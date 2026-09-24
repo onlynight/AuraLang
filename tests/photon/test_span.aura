@@ -1,0 +1,21 @@
+import aura.lang.std.String
+import aura.lang.compiler.test.TestRunner
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.ast.Ast
+import aura.lang.compiler.hir.Hir
+
+fun makeLitHir(value: String): Hir {
+    val ast = Ast()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+    val litId: Int = ast.leaf("IntLiteral", value, span)
+    ast.add("Program", "", "", span, kidsAdd(noKids(), litId))
+
+    val lowerer = HirLowerer()
+    lowerer.lower(ast)
+    return lowerer.hir
+}
+
+fun main() {
+    val hir = makeLitHir("42")
+    println("done")
+}

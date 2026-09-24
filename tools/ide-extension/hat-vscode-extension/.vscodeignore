@@ -1,0 +1,7 @@
+.gitignore
+*.vsix
+node_modules/
+.DS_Store
+.vscode/
+test-regex.ps1
+package-lock.json

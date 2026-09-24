@@ -1,0 +1,10 @@
+// tests/photon/P1/01_hello_world.aura
+// Phase 1.1: Hello World 测试
+//
+// 测试: 基本的 println 功能
+
+import aura.lang.std.String
+
+fun main() {
+    println("Hello, World!")
+}

@@ -1,0 +1,82 @@
+// tests/photon/test_photon_pipeline.aura
+// ═════════════════════════════════════════════════════════════
+// P0 端到端验证：Photon 管线测试
+//
+// 运行：aura run tests/photon/test_photon_pipeline.aura
+//
+// 验证内容：
+//   1. 创建测试 HIR (main -> return 42)
+//   2. 调用 compileHir() 编译管线
+//   3. 验证输出
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import aura.lang.std.Process
+import "../../aura/compiler/aura/lang/compiler/backend/photon/PhotonPipeline.aura"
+
+fun main() {
+    println("╔══════════════════════════════════════════════════════╗")
+    println("║   P0 端到端验证：Photon 管线测试                     ║")
+    println("╚══════════════════════════════════════════════════════╝")
+    println("")
+
+    // ── Step 1: 创建测试 HIR ──
+    println("[Step 1] 创建测试 HIR")
+    val hir = createTestHir()
+    println("  ✓ HIR 节点数: " + toStr(hir.count))
+    println("")
+
+    // ── Step 2: 调用 compileHir() 编译管线 ──
+    println("[Step 2] 调用 compileHir() 编译管线")
+    val pipeline: PhotonPipeline = PhotonPipelineUtils.emptyPipeline()
+    pipeline.outDir = "build/photon_test"
+    pipeline.moduleName = "hello_photon"
+    pipeline.outputType = "exe"
+    
+    val result = pipeline.compileHir(hir, "build/photon_test", "hello_photon")
+    
+    println("  编译结果:")
+    println("    成功: " + toStr(result.success))
+    println("    目标文件: " + result.objectFilePath)
+    println("    可执行文件: " + result.executablePath)
+    println("    机器码大小: " + toStr(result.encodedByteCount) + " 字节")
+    println("    COFF 大小: " + toStr(result.coffSize) + " 字节")
+    println("")
+
+    if (result.success) {
+        println("  ✓ 编译管线执行成功!")
+    } else {
+        println("  ✗ 编译失败: " + result.errorMessage)
+    }
+    
+    println("")
+    println("═══ P0 验证完成 ═══")
+    Process.exit(0)
+}
+
+/// 创建测试 HIR (main -> return 42)。
+fun createTestHir(): Hir {
+    val hir: Hir = Hir()
+
+    // 创建 Program 节点
+    val programId: Int = hir.add("HirProgram", "", "", Span(0, 0, 1, 1, 1, 1), "")
+
+    // 创建 main 函数
+    val mainId: Int = hir.add("HirFunction", "main", "Unit", Span(0, 0, 1, 1, 1, 1), "")
+    hir.kids[programId] = HirUtils.hirKidsAdd(hir.kids[programId], mainId)
+
+    // 创建函数体
+    val bodyId: Int = hir.add("HirBlock", "", "", Span(0, 0, 1, 1, 1, 1), "")
+    hir.kids[mainId] = HirUtils.hirKidsAdd(hir.kids[mainId], bodyId)
+
+    // 创建 return 语句
+    val retId: Int = hir.add("HirReturn", "", "", Span(0, 0, 1, 1, 1, 1), "")
+    hir.kids[bodyId] = HirUtils.hirKidsAdd(hir.kids[bodyId], retId)
+
+    // 创建返回常量 42
+    val constId: Int = hir.add("HirLit", "42", "Int", Span(0, 0, 1, 1, 1, 1), "")
+    hir.kids[retId] = HirUtils.hirKidsAdd(hir.kids[retId], constId)
+
+    hir.rootId = programId
+    return hir
+}

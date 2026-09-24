@@ -21,13 +21,19 @@
 param(
     [switch]$Keep,
     [string]$SdkLib,
-    [string]$AuraBin
+    [string]$AuraBin,
+    [string]$Lld
 )
 
 $ErrorActionPreference = 'Stop'
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $Root
+
+# NOTE: PowerShell variable names are case-insensitive, so the `-Lld` parameter and
+# a local `$lld` would be THE SAME variable. Snapshot it immediately and never
+# touch `$Lld` again (otherwise the driver-parsing block below silently wipes it).
+$LldOverride = $Lld
 
 $Driver = 'aura/compiler/aura/lang/compiler/backend/photon/PhotonHelloBuild.aura'
 $OutDir = Join-Path $Root 'build/lldtest'
@@ -74,6 +80,50 @@ function Write-HexFile {
     return $bytes.Length
 }
 
+# Read the lld bin directory from aura.toml's [lld] section.
+#
+# Why this lives in PowerShell and not only in Aura code: the seed VM cannot
+# execute the Aura-side parser (PhotonLldConfig). Its stdlib String.auc does not
+# load ("Unlinked external function `String.substring`"), so every
+# substring/indexOf/startsWith returns a default value and the Aura parser yields
+# an empty directory. aura.toml is the single source of truth for the lld path, so
+# the build script reads the same section directly.
+function Get-LldDirFromManifest {
+    param(
+        [string]$Manifest,
+        [string]$Triple = 'x86_64-pc-windows-msvc'
+    )
+    if (-not (Test-Path $Manifest)) { return $null }
+    # MUST read as UTF-8 explicitly: the manifest carries Chinese comments, and
+    # `Get-Content -Raw` under Windows PowerShell 5.1 decodes with the ANSI code
+    # page. That mis-decoding merges bytes across the newline in front of `[lld]`,
+    # so the section header is swallowed and the key lookup silently finds nothing.
+    $text = [System.IO.File]::ReadAllText($Manifest, [System.Text.Encoding]::UTF8)
+    $inLld = $false
+    foreach ($raw in ($text -split '\r?\n')) {
+        $line = $raw.Trim()
+        if ($line -eq '' -or $line.StartsWith('#')) { continue }
+        if ($line.StartsWith('[')) {
+            $inLld = ($line -eq '[lld]')
+            continue
+        }
+        if (-not $inLld) { continue }
+        $eq = $line.IndexOf('=')
+        if ($eq -le 0) { continue }
+        if ($line.Substring(0, $eq).Trim() -ne $Triple) { continue }
+        $val = $line.Substring($eq + 1).Trim()
+        if ($val.StartsWith('"')) {
+            $end = $val.IndexOf('"', 1)
+            if ($end -gt 1) { $val = $val.Substring(1, $end - 1) }
+        } else {
+            $h = $val.IndexOf('#')
+            if ($h -ge 0) { $val = $val.Substring(0, $h).Trim() }
+        }
+        return $val
+    }
+    return $null
+}
+
 function Quote-Arg {
     param([string]$a)
     if ($a -match '[\s"]') { return '"' + ($a -replace '"', '\"') + '"' }
@@ -111,9 +161,14 @@ $ErrorActionPreference = 'Continue'
 $lines = & $AuraBin run $Driver 2>$null
 $driverCode = $LASTEXITCODE
 $ErrorActionPreference = $prevEap
-if ($driverCode -ne 0) { throw "driver failed with exit code $driverCode" }
+# The seed VM's Process.exit is not reliable (stdlib externs are unlinked), so a
+# non-zero exit code here does NOT mean the driver failed. Success is decided by
+# the emitted markers below.
+if ($driverCode -ne 0) {
+    Write-Host "[photon-hello] driver exit=$driverCode (ignored; markers decide success)"
+}
 
-$mainHex = $null; $rtHex = $null; $lld = $null; $linkArgs = $null; $hexFiles = $null; $mode = ''
+$mainHex = $null; $rtHex = $null; $lldDriver = $null; $linkArgs = $null; $hexFiles = $null; $mode = ''
 foreach ($l in $lines) {
     $t = $l.Trim()
     if ($t -eq '===MAIN===')      { $mode = 'main'; continue }
@@ -127,15 +182,47 @@ foreach ($l in $lines) {
     } elseif ($mode -eq 'hexfiles') {
         if (-not $hexFiles) { $hexFiles = $t }
     } elseif ($mode -eq 'lld') {
-        if (-not $lld) { $lld = $t }
+        if (-not $lldDriver) { $lldDriver = $t }
     } elseif ($mode -eq 'args') {
         if (-not $linkArgs) { $linkArgs = $t }
     }
 }
 if (-not $mainHex)   { throw "driver did not emit ===MAIN===" }
 if (-not $rtHex)     { throw "driver did not emit ===RUNTIME===" }
-if (-not $lld)       { throw "driver did not emit ===LLD===" }
-if (-not $linkArgs)  { throw "driver did not emit ===LINK-ARGS===" }
+
+# ---- Resolve lld-link ----
+# Precedence: -Lld (explicit) > driver value (only if it is a real file) >
+#             aura.toml [lld] (the single source of truth) > PATH.
+#
+# The driver value matters only when it is an existing path: the Aura-side
+# PhotonLldConfig cannot read aura.toml under the seed VM (its String helpers are
+# unlinked externals), so it falls back to the *bare* name `lld-link.exe`, which
+# is not a file. Treating that as "resolved" was the earlier bug.
+$lldPath = $null
+if ($LldOverride) {
+    $lldPath = $LldOverride
+} elseif ($lldDriver -and (Test-Path $lldDriver)) {
+    $lldPath = $lldDriver
+    Write-Host "[photon-hello] lld from driver : $lldPath"
+}
+
+if (-not $lldPath) {
+    $lldDir = Get-LldDirFromManifest -Manifest (Join-Path $Root 'aura.toml')
+    if ($lldDir) {
+        $lldPath = Join-Path $lldDir 'lld-link.exe'
+        Write-Host "[photon-hello] lld from aura.toml [lld] : $lldDir"
+    }
+}
+
+if (-not $lldPath) { $lldPath = 'lld-link.exe' }
+if (-not (Test-Path $lldPath)) {
+    $resolved = Get-Command $lldPath -ErrorAction SilentlyContinue
+    if (-not $resolved) {
+        throw "lld-link not found (driver='$lldDriver'): pass -Lld <path>, or fix aura.toml [lld]"
+    }
+    $lldPath = $resolved.Source
+}
+$lld = $lldPath
 
 # ---- 1b. Prefer the .hex files written by the driver -----------------
 # The driver writes `<name>.obj.hex` through PhotonObjectWriterUtils.saveHexFile()
@@ -181,6 +268,18 @@ Write-Host "[photon-hello] aura_runtime.obj : $n2 bytes"
 $k32 = Find-Kernel32 -Explicit $SdkLib
 if (-not $k32) { throw "kernel32.Lib not found; pass -SdkLib <path>" }
 Write-Host "[photon-hello] kernel32.Lib : $k32"
+
+# Link arguments: prefer the driver's list; otherwise build the same command the
+# Aura-side PhotonSystemLinker would produce. See Get-LldDirFromManifest for why
+# the Aura-side string helpers are unusable under the seed VM.
+if (-not $linkArgs) {
+    $objMain = Join-Path $OutDir 'hello.obj'
+    $objRt   = Join-Path $OutDir 'aura_runtime.obj'
+    $outStem = Join-Path $OutDir 'hello'
+    $linkArgs = "$objMain $objRt /OUT:$outStem" +
+        " /SUBSYSTEM:CONSOLE /ENTRY:main /MACHINE:X64 /NODEFAULTLIB"
+    Write-Host "[photon-hello] link args : (built by script; driver emitted none)"
+}
 
 $argv = @($linkArgs -split '\s+' | Where-Object { $_ -ne '' })
 $argv += $k32

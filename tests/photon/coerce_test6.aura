@@ -1,0 +1,142 @@
+// tests/photon/coerce_test6.aura
+// 完全匹配 SsaBuilder 结构（含所有字段）
+
+class TypeReg {
+    var count: Int = 0
+    var data: List<String> = arrayListOf<String>()
+    init() {
+        this.count = 0
+        this.data = arrayListOf<String>()
+    }
+}
+
+class Func {
+    var name: String = ""
+    var blocks: String = ""
+    var entryBlock: Int = 0
+}
+
+class Program {
+    var types: TypeReg = TypeReg()
+    var values: List<String> = arrayListOf<String>()
+    var blocks: List<String> = arrayListOf<String>()
+    var funcs: List<Func> = arrayListOf<Func>()
+    var valueCount: Int = 0
+    var blockCount: Int = 0
+    var functionCount: Int = 0
+    var currentFunc: Int = -1
+
+    init() {
+        this.types = TypeReg()
+        this.values = arrayListOf<String>()
+        this.blocks = arrayListOf<String>()
+        this.funcs = arrayListOf<Func>()
+        this.valueCount = 0
+        this.blockCount = 0
+        this.functionCount = 0
+        this.currentFunc = -1
+    }
+
+    fun addFunc(name: String): Int {
+        val f: Func = Func()
+        f.name = name
+        f.blocks = ""
+        f.entryBlock = 0
+        this.funcs.add(f)
+        this.functionCount = this.funcs.size
+        this.currentFunc = this.funcs.size - 1
+        return this.currentFunc
+    }
+
+    fun funcOf(id: Int): Func {
+        if (id < 0 || id >= this.funcs.size) {
+            return Func()
+        }
+        return this.funcs[id]
+    }
+
+    fun addBlock(): Int {
+        this.blockCount = this.blockCount + 1
+        this.values.add("val_" + toStr(this.blockCount))
+        this.blocks.add("block_" + toStr(this.blockCount))
+        this.valueCount = this.values.size
+        if (this.currentFunc >= 0) {
+            val f: Func = this.funcOf(this.currentFunc)
+            if (f.blocks == "") {
+                f.blocks = toStr(this.blockCount)
+            } else {
+                f.blocks = f.blocks + "," + toStr(this.blockCount)
+            }
+        }
+        return this.blockCount
+    }
+}
+
+class Builder {
+    var program: Program = Program()
+    var types: TypeReg = TypeReg()
+    var curFunc: Int = -1
+    var curBlock: Int = 0
+    var tmpCount: Int = 0
+    var dbgFuncCount: Int = 0
+    var dbgLookups: Int = 0
+    var dbgScanned: Int = 0
+    var dbgStmts: Int = 0
+    var dbgExprs: Int = 0
+    var dbgBlocks: Int = 0
+    var dbgCalls: Int = 0
+    var dbgHasType: Int = 0
+    var memHead: Int = -1
+    var curParams: String = ""
+    var varMap: String = ""
+    var loopStack: String = ""
+    var varVersion: String = ""
+
+    init() {
+        this.program = Program()
+        this.types = this.program.types
+        this.curFunc = -1
+        this.curBlock = 0
+        this.tmpCount = 0
+        this.dbgFuncCount = 0
+        this.dbgLookups = 0
+        this.dbgScanned = 0
+        this.dbgStmts = 0
+        this.dbgExprs = 0
+        this.dbgBlocks = 0
+        this.dbgCalls = 0
+        this.dbgHasType = 0
+        this.memHead = -1
+        this.curParams = ""
+        this.varMap = ""
+        this.loopStack = ""
+        this.varVersion = ""
+    }
+
+    fun buildFunc(name: String): Unit {
+        this.curFunc = this.program.addFunc(name)
+        this.curBlock = this.program.addBlock()
+        this.program.addBlock()
+        this.program.addBlock()
+    }
+}
+
+fun main() {
+    val b: Builder = Builder()
+    b.buildFunc("main")
+    b.buildFunc("helper")
+    b.buildFunc("util")
+    
+    var ok: Boolean = true
+    var i: Int = 0
+    while (i < 3) {
+        val fi: Func = b.program.funcOf(i)
+        println("func" + toStr(i) + ".name=" + fi.name + " blocks=" + fi.blocks)
+        if (i == 0 && fi.blocks != "1,2,3") { ok = false; println("FAIL func0: " + fi.blocks) }
+        if (i == 1 && fi.blocks != "4,5,6") { ok = false; println("FAIL func1: " + fi.blocks) }
+        if (i == 2 && fi.blocks != "7,8,9") { ok = false; println("FAIL func2: " + fi.blocks) }
+        i = i + 1
+    }
+    
+    if (ok) { println("ALL OK") } else { println("FAILED") }
+}

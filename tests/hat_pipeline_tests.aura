@@ -1,0 +1,96 @@
+// aura:///tests/hat_pipeline_tests.aura
+// HAT v2.0 管线集成测试
+//
+// 运行: aura run tests/hat_pipeline_tests.aura
+
+import aura.lang.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/mir/SsaMir.aura"
+import "../aura/compiler/aura/lang/compiler/hir/hat/HatParser.aura"
+import "../aura/compiler/aura/lang/compiler/hir/hat/HatSerializer.aura"
+
+fun main() {
+    println("=== HAT v2.0 Pipeline Tests ===")
+    println()
+
+    val t = TestRunner()
+
+    // ── 测试 1: 解析 → 序列化 → 解析 (round-trip) ──
+    t.begin("HatPipeline.roundTrip")
+    val originalHat: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn add(@a: Int, @b: Int) -> Int\n" +
+        "  bb entry:\n" +
+        "    @t0 = @add(@a, @b) : Int\n" +
+        "    @ret @t0 : Int\n"
+
+    val parsed1: MirSsaProgram = HatParserUtils.parseHat(originalHat)
+    val serialized1: String = HatSerializerUtils.serializeHat(parsed1, "main")
+    val parsed2: MirSsaProgram = HatParserUtils.parseHat(serialized1)
+
+    t.assertEq(parsed1.functionCount, parsed2.functionCount, "function count matches")
+    t.assertEq(parsed1.blockCount, parsed2.blockCount, "block count matches")
+    t.assertTrue(parsed1.valueCount > 0, "original has values")
+    t.assertTrue(parsed2.valueCount > 0, "round-tripped has values")
+
+    // ── 测试 2: HAT → HIR → HAT (双路径一致性) ──
+    t.begin("HatPipeline.dualPath")
+    val hatText: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn main() -> Unit\n" +
+        "  bb entry:\n" +
+        "    @t0 = @i32_const 42 : Int\n" +
+        "    @ret () : Unit\n"
+
+    val ssa1: MirSsaProgram = HatParserUtils.parseHat(hatText)
+    val serialized: String = HatSerializerUtils.serializeHat(ssa1, "main")
+    val ssa2: MirSsaProgram = HatParserUtils.parseHat(serialized)
+
+    t.assertEq(ssa1.functionCount, ssa2.functionCount, "dual path function count")
+    t.assertTrue(ssa1.blockCount >= 1, "has blocks")
+    t.assertTrue(ssa1.valueCount >= 2, "has values (const + ret)")
+
+    // ── 测试 3: 错误处理 - 无效格式 ──
+    t.begin("HatPipeline.invalidFormat")
+    val invalidHat: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn main() -> Unit\n" +
+        "  bb entry:\n" +
+        "    @invalid_instruction\n"
+
+    val invalidResult: MirSsaProgram = HatParserUtils.parseHat(invalidHat)
+    t.assertEq(invalidResult.functionCount, 1, "invalid format still has 1 function")
+
+    // ── 测试 4: 性能基准 - 大文件解析 ──
+    t.begin("HatPipeline.performance")
+    // 生成一个包含多个函数的 HAT 文本
+    var bigHat: String = "; module big target x86_64\n; schema=HAT/2.0\n\n"
+    var fnCount: Int = 10
+    var fi: Int = 0
+    while (fi < fnCount) {
+        bigHat = bigHat + "@fn fn" + toStr(fi) + "() -> Unit\n"
+        bigHat = bigHat + "  bb entry:\n"
+        bigHat = bigHat + "    @ret () : Unit\n"
+        bigHat = bigHat + "\n"
+        fi = fi + 1
+    }
+
+    val bigResult: MirSsaProgram = HatParserUtils.parseHat(bigHat)
+    t.assertEq(bigResult.functionCount, fnCount, "big file has " + toStr(fnCount) + " functions")
+    t.assertTrue(bigResult.blockCount >= fnCount, "big file has blocks")
+
+    // ── 报告结果 ──
+    val failures = t.report()
+    println()
+    if (failures == 0) {
+        println("RESULT: PASS — All HAT pipeline tests passed")
+    } else {
+        println("RESULT: FAIL (" + toStr(failures) + " failures)")
+    }
+}

@@ -1,0 +1,26 @@
+// tests/photon/P4/test_arc_refcount.aura
+// Phase 4.6: ARC reference counting test
+//
+// Test: ARC retain/release operations
+
+import aura.lang.std.String
+import aura.lang.native.GC
+
+fun main() {
+    // 测试 ARC 操作
+    println("ARC test started")
+    
+    // 模拟对象 (使用指针 1 作为测试)
+    val obj: Long = 1
+    
+    // retain
+    ARC.retain(obj)
+    ARC.retain(obj)
+    println("retain count: " + toStr(ARC.getTotalRetain()))
+    
+    // release
+    ARC.release(obj)
+    println("release count: " + toStr(ARC.getTotalRelease()))
+    
+    println("ARC test passed")
+}

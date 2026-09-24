@@ -8,6 +8,7 @@ package aura.lang.compiler.mir
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.std.Env
 import aura.lang.collection.ArrayList
 // 同包依赖：TypeRegistry 为字段依赖，MirUtils（mirSplit）为同包助手。
 // 同包符号需显式导入才进入编译单元（否则退化为未解析调用 #65535）。
@@ -102,6 +103,9 @@ class MirBlock {
     /// 块 ID。
     var id: Int = 0
 
+    /// 块标签（HAT 文本中的 `bb <label>`；空字符串表示未命名，序列化时按 BlockID 回退生成）。
+    var label: String = ""
+
     /// 块首 Phi 节点 ValueID（逗号分隔字符串）。
     var phis: String = ""
 
@@ -119,6 +123,7 @@ class MirBlock {
 
     init() {
         this.id = 0
+        this.label = ""
         this.phis = ""
         this.instrs = ""
         this.term = -1
@@ -237,10 +242,31 @@ class MirSsaProgram {
 
     /// 创建一个新的基本块，返回 BlockID。
     fun addBlock(): Int {
+        // 崩溃诊断：AURA_PHOTON_TRACE=1 时逐步打印
+        val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
+        if (traceOn) println("      [addBlock] before MirBlock()")
         val b: MirBlock = MirBlock()
+        if (traceOn) println("      [addBlock] before b.id=" + this.blockCount)
         b.id = this.blockCount
+        if (traceOn) println("      [addBlock] before this.blocks.add(b)")
         this.blocks.add(b)
+        if (traceOn) println("      [addBlock] before blockCount=" + this.blocks.size)
         this.blockCount = this.blocks.size
+        // ★ 把新块登记到**当前函数**（2026-09-23 修复）
+        if (this.currentFunc >= 0) {
+            if (traceOn) println("      [addBlock] before functionOf(" + this.currentFunc + ")")
+            val f: MirFunction = this.functionOf(this.currentFunc)
+            if (traceOn) println("      [addBlock] before f.blocks read, f.blocks='" + f.blocks + "'")
+            var s: String = toStr(b.id)
+            if (f.blocks != "") {
+                s = f.blocks + "," + s
+            } else {
+                f.entryBlock = b.id
+            }
+            if (traceOn) println("      [addBlock] before f.blocks=" + s)
+            f.blocks = s
+            if (traceOn) println("      [addBlock] after f.blocks set")
+        }
         return b.id
     }
 
@@ -328,14 +354,13 @@ object SsaMirUtils {
         var total: Int = 0
         var i: Int = 0
         var neg: Boolean = false
-        // 用 `text[i]` 比较、`indexOf` 取数字值：
-        // `charCodeAt(i)` 在本 VM 下忽略下标（恒返回首字符码点），不可用于逐字符解析。
-        if (len > 0 && text[0] == "-") {
+        // 用 `text.charAt(i)` 比较、`indexOf` 取数字值。
+        if (len > 0 && text.charAt(0).toString() == "-") {
             neg = true
             i = 1
         }
         while (i < len) {
-            val digit: Int = "0123456789".indexOf(text[i])
+            val digit: Int = "0123456789".indexOf(text.charAt(i))
             if (digit >= 0 && digit <= 9) {
                 total = total * 10 + digit
             }

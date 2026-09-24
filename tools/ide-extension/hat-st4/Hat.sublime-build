@@ -1,0 +1,9 @@
+{
+    "cmd": ["hat", "run", "-f", "$file"],
+    "shell": true,
+    "selector": "source.hat",
+    "windows": {
+        "cmd": ["powershell", "-Command", "hat run -f \"$file\""],
+        "shell": true
+    }
+}

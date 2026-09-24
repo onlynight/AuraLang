@@ -28,7 +28,7 @@ import aura.lang.compiler.aot.Linker
 import aura.lang.compiler.aot.CBackend
 
 /// AOT 工具方法集合：集中管理 AOT 相关的全局函数，支持 O(1) 方法分派。
-object AotUtils {
+object Aot {
 
     /// 默认 AOT 选项。
     fun defaultAotOptions(): AotOptions {
@@ -62,8 +62,8 @@ object AotUtils {
     /// [`compileAotIrOnly`]：省掉整份 HIR 的二次翻译（自举时约 40MB 分配）。
     fun compileAot(hir: Hir): AotLinkResult {
         val r: AotLinkResult = AotLinkResult()
-        val opts: AotOptions = AotUtils.defaultAotOptions()
-        val aot: AotResult = AotUtils.aotCompile(hir, opts)
+        val opts: AotOptions = Aot.defaultAotOptions()
+        val aot: AotResult = Aot.aotCompile(hir, opts)
 
         r.llvmIr = aot.llvmIr
         r.targetTriple = aot.targetTriple
@@ -82,7 +82,7 @@ object AotUtils {
     /// 生成它是纯粹的内存浪费（`emitC` 会重新遍历整份 HIR 并拼接 C 文本）。
     fun compileAotIrOnly(hir: Hir): AotLinkResult {
         val r: AotLinkResult = AotLinkResult()
-        val opts: AotOptions = AotUtils.defaultAotOptions()
+        val opts: AotOptions = Aot.defaultAotOptions()
         opts.emitCSource = false
         return compileAotIrOnlyEx(hir, opts)
     }
@@ -90,7 +90,7 @@ object AotUtils {
     fun compileAotIrOnlyEx(hir: Hir, opts: AotOptions): AotLinkResult {
         val r: AotLinkResult = AotLinkResult()
         opts.emitCSource = false
-        val aot: AotResult = AotUtils.aotCompile(hir, opts)
+        val aot: AotResult = Aot.aotCompile(hir, opts)
 
         r.llvmIr = aot.llvmIr
         r.targetTriple = aot.targetTriple
@@ -114,9 +114,9 @@ object AotUtils {
     fun aotBuildExeFromHirEx(hir: Hir, moduleName: String, outDir: String, llvmHome: String, basePath: String): AotExeResult {
         val r: AotExeResult = AotExeResult()
 
-        val opts: AotOptions = AotUtils.defaultAotOptionsEx(basePath)
+        val opts: AotOptions = Aot.defaultAotOptionsEx(basePath)
         opts.emitCSource = false
-        val a: AotLinkResult = AotUtils.compileAotIrOnlyEx(hir, opts)
+        val a: AotLinkResult = Aot.compileAotIrOnlyEx(hir, opts)
         val tgt: String = a.targetTriple
         r.target = tgt
 
@@ -144,7 +144,7 @@ object AotUtils {
         r.llcLog = logPath
         val llcCmd: String = llc + " -mtriple " + tgt + " " + llPath +
             " -o " + objPath + " " + optFlag + " -filetype=obj -verify-each 2> " +
-            AotUtils.aotWinPath(logPath)
+            Aot.aotWinPath(logPath)
         r.llcExit = Process.run(llcCmd)
         if (r.llcExit != 0) {
             if (FileSystem.exists(logPath)) {
@@ -171,15 +171,15 @@ object AotUtils {
         // 编译 aura_syscalls.c（线程桥，不含与 IR 重复的符号）。
         // 目录解析：优先 Aura 侧自带位置 `aura/runtime/cffi`（不依赖 Rust 编译器目录），
         // 回退旧位置 `compiler/src/std/cffi`；两处都不存在时跳过（仅影响 Thread/并发）。
-        val cffiDir: String = AotUtils.resolveCffiDir()
+        val cffiDir: String = Aot.resolveCffiDir()
         if (cffiDir != "") {
             val sysObj: String = outDir + "/" + moduleName + "_syscalls.obj"
             val sysCmd: String = clang + " -c " + cffiDir + "/aura_syscalls.c"
-                + " -o " + AotUtils.aotWinPath(sysObj)
+                + " -o " + Aot.aotWinPath(sysObj)
                 + " -I " + cffiDir
             val sysExit: Int = Process.run(sysCmd)
             if (sysExit == 0 && FileSystem.exists(sysObj)) {
-                clangCmd = clangCmd + " " + AotUtils.aotWinPath(sysObj)
+                clangCmd = clangCmd + " " + Aot.aotWinPath(sysObj)
             }
         }
         clangCmd = clangCmd + " -o " + exePath + " " + optFlag
@@ -199,7 +199,7 @@ object AotUtils {
     /// 注意：`Process.run` 经 `cmd /C` 执行，`cmd` 会把路径中的 `/` 当作开关分隔符，
     /// 故先把分隔符规范化为反斜杠（`build/a/b.exe` → `build\a\b.exe`）。
     fun runBuiltExe(exePath: String): Int {
-        return Process.run(AotUtils.aotWinPath(exePath))
+        return Process.run(Aot.aotWinPath(exePath))
     }
 
     /// 把路径分隔符 `/` 规范化为 `\`（Windows `cmd` 友好）。
@@ -347,10 +347,10 @@ class AotResult {
 class AotCodeGenerator {
 
     /// 最近一次编译结果。
-    var lastResult: AotResult = AotUtils.emptyAotResult()
+    var lastResult: AotResult = Aot.emptyAotResult()
 
     init() {
-        this.lastResult = AotUtils.emptyAotResult()
+        this.lastResult = Aot.emptyAotResult()
     }
 
     /// HIR → AOT 结果（IR + 命令 + C 源码）。

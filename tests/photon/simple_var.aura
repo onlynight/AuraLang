@@ -1,0 +1,10 @@
+// tests/photon/simple_var.aura
+// Simple program with variables and arithmetic
+
+fun main() {
+    val x: Int = 10
+    val y: Int = 20
+    val z: Int = x + y
+    // z should be 30
+    return
+}

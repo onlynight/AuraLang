@@ -1,0 +1,1313 @@
+// aura:///aura/lang/compiler/hir/hat/HatParser.aura
+package aura.lang.compiler.hir.hat
+// ─────────────────────────────────────────────────────────────
+// HAT v2.0 解析器 — HAT 文本 → SSA MIR
+//
+// 输入：HAT 格式文本（SSA 结构化 IR）
+// 输出：MirSsaProgram（与 SsaBuilder 产出一致）
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.collection.ArrayList
+import "../../mir/SsaMir.aura"
+import "../../mir/TypeRegistry.aura"
+
+/// HAT 解析器：将 HAT 文本解析为 SSA MIR 程序。
+class HatParser {
+
+    /// 解析后的 SSA MIR 程序。
+    private var prog: MirSsaProgram = MirSsaProgram()
+
+    /// 当前函数上下文。
+    private var curFunc: Int = -1
+
+    /// 当前块上下文。
+    private var curBlock: Int = -1
+
+    /// 当前函数的返回类型 TypeID。
+    private var curRetType: Int = 0
+
+    /// 当前函数的类型注册表（快捷引用）。
+    private var types: TypeRegistry = TypeRegistry()
+
+    /// 临时变量计数器。
+    private var tmpCount: Int = 0
+
+    /// 值引用映射：HAT 中的 @name 或 @t0 → SSA ValueID。
+    private var valMap: String = ""
+
+    /// 块名映射：块标签名 → BlockID。
+    private var blockMap: String = ""
+
+    /// 当前块标签名。
+    private var curBlockLabel: String = ""
+
+    /// 当前函数签名行（用于参数解析）。
+    private var curSigLine: String = ""
+
+    /// 当前函数参数的结束位置。
+    private var curParamsEnd: Int = -1
+
+    /// 解析警告计数。
+    private var warnCount: Int = 0
+
+    /// 解析错误计数。
+    private var errCount: Int = 0
+
+    /// 已解析函数数。
+    private var funcCount: Int = 0
+
+    /// HAT 文本行数缓存。
+    private var lines: List<String> = arrayListOf<String>()
+
+    init() {
+        this.prog = MirSsaProgram()
+        this.types = this.prog.types
+        this.curFunc = -1
+        this.curBlock = -1
+        this.curRetType = 0
+        this.tmpCount = 0
+        this.valMap = ""
+        this.blockMap = ""
+        this.curBlockLabel = ""
+        this.warnCount = 0
+        this.errCount = 0
+        this.funcCount = 0
+        this.lines = arrayListOf<String>()
+    }
+
+    // ── 主入口 ──
+
+    /// 从 HAT 文本解析为 SSA MIR 程序。
+    fun parse(text: String): MirSsaProgram {
+        this.prog = MirSsaProgram()
+        this.types = this.prog.types
+        this.curFunc = -1
+        this.curBlock = -1
+        this.curRetType = 0
+        this.tmpCount = 0
+        this.valMap = "\n"
+        this.blockMap = "\n"
+        this.warnCount = 0
+        this.errCount = 0
+        this.funcCount = 0
+
+        // 按行分割文本
+        this.lines = arrayListOf<String>()
+        var lineStart: Int = 0
+        var pos: Int = 0
+        var len: Int = text.length
+        while (pos <= len) {
+            if (pos == len || text.charCodeAt(pos) == 10) {
+                if (pos > lineStart) {
+                    this.lines.add(HatParserUtils.safeSubstring(text, lineStart, pos))
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+
+        var i: Int = 0
+        var lineCount: Int = this.lines.size
+        while (i < lineCount) {
+            val line: String = this.lines[i]
+            val stripped: String = this.stripComment(line)
+
+            if (stripped.startsWith("@fn")) {
+                i = this.parseFunction(i)
+            } else if (stripped.startsWith("@extern") || stripped.startsWith("@struct") || stripped.startsWith("@enum")) {
+                i = i + 1
+            } else {
+                i = i + 1
+            }
+        }
+
+        return this.prog
+    }
+
+    /// 从文件路径读取并解析 HAT 文件。
+    fun parseFile(path: String): MirSsaProgram {
+        val text: String = FileSystem.readText(path)
+        return this.parse(text)
+    }
+
+    // ── 函数定义 ──
+
+    /// 解析函数定义（从 `;@fn` 行开始，返回下一个未处理的行号）。
+    private fun parseFunction(i: Int): Int {
+        this.funcCount = this.funcCount + 1
+        val funcStartValueId: Int = this.prog.valueCount
+        val line: String = this.stripComment(this.lines[i])
+
+        // 解析函数签名: @fn name(@params) -> ret
+        val sigLine: String = this.stripPrefix(line, "@fn")
+        val nameEnd: Int = this.findChar(sigLine, 0, 40)
+        val funcName: String = HatParserUtils.safeSubstring(sigLine, 0, nameEnd).trim()
+
+        // 返回类型
+        var retTy: String = "Unit"
+        var arrow: Int = -1
+        var si: Int = 0
+        var sLen: Int = sigLine.length
+        while (si < sLen - 1) {
+            if (sigLine.charCodeAt(si) == 45 && sigLine.charCodeAt(si + 1) == 62) {
+                arrow = si
+                break
+            }
+            si = si + 1
+        }
+        if (arrow >= 0) {
+            var tail: String = HatParserUtils.safeSubstringFrom(sigLine, arrow + 2).trim()
+            val brace: Int = this.findChar(tail, 0, 123)
+            if (brace >= 0) {
+                tail = HatParserUtils.safeSubstring(tail, 0, brace).trim()
+            }
+            retTy = tail
+        }
+
+        // 注册返回类型
+        val retTypeId: Int = this.types.fromTypeName(retTy)
+        this.curRetType = retTypeId
+
+        // 创建函数
+        val fid: Int = this.prog.addFunction(funcName, retTypeId, retTypeId, false)
+        this.curFunc = fid
+
+        // 重置值映射和块映射
+        this.valMap = "\n"
+        this.blockMap = "\n"
+        this.tmpCount = 0
+
+        // 解析参数
+        var paramsEnd: Int = -1
+        if (nameEnd > 0) {
+            paramsEnd = this.findChar(sigLine, nameEnd, 41)
+        }
+        this.curParamsEnd = paramsEnd
+        this.curSigLine = sigLine
+
+        // 创建入口块
+        var hasExplicitBb: Boolean = false
+        var j: Int = i + 1
+        while (j < this.lines.size) {
+            val nextLine: String = this.stripComment(this.lines[j])
+            if (nextLine.startsWith("bb ")) {
+                hasExplicitBb = true
+                break
+            }
+            if (nextLine.startsWith(";") || nextLine == "") {
+                j = j + 1
+                continue
+            }
+            break
+        }
+
+        if (!hasExplicitBb) {
+            // 没有显式 bb，创建 entry block
+            this.curBlock = this.prog.addBlock()
+            this.curBlockLabel = "entry"
+            this.prog.blockOf(this.curBlock).label = "entry"
+            this.blockMap = this.blockMap + "entry|" + HatParserUtils.toStr(this.curBlock) + "\n"
+            this.createEntryBlockParams(this.curSigLine, this.curParamsEnd)
+            // 直接解析 entry block 中的指令（无显式 bb 头）
+            i = this.parseBbBody(i + 1)
+        } else {
+            // 有显式 bb 声明：先预登记全部块标签，
+            // 使 `@br @check` / `@br_if @t0 => @body, @exit` 可以前向引用尚未解析的块。
+            this.predeclareBlocks(i + 1)
+            i = this.parseBbs(i + 1)
+        }
+
+        // 确保函数有终结指令
+        this.ensureTerminator()
+
+        // 回填前向引用的操作数（`?name` 占位 → ValueID）
+        this.resolvePendingValues(funcStartValueId)
+
+        // 结束函数
+        this.prog.endFunction()
+        this.curFunc = -1
+        this.curBlock = -1
+        this.valMap = "\n"
+        this.blockMap = "\n"
+        this.tmpCount = 0
+
+        return i
+    }
+
+    /// 创建 entry block 的参数值。
+    private fun createEntryBlockParams(sigLine: String, paramsEnd: Int): Unit {
+        if (paramsEnd < 0) {
+            return
+        }
+        val nameStart: Int = this.findChar(sigLine, 0, 40)
+        if (nameStart < 0 || paramsEnd < nameStart + 1) {
+            return
+        }
+
+        var paramsStr: String = HatParserUtils.safeSubstring(sigLine, nameStart + 1, paramsEnd).trim()
+        if (paramsStr == "") {
+            return
+        }
+
+        // 按逗号分割参数
+        var pos: Int = 0
+        var start: Int = 0
+        var plen: Int = paramsStr.length
+        while (pos <= plen) {
+            if (pos == plen || paramsStr.charCodeAt(pos) == 44) {
+                if (pos > start) {
+                    val param: String = HatParserUtils.safeSubstring(paramsStr, start, pos).trim()
+                    if (param != "") {
+                        this.parseSingleParam(param)
+                    }
+                }
+                start = pos + 1
+            }
+            pos = pos + 1
+        }
+    }
+
+    /// 解析单个参数。
+    private fun parseSingleParam(param: String): Unit {
+        // @name: Type
+        var name: String = param.trim()
+        var paramTy: String = "Int"
+
+        // 去掉 @ 前缀
+        if (name.startsWith("@")) {
+            name = HatParserUtils.safeSubstringFrom(name, 1)
+        }
+
+        // 查找冒号
+        // 注意：必须先取类型再截断参数名 —— 反过来会在截断后的短串上取类型，
+        // 导致参数类型恒为空（历史上表现为 HAT 输出里出现 `@n: Basic`）。
+        val colonPos: Int = this.findChar(name, 0, 58)
+        if (colonPos > 0) {
+            paramTy = HatParserUtils.safeSubstringFrom(name, colonPos + 1).trim()
+            name = HatParserUtils.safeSubstring(name, 0, colonPos).trim()
+        }
+
+        if (name == "") {
+            return
+        }
+
+        val paramTypeId: Int = this.types.fromTypeName(paramTy)
+        val paramVal: Int = this.prog.addValue("Param", paramTypeId, "", name, this.curBlock)
+
+        // 添加到 valMap
+        this.valMap = this.replaceVal(this.valMap, name, paramVal)
+
+        // 添加到函数参数列表
+        val f: MirFunction = this.prog.functionOf(this.curFunc)
+        if (f.params == "") {
+            f.params = HatParserUtils.toStr(paramVal)
+        } else {
+            f.params = f.params + "," + HatParserUtils.toStr(paramVal)
+        }
+    }
+
+    // ── 基本块 ──
+
+    /// 解析所有基本块。
+    private fun parseBbs(i: Int): Int {
+        while (i < this.lines.size) {
+            val rawLine: String = this.lines[i]
+            val line: String = this.stripComment(rawLine)
+
+            if (line.startsWith("bb ")) {
+                this.parseBbHeader(line)
+                i = i + 1
+                i = this.parseBbBody(i)
+            } else if (line.startsWith("@fn")) {
+                // 遇到新函数定义，返回当前行号给主循环
+                return i
+            } else if (line.startsWith("@extern") || line.startsWith("@struct") || line.startsWith("@enum")) {
+                // 遇到外部声明/结构体/枚举，跳过
+                i = i + 1
+            } else if (line.startsWith(";") || line == "") {
+                i = i + 1
+            } else {
+                // 遇到未知行，停止解析
+                return i
+            }
+        }
+        return i
+    }
+
+    /// 解析基本块头。
+    private fun parseBbHeader(line: String): Unit {
+        // bb label:
+        val colonPos: Int = this.findChar(line, 0, 58)
+        if (colonPos > 0) {
+            var label: String = HatParserUtils.safeSubstring(line, 3, colonPos).trim()
+            if (label == "") {
+                label = "bb" + HatParserUtils.toStr(this.prog.blockCount)
+                this.addWarning("empty bb label, using " + label)
+            }
+            this.curBlockLabel = label
+
+            // 优先复用 predeclareBlocks 预登记的块（保持 BlockID 与标签一致）
+            val declared: Int = this.findBlockByName(label)
+            if (declared >= 0) {
+                this.curBlock = declared
+            } else {
+                this.curBlock = this.prog.addBlock()
+                this.blockMap = this.blockMap + label + "|" + HatParserUtils.toStr(this.curBlock) + "\n"
+            }
+            this.prog.blockOf(this.curBlock).label = label
+
+            // 如果是 entry 块，创建参数值
+            if (label == "entry" || label == "__params__") {
+                this.createEntryBlockParams(this.curSigLine, this.curParamsEnd)
+            }
+        } else {
+            this.curBlock = this.prog.addBlock()
+        }
+    }
+
+    /// 预登记函数体内的全部基本块标签。
+    ///
+    /// HAT 中 `@br_if @t0 => @body, @exit` 的目标块定义在后方，若按单遍解析
+    /// 会因为标签尚未登记而解析失败。这里在解析函数体之前把所有 `bb <label>:`
+    /// 先分配 BlockID 并写入 blockMap。
+    private fun predeclareBlocks(startLine: Int): Unit {
+        var j: Int = startLine
+        while (j < this.lines.size) {
+            val line: String = this.stripComment(this.lines[j])
+            if (line.startsWith("@fn") || line.startsWith("@extern")
+                || line.startsWith("@struct") || line.startsWith("@enum")) {
+                return
+            }
+            if (line.startsWith("bb ")) {
+                this.declareBlock(line)
+            }
+            j = j + 1
+        }
+    }
+
+    /// 为一个 `bb <label>:` 行分配 BlockID 并登记标签。
+    private fun declareBlock(line: String): Unit {
+        val colonPos: Int = this.findChar(line, 0, 58)
+        if (colonPos <= 0) {
+            return
+        }
+        var label: String = HatParserUtils.safeSubstring(line, 3, colonPos).trim()
+        if (label == "") {
+            label = "bb" + HatParserUtils.toStr(this.prog.blockCount)
+        }
+        if (this.findBlockByName(label) >= 0) {
+            return
+        }
+        val bid: Int = this.prog.addBlock()
+        this.prog.blockOf(bid).label = label
+        this.blockMap = this.blockMap + label + "|" + HatParserUtils.toStr(bid) + "\n"
+    }
+
+    // ── 基本块体 ──
+
+    /// 解析基本块体内的指令。
+    private fun parseBbBody(i: Int): Int {
+        while (i < this.lines.size) {
+            val rawLine: String = this.lines[i]
+            val line: String = this.stripComment(rawLine)
+
+            if (line.startsWith("bb ") || line.startsWith(";") || line == "" || line.startsWith("@fn") || line.startsWith("@extern") || line.startsWith("@struct") || line.startsWith("@enum")) {
+                break
+            }
+
+            if (line.startsWith("@br_if")) {
+                this.parseBrIf(line)
+            } else if (line.startsWith("@br ")) {
+                this.parseBr(line)
+            } else if (line.startsWith("@ret")) {
+                this.parseRet(line)
+            } else if (line.contains("@phi(")) {
+                this.parsePhi(line)
+            } else if (line.startsWith("@")) {
+                this.parseInstruction(line)
+            }
+
+            i = i + 1
+        }
+
+        return i
+    }
+
+    // ── Phi 节点 ──
+
+    /// 解析 Phi 节点指令。
+    private fun parsePhi(line: String): Unit {
+        // @t = @phi(@a, @b) : Type
+        val eqPos: Int = this.findChar(line, 0, 61)
+        if (eqPos < 0) {
+            this.addError("invalid phi: " + line)
+            return
+        }
+
+        var target: String = HatParserUtils.safeSubstring(line, 0, eqPos).trim()
+        var rhs: String = HatParserUtils.safeSubstringFrom(line, eqPos + 1).trim()
+
+        if (target.startsWith("@")) {
+            target = HatParserUtils.safeSubstringFrom(target, 1)
+        }
+
+        // 解析类型
+        var tyStr: String = "Int"
+        val colonPos: Int = this.findChar(rhs, 0, 58)
+        if (colonPos > 0) {
+            tyStr = HatParserUtils.safeSubstringFrom(rhs, colonPos + 1).trim()
+            rhs = HatParserUtils.safeSubstring(rhs, 0, colonPos).trim()
+        }
+
+        val ty: Int = this.types.fromTypeName(tyStr)
+
+        // 解析操作数: @phi(@a, @b)
+        var argsStr: String = ""
+        if (rhs.startsWith("@phi(")) {
+            val parenEnd: Int = this.findChar(rhs, 0, 41)
+            if (parenEnd > 0) {
+                var inner: String = HatParserUtils.safeSubstring(rhs, 5, parenEnd).trim()
+                argsStr = this.parseArgsList(inner, argsStr)
+            }
+        }
+
+        // 创建 Phi 值
+        val vid: Int = this.prog.addPhi(this.curBlock, ty, argsStr, "")
+
+        // 注册目标名
+        if (target != "") {
+            this.valMap = this.replaceVal(this.valMap, target, vid)
+        }
+    }
+
+    // ── 终止符 ──
+
+    /// 解析无条件跳转。
+    private fun parseBr(line: String): Unit {
+        // @br @label
+        var target: String = HatParserUtils.safeSubstringFrom(line, 4).trim()
+        if (target.startsWith("@")) {
+            target = HatParserUtils.safeSubstringFrom(target, 1)
+        }
+
+        // 查找目标块
+        val targetBlock: Int = this.findBlockByName(target)
+        this.prog.setTerminator(this.curBlock, "Br", 0,
+            HatParserUtils.toStr(targetBlock), "")
+    }
+
+    /// 解析条件跳转。
+    private fun parseBrIf(line: String): Unit {
+        // @br_if @cond => @then, @else
+        var rest: String = HatParserUtils.safeSubstringFrom(line, 6).trim()
+
+        // 解析条件
+        val condPos: Int = this.findChar(rest, 0, 61)
+        // 检查是否是 => (61, 62)
+        var condEnd: Int = -1
+        var ri: Int = 0
+        var rlen: Int = rest.length
+        while (ri < rlen - 1) {
+            if (rest.charCodeAt(ri) == 61 && rest.charCodeAt(ri + 1) == 62) {
+                condEnd = ri
+                break
+            }
+            ri = ri + 1
+        }
+
+        if (condEnd > 0) {
+            val cond: String = HatParserUtils.safeSubstring(rest, 0, condEnd).trim()
+            val condRef: String = this.resolveOperand(cond)
+
+            // 解析目标
+            var targets: String = HatParserUtils.safeSubstringFrom(rest, condEnd + 2).trim()
+            this.parseBrIfTargets(targets, condRef)
+        }
+    }
+
+    /// 解析 br_if 的目标。
+    private fun parseBrIfTargets(targets: String, condRef: String): Unit {
+        // @then, @else
+        var commaPos: Int = this.findChar(targets, 0, 44)
+        if (commaPos < 0) {
+            return
+        }
+
+        var thenTarget: String = HatParserUtils.safeSubstring(targets, 0, commaPos).trim()
+        var elseTarget: String = HatParserUtils.safeSubstringFrom(targets, commaPos + 1).trim()
+
+        if (thenTarget.startsWith("@")) {
+            thenTarget = HatParserUtils.safeSubstringFrom(thenTarget, 1)
+        }
+        if (elseTarget.startsWith("@")) {
+            elseTarget = HatParserUtils.safeSubstringFrom(elseTarget, 1)
+        }
+
+        val thenBlock: Int = this.findBlockByName(thenTarget)
+        val elseBlock: Int = this.findBlockByName(elseTarget)
+
+        this.prog.setTerminator(this.curBlock, "CondBr", 0,
+            condRef + "," +
+            HatParserUtils.toStr(thenBlock) + "," +
+            HatParserUtils.toStr(elseBlock), "")
+    }
+
+    /// 解析返回指令。
+    private fun parseRet(line: String): Unit {
+        // @ret @val : Type  或  @ret () : Unit
+        var rest: String = line.substring(4).trim()
+
+        if (rest.startsWith("()")) {
+            // 无返回值
+            this.prog.setTerminator(this.curBlock, "Ret", 0, "", "")
+        } else {
+            // 有返回值
+            var valStr: String = rest
+            val colonPos: Int = this.findChar(valStr, 0, 58)
+            if (colonPos > 0) {
+                valStr = HatParserUtils.safeSubstring(valStr, 0, colonPos).trim()
+            }
+            if (valStr.startsWith("@")) {
+                valStr = HatParserUtils.safeSubstringFrom(valStr, 1)
+            }
+            val resolved: String = this.resolveOperand(valStr)
+            this.prog.setTerminator(this.curBlock, "Ret", this.curRetType, resolved, "")
+        }
+    }
+
+    // ── 普通指令 ──
+
+    /// 解析普通指令。
+    private fun parseInstruction(line: String): Unit {
+        val eqPos: Int = this.findCharTop(line, 0, 61)
+        if (eqPos < 0) {
+            // 无返回值指令
+            this.parseNoRetInstruction(line)
+            return
+        }
+
+        var target: String = HatParserUtils.safeSubstring(line, 0, eqPos).trim()
+        var rhs: String = HatParserUtils.safeSubstringFrom(line, eqPos + 1).trim()
+
+        if (target.startsWith("@")) {
+            target = HatParserUtils.safeSubstringFrom(target, 1)
+        }
+
+        // 解析类型
+        var tyStr: String = "Int"
+        val colonPos: Int = this.findCharTop(rhs, 0, 58)
+        if (colonPos > 0) {
+            tyStr = HatParserUtils.safeSubstringFrom(rhs, colonPos + 1).trim()
+            rhs = HatParserUtils.safeSubstring(rhs, 0, colonPos).trim()
+        }
+
+        val ty: Int = this.types.fromTypeName(tyStr)
+
+        // 解析操作码和操作数
+        var op: String = ""
+        var argsStr: String = ""
+        var aux: String = ""
+
+        if (rhs.startsWith("@")) {
+            rhs = HatParserUtils.safeSubstringFrom(rhs, 1)
+        }
+
+        val parenPos: Int = this.findCharTop(rhs, 0, 40)
+        if (parenPos < 0) {
+            op = rhs
+        } else {
+            op = HatParserUtils.safeSubstring(rhs, 0, parenPos).trim()
+            if (parenPos < rhs.length - 1) {
+                var inner: String = HatParserUtils.safeSubstringFrom(rhs, parenPos + 1)
+                if (inner.endsWith(")")) {
+                    inner = HatParserUtils.safeSubstring(inner, 0, inner.length - 1).trim()
+                }
+                argsStr = this.parseArgsList(inner, argsStr)
+            }
+        }
+
+        // 处理 @icmp @xxx 格式
+        if (op.contains(" ")) {
+            val spacePos: Int = this.findChar(op, 0, 32)
+            if (spacePos > 0) {
+                aux = HatParserUtils.safeSubstringFrom(op, spacePos + 1).trim()
+                op = HatParserUtils.safeSubstring(op, 0, spacePos).trim()
+                // 去掉函数名的 @ 前缀（HAT 格式约定）
+                if (aux.startsWith("@")) {
+                    aux = HatParserUtils.safeSubstringFrom(aux, 1)
+                }
+            }
+        }
+
+        // 映射操作码
+        val opRaw: String = op
+        op = this.mapOp(op)
+
+        // 字符串常量：反转义 HAT 字面量（与 `HatSerializer.escapeHatText` 对称）
+        if (opRaw == "const_str") {
+            aux = this.unescapeHatConst(aux)
+        }
+
+        // 谓词内嵌：HAT 的 `@icmp @i32_sle` 需要还原成下游期望的 `ICmpSle`
+        //（`Lowering.mapCmpOp` / `InstructionSelection` 都按谓词内嵌名匹配）
+        if (aux != "" && (op == "ICmp" || op == "FCmp")) {
+            op = this.cmpOpName(op, aux)
+            aux = ""
+        }
+
+        // 创建指令
+        val vid: Int = this.prog.addInstr(this.curBlock, op, ty, argsStr, aux)
+
+        // 注册目标名
+        if (target != "") {
+            this.valMap = this.replaceVal(this.valMap, target, vid)
+        }
+    }
+
+    /// 解析无返回值指令。
+    private fun parseNoRetInstruction(line: String): Unit {
+        var op: String = ""
+        var argsStr: String = ""
+        var aux: String = ""
+
+        var rest: String = line
+        if (rest.startsWith("@")) {
+            rest = HatParserUtils.safeSubstringFrom(rest, 1)
+        }
+
+        // 解析并去掉类型注释（: Type）
+        var tyStr: String = "Unit"
+        val colonPos: Int = this.findCharTop(rest, 0, 58)
+        if (colonPos > 0) {
+            tyStr = HatParserUtils.safeSubstringFrom(rest, colonPos + 1).trim()
+            rest = HatParserUtils.safeSubstring(rest, 0, colonPos).trim()
+        }
+
+        val parenPos: Int = this.findCharTop(rest, 0, 40)
+        if (parenPos < 0) {
+            op = rest
+        } else {
+            op = rest.substring(0, parenPos).trim()
+            if (parenPos < rest.length - 1) {
+                var inner: String = HatParserUtils.safeSubstringFrom(rest, parenPos + 1)
+                if (inner.endsWith(")")) {
+                    inner = HatParserUtils.safeSubstring(inner, 0, inner.length - 1).trim()
+                }
+                argsStr = this.parseArgsList(inner, argsStr)
+            }
+        }
+
+        if (op.contains(" ")) {
+            val spacePos: Int = this.findChar(op, 0, 32)
+            if (spacePos > 0) {
+                aux = HatParserUtils.safeSubstringFrom(op, spacePos + 1).trim()
+                op = HatParserUtils.safeSubstring(op, 0, spacePos).trim()
+                // 去掉函数名的 @ 前缀（HAT 格式约定）
+                if (aux.startsWith("@")) {
+                    aux = HatParserUtils.safeSubstringFrom(aux, 1)
+                }
+            }
+        }
+
+        val opRaw: String = op
+        op = this.mapOp(op)
+        if (opRaw == "const_str") {
+            aux = this.unescapeHatConst(aux)
+        }
+        if (aux != "" && (op == "ICmp" || op == "FCmp")) {
+            op = this.cmpOpName(op, aux)
+            aux = ""
+        }
+        val ty: Int = this.types.fromTypeName(tyStr)
+        this.prog.addInstr(this.curBlock, op, ty, argsStr, aux)
+    }
+
+    // ── 参数列表解析 ──
+
+    /// 解析逗号分隔的参数列表，返回 ValueID 逗号分隔字符串（未解析项为 `?name` 占位）。
+    private fun parseArgsList(inner: String, outArgs: String): String {
+        var pos: Int = 0
+        var start: Int = 0
+        var inLen: Int = inner.length
+        var result: String = ""
+
+        while (pos <= inLen) {
+            if (pos == inLen || inner.charCodeAt(pos) == 44) {
+                if (pos > start) {
+                    val arg: String = HatParserUtils.safeSubstring(inner, start, pos).trim()
+                    val resolved: String = this.resolveOperand(arg)
+                    if (result == "") {
+                        result = resolved
+                    } else {
+                        result = result + "," + resolved
+                    }
+                }
+                start = pos + 1
+            }
+            pos = pos + 1
+        }
+
+        return result
+    }
+
+    /// 解析单个操作数。
+    ///
+    /// - 已定义的值 → 返回其 ValueID 字符串
+    /// - 纯数字 → 原样返回（临时变量编号）
+    /// - 尚未定义（前向引用，如 `@phi(@sum, @sum@2)` 里的 `@sum@2`）→ 返回 `?name` 占位，
+    ///   由 `resolvePendingValues` 在函数解析完成后回填。
+    private fun resolveOperand(arg: String): String {
+        var name: String = arg
+        if (name == "") {
+            return ""
+        }
+        if (name.startsWith("@")) {
+            name = HatParserUtils.safeSubstringFrom(name, 1)
+        }
+        // `@"literal"` 形态（设计文档 §3.7）暂按未解析处理，不做常量内联
+        val vid: Int = this.lookupVal(name)
+        if (vid >= 0) {
+            return HatParserUtils.toStr(vid)
+        }
+        if (this.isDigit(name)) {
+            return name
+        }
+        return "?" + name
+    }
+
+    /// 回填 `?name` 占位（遍历本函数解析期间新建的所有值）。
+    private fun resolvePendingValues(startValueId: Int): Unit {
+        var vi: Int = startValueId
+        while (vi < this.prog.valueCount) {
+            val v: MirValue = this.prog.valueOf(vi)
+            if (v.args.indexOf("?") >= 0) {
+                v.args = this.patchArgs(v.args)
+            }
+            vi = vi + 1
+        }
+    }
+
+    /// 把 args 串中的 `?name` 占位替换为 ValueID。
+    private fun patchArgs(args: String): String {
+        var pos: Int = 0
+        var start: Int = 0
+        var len: Int = args.length
+        var out: String = ""
+        var first: Boolean = true
+
+        while (pos <= len) {
+            if (pos == len || args.charCodeAt(pos) == 44) {
+                if (pos > start) {
+                    var token: String = HatParserUtils.safeSubstring(args, start, pos).trim()
+                    if (token.startsWith("?")) {
+                        val name: String = HatParserUtils.safeSubstringFrom(token, 1)
+                        val vid: Int = this.lookupVal(name)
+                        if (vid >= 0) {
+                            token = HatParserUtils.toStr(vid)
+                        } else {
+                            this.addWarning("unresolved value: " + name)
+                            token = "-1"
+                        }
+                    }
+                    if (first) {
+                        first = false
+                        out = token
+                    } else {
+                        out = out + "," + token
+                    }
+                }
+                start = pos + 1
+            }
+            pos = pos + 1
+        }
+
+        return out
+    }
+
+    // ── 操作码映射 ──
+
+    /// 将操作码转换为 SSA MIR 的 op 名。
+    private fun mapOp(op: String): String {
+        if (op == "i32_const" || op == "i64_const") { return "Const" }
+        if (op == "f64_const" || op == "f32_const") { return "Const" }
+        if (op == "const_str") { return "Const" }
+        if (op == "bool_const") { return "Const" }
+        if (op == "null") { return "Const" }
+        if (op == "phi") { return "Phi" }
+        if (op == "add") { return "Add" }
+        if (op == "sub") { return "Sub" }
+        if (op == "mul") { return "Mul" }
+        if (op == "div") { return "SDiv" }
+        if (op == "rem") { return "SRem" }
+        if (op == "neg") { return "Neg" }
+        if (op == "and") { return "And" }
+        if (op == "or") { return "Or" }
+        if (op == "xor") { return "Xor" }
+        if (op == "not") { return "Not" }
+        if (op == "band") { return "Band" }
+        if (op == "bor") { return "Bor" }
+        if (op == "bxor") { return "Bxor" }
+        if (op == "shl") { return "Shl" }
+        if (op == "shr") { return "Shr" }
+        if (op == "ushr") { return "Shr" }
+        if (op == "call") { return "Call" }
+        if (op == "alloc") { return "Alloc" }
+        if (op == "store") { return "Store" }
+        if (op == "load") { return "Load" }
+        if (op == "alloc_list") { return "AllocList" }
+        if (op == "list_set") { return "ListSet" }
+        if (op == "list_get") { return "ListGet" }
+        if (op == "list_len") { return "ListLen" }
+        if (op == "new") { return "New" }
+        if (op == "field") { return "GetField" }
+        if (op == "field_set") { return "SetField" }
+        if (op == "icmp") { return "ICmp" }
+        if (op == "fcmp") { return "FCmp" }
+        if (op == "str_concat") { return "StrConcat" }
+        if (op == "str_len") { return "StrLen" }
+        if (op == "str_sub") { return "StrSub" }
+        if (op == "str_char") { return "StrChar" }
+        if (op == "alloc_map") { return "AllocMap" }
+        if (op == "map_set") { return "MapSet" }
+        if (op == "map_get") { return "MapGet" }
+        if (op == "i32_to_f64") { return "I32ToF64" }
+        if (op == "f64_to_i32") { return "F64ToI32" }
+        if (op == "i32_to_str") { return "I32ToStr" }
+        if (op == "f64_to_str") { return "F64ToStr" }
+        if (op == "str_to_i32") { return "StrToI32" }
+        return op
+    }
+
+    /// HAT 比较谓词 → 谓词内嵌的 SSA op 名（`i32_sle` → `ICmpSle`）。
+    ///
+    /// 与 `SsaBuilder.mapBinaryOp`（`ICmpEq` / `ICmpSlt` / … / `SDiv`）以及
+    /// 下游 `Lowering.mapCmpOp` 的词汇表严格一致；未知谓词原样拼接，至少不丢信息。
+    private fun cmpOpName(base: String, pred: String): String {
+        val p: String = pred.trim()
+        if (p == "i32_eq" || p == "i64_eq" || p == "str_eq" || p == "f64_eq") { return "ICmpEq" }
+        if (p == "i32_ne" || p == "i64_ne" || p == "str_ne" || p == "f64_ne") { return "ICmpNe" }
+        if (p == "i32_slt" || p == "i64_slt" || p == "f64_lt") { return "ICmpSlt" }
+        if (p == "i32_sgt" || p == "i64_sgt" || p == "f64_gt") { return "ICmpSgt" }
+        if (p == "i32_sle" || p == "i64_sle" || p == "f64_le") { return "ICmpSle" }
+        if (p == "i32_sge" || p == "i64_sge" || p == "f64_ge") { return "ICmpSge" }
+        if (p == "i32_ult" || p == "i64_ult") { return "ICmpUlt" }
+        if (p == "i32_ugt" || p == "i64_ugt") { return "ICmpUgt" }
+        if (p == "i32_ule" || p == "i64_ule") { return "ICmpUle" }
+        if (p == "i32_uge" || p == "i64_uge") { return "ICmpUge" }
+        return base + p
+    }
+
+    // ── 值引用解析 ──
+
+    /// 从 valMap 中查找值。
+    private fun lookupVal(name: String): Int {
+        val key: String = "\n" + name + "|"
+        val at: Int = this.valMap.indexOf(key)
+        if (at < 0) {
+            return -1
+        }
+        val start: Int = at + key.length
+        var e: Int = start
+        var len: Int = this.valMap.length
+        while (e < len && this.valMap.charCodeAt(e) != 10) {
+            e = e + 1
+        }
+        return HatParserUtils.strToInt(HatParserUtils.safeSubstring(this.valMap, start, e))
+    }
+
+    /// 替换 valMap 中的值。
+    private fun replaceVal(map: String, name: String, vid: Int): String {
+        val key: String = name + "|"
+        var out: String = "\n"
+        var lineStart: Int = 0
+        var pos: Int = 0
+        var len: Int = map.length
+        while (pos <= len) {
+            if (pos == len || map.charCodeAt(pos) == 10) {
+                if (pos > lineStart) {
+                    val line: String = HatParserUtils.safeSubstring(map, lineStart, pos)
+                    if (!line.startsWith(key)) {
+                        out = out + line + "\n"
+                    }
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        return out + name + "|" + HatParserUtils.toStr(vid) + "\n"
+    }
+
+    /// 查找块名对应的 BlockID。
+    private fun findBlockByName(name: String): Int {
+        val key: String = "\n" + name + "|"
+        val at: Int = this.blockMap.indexOf(key)
+        if (at < 0) {
+            return -1
+        }
+        val start: Int = at + key.length
+        var e: Int = start
+        var len: Int = this.blockMap.length
+        while (e < len && this.blockMap.charCodeAt(e) != 10) {
+            e = e + 1
+        }
+        return HatParserUtils.strToInt(HatParserUtils.safeSubstring(this.blockMap, start, e))
+    }
+
+    // ── 工具方法 ──
+
+    /// 查找字符在字符串中的位置。
+    private fun findChar(s: String, start: Int, code: Int): Int {
+        var i: Int = start
+        var len: Int = s.length
+        while (i < len) {
+            if (s.charCodeAt(i) == code) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 反转义 HAT 字符串字面量：`\\` → `\`、`\"` → `"`、`\n`/`\r`/`\t`/`\|` → 对应字符。
+    ///
+    /// 与 `HatSerializer.escapeHatText` 严格对称；返回结果仍按 SSA 侧约定保留
+    /// 外层引号（`"…"`），因为下游（对象写入器的字符串池）按该载荷取字面量。
+    private fun unescapeHatConst(aux: String): String {
+        val blen: Int = aux.length
+        var body: String = aux
+        var quoted: Boolean = false
+        if (blen >= 2 && aux.startsWith("\"") && aux.endsWith("\"")) {
+            body = HatParserUtils.safeSubstring(aux, 1, blen - 1)
+            quoted = true
+        }
+        var out: String = ""
+        var i: Int = 0
+        val len: Int = body.length
+        while (i < len) {
+            if (body.charCodeAt(i) == 92 && i + 1 < len) {
+                val n: Int = body.charCodeAt(i + 1)
+                if (n == 110) {
+                    out = out + "\n"
+                } else if (n == 114) {
+                    out = out + "\r"
+                } else if (n == 116) {
+                    out = out + "\t"
+                } else if (n == 34) {
+                    out = out + "\""
+                } else if (n == 92) {
+                    out = out + "\\"
+                } else if (n == 124) {
+                    out = out + "|"
+                } else {
+                    out = out + body.substring(i, i + 1)
+                }
+                i = i + 2
+            } else {
+                out = out + body.substring(i, i + 1)
+                i = i + 1
+            }
+        }
+        if (quoted) {
+            return "\"" + out + "\""
+        }
+        return out
+    }
+
+    /// 查找 `code` 字符，**跳过双引号字符串内部**。
+    ///
+    /// 为什么必须这样：HAT 字符串字面量里可以合法出现 `(` / `:` / `=` ——
+    /// `@t0 = @const_str "add(3,4) = " : String`。旧实现在整行上找第一个 `(`，
+    /// 于是字符串内部被切开：op 变成 `const_str "add`、实参变成 `3,4) = "`，
+    /// 常量值整条错位（实测 P1/05_functions 的 stdout 乱码、COFF 少 44 字节）。
+    private fun findCharTop(s: String, start: Int, code: Int): Int {
+        var i: Int = start
+        var len: Int = s.length
+        var inStr: Boolean = false
+        while (i < len) {
+            val c: Int = s.charCodeAt(i)
+            if (inStr) {
+                if (c == 92) {          // 反斜杠转义：跳过下一字符
+                    i = i + 2
+                    continue
+                }
+                if (c == 34) { inStr = false }
+            } else {
+                if (c == 34) {
+                    inStr = true
+                } else if (c == code) {
+                    return i
+                }
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 判断字符串是否为数字。
+    private fun isDigit(s: String): Boolean {
+        if (s == "") {
+            return false
+        }
+        var i: Int = 0
+        while (i < s.length) {
+            val c: Int = s.charCodeAt(i)
+            if (c < 48 || c > 57) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 去掉前缀。
+    private fun stripPrefix(s: String, prefix: String): String {
+        var pLen: Int = prefix.length
+        var sLen: Int = s.length
+        if (sLen < pLen) {
+            return s
+        }
+        var i: Int = 0
+        while (i < pLen) {
+            if (s.charCodeAt(i) != prefix.charCodeAt(i)) {
+                return s
+            }
+            i = i + 1
+        }
+        return HatParserUtils.safeSubstringFrom(s, pLen)
+    }
+
+    /// 去除字符串首尾空格。
+    private fun trimString(s: String): String {
+        var start: Int = 0
+        var end: Int = s.length
+        var i: Int = 0
+        while (i < end && (s.charCodeAt(i) == 32 || s.charCodeAt(i) == 9 || s.charCodeAt(i) == 13)) {
+            start = i + 1
+            i = i + 1
+        }
+        i = end
+        while (i > start && (s.charCodeAt(i - 1) == 32 || s.charCodeAt(i - 1) == 9 || s.charCodeAt(i - 1) == 13)) {
+            end = i - 1
+            i = i - 1
+        }
+        if (start == end) {
+            return ""
+        }
+        return HatParserUtils.safeSubstring(s, start, end)
+    }
+
+    /// 去除 HAT 注释前缀 (; 和可能的空格)。
+    private fun stripComment(s: String): String {
+        if (s.length == 0) {
+            return s
+        }
+        // 找到第一个非空格字符
+        var start: Int = 0
+        var len: Int = s.length
+        var i: Int = 0
+        while (i < len && (s.charCodeAt(i) == 32 || s.charCodeAt(i) == 9 || s.charCodeAt(i) == 10 || s.charCodeAt(i) == 13)) {
+            start = i + 1
+            i = i + 1
+        }
+        // 如果是 ; 开头，去掉 ; 和后续空格
+        if (start < len && s.charCodeAt(start) == 59) {
+            start = start + 1
+            i = start
+            while (i < len && (s.charCodeAt(i) == 32 || s.charCodeAt(i) == 9 || s.charCodeAt(i) == 10 || s.charCodeAt(i) == 13)) {
+                start = i + 1
+                i = i + 1
+            }
+        }
+        if (start >= len) {
+            return ""
+        }
+        return HatParserUtils.safeSubstring(s, start, len)
+    }
+
+    /// 确保当前块有终结指令。
+    private fun ensureTerminator(): Unit {
+        if (this.curBlock < 0) {
+            return
+        }
+        val b: MirBlock = this.prog.blockOf(this.curBlock)
+        if (b.term < 0) {
+            this.prog.setTerminator(this.curBlock, "Ret", 0, "", "")
+            this.addWarning("missing terminator in block " + HatParserUtils.toStr(this.curBlock) +
+                           ", added @ret () : Unit")
+        }
+    }
+
+    /// 添加警告。
+    private fun addWarning(msg: String): Unit {
+        this.warnCount = this.warnCount + 1
+        println("[WARN] hat_parse: " + msg)
+    }
+
+    /// 添加错误。
+    private fun addError(msg: String): Unit {
+        this.errCount = this.errCount + 1
+        println("[ERROR] hat_parse: " + msg)
+    }
+
+    /// 获取警告计数。
+    fun getWarnCount(): Int {
+        return this.warnCount
+    }
+
+    /// 获取错误计数。
+    fun getErrCount(): Int {
+        return this.errCount
+    }
+
+    /// 获取已解析函数数。
+    fun getParsedFuncCount(): Int {
+        return this.funcCount
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// HatParserUtils — 工具对象
+// ─────────────────────────────────────────────────────────────
+
+object HatParserUtils {
+
+    /// 字符串转整数。
+    fun strToInt(text: String): Int {
+        if (text == "") {
+            return 0
+        }
+        var total: Int = 0
+        var i: Int = 0
+        var neg: Boolean = false
+        var len: Int = text.length
+        if (len > 0 && text.charCodeAt(0) == 45) {
+            neg = true
+            i = 1
+        }
+        while (i < len) {
+            val c: Int = text.charCodeAt(i)
+            if (c >= 48 && c <= 57) {
+                total = total * 10 + (c - 48)
+            }
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
+    }
+
+    /// 字符串转浮点数（简化实现）。
+    fun strToFloat(text: String): Double {
+        if (text == "") {
+            return 0.0
+        }
+        var total: Double = 0.0
+        var i: Int = 0
+        var neg: Boolean = false
+        var len: Int = text.length
+        var dotPos: Int = -1
+        if (len > 0 && text.charCodeAt(0) == 45) {
+            neg = true
+            i = 1
+        }
+        while (i < len) {
+            val c: Int = text.charCodeAt(i)
+            if (c == 46) {
+                dotPos = i
+                i = i + 1
+                continue
+            }
+            if (c >= 48 && c <= 57) {
+                total = total * 10.0 + (c - 48)
+            }
+            i = i + 1
+        }
+        if (dotPos >= 0) {
+            var fracDiv: Double = 10.0
+            while (dotPos < len) {
+                val c: Int = text.charCodeAt(dotPos)
+                if (c >= 48 && c <= 57) {
+                    total = total + ((c - 48) / fracDiv)
+                    fracDiv = fracDiv * 10.0
+                }
+                dotPos = dotPos + 1
+            }
+        }
+        if (neg) {
+            return -total
+        }
+        return total
+    }
+
+    /// 整数转字符串。
+    fun toStr(n: Int): String {
+        if (n == 0) {
+            return "0"
+        }
+        var neg: Boolean = false
+        if (n < 0) {
+            neg = true
+            n = -n
+        }
+        var result: String = ""
+        while (n > 0) {
+            result = HatParserUtils.digitChar(n % 10) + result
+            n = n / 10
+        }
+        if (neg) {
+            result = "-" + result
+        }
+        return result
+    }
+
+    /// VM 兼容的 substring（从 start 到 end，不含 end）。
+    fun safeSubstring(s: String, start: Int, end: Int): String {
+        var len: Int = s.length
+        if (start < 0) { start = 0 }
+        if (end > len) { end = len }
+        if (start >= end) { return "" }
+        return s.substring(start, end)
+    }
+
+    /// VM 兼容的 substring（从 start 到末尾）。
+    fun safeSubstringFrom(s: String, start: Int): String {
+        var len: Int = s.length
+        if (start < 0) { start = 0 }
+        if (start >= len) { return "" }
+        return s.substring(start)
+    }
+
+    /// 把 0-9 的数字转换为单字符字符串。
+    private fun digitChar(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        return "9"
+    }
+
+    /// 空解析器。
+    fun emptyParser(): HatParser {
+        return HatParser()
+    }
+
+    /// 解析 HAT 文本。
+    fun parseHat(text: String): MirSsaProgram {
+        val parser: HatParser = HatParser()
+        return parser.parse(text)
+    }
+
+    /// 加载 HAT 文件。
+    fun loadHat(filePath: String): MirSsaProgram {
+        val parser: HatParser = HatParser()
+        return parser.parseFile(filePath)
+    }
+}

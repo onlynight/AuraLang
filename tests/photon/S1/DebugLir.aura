@@ -1,0 +1,15 @@
+// aura:///aura/lang/compiler/backend/photon/DebugLir.aura
+package aura.lang.compiler.backend.photon
+// Debug: test LirProgram creation
+
+import aura.lang.std.String
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
+
+fun main() {
+    println("═══ Debug Lir ═══")
+
+    println("[1] LirUtils.emptyProgram()")
+    val lir = LirUtils.emptyProgram()
+    println("  functionCount=" + lir.functionCount)
+    println("  PASS")
+}

@@ -5,47 +5,48 @@ package aura.lang.compiler.mir
 //
 // 用**类型句柄 + 去重**管理类型。所有类型引用通过 TypeID（整数句柄）完成。
 // 类型比较 = 整数比较，序列化 = 整数写入。
+//
+// S1 修复：去重表从 HashMap<String, Int> 改为扁平字符串（key|id\n...），
+// 以兼容 VM 的 HashMap 构造器限制（嵌套泛型不支持）。
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.collection.HashMap
-import aura.lang.collection.ArrayList
 
 /// 类型注册表：管理所有类型的注册、去重和查询。
 class TypeRegistry {
 
     /// 类型种类。
-    private var kinds: List<String> = ArrayList<String>()
+    private var kinds: List<String> = arrayListOf<String>()
 
     /// 类型位宽。
-    private var widths: List<Int> = ArrayList<Int>()
+    private var widths: List<Int> = arrayListOf<Int>()
 
     /// 类型名称。
-    private var names: List<String> = ArrayList<String>()
+    private var names: List<String> = arrayListOf<String>()
 
     /// 字段类型 ID 列表（每项为逗号分隔的 TypeID 字符串）。
-    private var fields: List<String> = ArrayList<String>()
+    private var fields: List<String> = arrayListOf<String>()
 
     /// 元素类型 ID。
-    private var elems: List<Integer> = ArrayList<Integer>()
+    private var elems: List<Int> = arrayListOf<Int>()
 
     /// 数组长度。
-    private var arrayLengths: List<Integer> = ArrayList<Integer>()
+    private var arrayLengths: List<Int> = arrayListOf<Int>()
 
-    /// 类型名 → TypeID 去重表。
-    private var dedup: HashMap<String, Int> = HashMap<String, Int>()
+    /// 类型名 → TypeID 去重表（扁平字符串："key|id\nkey|id\n..."）。
+    private var dedup: String = ""
 
     /// 已注册类型数。
     var count: Int = 0
 
     init() {
-        this.kinds = ArrayList<String>()
-        this.widths = ArrayList<Integer>()
-        this.names = ArrayList<String>()
-        this.fields = ArrayList<String>()
-        this.elems = ArrayList<Integer>()
-        this.arrayLengths = ArrayList<Integer>()
-        this.dedup = HashMap<String, Int>()
+        this.kinds = arrayListOf<String>()
+        this.widths = arrayListOf<Int>()
+        this.names = arrayListOf<String>()
+        this.fields = arrayListOf<String>()
+        this.elems = arrayListOf<Int>()
+        this.arrayLengths = arrayListOf<Int>()
+        this.dedup = ""
         this.count = 0
 
         // 预注册基本类型
@@ -68,8 +69,10 @@ class TypeRegistry {
         val key: String = kind + "|" + toStr(width) + "|" + name + "|"
             + fieldIds + "|" + toStr(elemId) + "|" + toStr(arrayLen)
 
-        if (this.dedup.containsKey(key)) {
-            return this.dedup.get(key)
+        // 扁平字符串查找
+        val existingId: Int = this.dedupLookup(key)
+        if (existingId >= 0) {
+            return existingId
         }
 
         val id: Int = this.kinds.size
@@ -79,7 +82,7 @@ class TypeRegistry {
         this.fields.add(fieldIds)
         this.elems.add(elemId)
         this.arrayLengths.add(arrayLen)
-        this.dedup.put(key, id)
+        this.dedupAppend(key, id)
         this.count = this.kinds.size
         return id
     }
@@ -87,6 +90,90 @@ class TypeRegistry {
     /// 注册一个基本类型（无字段、无元素）。
     private fun registerBasic(kind: String): Int {
         return this.register(kind, 0, "", "", -1, -1)
+    }
+
+    // ── 去重表操作 ──
+
+    /// 临时性能探针：去重查找次数与累计扫描字符数。
+    var dbgCalls: Int = 0
+    var dbgScanned: Int = 0
+
+    /// 在扁平字符串中去重查找。找到返回 ID，否则返回 -1。
+    ///
+    /// ⚠️ 原实现有两处致命问题：
+    ///   1. 用**字符串下标** `this.dedup[pos]` / `line[i]` 判断 `\n` 与 `|` ——
+    ///      Aura 的 String 下标在本 VM 下不成立（实测恒不等），于是循环永远
+    ///      走不到行尾分支，查找**恒返回 -1**；
+    ///   2. 恒 -1 ⇒ 每次 `register` 都追加新条目，去重表无界增长
+    ///      （实测编译 `Main.aura` 时注册出 1500+ 个**完全相同**的基本类型），
+    ///      而每次查找又要全表 O(N) 扫描 + 逐行 `substring` 分配 ⇒ Phase A
+    ///      退化为 O(N²) 且内存暴涨。
+    ///
+    /// 现改为 `charCodeAt` 逐码点扫描（`\n`=10、`|`=124），零中间分配，
+    /// 只在**命中**时切片一次。
+    private fun dedupLookup(key: String): Int {
+        this.dbgCalls = this.dbgCalls + 1
+        this.dbgScanned = this.dbgScanned + this.dedup.length
+        if (this.dedup == "" || key == "") { return -1 }
+        val klen: Int = key.length
+        var lineStart: Int = 0
+        var pos: Int = 0
+        val len: Int = this.dedup.length
+        while (pos <= len) {
+            if (pos == len || this.dedup.charCodeAt(pos) == 10) {
+                // 行区间 [lineStart, pos)，格式 "key|id"
+                if (pos - lineStart > klen && this.dedup.charCodeAt(lineStart + klen) == 124) {
+                    var same: Boolean = true
+                    var i: Int = 0
+                    while (i < klen) {
+                        if (this.dedup.charCodeAt(lineStart + i) != key.charCodeAt(i)) {
+                            same = false
+                            break
+                        }
+                        i = i + 1
+                    }
+                    if (same) {
+                        return this.dedupStrToInt(this.dedup.substring(lineStart + klen + 1, pos))
+                    }
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        return -1
+    }
+
+    /// 检查字符串是否包含子串。
+    private fun strContains(text: String, sub: String): Boolean {
+        val tlen: Int = text.length
+        val slen: Int = sub.length
+        if (slen > tlen) { return false }
+        var i: Int = 0
+        while (i <= tlen - slen) {
+            var match: Boolean = true
+            var j: Int = 0
+            while (j < slen) {
+                // 字符串下标在本 VM 下不可用：一律 charCodeAt 比较码点
+                if (text.charCodeAt(i + j) != sub.charCodeAt(j)) {
+                    match = false
+                    break
+                }
+                j = j + 1
+            }
+            if (match) { return true }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 向扁平字符串追加一个去重记录。
+    private fun dedupAppend(key: String, id: Int): Unit {
+        val entry: String = key + "|" + toStr(id)
+        if (this.dedup == "") {
+            this.dedup = entry
+        } else {
+            this.dedup = this.dedup + "\n" + entry
+        }
     }
 
     // ── 类型构造工厂 ──
@@ -138,6 +225,60 @@ class TypeRegistry {
         return this.kinds[id]
     }
 
+    /// 是否为整数类型。
+    ///
+    /// 除内部 `Int` 类型（`intType(width)`）外，还要认**按名字**注册的整型
+    ///（`fromTypeName("Int")` / `"Long"` …）。`.phir` 里的类型都是名字形式，
+    /// 不认它们会让 `buildLit` / 零值初始化退化成「非整数」分支。
+    fun isInt(id: Int): Boolean {
+        val k: String = this.kindOf(id)
+        if (k == "Int") { return true }
+        if (k != "Basic") { return false }
+        val n: String = this.nameOf(id)
+        return n == "Int" || n == "Long" || n == "Short" || n == "Byte"
+            || n == "Int8" || n == "Int16" || n == "Int32" || n == "Int64"
+            || n == "UInt" || n == "UByte" || n == "UShort" || n == "ULong"
+    }
+
+    /// 是否为浮点类型。
+    fun isFloat(id: Int): Boolean {
+        val k: String = this.kindOf(id)
+        if (k == "Float") { return true }
+        if (k != "Basic") { return false }
+        val n: String = this.nameOf(id)
+        return n == "Float" || n == "Double" || n == "Float32" || n == "Float64"
+    }
+
+    /// 是否为布尔类型（`Bool` 与 Aura 源码里的 `Boolean` 都算）。
+    fun isBool(id: Int): Boolean {
+        val k: String = this.kindOf(id)
+        if (k == "Basic") {
+            val n: String = this.nameOf(id)
+            return n == "Bool" || n == "Boolean" || n == "bool"
+        }
+        return k == "Bool" || k == "Boolean"
+    }
+
+    /// 是否为字符串类型。
+    fun isString(id: Int): Boolean {
+        return this.kindOf(id) == "Basic" && this.nameOf(id) == "String"
+    }
+
+    /// 是否为指针类型。
+    fun isPtr(id: Int): Boolean {
+        return this.kindOf(id) == "Ptr"
+    }
+
+    /// 是否为结构体类型。
+    fun isStruct(id: Int): Boolean {
+        return this.kindOf(id) == "Struct"
+    }
+
+    /// 是否为函数类型。
+    fun isFunc(id: Int): Boolean {
+        return this.kindOf(id) == "Func"
+    }
+
     fun widthOf(id: Int): Int {
         if (id < 0 || id >= this.widths.size) { return 0 }
         return this.widths[id]
@@ -163,96 +304,59 @@ class TypeRegistry {
         return this.arrayLengths[id]
     }
 
-    fun isInt(id: Int): Boolean { return this.kindOf(id) == "Int" }
-    fun isFloat(id: Int): Boolean { return this.kindOf(id) == "Float" }
-    fun isBool(id: Int): Boolean { return this.kindOf(id) == "Bool" }
-    fun isPtr(id: Int): Boolean { return this.kindOf(id) == "Ptr" }
-    fun isStruct(id: Int): Boolean { return this.kindOf(id) == "Struct" }
-    fun isFunc(id: Int): Boolean { return this.kindOf(id) == "Func" }
-    fun isEnum(id: Int): Boolean { return this.kindOf(id) == "Enum" }
-
-    // ── 从字符串类型名构造 TypeID ──
-
+    /// 从类型名查找 TypeID。未注册返回 -1。
     fun fromTypeName(name: String): Int {
-        if (name == "Int" || name == "Long") { return this.intType(64) }
-        if (name == "Short") { return this.intType(16) }
-        if (name == "Byte") { return this.intType(8) }
-        if (name == "Float") { return this.floatType(32) }
-        if (name == "Double") { return this.floatType(64) }
-        if (name == "Boolean") { return this.boolType() }
-        if (name == "String") { return this.stringType() }
-        if (name == "Unit") { return this.unitType() }
-        if (name == "Any" || name == "Nothing") { return this.ptrType(this.intType(8)) }
-        if (name == "") { return this.unitType() }
-        if (name.endsWith("?")) {
-            val inner: String = name.substring(0, name.length() - 1)
-            return this.ptrType(this.fromTypeName(inner))
-        }
-        if (name.startsWith("Pointer<") && name.endsWith(">")) {
-            val inner: String = name.substring(8, name.length() - 1)
-            return this.ptrType(this.fromTypeName(inner))
-        }
-        if (name.startsWith("Array<") && name.endsWith(">")) {
-            val inner: String = name.substring(6, name.length() - 1)
-            return this.arrayType(this.fromTypeName(inner), -1)
-        }
-        if (name.startsWith("List<") && name.endsWith(">")) {
-            val inner: String = name.substring(5, name.length() - 1)
-            return this.ptrType(this.fromTypeName(inner))
-        }
-        if (name.startsWith("Map<") && name.endsWith(">")) {
-            return this.ptrType(this.intType(64))
-        }
-        if (name.startsWith("(") && name.contains(") ->")) {
-            return this.fromFuncType(name)
-        }
-        return this.structType(name, "")
+        val id: Int = this.register("Basic", 0, name, "", -1, -1)
+        return id
     }
 
-    private fun fromFuncType(ty: String): Int {
-        val arrowPos: Int = ty.indexOf(") ->")
-        if (arrowPos < 0) { return this.funcType("", this.unitType()) }
-        val paramsPart: String = ty.substring(1, arrowPos)
-        val retPart: String = ty.substring(arrowPos + 5)
-        val paramIds: String = this.parseParamList(paramsPart)
-        val retId: Int = this.fromTypeName(retPart)
-        return this.funcType(paramIds, retId)
+    // ── 元信息 ──
+
+    fun typeNameOf(id: Int): String {
+        val kind: String = this.kindOf(id)
+        val name: String = this.nameOf(id)
+        if (kind == "Struct" || kind == "Enum") { return name }
+        if (kind == "Basic") { return name }
+        return this.typeStr(id)
     }
 
-    private fun parseParamList(params: String): String {
+    /// 类型描述字符串。
+    fun typeStr(id: Int): String {
+        val kind: String = this.kindOf(id)
+        if (kind == "") { return "" }
+        if (kind == "Int") { return "i" + toStr(this.widthOf(id)) }
+        if (kind == "Float") { return "f" + toStr(this.widthOf(id)) }
+        if (kind == "Bool") { return "bool" }
+        if (kind == "Unit") { return "unit" }
+        if (kind == "String") { return "string" }
+        if (kind == "Ptr") { return "*" + this.typeStr(this.elemOf(id)) }
+        if (kind == "Array") {
+            return "[" + toStr(this.arrayLenOf(id)) + "]" + this.typeStr(this.elemOf(id))
+        }
+        if (kind == "Struct") { return "struct" }
+        if (kind == "Enum") { return "enum" }
+        if (kind == "Func") { return "func" }
+        return kind
+    }
+
+    /// 打印所有已注册类型。
+    fun describe(): String {
         var result: String = ""
-        val parts: List<String> = params.split(",")
         var i: Int = 0
-        while (i < parts.size) {
-            val p: String = parts[i]
-            if (p != "") {
-                if (result != "") { result = result + "," }
-                result = result + toStr(this.fromTypeName(p))
-            }
+        while (i < this.count) {
+            if (i > 0) { result = result + "\n" }
+            result = result + toStr(i) + ": " + this.typeNameOf(i)
             i = i + 1
         }
         return result
     }
 
-    // ── 工具方法 ──
-
-    fun typeName(id: Int): String {
-        val kind: String = this.kindOf(id)
-        if (kind == "Int") { return "i" + toStr(this.widthOf(id)) }
-        if (kind == "Float") { return "f" + toStr(this.widthOf(id)) }
-        if (kind == "Struct" || kind == "Enum") { return this.nameOf(id) }
-        if (kind == "Ptr") { return "ptr<" + this.typeName(this.elemOf(id)) + ">" }
-        if (kind == "Array") { return "[" + this.typeName(this.elemOf(id)) + "]" }
-        if (kind == "Func") { return "func" }
-        return kind
-    }
+    // ── 大小 / 对齐 ──
 
     fun sizeOf(id: Int): Int {
         val kind: String = this.kindOf(id)
         if (kind == "Int") {
             val w: Int = this.widthOf(id)
-            if (w <= 8) { return 1 }
-            if (w <= 16) { return 2 }
             if (w <= 32) { return 4 }
             return 8
         }
@@ -267,7 +371,7 @@ class TypeRegistry {
         if (kind == "Struct") {
             val f: String = this.fieldsOf(id)
             if (f == "") { return 0 }
-            return f.split(",").size * 8
+            return strCountFields(f) * 8
         }
         if (kind == "Array") {
             val len: Int = this.arrayLenOf(id)
@@ -293,6 +397,66 @@ class TypeRegistry {
         }
         if (kind == "Bool" || kind == "Unit") { return 1 }
         return 8
+    }
+
+    // ── 字符串工具 ──
+
+    private fun toStr(n: Int): String {
+        if (n == 0) { return "0" }
+        var neg: Boolean = false
+        if (n < 0) { neg = true; n = -n }
+        var result: String = ""
+        while (n > 0) {
+            result = digitChar(n % 10) + result
+            n = n / 10
+        }
+        if (neg) { result = "-" + result }
+        return result
+    }
+
+    private fun digitChar(value: Int): String {
+        if (value < 0 || value > 9) { return "" }
+        return "0123456789".substring(value, value + 1)
+    }
+
+    /// 十进制字符串转整数。
+    ///
+    /// 名字刻意带类前缀语义前缀 `dedup`：**不要**改回 `strToInt`。
+    /// 本方法只能靠「全表唯一候选」兜底解析（`this.` 形式在旧前端下同样
+    /// 退化为裸名），而同名方法在编译单元内至少还有 SsaMirUtils / LirUtils /
+    /// MachineDagUtils 三份，重名即失败
+    /// （`[bytecode] error: 未解析的函数调用 'strToInt'`）。
+    private fun dedupStrToInt(text: String): Int {
+        if (text == "") { return 0 }
+        val len: Int = text.length
+        var total: Int = 0
+        var i: Int = 0
+        var neg: Boolean = false
+        // ⚠️ 原实现用字符串下标（`text[0] == "-"`、`text[i]`）与
+        // `"0123456789".indexOf(char)`：String 下标在本 VM 下不可用，转换结果
+        // 恒为 0 —— 去重表一旦命中也会返回错误的 TypeID（全部塌成 0）。
+        // 改为 charCodeAt 直接算数字（45='-'，48='0'）。
+        if (len > 0 && text.charCodeAt(0) == 45) { neg = true; i = 1 }
+        while (i < len) {
+            val c: Int = text.charCodeAt(i) - 48
+            if (c >= 0 && c <= 9) { total = total * 10 + c }
+            i = i + 1
+        }
+        if (neg) { return -total }
+        return total
+    }
+
+    /// 统计逗号分隔字段数。
+    private fun strCountFields(text: String): Int {
+        if (text == "") { return 0 }
+        var count: Int = 1
+        var i: Int = 0
+        val len: Int = text.length
+        while (i < len) {
+            if (text.charCodeAt(i) == 44) { count = count + 1 }   // ','
+            i = i + 1
+        }
+        return count
     }
 }
 

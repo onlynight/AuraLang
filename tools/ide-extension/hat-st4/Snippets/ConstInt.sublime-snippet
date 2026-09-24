@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[; @ = @i32_const ]]></content>
+    <tabTrigger>i32c</tabTrigger>
+    <scope>source.hat</scope>
+    <description>Integer constant</description>
+</snippet>

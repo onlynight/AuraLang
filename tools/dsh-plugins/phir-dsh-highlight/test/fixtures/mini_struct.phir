@@ -1,0 +1,12 @@
+struct Point(val x: Int, val y: Int)
+
+fun dist(p: Point): Int {
+    return p.x + p.y
+}
+
+fun main() {
+    val p = Point(3, 4)
+    println(p.x)
+    println(p.y)
+    println(dist(p))
+}

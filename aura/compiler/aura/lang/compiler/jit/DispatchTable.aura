@@ -1,0 +1,123 @@
+// aura:///aura/lang/compiler/jit/DispatchTable.aura
+package aura.lang.compiler.jit
+// ─────────────────────────────────────────────────────────────
+// JIT 分发表 — 纯 Aura 化迁移 · Phase 7 (任务 7.4)
+//
+// 与 JitState / JitRuntime 共享同一分派语义：
+//   * 条目是函数 idx → 入口标记 / 地址
+//   * 缺失条目显式回退解释器
+//
+// 设计目标：把 JitState 的哈希表封装成可直接测试的纯数据结构，
+// 供派发、热区重建与差分验证复用。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 分发表条目。
+class DispatchEntry {
+    var funcIdx: Int = 0
+    var token: String = ""
+
+    init(funcIdx: Int, token: String) {
+        this.funcIdx = funcIdx
+        this.token = token
+    }
+}
+
+/// 分发表：函数索引到入口 token 的记录表。
+class DispatchTable {
+
+    /// 行表：`funcIdx|token`。
+    var rows: String = ""
+
+    /// 容量提示（用于增长策略和诊断）。
+    var capacity: Int = 0
+
+    init() {
+        this.rows = ""
+        this.capacity = 0
+    }
+
+    /// 条目数量。
+    fun size(): Int {
+        return jitLineCount(this.rows)
+    }
+
+    /// 设置条目。
+    fun put(funcIdx: Int, token: String): Unit {
+        this.ensureCapacity(funcIdx + 1)
+        var out: String = ""
+        val n: Int = jitLineCount(this.rows)
+        var i: Int = 0
+        var replaced: Boolean = false
+        while (i < n) {
+            val line: String = jitLineAt(this.rows, i)
+            if (jitFieldAt(line, 0, "|") == toStr(funcIdx)) {
+                out = out + toStr(funcIdx) + "|" + token + "\n"
+                replaced = true
+            } else {
+                out = out + line + "\n"
+            }
+            i = i + 1
+        }
+        if (!replaced) {
+            out = out + toStr(funcIdx) + "|" + token + "\n"
+        }
+        this.rows = out
+    }
+
+    /// 获取条目 token；不存在返回空串。
+    fun get(funcIdx: Int): String {
+        val v: String = jitRecordGet(this.rows, toStr(funcIdx))
+        return v
+    }
+
+    /// 是否存在条目。
+    fun has(funcIdx: Int): Boolean {
+        return this.get(funcIdx) != ""
+    }
+
+    /// 扩容提示。
+    fun ensureCapacity(len: Int): Unit {
+        if (len > this.capacity) {
+            this.capacity = len
+        }
+    }
+
+    /// 清空。
+    fun clear(): Unit {
+        this.rows = ""
+    }
+}
+
+/// 分发表工具。
+object DispatchTableUtils {
+
+    /// 从 JitState 快照重建分发表（token 行表）。
+    fun fromState(state: JitState, funcCount: Int): DispatchTable {
+        val table: DispatchTable = DispatchTable()
+        table.ensureCapacity(funcCount)
+        var i: Int = 0
+        while (i < funcCount) {
+            val token: String = state.entryToken(i)
+            if (token != "") {
+                table.put(i, token)
+            }
+            i = i + 1
+        }
+        return table
+    }
+
+    /// 判断条目是否可用于原生派发。
+    fun isValid(table: DispatchTable, funcIdx: Int): Boolean {
+        return table.has(funcIdx)
+    }
+
+    /// 分派说明文本。
+    fun describe(table: DispatchTable, funcIdx: Int): String {
+        if (table.has(funcIdx)) {
+            return "native:" + table.get(funcIdx)
+        }
+        return "interpreter"
+    }
+}

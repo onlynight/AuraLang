@@ -1,0 +1,408 @@
+// tests/photon/test_phir_to_exe.aura
+// ═════════════════════════════════════════════════════════════
+// P0 端到端验证：.phir → exe → 运行
+//
+// 运行：aura run tests/photon/test_phir_to_exe.aura
+//
+// 验证内容：
+//   1. 读取 .phir 文件
+//   2. 解析 .phir → HIR
+//   3. 调用 compileHir() 编译管线
+//   4. 生成可执行文件
+//   5. 运行可执行文件
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import aura.lang.std.Process
+import aura.lang.std.FileSystem
+import "../../aura/compiler/aura/lang/compiler/backend/photon/PhotonPipeline.aura"
+
+fun main() {
+    println("╔══════════════════════════════════════════════════════╗")
+    println("║   P0 端到端验证：.phir → exe → 运行                 ║")
+    println("╚══════════════════════════════════════════════════════╝")
+    println("")
+
+    // ── Step 1: 读取 .phir 文件 ──
+    val phirPath = "tests/phase_b_simple_test.phir"
+    println("[Step 1] 读取 .phir 文件: " + phirPath)
+    val phirText = FileSystem.readText(phirPath)
+    if (phirText == "") {
+        println("  ✗ .phir 文件不存在或为空")
+        println("  请先运行: aura build tests/phase_b_simple_test.aura -b photon")
+        Process.exit(1)
+    }
+    println("  ✓ 读取成功: " + toStr(phirText.length) + " 字符")
+    println("")
+
+    // ── Step 2: 解析 .phir → HIR ──
+    println("[Step 2] 解析 .phir → HIR")
+    val hir = parsePhir(phirText)
+    println("  ✓ 解析成功: " + toStr(hir.count) + " 节点")
+    println("")
+
+    // ── Step 3: 调用 compileHir() 编译管线 ──
+    println("[Step 3] 调用 compileHir() 编译管线")
+    val pipeline = PhotonPipelineUtils.emptyPipeline()
+    pipeline.outputType = "exe"
+    
+    val result = pipeline.compileHir(hir, "build/photon_test", "phase_b_simple_test")
+    
+    println("  编译结果:")
+    println("    成功: " + toStr(result.success))
+    println("    目标文件: " + result.objectFilePath)
+    println("    可执行文件: " + result.executablePath)
+    println("    机器码大小: " + toStr(result.encodedByteCount) + " 字节")
+    println("    COFF 大小: " + toStr(result.coffSize) + " 字节")
+    println("")
+
+    if (!result.success) {
+        println("  ✗ 编译失败: " + result.errorMessage)
+        Process.exit(1)
+    }
+
+    // ── Step 4: 验证可执行文件 ──
+    println("[Step 4] 验证可执行文件")
+    if (result.executablePath != "" && result.executablePath != "null") {
+        println("  ✓ 可执行文件已生成: " + result.executablePath)
+        
+        // ── Step 5: 运行可执行文件 ──
+        println("")
+        println("[Step 5] 运行可执行文件")
+        val exitCode = Process.run(result.executablePath)
+        println("  退出码: " + toStr(exitCode))
+        
+        if (exitCode == 0) {
+            println("  ✓ 可执行文件运行成功!")
+        } else {
+            println("  ⚠ 可执行文件运行失败 (退出码: " + toStr(exitCode) + ")")
+        }
+    } else {
+        println("  ⚠ 未生成可执行文件")
+        println("  目标文件: " + result.objectFilePath)
+    }
+    
+    println("")
+    println("═══ P0 验证完成 ═══")
+    Process.exit(0)
+}
+
+/// 解析 .phir 文本为 HIR（最小化解析器）。
+fun parsePhir(text: String): Hir {
+    val hir: Hir = Hir()
+    
+    // 创建 Program 节点
+    val programId: Int = hir.add("HirProgram", "", "", Span(0, 0, 1, 1, 1, 1), "")
+    hir.rootId = programId
+
+    // 按行解析
+    var lines: List<String> = text.split("\n")
+    var i: Int = 0
+    var funcCount: Int = 0
+
+    while (i < lines.size) {
+        val line: String = lines[i].trim()
+        
+        // 跳过空行和注释
+        if (line == "" || line.startsWith("#")) {
+            i = i + 1
+            continue
+        }
+        
+        // 跳过 native fun 声明
+        if (line.startsWith("native fun")) {
+            i = i + 1
+            continue
+        }
+        
+        // 解析 fun 定义
+        if (line.startsWith("fun ")) {
+            funcCount = funcCount + 1
+            val result: List<Int> = parseFunctionDef(hir, lines, i)
+            val funcId: Int = result[0]
+            val nextLine: Int = result[1]
+            // 防御：解析结果必须严格前进。若因任何原因拿不到有效下标
+            // （历史教训：`[a, b]` 列表字面量在本运行时求值为 null，
+            //  `i` 会退化成 0 → 外层 while 从头重来 → 无限循环 + 无限刷屏），
+            // 则至少前进一行，保证循环必然收敛。
+            if (nextLine > i) {
+                i = nextLine
+            } else {
+                i = i + 1
+            }
+            hir.kids[programId] = HirUtils.hirKidsAdd(hir.kids[programId], funcId)
+            continue
+        }
+        
+        i = i + 1
+    }
+
+    println("  解析了 " + toStr(funcCount) + " 个函数")
+    return hir
+}
+
+/// 解析函数定义，返回 [函数ID, 下一行索引]。
+fun parseFunctionDef(hir: Hir, lines: List<String>, startLine: Int): List<Int> {
+    val line: String = lines[startLine].trim()
+    
+    // 提取函数名
+    var nameStart: Int = 4
+    var nameEnd: Int = nameStart
+    while (nameEnd < line.length
+        && line.substring(nameEnd, nameEnd + 1) != "("
+        && line.substring(nameEnd, nameEnd + 1) != " ") {
+        nameEnd = nameEnd + 1
+    }
+    val funcName: String = line.substring(nameStart, nameEnd)
+    
+    // 创建函数节点
+    val funcId: Int = hir.add("HirFunction", funcName, "Unit", Span(0, 0, 1, 1, 1, 1), "")
+    
+    // 查找函数体结束位置
+    var bodyStart: Int = startLine
+    var braceCount: Int = 0
+    var foundBody: Boolean = false
+    
+    while (bodyStart < lines.size) {
+        val l: String = lines[bodyStart]
+        var j: Int = 0
+        while (j < l.length) {
+            val ch: String = l.substring(j, j + 1)
+            if (ch == "{") {
+                braceCount = braceCount + 1
+                foundBody = true
+            } else if (ch == "}") {
+                braceCount = braceCount - 1
+                if (foundBody && braceCount == 0) {
+                    break
+                }
+            }
+            j = j + 1
+        }
+        if (foundBody && braceCount == 0) {
+            break
+        }
+        bodyStart = bodyStart + 1
+    }
+    
+    // 创建函数体块
+    val bodyId: Int = hir.add("HirBlock", "", "", Span(0, 0, 1, 1, 1, 1), "")
+    hir.kids[funcId] = HirUtils.hirKidsAdd(hir.kids[funcId], bodyId)
+    
+    // 解析函数体语句
+    var stmtLine: Int = startLine + 1
+    while (stmtLine < bodyStart) {
+        val sl: String = lines[stmtLine].trim()
+        if (sl != "" && !sl.startsWith("#")) {
+            parseStatement(hir, bodyId, sl)
+        }
+        stmtLine = stmtLine + 1
+    }
+    
+    // 注意：**不能**写成 `return [funcId, bodyStart + 1]` —— 列表字面量
+    // 在本运行时（VM 字节码模式）求值为 null，调用方会拿到空结果。
+    // `listOf(...)` 是本运行时下唯一可靠的列表构造方式。
+    return listOf(funcId, bodyStart + 1)
+}
+
+/// 是否为 ASCII 十进制数字字符。
+fun isDigitChar(ch: String): Boolean {
+    if (ch.length != 1) { return false }
+    val c: Int = ch.charCodeAt(0)
+    return c >= 48 && c <= 57
+}
+
+/// 是否为 ASCII 标识符字符（字母 / 数字 / 下划线）。
+fun isWordChar(ch: String): Boolean {
+    if (ch.length != 1) { return false }
+    val c: Int = ch.charCodeAt(0)
+    if (c >= 48 && c <= 57) { return true }
+    if (c >= 65 && c <= 90) { return true }
+    if (c >= 97 && c <= 122) { return true }
+    return c == 95
+}
+
+/// 解析单条语句。
+fun parseStatement(hir: Hir, blockId: Int, text: String): Unit {
+    // val/var 声明
+    if (text.startsWith("val ") || text.startsWith("var ")) {
+        val isVal: Boolean = text.startsWith("val ")
+        var nameStart: Int = 4
+        var nameEnd: Int = nameStart
+        while (nameEnd < text.length && text.substring(nameEnd, nameEnd + 1) != ":" && text.substring(nameEnd, nameEnd + 1) != "=") {
+            nameEnd = nameEnd + 1
+        }
+        val name: String = text.substring(nameStart, nameEnd).trim()
+        
+        var initExpr: String = ""
+        var eqPos: Int = text.indexOf("=")
+        if (eqPos >= 0) {
+            initExpr = text.substring(eqPos + 1).trim()
+        }
+        
+        var ty: String = ""
+        var colonPos: Int = text.indexOf(":")
+        if (colonPos >= 0 && eqPos > colonPos) {
+            ty = text.substring(colonPos + 1, eqPos).trim()
+        } else if (colonPos >= 0 && eqPos < 0) {
+            ty = text.substring(colonPos + 1).trim()
+        }
+        
+        var stmtId: Int
+        if (isVal) {
+            stmtId = hir.add("HirValDecl", name, ty, Span(0, 0, 1, 1, 1, 1), "")
+        } else {
+            stmtId = hir.add("HirVarDecl", name, ty, Span(0, 0, 1, 1, 1, 1), "")
+        }
+        hir.kids[blockId] = HirUtils.hirKidsAdd(hir.kids[blockId], stmtId)
+        
+        if (initExpr != "") {
+            parseExpr(hir, stmtId, initExpr)
+        }
+        return
+    }
+    
+    // return 语句
+    if (text.startsWith("return")) {
+        var expr: String = ""
+        if (text.length > 6) {
+            expr = text.substring(6).trim()
+        }
+        val retId: Int = hir.add("HirReturn", "", "", Span(0, 0, 1, 1, 1, 1), "")
+        hir.kids[blockId] = HirUtils.hirKidsAdd(hir.kids[blockId], retId)
+        if (expr != "") {
+            parseExpr(hir, retId, expr)
+        }
+        return
+    }
+    
+    // break/continue
+    if (text == "break") {
+        val id: Int = hir.add("HirBreak", "", "", Span(0, 0, 1, 1, 1, 1), "")
+        hir.kids[blockId] = HirUtils.hirKidsAdd(hir.kids[blockId], id)
+        return
+    }
+    if (text == "continue") {
+        val id: Int = hir.add("HirContinue", "", "", Span(0, 0, 1, 1, 1, 1), "")
+        hir.kids[blockId] = HirUtils.hirKidsAdd(hir.kids[blockId], id)
+        return
+    }
+    
+    // 表达式语句
+    val exprId: Int = hir.add("HirExprStmt", "", "", Span(0, 0, 1, 1, 1, 1), "")
+    hir.kids[blockId] = HirUtils.hirKidsAdd(hir.kids[blockId], exprId)
+    parseExpr(hir, exprId, text)
+}
+
+/// 解析表达式。
+fun parseExpr(hir: Hir, parentId: Int, text: String): Unit {
+    text = text.trim()
+    if (text == "") {
+        return
+    }
+    
+    // 数字字面量
+    var isNumber: Boolean = true
+    var j: Int = 0
+    while (j < text.length) {
+        val ch: String = text.substring(j, j + 1)
+        if (!(isDigitChar(ch) || ch == "." || ch == "-")) {
+            isNumber = false
+            break
+        }
+        j = j + 1
+    }
+    if (isNumber) {
+        var ty: String = if (text.contains(".")) "Float" else "Int"
+        val id: Int = hir.add("HirLit", text, ty, Span(0, 0, 1, 1, 1, 1), "")
+        hir.kids[parentId] = HirUtils.hirKidsAdd(hir.kids[parentId], id)
+        return
+    }
+    
+    // 字符串字面量
+    if (text.startsWith("\"")) {
+        val id: Int = hir.add("HirLit", text, "String", Span(0, 0, 1, 1, 1, 1), "")
+        hir.kids[parentId] = HirUtils.hirKidsAdd(hir.kids[parentId], id)
+        return
+    }
+    
+    // 布尔字面量
+    if (text == "true" || text == "false" || text == "null") {
+        var ty: String = if (text == "null") "Any" else "Boolean"
+        val id: Int = hir.add("HirLit", text, ty, Span(0, 0, 1, 1, 1, 1), "")
+        hir.kids[parentId] = HirUtils.hirKidsAdd(hir.kids[parentId], id)
+        return
+    }
+    
+    // 函数调用
+    var parenPos: Int = text.indexOf("(")
+    if (parenPos > 0 && text.substring(text.length - 1, text.length) == ")") {
+        var callee: String = text.substring(0, parenPos).trim()
+        var argsStr: String = text.substring(parenPos + 1, text.length - 1).trim()
+        
+        val callId: Int = hir.add("HirCall", callee, "", Span(0, 0, 1, 1, 1, 1), "")
+        hir.kids[parentId] = HirUtils.hirKidsAdd(hir.kids[parentId], callId)
+        
+        if (argsStr != "") {
+            var args: List<String> = argsStr.split(",")
+            var k: Int = 0
+            while (k < args.size) {
+                var argText: String = args[k].trim()
+                if (argText != "") {
+                    parseExpr(hir, callId, argText)
+                }
+                k = k + 1
+            }
+        }
+        return
+    }
+    
+    // 二元表达式（同样不能用字面量 `[...]`：本运行时会求值为 null）
+    var ops: List<String> = listOf(
+        "==", "!=", "<=", ">=", "&&", "||", "+", "-", "*", "/", "%",
+        "<", ">", "&", "|", "^", "to", "as"
+    )
+    var opFound: String = ""
+    var opPos: Int = -1
+    for (op in ops) {
+        var pos: Int = text.indexOf(op)
+        if (pos > 0) {
+            opFound = op
+            opPos = pos
+            break
+        }
+    }
+    
+    if (opFound != "") {
+        var lhs: String = text.substring(0, opPos).trim()
+        var rhs: String = text.substring(opPos + opFound.length).trim()
+        
+        val binId: Int = hir.add("HirBinary", opFound, "", Span(0, 0, 1, 1, 1, 1), "")
+        hir.kids[parentId] = HirUtils.hirKidsAdd(hir.kids[parentId], binId)
+        
+        parseExpr(hir, binId, lhs)
+        parseExpr(hir, binId, rhs)
+        return
+    }
+    
+    // 变量引用
+    var isVar: Boolean = true
+    j = 0
+    while (j < text.length) {
+        var ch: String = text.substring(j, j + 1)
+        if (!isWordChar(ch)) {
+            isVar = false
+            break
+        }
+        j = j + 1
+    }
+    if (isVar) {
+        var id: Int = hir.add("HirVar", text, "", Span(0, 0, 1, 1, 1, 1), "")
+        hir.kids[parentId] = HirUtils.hirKidsAdd(hir.kids[parentId], id)
+        return
+    }
+    
+    // 默认：作为字符串字面量
+    var fallbackId: Int = hir.add("HirLit", text, "String", Span(0, 0, 1, 1, 1, 1), "")
+    hir.kids[parentId] = HirUtils.hirKidsAdd(hir.kids[parentId], fallbackId)
+}

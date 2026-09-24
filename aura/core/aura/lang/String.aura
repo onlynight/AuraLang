@@ -182,7 +182,7 @@ value class String {
                     result = result + replacement
                     i = i + target.length
                 } else {
-                    result = result + text[i]
+                    result = result + text.charAt(i)
                     i = i + 1
                 }
             }
@@ -196,7 +196,7 @@ value class String {
             var result: String = ""
             var i: Int = 0
             while (i < text.length) {
-                val c = text[i]
+                val c = text.charAt(i)
                 if (c >= 'a' && c <= 'z') {
                     result = result + (c - 32)
                 } else {
@@ -212,7 +212,7 @@ value class String {
             var result: String = ""
             var i: Int = 0
             while (i < text.length) {
-                val c = text[i]
+                val c = text.charAt(i)
                 if (c >= 'A' && c <= 'Z') {
                     result = result + (c + 32)
                 } else {
@@ -355,7 +355,7 @@ value class String {
         var chars = arrayOf<Char>()
         var i: Int = 0
         while (i < this.length) {
-            chars = chars + this[i]
+            chars = chars + this.charAt(i)
             i = i + 1
         }
         return chars
@@ -691,7 +691,7 @@ value class String {
                 result = result + replacement
                 i = i + target.length
             } else {
-                result = result + this[i]
+                result = result + this.charAt(i)
                 i = i + 1
             }
         }
@@ -779,7 +779,7 @@ value class String {
     fun containsAny(chars: String): Boolean {
         var i: Int = 0
         while (i < chars.length) {
-            if (this.contains(chars[i].toString())) {
+            if (this.contains(chars.charAt(i).toString())) {
                 return true
             }
             i = i + 1
@@ -791,7 +791,7 @@ value class String {
     fun containsAll(chars: String): Boolean {
         var i: Int = 0
         while (i < chars.length) {
-            if (!this.contains(chars[i].toString())) {
+            if (!this.contains(chars.charAt(i).toString())) {
                 return false
             }
             i = i + 1

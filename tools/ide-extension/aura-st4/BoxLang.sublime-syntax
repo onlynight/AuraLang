@@ -1,0 +1,1631 @@
+%YAML 1.2
+---
+
+name: BoxLang
+scope: source.boxlang
+version: 2
+
+file_extensions:
+  - bx
+
+variables:
+  identifier: '[_$[:alpha:]][_$[:alnum:]]*'
+  dot_path_identifier: '[_$[:alnum:]][_$[:alnum:].]*'
+  constant_identifier: '[[:upper:]][_$[:digit:][:upper:]]*\b'
+  reserved_word: |-
+    (?x:
+      break|case|catch|continue|default|do|else|finally|for|function|if|import|in|new|return|
+      super|switch|this|try|var|void|while|null|true|false|class|interface|extends|implements|
+      attempt|retry|transaction|lock|abort|throw|rethrow|include|property|component|abstract|
+      final|static|public|private|package|remote|annotation|assert
+    )\b
+
+  boxlang_scope: \b(this|variables|thread|session|client|server|cgi|form|url|cookie|application|request|arguments|super)\b
+
+  non_reserved_identifier: (?:(?!{{reserved_word}}){{identifier}})
+
+  access_modifier: \b(private|package|public|remote)\b
+  storage_modifier: \b(static|final|abstract)\b
+  storage_types: \b(?:any|array|binary|boolean|component|date|guid|numeric|query|string|struct|xml|uuid|void)\b
+  function_declaration_lookahead: |-
+    (?x:
+      ({{access_modifier}}\s+)?
+      ({{storage_modifier}}\s+)?
+      ({{dot_path_identifier}}(\[\])?\s+)?
+      \bfunction\b
+    )
+  function_lookahead: \s*\bfunction\b
+  arrow_func_lookahead: |-
+    (?x:
+      (?:
+        {{identifier}}
+        | \( ( [^()] | \( [^()]* \) )* \)
+      )
+      \s*
+      =>
+    )
+  either_function_lookahead: (?:{{function_lookahead}}|{{arrow_func_lookahead}})
+  function_assignment_lookahead: |-
+    (?x:(?=
+      \s* = \s*
+      {{either_function_lookahead}}
+    ))
+  function_call_after_lookahead: (?=\s*\()
+
+  block_comment_contents: (?:(?:[^*]|\*(?!/))*)
+  block_comment: (?:/\*{{block_comment_contents}}\*/)
+  nothing: (?:(?:\s|{{block_comment}})*)
+  line_ending_ahead: (?={{nothing}}(?:/\*{{block_comment_contents}}|//.*)?$)
+
+  binding_pattern_lookahead: (?:{{identifier}}|\[|\{)
+  property_name: >-
+    (?x:
+      {{identifier}}
+      | [0-9]+
+      | '(?:[^\\']|\\.)*'
+      | "(?:[^\\"]|\\.)*"
+    )
+
+  bif_names: |-
+    (?x:
+      Abs | Acos | ApplicationRestart | ApplicationStartTime | ApplicationStop | ArrayAppend | ArrayAvg | ArrayChunk |
+      ArrayClear | ArrayContains | ArrayContainsNoCase | ArrayDelete | ArrayDeleteAt | ArrayDeleteNoCase | ArrayEach | ArrayEvery |
+      ArrayFilter | ArrayFind | ArrayFindAll | ArrayFindAllNoCase | ArrayFindFirst | ArrayFindNoCase | ArrayFirst | ArrayFlatMap |
+      ArrayFlatten | ArrayGetMetadata | ArrayGroupBy | ArrayIndexExists | ArrayInsertAt | ArrayIsDefined | ArrayIsEmpty | ArrayLast |
+      ArrayLen | ArrayMap | ArrayMax | ArrayMedian | ArrayMerge | ArrayMid | ArrayMin | ArrayNew |
+      ArrayNone | ArrayPop | ArrayPrepend | ArrayPush | ArrayRange | ArrayReduce | ArrayReduceRight | ArrayReject |
+      ArrayResize | ArrayReverse | ArraySet | ArrayShift | ArraySlice | ArraySome | ArraySort | ArraySplice |
+      ArraySum | ArraySwap | ArrayToList | ArrayToStruct | ArrayTranspose | ArrayUnique | ArrayUnshift | ArrayZip |
+      Ascii | Asin | AsyncAll | AsyncAllApply | AsyncAny | AsyncRun | Atn | Attempt |
+      BinaryDecode | BinaryEncode | BitAnd | BitMaskClear | BitMaskRead | BitMaskSet | BitNot | BitOr |
+      BitSh | BitShln | BitShrn | BitXor | BooleanFormat | BoxAnnounce | BoxAnnounceAsync | BoxAST |
+      BoxLangBIFProxy | BoxModuleReload | BoxRegisterInterceptionPoints | BoxRegisterInterceptor | BoxRegisterRequestInterceptor | BoxUnregisterInterceptor | BoxUnregisterRequestInterceptor | Cache |
+      CacheFilter | CacheNames | CacheProviders | CacheService | CallStackGet | CamelCase | Ceiling | Char |
+      CharsetDecode | CharsetEncode | ClearLocale | ClearTimezone | CLIClear | CLIExit | CLIGetArgs | CLIRead |
+      Compare | CompareNoCase | Compress | ContractPath | Cos | CreateDate | CreateDateTime | CreateDynamicProxy |
+      CreateGUID | CreateObject | CreateODBCDate | CreateODBCDateTime | CreateODBCTime | CreateTempDirectory | CreateTempFile | CreateTime |
+      CreateTimeSpan | CreateUUID | CurrencyFormat | DataNavigate | DateAdd | DateCompare | DateConvert | DateDiff |
+      DateFormat | DatePart | DateTimeFormat | Day | DayOfWeek | DayOfWeekAsString | DayOfWeekShortAsString | DayOfYear |
+      DaysInMonth | DaysInYear | DE | DebugBoxContexts | DecimalFormat | DecrementValue | Decrypt | DecryptBinary |
+      DirectoryCopy | DirectoryCreate | DirectoryDelete | DirectoryExists | DirectoryList | DirectoryMove | DirectoryRename | DollarFormat |
+      Dump | Duplicate | Echo | EncodeForHTML | Encrypt | EncryptBinary | ExecutorDelete | ExecutorGet |
+      ExecutorHas | ExecutorList | ExecutorNew | ExecutorShutdown | ExecutorStatus | Exp | ExpandPath | Extract |
+      FileAppend | FileClose | FileCopy | FileDelete | FileExists | FileGetMimeType | FileInfo | FileIsEOF |
+      FileMove | FileOpen | FileRead | FileReadBinary | FileReadLine | FileSeek | FileSetAccessMode | FileSetAttribute |
+      FileSetLastModified | FileSkipBytes | FileUpload | FileUploadAll | FileWrite | FileWriteLine | Find | FindNoCase |
+      FindOneOf | FirstDayOfMonth | Fix | Floor | FormatBaseN | Forward | FutureNew | GeneratePBKDFKey |
+      GenerateSecretKey | GetApplicationMetadata | GetBaseTagData | GetBaseTagList | GetBaseTemplatePath | GetBoxCache | GetBoxCacheFilter | GetBoxCacheNames |
+      GetBoxCacheProviders | GetBoxCacheService | GetBoxContext | GetBoxRuntime | GetBoxVersionInfo | GetCanonicalPath | GetClassMetadata | GetComponentList |
+      GetComponentMetadata | GetContextRoot | GetCurrentTemplatePath | GetDirectoryFromPath | GetFileFromPath | GetFileInfo | GetFunctionCalledName | GetFunctionList |
+      GetHTTPRequestData | GetHTTPTimeString | GetLocale | GetLocaleDisplayName | GetLocaleInfo | GetMetaData | GetModuleInfo | GetModuleList |
+      GetNumericDate | GetPageContext | GetRequestClassLoader | GetSemver | GetSystemSetting | GetTempDirectory | GetTempFile | GetTickCount |
+      GetTime | GetTimezone | GetTimezoneInfo | GetToken | Hash | Hash40 | Hmac | Hour |
+      HtmlEditFormat | HtmlFooter | HtmlHead | HTTP | IIF | IncrementValue | InputBaseN | Insert |
+      Int | Invoke | IsArray | IsBinary | IsBoolean | IsClosure | IsCurrency | IsCustomFunction |
+      IsDate | IsDateObject | IsDebugMode | IsDefined | IsEmpty | IsFileObject | IsInstanceOf | IsInThread |
+      IsInTransaction | IsIPv6 | IsJSON | IsLeapYear | IsLocalHost | IsNull | IsNumeric | IsNumericDate |
+      IsObject | IsQuery | IsSimpleValue | IsStruct | IsThreadAlive | IsThreadInterrupted | IsValid | IsWithinTransaction |
+      IsXML | IsXmlAttribute | IsXMLDoc | IsXMLElem | IsXMLNode | IsXMLRoot | IsZipFile | JavaCast |
+      JSONDeserialize | JSONPrettify | JSONSerialize | JSStringFormat | Justify | KebabCase | Key | LCase |
+      Left | Len | ListAppend | ListAvg | ListChangeDelims | ListCompact | ListContains | ListContainsNoCase |
+      ListDeleteAt | ListEach | ListEvery | ListFilter | ListFind | ListFindNoCase | ListFirst | ListGetAt |
+      ListGetEndings | ListIndexExists | ListInsertAt | ListItemTrim | ListLast | ListLen | ListMap | ListNone |
+      ListPrepend | ListQualify | ListReduce | ListReduceRight | ListRemoveDuplicates | ListRest | ListSetAt | ListSome |
+      ListSort | ListToArray | ListTrim | ListValueCount | ListValueCountNoCase | LJustify | Location | Log |
+      Log10 | LSCurrencyFormat | LSIsCurrency | LSIsNumeric | LSNumberFormat | LSParseCurrency | LSParseNumber | LTrim |
+      Max | Mid | Millisecond | Min | Minute | Month | MonthAsString | MonthShortAsString |
+      Nanosecond | Now | NullValue | NumberFormat | ObjectDeserialize | ObjectSerialize | Offset | PagePoolClear |
+      ParagraphFormat | ParseCurrency | ParseDateTime | ParseNumber | PascalCase | Pi | PrecisionEvaluate | PreserveSingleQuotes |
+      Print | Println | PropertyFile | Quarter | QueryAddColumn | QueryAddRow | QueryAppend | QueryClear |
+      QueryColumnArray | QueryColumnCount | QueryColumnData | QueryColumnExists | QueryColumnList | QueryCurrentRow | QueryDeleteColumn | QueryDeleteRow |
+      QueryEach | QueryEvery | QueryExecute | QueryFilter | QueryGetCell | QueryGetResult | QueryInsertAt | QueryKeyExists |
+      QueryMap | QueryNew | QueryNone | QueryPrepend | QueryRecordCount | QueryReduce | QueryRegisterFunction | QueryReverse |
+      QueryRowData | QueryRowSwap | QuerySetCell | QuerySetRow | QuerySlice | QuerySome | QuerySort | QueryStringToStruct |
+      Rand | Randomize | RandRange | ReEscape | ReFind | ReFindNoCase | ReMatch | ReMatchNoCase |
+      RemoveChars | RepeatString | Replace | ReplaceList | ReplaceListNoCase | ReplaceNoCase | ReReplace | ReReplaceNoCase |
+      Reverse | Right | RJustify | Round | RTrim | RunAsync | RunThreadInContext | SchedulerGet |
+      SchedulerGetAll | SchedulerList | SchedulerRestart | SchedulerShutdown | SchedulerStart | Second | SessionInvalidate | SessionRotate |
+      SessionStartTime | SetEncoding | SetLocale | SetTimezone | Sgn | Sin | Sleep | Slugify |
+      SnakeCase | SOAP | SpanExcluding | SpanIncluding | SQLPrettify | Sqr | StringBind | StringEach |
+      StringEvery | StringFilter | StringLen | StringMap | StringReduce | StringReduceRight | StringSome | StringSort |
+      StripCR | StructAppend | StructClear | StructCopy | StructCount | StructDelete | StructEach | StructEquals |
+      StructEvery | StructFilter | StructFind | StructFindKey | StructFindValue | StructGet | StructGetMetadata | StructInsert |
+      StructIsCaseSensitive | StructIsEmpty | StructIsOrdered | StructKeyArray | StructKeyExists | StructKeyList | StructKeyTranslate | StructMap |
+      StructNew | StructNone | StructReduce | StructSome | StructSort | StructToQueryString | StructToSorted | StructUpdate |
+      StructValueArray | SystemCacheClear | SystemExecute | SystemOutput | Tan | ThreadInterrupt | ThreadJoin | ThreadNew |
+      ThreadTerminate | Throw | TimeFormat | TimeUnits | ToBase64 | ToBinary | ToModifiable | ToNumeric |
+      ToScript | ToString | ToUnmodifiable | Trace | TransactionCommit | TransactionRollback | TransactionSetSavepoint | TranspileCollectionKeySwap |
+      Trim | TrueFalseFormat | UCase | UCFirst | URLDecode | URLEncodedFormat | Val | Week |
+      WeekOfYear | Wrap | WriteDump | WriteLog | WriteOutput | XMLChildPos | XMLElemNew | XMLFormat |
+      XMLGetNodeType | XMLNew | XMLParse | XMLSearch | XMLTransform | XMLValidate | Year | YesNoFormat
+    )
+
+contexts:
+  prototype:
+    - include: comments
+    - include: annotations
+
+  else-pop:
+    - match: (?=\S)
+      pop: true
+
+  else-pop-2:
+    - match: (?=\S)
+      pop: 2
+
+  immediately-pop:
+    - meta_include_prototype: false
+    - match: ''
+      pop: true
+
+  immediately-pop-2:
+    - meta_include_prototype: false
+    - match: ''
+      pop: 2
+
+  main:
+    - include: import-statement
+    - include: statements
+
+  statements:
+    - match: (?=\S)
+      push: statement
+
+  statement:
+    - match: \;
+      scope: punctuation.terminator.statement.empty.boxlang
+      pop: true
+    - include: class-declaration
+    - include: function-declaration
+    - include: static-block
+    - include: variable-declaration
+    - include: conditional
+    - include: block
+    - include: label
+    - include: flow-control
+    - include: assert-statement
+    - include: bx-component-statement
+    - include: expression-statement
+
+  comments:
+    - match: /\*\*(?!/|\*)
+      scope: punctuation.definition.comment.boxlang
+      push:
+        - meta_include_prototype: false
+        - meta_scope: comment.block.documentation.boxlang
+        - match: \*/
+          scope: punctuation.definition.comment.boxlang
+          pop: true
+    - match: /\*
+      scope: punctuation.definition.comment.boxlang
+      push:
+        - meta_include_prototype: false
+        - meta_scope: comment.block.boxlang
+        - match: \*/
+          scope: punctuation.definition.comment.boxlang
+          pop: true
+    - match: //
+      scope: punctuation.definition.comment.boxlang
+      push:
+        - meta_include_prototype: false
+        - meta_scope: comment.block.documentation.boxlang
+        - match: \n
+          pop: true
+
+  annotations:
+    - match: '@'
+      scope: punctuation.definition.decorator.boxlang keyword.operator.decorator.boxlang
+      push:
+        - annotation-body
+        - annotation-name
+
+  annotation-name:
+    - match: '{{identifier}}'
+      scope: entity.name.function.decorator.boxlang storage.type.annotation.boxlang
+      pop: true
+    - include: else-pop
+
+  annotation-body:
+    - match: \(
+      scope: punctuation.section.parameters.begin.annotation.boxlang
+      set:
+        - meta_scope: meta.annotation.parameters.boxlang
+        - match: \)
+          scope: punctuation.section.parameters.end.annotation.boxlang
+          pop: true
+        - match: ','
+          scope: punctuation.separator.annotation.boxlang
+        - match: '(\w[\w\-]*)\s*(=)'
+          captures:
+            1: entity.other.attribute-name.annotation.boxlang
+            2: punctuation.separator.key-value.annotation.boxlang
+          push: expression-no-comma
+        - include: expressions-no-comma
+    - match: ''
+      pop: true
+
+  import-statement:
+    - match: \b(import)\b
+      scope: keyword.control.import.boxlang
+      push:
+        - meta_scope: meta.import.boxlang
+        - match: (?=\n|;)
+          pop: true
+        - match: '\b(as)\b'
+          scope: keyword.control.import.alias.boxlang
+          push: import-alias
+        - match: '\b(bx|java|whatever|coldfusion|cfml)(:)'
+          captures:
+            1: support.type.import.prefix.boxlang
+            2: punctuation.separator.namespace.boxlang
+          push:
+            - import-class-name
+            - import-path-segments
+        - match: \*
+          scope: constant.other.wildcard.import.boxlang
+        - match: (?=\S)
+          push:
+            - import-class-name
+            - import-path-segments
+        - include: else-pop
+
+  import-alias:
+    - match: '([[:alpha:]][_$[:alnum:]]*)'
+      scope: entity.name.class.import.alias.boxlang
+      pop: true
+    - include: else-pop
+
+  import-path-segments:
+    - match: '([_$[:alnum:]]+)\.'
+      scope: meta.path.import.boxlang
+    - include: else-pop
+
+  import-class-name:
+    - match: '([[:alpha:]][_$[:alnum:]]*)'
+      scope: entity.name.class.import.boxlang
+      pop: true
+    - include: else-pop
+
+  class-declaration:
+    - match: \b(class)\b
+      scope: keyword.declaration.class.boxlang storage.type.class.boxlang
+      push:
+        - meta_scope: meta.class.declaration.boxlang
+        - match: \{
+          scope: punctuation.section.block.begin.boxlang
+          set: class-body
+        - match: '(\w[\w\-]*)\s*(=)'
+          captures:
+            1: entity.other.attribute-name.class.boxlang
+            2: punctuation.separator.key-value.class.boxlang
+          push: expression-no-comma
+        - match: \b(extends)\b
+          scope: keyword.declaration.extends.boxlang
+        - match: \b(implements)\b
+          scope: keyword.declaration.implements.boxlang
+        - match: '{{identifier}}'
+          scope: entity.name.class.boxlang
+        - match: '(\w[\w\-]*)'
+          scope: entity.other.attribute-name.class.boxlang
+
+  class-body:
+    - meta_scope: meta.class.body.boxlang
+    - match: \}
+      scope: punctuation.section.block.end.boxlang
+      pop: true
+    - include: function-declaration
+    - include: property-declaration
+    - include: statements
+
+  static-block:
+    - match: \bstatic\b(?=\s*[\n\{])
+      scope: keyword.control.static.boxlang
+      push:
+        - static-block-meta
+        - block
+
+  static-block-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.block.static.boxlang
+    - include: immediately-pop
+
+  block:
+    - match: \{
+      scope: punctuation.section.block.begin.boxlang
+      set:
+        - meta_scope: meta.block.boxlang
+        - match: \}
+          scope: punctuation.section.block.end.boxlang
+          pop: true
+        - include: statements
+
+  variable-declaration:
+    - match: \b(var)\b
+      scope: keyword.declaration.var.boxlang storage.type.boxlang
+      set:
+        - expect-semicolon
+        - variable-binding-list-top
+        - variable-binding-top
+    - include: static-declaration
+    - include: final-declaration
+
+  static-declaration:
+    - match: \bstatic\b(?!\??\.)
+      scope: storage.modifier.boxlang
+      set:
+        - match: (?=\bfinal\b(?!\??\.))
+          set: final-declaration
+        - match: '(?={{function_lookahead}}\b)'
+          set: function-declaration
+        - include: else-pop
+
+  final-declaration:
+    - match: \bfinal\b(?!\??\.)
+      scope: storage.modifier.boxlang
+      set:
+        - match: (?=\bstatic\b(?!\??\.))
+          set: static-declaration
+        - match: '(?={{function_lookahead}}\b)'
+          set: function-declaration
+        - include: else-pop
+
+  variable-binding-top:
+    - match: (?={{binding_pattern_lookahead}})
+      set:
+        - initializer
+        - variable-binding-pattern
+
+  variable-binding-pattern:
+    - include: variable-binding-name
+    - include: variable-binding-array-destructuring
+    - include: variable-binding-struct-destructuring
+    - include: else-pop
+
+  variable-binding-name:
+    - match: (?={{non_reserved_identifier}}\b\[)
+      pop: true
+    - match: (?={{non_reserved_identifier}})
+      set:
+        - meta_scope: meta.binding.name.boxlang
+        - match: '{{identifier}}'
+          scope: variable.other.readwrite.boxlang
+          pop: true
+
+  variable-binding-array-destructuring:
+    - match: '\['
+      scope: punctuation.section.sequence.begin.boxlang
+      set:
+        - meta_scope: meta.binding.destructuring.sequence.boxlang
+        - match: '\]'
+          scope: punctuation.section.sequence.end.boxlang
+          pop: true
+        - include: variable-binding-list
+
+  variable-binding-struct-destructuring:
+    - match: '\{'
+      scope: punctuation.section.mapping.begin.boxlang
+      set:
+        - meta_scope: meta.binding.destructuring.mapping.boxlang
+        - match: '\}'
+          scope: punctuation.section.mapping.end.boxlang
+          pop: true
+        - include: variable-binding-list
+
+  variable-binding-list:
+    - match: ','
+      scope: punctuation.separator.comma.boxlang
+      push: variable-binding-top
+    - include: else-pop
+
+  variable-binding-list-top:
+    - match: ','
+      scope: punctuation.separator.comma.boxlang
+      push: variable-binding-top
+    - include: else-pop
+
+  initializer:
+    - match: '='
+      scope: keyword.operator.assignment.boxlang
+      set: expression-no-comma
+    - include: else-pop
+
+  expect-semicolon:
+    - match: \;
+      scope: punctuation.terminator.statement.boxlang
+      pop: true
+    - include: else-pop
+
+  label:
+    - match: '({{identifier}})\s*(:)'
+      captures:
+        1: entity.name.label.boxlang
+        2: punctuation.separator.boxlang
+
+  flow-control:
+    - match: \b(break|continue)\b
+      scope: keyword.control.flow.boxlang
+      set:
+        - expect-semicolon
+        - expect-label
+    - match: \b(return)\b
+      scope: keyword.control.flow.return.boxlang
+      set: restricted-production
+    - match: \b(throw|rethrow)\b
+      scope: keyword.control.flow.throw.boxlang
+      set: restricted-production
+    - match: \b(abort)\b
+      scope: keyword.control.flow.boxlang
+      set: expect-semicolon
+
+  assert-statement:
+    - match: \b(assert)\b
+      scope: keyword.control.assert.boxlang
+      set:
+        - expect-semicolon
+        - assert-message-clause
+        - expression-no-comma
+
+  assert-message-clause:
+    - match: ':'
+      scope: punctuation.separator.key-value.boxlang
+      set: expression-no-comma
+    - include: else-pop
+
+  expect-label:
+    - meta_include_prototype: false
+    - match: '(?={{nothing}}{{identifier}})'
+      set:
+        - match: '{{non_reserved_identifier}}'
+          scope: variable.label.boxlang
+          pop: true
+        - match: '{{identifier}}'
+          scope: invalid.illegal.identifier.boxlang variable.label.boxlang
+          pop: true
+        - include: else-pop
+    - include: immediately-pop
+
+  bx-component-statement:
+    - match: \b(bx:)([[:alpha:]][[:alnum:]_]*)
+      captures:
+        1: support.function.boxlang keyword.control.boxlang
+        2: entity.name.function.boxlang support.function.boxlang entity.name.tag.boxlang
+      set:
+        - bx-component-statement-meta
+        - bx-component-statement-body
+        - bx-component-statement-attributes
+
+  bx-component-statement-meta:
+    - meta_scope: meta.tag.boxlang meta.tag.script.bx.boxlang
+    - include: immediately-pop
+
+  bx-component-statement-attributes:
+    - match: (?=\{)
+      pop: true
+    - match: (?=\;)
+      pop: true
+    - match: (\w[\w\-]*)\s*(=)\s*(\")
+      captures:
+        1: entity.other.attribute-name.boxlang
+        2: punctuation.separator.key-value.boxlang
+        3: punctuation.definition.string.begin.boxlang
+      set:
+        - meta_include_prototype: false
+        - meta_scope: string.quoted.double.boxlang
+        - match: \"
+          scope: punctuation.definition.string.end.boxlang
+          pop: true
+        - match: '\\.'
+          scope: constant.character.escape.boxlang
+    - match: (\w[\w\-]*)\s*(=)\s*(')
+      captures:
+        1: entity.other.attribute-name.boxlang
+        2: punctuation.separator.key-value.boxlang
+        3: punctuation.definition.string.begin.boxlang
+      set:
+        - meta_include_prototype: false
+        - meta_scope: string.quoted.single.boxlang
+        - match: \'
+          scope: punctuation.definition.string.end.boxlang
+          pop: true
+        - match: '\\.'
+          scope: constant.character.escape.boxlang
+    - match: (\w[\w\-]*)
+      scope: entity.other.attribute-name.boxlang
+
+  bx-component-statement-body:
+    - match: \{
+      scope: support.function.boxlang punctuation.definition.tag.begin.boxlang
+      set:
+        - meta_scope: meta.tag.boxlang meta.bx-tag.body.boxlang
+        - match: \}
+          scope: support.function.boxlang punctuation.definition.tag.end.boxlang
+          pop: true
+        - include: statements
+    - match: \;
+      scope: support.function.boxlang punctuation.definition.tag.end.boxlang
+      pop: true
+    - include: else-pop
+
+  restricted-production:
+    - meta_include_prototype: false
+    - match: '{{line_ending_ahead}}'
+      pop: true
+    - match: ''
+      set: expression-statement
+
+  conditional:
+    - match: \bswitch\b
+      scope: keyword.control.conditional.switch.boxlang
+      set:
+        - switch-meta
+        - switch-block
+        - expect-parenthesized-expression
+    - match: \bdo\b
+      scope: keyword.control.loop.do-while.boxlang
+      set:
+        - do-while-meta
+        - do-while-condition
+        - statement
+    - match: \bfor\b
+      scope: keyword.control.loop.for.boxlang
+      set:
+        - for-meta
+        - block-scope
+        - for-condition
+    - match: \bwhile\b
+      scope: keyword.control.loop.while.boxlang
+      set:
+        - while-meta
+        - block-scope
+        - expect-parenthesized-expression
+    - match: \bif\b
+      scope: keyword.control.conditional.if.boxlang
+      set:
+        - conditional-meta
+        - statement
+        - expect-parenthesized-expression
+    - match: \belse\s+if\b
+      scope: keyword.control.conditional.elseif.boxlang
+      set:
+        - conditional-meta
+        - statement
+        - expect-parenthesized-expression
+    - match: \belse\b
+      scope: keyword.control.conditional.else.boxlang
+      set:
+        - conditional-meta
+        - statement
+    - match: \btry\b
+      scope: keyword.control.exception.try.boxlang
+      set:
+        - try-meta
+        - block-scope
+    - match: \bfinally\b
+      scope: keyword.control.exception.finally.boxlang
+      set:
+        - finally-meta
+        - block-scope
+    - match: \bcatch\b
+      scope: keyword.control.exception.catch.boxlang
+      set:
+        - catch-meta
+        - block-scope
+        - catch-binding
+
+  expect-parenthesized-expression:
+    - include: parenthesized-expression
+    - include: else-pop
+
+  switch-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.switch.boxlang
+    - include: immediately-pop
+
+  do-while-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.do-while.boxlang
+    - include: immediately-pop
+
+  for-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.for.boxlang
+    - include: immediately-pop
+
+  while-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.while.boxlang
+    - include: immediately-pop
+
+  conditional-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.conditional.boxlang
+    - include: immediately-pop
+
+  try-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.try.boxlang
+    - include: immediately-pop
+
+  finally-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.finally.boxlang
+    - include: immediately-pop
+
+  catch-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.catch.boxlang
+    - include: immediately-pop
+
+  for-condition:
+    - match: \(
+      scope: punctuation.section.group.begin.boxlang
+      branch_point: for-in
+      branch:
+        - for-in
+        - for-oldstyle
+      pop: true
+    - include: else-pop
+
+  for-condition-end:
+    - meta_scope: meta.group.boxlang
+    - match: \)
+      scope: punctuation.section.group.end.boxlang
+      pop: true
+    - match: ;
+      scope: invalid.illegal.unexpected-token.boxlang
+    - include: expressions
+
+  for-in:
+    - meta_include_prototype: false
+    - meta_scope: meta.group.boxlang
+    - match: ''
+      set:
+        - for-condition-end
+        - for-in-word
+        - for-in-declaration
+
+  for-in-declaration:
+    - match: \bvar\b
+      scope: keyword.declaration.var.boxlang storage.type.boxlang
+      set:
+        - for-in-binding-list
+        - for-in-binding
+    - match: (?=\S)
+      set:
+        - for-in-value-list
+        - left-expression-end
+        - expression-begin
+
+  for-in-binding:
+    - include: variable-binding-name
+    - include: variable-binding-array-destructuring
+    - include: variable-binding-struct-destructuring
+    - match: (?=\S)
+      fail: for-in
+
+  for-in-binding-list:
+    - match: ','
+      scope: punctuation.separator.comma.boxlang
+      push: for-in-binding
+    - include: else-pop
+
+  for-in-value-list:
+    - match: ','
+      scope: punctuation.separator.comma.boxlang
+      set:
+        - left-expression-end
+        - expression-begin
+    - include: else-pop
+
+  for-in-word:
+    - match: (?i)\bin\b
+      scope: keyword.operator.binary.boxlang
+      pop: true
+    - match: (?=\S)
+      fail: for-in
+
+  for-oldstyle:
+    - meta_include_prototype: false
+    - meta_scope: meta.group.boxlang
+    - match: ''
+      set:
+        - for-condition-end
+        - for-oldstyle-separator
+        - expression
+        - for-oldstyle-separator
+        - for-oldstyle-declaration
+
+  for-oldstyle-declaration:
+    - match: \bvar\b
+      scope: keyword.declaration.var.boxlang storage.type.boxlang
+      set:
+        - variable-binding-list-top
+        - variable-binding-top
+    - match: (?=\S)
+      set: expression
+
+  for-oldstyle-separator:
+    - match: ;
+      scope: punctuation.separator.expression.boxlang
+      pop: true
+    - include: else-pop
+
+  block-scope:
+    - include: block
+    - include: else-pop
+
+  switch-block:
+    - match: '\{'
+      scope: punctuation.section.block.begin.boxlang
+      set: switch-block-contents
+    - include: else-pop
+
+  switch-block-contents:
+    - meta_scope: meta.block.boxlang
+    - match: '\}'
+      scope: punctuation.section.block.end.boxlang
+      pop: true
+    - match: \bcase\b
+      scope: keyword.control.conditional.case.boxlang
+      push:
+        - expect-case-colon
+        - expression
+    - match: \bdefault\b
+      scope: keyword.control.conditional.default.boxlang
+      push:
+        - expect-case-colon
+    - include: statements
+
+  expect-case-colon:
+    - match: ':'
+      scope: punctuation.separator.boxlang
+      pop: true
+    - include: else-pop
+
+  do-while-condition:
+    - match: \bwhile\b
+      scope: keyword.control.loop.while.boxlang
+      set: parenthesized-expression
+    - include: else-pop
+
+  catch-binding:
+    - match: \(
+      scope: punctuation.section.group.begin.boxlang
+      set:
+        - catch-binding-end
+        - catch-expression
+    - include: else-pop
+
+  catch-binding-end:
+    - meta_scope: meta.group.boxlang
+    - match: \)
+      scope: punctuation.section.group.end.boxlang
+      pop: true
+
+  catch-expression:
+    - match: (?:({{dot_path_identifier}})\s+)?(?i:(var)\s+)?({{identifier}})
+      captures:
+        1: support.type.exception.boxlang
+        2: storage.type.boxlang
+        3: variable.other.readwrite.boxlang
+      pop: true
+    - include: else-pop
+
+  parenthesized-expression:
+    - match: \(
+      scope: punctuation.section.group.begin.boxlang
+      set:
+        - meta_scope: meta.group.boxlang
+        - match: \)
+          scope: punctuation.section.group.end.boxlang
+          pop: true
+        - match: (?=\S)
+          push: expression
+
+  expressions:
+    - match: (?=\S)
+      push: [ expression-end, expression-begin ]
+
+  expression:
+    - meta_include_prototype: false
+    - include: comments
+    - match: (?=\S)
+      set: [ expression-end, expression-begin ]
+
+  expressions-no-comma:
+    - match: (?=\S)
+      push: [ expression-end-no-comma, expression-begin ]
+
+  expression-no-comma:
+    - meta_include_prototype: false
+    - include: comments
+    - match: (?=\S)
+      set: [ expression-end-no-comma, expression-begin ]
+
+  expression-statement:
+    - match: (?=\S)
+      set:
+        - expect-semicolon
+        - expression-statement-end
+        - expression-begin
+
+  expression-begin:
+    - include: expression-break
+    - include: string
+    - include: constructor
+    - include: prefix-operators
+    - include: special-name
+    - include: boxlang-scopes
+    - include: literal-number
+    - include: function-expression
+    - include: struct-literal
+    - include: array-literal
+    - include: set-or-stringbuilder-literal
+    - match: (?={{reserved_word}})
+      pop: true
+    - match: (?=(?:\(|{{identifier}}))
+      pop: true
+      branch_point: arrow-function
+      branch:
+        - branch-possible-arrow-function
+        - arrow-function-expression
+    - include: else-pop
+
+  expression-break:
+    - match: (?=[;})\]])
+      pop: true
+
+  expression-end:
+    - include: expression-break
+    - include: postfix-operators
+    - include: binary-operators
+    - include: ternary-operator
+    - include: left-expression-end
+
+  expression-end-no-comma:
+    - match: (?=,)
+      pop: true
+    - include: expression-end
+
+  left-expression-end:
+    - include: expression-break
+    - match: '{{function_call_after_lookahead}}'
+      push: function-call-arguments
+    - include: property-access
+    - include: else-pop
+
+  expression-statement-end:
+    - match: '{{line_ending_ahead}}'
+      branch_point: expression-statement-continuation
+      branch:
+        - expression-statement-continuation
+        - expression-statement-pop
+    - include: expression-end
+
+  expression-statement-continuation:
+    - match: (?=\+\+|--)
+      fail: expression-statement-continuation
+    - match: |-
+        (?x)
+        (?=
+          !=
+        | [-+*/%><=&|^\[(;,.:?]
+        | in\b
+        )
+      pop: true
+    - match: (?=\S)
+      fail: expression-statement-continuation
+
+  expression-statement-pop:
+    - meta_include_prototype: false
+    - include: comments
+    - include: else-pop-2
+
+  branch-possible-arrow-function:
+    - meta_include_prototype: false
+    - match: (?=\()
+      set:
+        - detect-arrow
+        - parenthesized-expression
+    - match: (?={{identifier}})
+      set:
+        - detect-arrow
+        - literal-variable
+
+  detect-arrow:
+    - match: (?==>)
+      fail: arrow-function
+    - include: else-pop
+
+  string:
+    - match: \'
+      scope: punctuation.definition.string.begin.boxlang
+      set:
+        - meta_include_prototype: false
+        - meta_scope: string.quoted.single.boxlang
+        - match: \'
+          scope: punctuation.definition.string.end.boxlang
+          pop: true
+        - match: '\\.'
+          scope: constant.character.escape.boxlang
+    - match: \"
+      scope: punctuation.definition.string.begin.boxlang
+      set:
+        - meta_include_prototype: false
+        - meta_scope: string.quoted.double.boxlang
+        - match: \"
+          scope: punctuation.definition.string.end.boxlang
+          pop: true
+        - match: '\\.'
+          scope: constant.character.escape.boxlang
+
+  constructor:
+    - match: \bnew\b
+      scope: keyword.operator.word.new.boxlang
+      set:
+        - constructor-meta
+        - constructor-body-expect-arguments
+        - constructor-body-expect-entity-name
+
+  constructor-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.instance.constructor.boxlang
+    - include: immediately-pop
+
+  constructor-body-expect-arguments:
+    - include: method-call-arguments
+    - include: else-pop
+
+  constructor-body-expect-entity-name:
+    - match: (?i:component)
+      scope: storage.type.class.boxlang
+      pop: true
+    - match: (?i:java)
+      scope: variable.type.boxlang
+      pop: true
+    - match: '{{dot_path_identifier}}'
+      scope: entity.name.class.boxlang
+      pop: true
+    - include: else-pop
+
+  prefix-operators:
+    - match: '!(?!=)'
+      scope: keyword.operator.logical.boxlang
+    - match: '--'
+      scope: keyword.operator.arithmetic.boxlang
+    - match: '\+\+'
+      scope: keyword.operator.arithmetic.boxlang
+    - match: \.\.\.
+      scope: keyword.operator.spread.boxlang
+    - match: \.\.<|\.\.
+      scope: keyword.operator.range.boxlang
+    - match: \+|\-
+      scope: keyword.operator.arithmetic.boxlang
+
+  binary-operators:
+    - match: \b(?i:in)\b
+      scope: keyword.operator.binary.boxlang
+      push: expression-begin
+    - match: '&&|\|\|'
+      scope: keyword.operator.logical.binary.boxlang
+      push: expression-begin
+    - match: \b(?i:(and|or|xor|eqv|imp))\b
+      scope: keyword.operator.logical.binary.boxlang
+      push: expression-begin
+    - match: =(?![=>])
+      scope: keyword.operator.assignment.boxlang
+      push: expression-begin
+    - match: |-
+        (?x)
+        %=   | # assignment      right-to-left   both
+        &=   | # assignment      right-to-left   both
+        \*=  | # assignment      right-to-left   both
+        \+=  | # assignment      right-to-left   both
+        -=   | # assignment      right-to-left   both
+        /=     # assignment      right-to-left   both
+      scope: keyword.operator.assignment.augmented.binary.boxlang
+      push: expression-begin
+    - match: '&'
+      scope: keyword.operator.concat.binary.boxlang
+      push: expression-begin
+    - match: '>\.\.<|>\.\.|\.\.<|\.\.'
+      scope: keyword.operator.range.boxlang
+      push: expression-begin
+    - match: |-
+        (?x)
+        ===  | # equality        left-to-right   both
+        !==  | # equality        left-to-right   both
+        ==   | # equality        left-to-right   both
+        !=   |  # equality        left-to-right   both
+        <>     # equality        left-to-right   both
+      scope: keyword.operator.comparison.binary.boxlang
+      push: expression-begin
+    - match: |-
+        (?x)
+        <=   | # relational      left-to-right   both
+        >=   | # relational      left-to-right   both
+        <    | # relational      left-to-right   both
+        >      # relational      left-to-right   both
+      scope: keyword.operator.relational.binary.boxlang
+      push: expression-begin
+    - match: \b(?i:mod)\b
+      scope: keyword.operator.arithmetic.binary.boxlang
+      push: expression-begin
+    - match: |-
+        (?x)
+        /    | # division        left-to-right   both
+        %    | # modulus         left-to-right   both
+        \*   | # multiplication  left-to-right   both
+        \+   | # addition        left-to-right   both
+        -      # subtraction     left-to-right   both
+      scope: keyword.operator.arithmetic.binary.boxlang
+      push: expression-begin
+    - match: ','
+      scope: punctuation.separator.comma.boxlang
+      push: expression-begin
+
+  ternary-operator:
+    - match: '\?(?=[^.]|\.[0-9])'
+      scope: keyword.operator.ternary.boxlang
+      set:
+        - ternary-operator-expect-colon
+        - expression-no-comma
+
+  ternary-operator-expect-colon:
+    - match: ':'
+      scope: keyword.operator.ternary.boxlang
+      set: expression-no-comma
+    - include: else-pop
+
+  postfix-operators:
+    - match: '--'
+      scope: keyword.operator.arithmetic.postfix.boxlang
+    - match: '\+\+'
+      scope: keyword.operator.arithmetic.postfix.boxlang
+
+  special-name:
+    - match: \btrue\b
+      scope: constant.language.boolean.true.boxlang
+      pop: true
+    - match: \bfalse\b
+      scope: constant.language.boolean.false.boxlang
+      pop: true
+    - match: \bnull\b
+      scope: constant.language.null.boxlang
+      pop: true
+
+  literal-number:
+    - match: |-
+        (?xi)
+        (?:\B[-+])?
+        (?:
+          \b0x[0-9a-f]*|              # hex
+          (
+            \B\.[0-9]+|               # e.g. .999
+            \b[0-9]+(\.(?!\.)[0-9]*)? # e.g. 999.999, 999. or 999 (but not 1..5 range)
+          )
+        )
+      scope: constant.numeric.boxlang
+      pop: true
+
+  literal-variable:
+    - match: '(?={{identifier}}{{function_assignment_lookahead}})'
+      set:
+        - function-name-meta
+        - literal-variable-base
+    - match: (?={{identifier}}{{nothing}}{{function_call_after_lookahead}})
+      set: function-call
+    - include: literal-variable-base
+
+  literal-variable-base:
+    - match: '[_.$[:alnum:]]+(?=\s*::)'
+      scope: entity.name.class.boxlang
+      pop: true
+    - match: '{{identifier}}(?=\s*(?:\[|\??\.))'
+      scope: variable.other.object.boxlang
+      pop: true
+    - match: '{{constant_identifier}}'
+      scope: variable.other.constant.boxlang
+      pop: true
+    - match: '{{identifier}}'
+      scope: variable.other.readwrite.boxlang
+      pop: true
+
+  boxlang-scopes:
+    - match: \b(?i:super)\b
+      scope: variable.language.super.boxlang
+      pop: true
+    - match: \b(?i:this)\b
+      scope: variable.language.this.boxlang
+      pop: true
+    - match: \b(?i:thread)\b(?=[\[.])
+      scope: variable.language.scope.boxlang
+      pop: true
+    - match: |-
+        (?x)
+          \b(?i:(
+          application|arguments|cgi|client|cookie|form|
+          local|request|server|session|url|variables|static
+        ))\b
+      scope: variable.language.scope.boxlang
+      pop: true
+
+  function-name-meta:
+    - meta_include_prototype: false
+    - meta_scope: entity.name.function.boxlang
+    - include: immediately-pop
+
+  function-expression:
+    - match: (?={{function_lookahead}})
+      set: function-declaration
+
+  function-declaration:
+    - match: (?={{function_declaration_lookahead}})
+      set:
+        - function-declaration-expect-body
+        - function-meta
+        - function-declaration-expect-parameters
+        - function-declaration-expect-name
+        - function-declaration-expect-function-keyword
+        - function-declaration-expect-return-type
+        - function-declaration-expect-storage-keyword
+        - function-declaration-expect-access-keyword
+
+  function-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.function.declaration.boxlang
+    - include: immediately-pop
+
+  function-declaration-expect-body:
+    - include: function-block
+    - include: else-pop
+
+  function-declaration-expect-parameters:
+    - include: function-declaration-parameters
+    - include: else-pop
+
+  function-declaration-expect-name:
+    - match: '{{identifier}}'
+      scope: entity.name.function.boxlang
+      pop: true
+    - include: else-pop
+
+  function-declaration-expect-function-keyword:
+    - match: \bfunction\b
+      scope: keyword.declaration.function.boxlang storage.type.function.boxlang
+      pop: true
+    - include: else-pop
+
+  function-declaration-expect-return-type:
+    - match: (?i)(?={{function_lookahead}}(?!{{function_lookahead}}))
+      pop: true
+    - include: return-type
+
+  return-type:
+    - match: (?i){{storage_types}}
+      scope: storage.type.return-type.primitive.boxlang
+      pop: true
+    - match: (?i:\b(function)\b)
+      scope: storage.type.return-type.function.boxlang
+      pop: true
+    - match: (?i:\b(void)\b)
+      scope: storage.type.return-type.void.boxlang
+      pop: true
+    - match: (?i:\b({{dot_path_identifier}})\b)(\[)(\])
+      captures:
+        1: storage.type.return-type.array.boxlang
+        2: meta.brackets.boxlang punctuation.section.brackets.begin.boxlang
+        3: meta.brackets.boxlang punctuation.section.brackets.end.boxlang
+      pop: true
+    - match: (?i:\b{{dot_path_identifier}}\b)
+      scope: storage.type.return-type.object.boxlang
+      pop: true
+    - include: else-pop
+
+  function-declaration-expect-storage-keyword:
+    - match: '{{storage_modifier}}'
+      scope: storage.modifier.boxlang
+      pop: true
+    - include: else-pop
+
+  function-declaration-expect-access-keyword:
+    - match: '{{access_modifier}}'
+      scope: storage.modifier.boxlang
+      pop: true
+    - include: else-pop
+
+  storage-types:
+    - match: (?i){{storage_types}}
+      scope: storage.type.primitive.boxlang
+      pop: true
+    - match: (?i:\b(function)\b)
+      scope: storage.type.function.boxlang
+      pop: true
+    - match: (?i:\b(void)\b)
+      scope: storage.type.void.boxlang
+      pop: true
+    - match: (?i:\b({{dot_path_identifier}})\b)(\[)(\])
+      captures:
+        1: storage.type.object.array.boxlang
+        2: meta.brackets.boxlang punctuation.section.brackets.begin.boxlang
+        3: meta.brackets.boxlang punctuation.section.brackets.end.boxlang
+      pop: true
+    - match: (?i:\b{{dot_path_identifier}}\b)
+      scope: storage.type.object.boxlang
+      pop: true
+
+  function-block:
+    - match: '\{'
+      scope: punctuation.section.block.begin.boxlang
+      set:
+        - meta_scope: meta.function.body.boxlang
+        - match: '\}'
+          scope: punctuation.section.block.end.boxlang
+          pop: true
+        - include: statements
+
+  function-declaration-parameters:
+    - match: \(
+      scope: punctuation.section.parameters.begin.boxlang
+      set:
+        - meta_scope: meta.function.parameters.boxlang
+        - match: \)
+          scope: punctuation.section.parameters.end.boxlang
+          pop: true
+        - match: ','
+          scope: punctuation.separator.parameter.function.boxlang
+        - match: (?i)\brequired\b
+          scope: keyword.other.required.parameter.boxlang
+        - match: (\.\.\.)({{identifier}})
+          captures:
+            1: keyword.operator.rest.boxlang
+            2: variable.parameter.function.boxlang
+        - match: (?:({{dot_path_identifier}})\s+)?({{identifier}})
+          captures:
+            1: storage.type.boxlang
+            2: variable.parameter.function.boxlang
+          push:
+            - function-declaration-parameter-default
+
+  function-declaration-parameter-default:
+    - match: '='
+      scope: keyword.operator.assignment.boxlang
+      set:
+        - function-declaration-parameter-meta
+        - expression-no-comma
+    - include: else-pop
+
+  function-declaration-parameter-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.parameter.optional.boxlang
+    - include: immediately-pop
+
+  arrow-function-expression:
+    - meta_include_prototype: false
+    - match: ''
+      set:
+        - arrow-function-expect-body
+        - arrow-function-expect-arrow
+        - function-meta
+        - arrow-function-expect-parameters
+
+  arrow-function-expect-body:
+    - include: function-block
+    - match: (?=\S)
+      set:
+        - function-body-meta
+        - expression-no-comma
+
+  arrow-function-expect-arrow:
+    - match: '=>'
+      scope: storage.type.function.arrow.boxlang
+      pop: true
+    - include: else-pop
+
+  arrow-function-expect-parameters:
+    - match: (?={{identifier}})
+      set:
+        - clear_scopes: 1
+        - meta_scope: meta.function.parameters.boxlang
+        - match: '{{identifier}}'
+          scope: variable.parameter.function.boxlang
+          pop: true
+    - include: function-declaration-parameters
+    - include: else-pop
+
+  function-body-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.function.body.boxlang
+    - include: immediately-pop
+
+  method-call-arguments:
+    - match: \(
+      scope: punctuation.section.group.begin.boxlang
+      set:
+        - meta_scope: meta.function-call.arguments.boxlang meta.group.boxlang
+        - match: \)
+          scope: punctuation.section.group.end.boxlang
+          pop: true
+        - match: ','
+          scope: punctuation.separator.function-call.boxlang
+        - match: \b({{identifier}})\s*(?:(=)(?![=>])|(:)(?!:))
+          captures:
+            1: entity.other.function-parameter.boxlang
+            2: keyword.operator.assignment.boxlang
+            3: punctuation.separator.key-value.boxlang
+          push: expression-no-comma
+        - include: expressions-no-comma
+
+  function-call-arguments:
+    - match: \(
+      scope: punctuation.section.group.begin.boxlang
+      set:
+        - meta_scope: meta.function-call.arguments.boxlang
+        - match: \)
+          scope: punctuation.section.group.end.boxlang
+          pop: true
+        - include: expression
+
+  property-access:
+    - match: \[
+      scope: punctuation.section.brackets.begin.boxlang
+      push:
+        - meta_scope: meta.brackets.boxlang
+        - match: \]
+          scope: punctuation.section.brackets.end.boxlang
+          pop: true
+        - include: expressions
+    - match: \?\.
+      scope: punctuation.accessor.safe.boxlang
+      push:
+        - match: (?={{identifier}}{{function_assignment_lookahead}})
+          set:
+            - function-name-meta
+            - literal-variable-base
+        - match: (?={{identifier}}\s*\()
+          set: method-call
+        - include: struct-property
+    - match: \.
+      scope: punctuation.accessor.boxlang
+      push:
+        - match: (?={{identifier}}{{function_assignment_lookahead}})
+          set:
+            - function-name-meta
+            - literal-variable-base
+        - match: (?={{identifier}}\s*\()
+          set: method-call
+        - include: struct-property
+    - match: '::'
+      scope: punctuation.accessor.static.boxlang
+      push:
+        - match: (?={{identifier}}{{function_assignment_lookahead}})
+          set:
+            - function-name-meta
+            - literal-variable-base
+        - match: (?={{identifier}}\s*\()
+          set: static-method-call
+        - include: struct-property
+
+  function-call:
+    - include: bif-call
+    - match: ({{identifier}})(?=\s*\()
+      scope: variable.function.boxlang
+      set:
+        - function-call-meta
+        - function-call-arguments
+
+  function-call-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.function-call.boxlang
+    - include: immediately-pop
+
+  bif-call:
+    - match: (?i)\b({{bif_names}})(?=\s*\()
+      captures:
+        1: support.function.boxlang
+      set:
+        - bif-call-meta
+        - bif-call-arguments
+
+  bif-call-meta:
+    - meta_include_prototype: false
+    - meta_scope: meta.function-call.support.boxlang
+    - include: immediately-pop
+
+  bif-call-arguments:
+    - meta_content_scope: meta.function-call.support.boxlang
+    - match: \(
+      scope: punctuation.section.group.begin.boxlang
+      set:
+        - meta_scope: meta.function-call.arguments.support.boxlang
+        - match: \)
+          scope: punctuation.section.group.end.boxlang
+          pop: true
+        - match: ','
+          scope: punctuation.separator.function-call.support.boxlang
+        - match: \b({{identifier}})\s*(?:(=)(?![=>])|(:)(?!:))
+          captures:
+            1: entity.other.function-parameter.boxlang
+            2: keyword.operator.assignment.boxlang
+            3: punctuation.separator.key-value.boxlang
+          push: expression-no-comma
+        - include: expressions-no-comma
+    - include: else-pop
+
+  method-call:
+    - match: '{{identifier}}'
+      scope: meta.function-call.boxlang entity.name.function.boxlang
+      set: method-call-arguments
+
+  static-method-call:
+    - match: '{{identifier}}'
+      scope: meta.function-call.boxlang entity.name.function.boxlang
+      set: method-call-arguments
+
+  struct-property:
+    - match: (?={{identifier}}{{function_assignment_lookahead}})
+      set:
+        - function-name-meta
+        - struct-property-base
+    - include: struct-property-base
+    - include: else-pop
+
+  struct-property-base:
+    - match: '{{constant_identifier}}'
+      scope: meta.property.constant.boxlang
+      pop: true
+    - match: '{{identifier}}'
+      scope: meta.property.boxlang
+      pop: true
+
+  set-or-stringbuilder-literal:
+    - match: \b(?i:set|sb|stringbuilder)\b(?=\s*\{)
+      scope: keyword.other.literal.boxlang
+      push: struct-literal
+
+  struct-literal:
+    - match: '\{'
+      scope: punctuation.section.mapping.begin.boxlang
+      set: struct-literal-contents
+
+  struct-literal-contents:
+    - meta_scope: meta.struct-literal.boxlang
+    - match: '\}'
+      scope: punctuation.section.mapping.end.boxlang
+      pop: true
+    - include: struct-literal-common-content
+
+  struct-literal-ordered:
+    - match: '\['
+      scope: punctuation.section.mapping.begin.boxlang
+      set: struct-literal-ordered-contents
+
+  struct-literal-ordered-contents:
+    - meta_scope: meta.mapping.boxlang
+    - match: '\]'
+      scope: punctuation.section.mapping.end.boxlang
+      pop: true
+    - include: struct-literal-common-content
+
+  struct-literal-common-content:
+    - match: \.\.\.
+      scope: keyword.operator.spread.boxlang
+      push: expression-no-comma
+    - match: >-
+        (?x)(?=
+          {{property_name}}\s*[:=]\s*
+          {{either_function_lookahead}}
+        )
+      push:
+        - struct-literal-meta-key
+        - method-name
+    - match: (?={{property_name}})
+      push: struct-literal-element
+    - match: ','
+      scope: punctuation.separator.struct-literal.boxlang
+    - match: '[:=]'
+      scope: punctuation.separator.key-value.boxlang
+      push: expression-no-comma
+    - match: (?=\S)
+      push: expression-no-comma
+
+  struct-literal-element:
+    - match: '{{identifier}}(?=\s*(?:[},]|$|//|/\*))'
+      scope: variable.other.readwrite.boxlang
+      pop: true
+    - match: (?=["'])
+      set:
+        - struct-literal-meta-key
+        - string
+    - match: (?=\S)
+      set:
+        - struct-literal-meta-key
+        - struct-literal-key
+
+  struct-literal-key:
+    - include: string
+    - match: '[_$[:alnum:]]+'
+      pop: true
+    - include: else-pop
+
+  struct-literal-meta-key:
+    - meta_include_prototype: false
+    - meta_scope: meta.struct-literal.key.boxlang
+    - include: else-pop
+
+  method-name:
+    - match: '{{identifier}}'
+      scope: entity.name.function.boxlang
+      pop: true
+    - match: \'
+      scope: punctuation.definition.string.begin.boxlang
+      set:
+        - meta_include_prototype: false
+        - meta_scope: string.quoted.single.boxlang
+        - meta_content_scope: entity.name.function.boxlang
+        - match: \'
+          scope: punctuation.definition.string.end.boxlang
+          pop: true
+    - match: \"
+      scope: punctuation.definition.string.begin.boxlang
+      set:
+        - meta_include_prototype: false
+        - meta_scope: string.quoted.double.boxlang
+        - meta_content_scope: entity.name.function.boxlang
+        - match: \"
+          scope: punctuation.definition.string.end.boxlang
+          pop: true
+    - include: else-pop
+
+  array-literal:
+    - match: (?=\[)
+      pop: true
+      branch_point: array-or-ordered-struct
+      branch:
+        - array-literal-base
+        - struct-literal-ordered
+
+  array-literal-base:
+    - match: '\['
+      scope: punctuation.section.sequence.begin.boxlang
+      set:
+        - array-literal-contents
+        - array-literal-maybe-struct
+
+  array-literal-contents:
+    - meta_scope: meta.sequence.boxlang
+    - match: '\]'
+      scope: punctuation.section.sequence.end.boxlang
+      pop: true
+    - include: expression-break
+    - match: \,
+      scope: punctuation.separator.sequence.boxlang
+    - include: expressions-no-comma
+
+  array-literal-maybe-struct:
+    - match: (?={{property_name}}\s*(?:=(?!=)|:(?!:)))
+      fail: array-or-ordered-struct
+    - match: (?=:)
+      fail: array-or-ordered-struct
+    - match: (?=\S)
+      pop: true
+
+  property-declaration:
+    - match: \b(property)\b
+      scope: keyword.declaration.property.boxlang
+      push:
+        - meta_scope: meta.property.declaration.boxlang
+        - match: \;
+          scope: punctuation.terminator.statement.boxlang
+          pop: true
+        - match: '{{access_modifier}}'
+          scope: storage.modifier.boxlang
+        - match: '{{storage_modifier}}'
+          scope: storage.modifier.boxlang
+        - match: '{{storage_types}}'
+          scope: storage.type.boxlang
+        - match: '{{identifier}}'
+          scope: variable.other.property.boxlang
+        - match: '='
+          scope: keyword.operator.assignment.boxlang
+          push: expression

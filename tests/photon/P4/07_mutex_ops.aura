@@ -1,0 +1,19 @@
+// tests/photon/P4/07_mutex_ops.aura
+// Phase 4.7: Mutex 操作测试
+//
+// 测试: 互斥锁的锁定/解锁
+
+import aura.lang.std.String
+import aura.lang.concurrent.Mutex
+
+fun main() {
+    var mutex: Mutex = Mutex()
+    
+    println("Locked: " + toStr(mutex.isLocked()))
+    
+    mutex.lock()
+    println("After lock: " + toStr(mutex.isLocked()))
+    
+    mutex.unlock()
+    println("After unlock: " + toStr(mutex.isLocked()))
+}

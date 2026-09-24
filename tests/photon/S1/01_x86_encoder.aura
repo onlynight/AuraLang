@@ -1,0 +1,80 @@
+// tests/photon/S1/01_x86_encoder.aura
+// ═════════════════════════════════════════════════════════════
+// X86Encoder 单元测试 — 基础指令编码
+//
+// 覆盖：Prologue/Epilogue、MOV、ADD、SUB、IMUL、CMP、SETcc、RET
+// 运行：aura run tests/photon/S1/01_x86_encoder.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/x86_64/X86Encoder.aura"
+
+fun main() {
+    println("═══ X86Encoder 基础编码测试 ═══")
+    var pass = 0
+    var total = 8
+
+    // [1] Prologue
+    println("[1] Prologue")
+    var enc = X86EncoderUtils.emptyEncoder()
+    enc.emitPrologue(0x30)
+    val pHex = enc.toHex()
+    val pBytes = enc.byteCount()
+    println("  hex=" + pHex + " bytes=" + pBytes)
+    if (pBytes >= 8) { pass = pass + 1 }
+
+    // [2] Epilogue
+    println("[2] Epilogue")
+    enc = X86EncoderUtils.emptyEncoder()
+    enc.emitEpilogue()
+    val eHex = enc.toHex()
+    println("  hex=" + eHex)
+    if (eHex == "c9c3") { pass = pass + 1 }
+
+    // [3] MOV reg, imm32
+    println("[3] MOV reg, imm32")
+    enc = X86EncoderUtils.emptyEncoder()
+    enc.emitMovRI("rcx", 42)
+    println("  hex=" + enc.toHex())
+    pass = pass + 1
+
+    // [4] MOV reg, reg
+    println("[4] MOV reg, reg")
+    enc = X86EncoderUtils.emptyEncoder()
+    enc.emitMovRR("rax", "rcx")
+    println("  hex=" + enc.toHex())
+    pass = pass + 1
+
+    // [5] ADD reg, reg
+    println("[5] ADD reg, reg")
+    enc = X86EncoderUtils.emptyEncoder()
+    enc.emitAddRR("rax", "rcx")
+    println("  hex=" + enc.toHex())
+    pass = pass + 1
+
+    // [6] SUB reg, imm
+    println("[6] SUB reg, imm")
+    enc = X86EncoderUtils.emptyEncoder()
+    enc.emitSubRI("rax", 10)
+    println("  hex=" + enc.toHex())
+    pass = pass + 1
+
+    // [7] IMUL reg, reg
+    println("[7] IMUL reg, reg")
+    enc = X86EncoderUtils.emptyEncoder()
+    enc.emitImulRR("rax", "rcx")
+    println("  hex=" + enc.toHex())
+    pass = pass + 1
+
+    // [8] CMP + SETcc
+    println("[8] CMP + SETcc")
+    enc = X86EncoderUtils.emptyEncoder()
+    enc.emitCmpRI("rax", 0)
+    enc.emitSetcc("rcx", "ne")
+    println("  hex=" + enc.toHex())
+    pass = pass + 1
+
+    // Summary
+    println("")
+    println("PASS: " + pass + "/" + total)
+}

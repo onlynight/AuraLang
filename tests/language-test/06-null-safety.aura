@@ -94,19 +94,23 @@ fun testAssertNonNull() {
 fun testSafeCall() {
     // 非空 String 安全访问（防御性编程）
     val someStr: String? = "hello"
-    val safeStr: String = someStr ?: "default"
+    val safeLen: Int? = someStr?.length
 
-    // 安全调用 + Elvis 组合
+    // null String 安全访问 → 结果为 null
     val nullStr: String? = null
-    val safeFromNull: String = nullStr ?: "fallback"
+    val nullLen: Int? = nullStr?.length
 
-    // 链式 Elvis
-    val chainResult: String = nullStr ?: "fallback"
+    // 安全调用 + Elvis 组合：null → 默认值
+    val combined: Int = nullStr?.length ?: 0
 
-    println("§6.4 安全调用/防御性访问:")
-    println("  someStr ?: \"default\" = " + safeStr)
-    println("  nullStr ?: \"fallback\" = " + safeFromNull)
-    println("  链式 Elvis: " + chainResult)
+    // 安全调用 + 运算
+    val result: Int = (someStr?.length ?: 0) + 1
+
+    println("§6.4 安全调用（?.）:")
+    println("  someStr?.length = " + safeLen.toString())
+    println("  nullStr?.length = " + nullLen.toString())
+    println("  nullStr?.length ?: 0 = " + combined.toString())
+    println("  (someStr?.length ?: 0) + 1 = " + result.toString())
 }
 
 // ── §6.5 可空 vs 非空互转（Nullable Conversion） ──────────────────────────

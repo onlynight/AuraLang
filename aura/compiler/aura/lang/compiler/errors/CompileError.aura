@@ -12,6 +12,11 @@ package aura.lang.compiler.errors
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+// 本模块用到 `AstUtils.fieldAt` 与 `Span`：必须显式导入，否则二者不在编译
+// 单元内时，接收者/类型都退化为未知 → `fieldAt` 与 VmOps/Closures 的同名
+// helper 冲突、唯一候选兜底失效 → 降级为裸名调用（未解析）。
+import aura.lang.compiler.ast.Ast
+import aura.lang.compiler.lexer.Span
 
 /// 编译错误辅助工具集合。
 ///
@@ -154,9 +159,9 @@ class CompileErrors {
     fun spanAt(index: Int): Span {
         val line: String = this.line(this.spans, index)
         return Span(
-            CompileErrorUtils.ceToIntOf(fieldAt(line, 0, " ")), CompileErrorUtils.ceToIntOf(fieldAt(line, 1, " ")),
-            CompileErrorUtils.ceToIntOf(fieldAt(line, 2, " ")), CompileErrorUtils.ceToIntOf(fieldAt(line, 3, " ")),
-            CompileErrorUtils.ceToIntOf(fieldAt(line, 4, " ")), CompileErrorUtils.ceToIntOf(fieldAt(line, 5, " "))
+            CompileErrorUtils.ceToIntOf(AstUtils.fieldAt(line, 0, " ")), CompileErrorUtils.ceToIntOf(AstUtils.fieldAt(line, 1, " ")),
+            CompileErrorUtils.ceToIntOf(AstUtils.fieldAt(line, 2, " ")), CompileErrorUtils.ceToIntOf(AstUtils.fieldAt(line, 3, " ")),
+            CompileErrorUtils.ceToIntOf(AstUtils.fieldAt(line, 4, " ")), CompileErrorUtils.ceToIntOf(AstUtils.fieldAt(line, 5, " "))
         )
     }
 

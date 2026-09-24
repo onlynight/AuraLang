@@ -1,0 +1,169 @@
+// aura:///tests/hat_serializer_tests.aura
+// HAT v2.0 序列化器单元测试
+//
+// 运行: aura run tests/hat_serializer_tests.aura
+
+import aura.lang.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/mir/SsaMir.aura"
+import "../aura/compiler/aura/lang/compiler/mir/TypeRegistry.aura"
+import "../aura/compiler/aura/lang/compiler/hir/hat/HatParser.aura"
+import "../aura/compiler/aura/lang/compiler/hir/hat/HatSerializer.aura"
+
+fun main() {
+    println("=== HAT v2.0 Serializer Tests ===")
+    println()
+
+    val t = TestRunner()
+
+    // ── 测试 1: 空模块 ──
+    t.begin("HatSerializer.emptyModule")
+    val emptyHat: String = "; module test target x86_64\n; schema=HAT/2.0\n"
+    val emptyResult: MirSsaProgram = HatParserUtils.parseHat(emptyHat)
+    val emptySerialized: String = HatSerializerUtils.serializeHat(emptyResult, "test")
+    t.assertTrue(emptySerialized.startsWith("; module test target x86_64"), "starts with module header")
+    t.assertTrue(emptySerialized.contains("; schema=HAT/2.0"), "contains schema line")
+
+    // ── 测试 2: Hello World ──
+    t.begin("HatSerializer.helloWorld")
+    val helloHat: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn main() -> Unit\n" +
+        "  bb entry:\n" +
+        "    @t0 = @const_str \"Hello, World!\" : String\n" +
+        "    @ret () : Unit\n"
+
+    val helloResult: MirSsaProgram = HatParserUtils.parseHat(helloHat)
+    val helloSerialized: String = HatSerializerUtils.serializeHat(helloResult, "main")
+    t.assertTrue(helloSerialized.contains("@fn main()"), "contains function definition")
+    t.assertTrue(helloSerialized.contains("bb entry"), "contains entry block")
+    t.assertTrue(helloSerialized.contains("@ret"), "contains return instruction")
+
+    // ── 测试 3: 函数调用 ──
+    t.begin("HatSerializer.functionCall")
+    val callHat: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn add(@a: Int, @b: Int) -> Int\n" +
+        "  bb entry:\n" +
+        "    @t0 = @add(@a, @b) : Int\n" +
+        "    @ret @t0 : Int\n"
+
+    val callResult: MirSsaProgram = HatParserUtils.parseHat(callHat)
+    val callSerialized: String = HatSerializerUtils.serializeHat(callResult, "main")
+    t.assertTrue(callSerialized.contains("@fn add"), "contains add function")
+    t.assertTrue(callSerialized.contains("@ret"), "contains return instruction")
+
+    // ── 测试 4: 条件分支 ──
+    t.begin("HatSerializer.conditional")
+    val condHat: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn max(@a: Int, @b: Int) -> Int\n" +
+        "  bb entry:\n" +
+        "    @t0 = @icmp @i32_sgt(@a, @b) : Bool\n" +
+        "    @br_if @t0 => @then, @else\n" +
+        "\n" +
+        "  bb then:\n" +
+        "    @ret @a : Int\n" +
+        "\n" +
+        "  bb else:\n" +
+        "    @ret @b : Int\n"
+
+    val condResult: MirSsaProgram = HatParserUtils.parseHat(condHat)
+    val condSerialized: String = HatSerializerUtils.serializeHat(condResult, "main")
+    t.assertTrue(condSerialized.contains("@fn max"), "contains max function")
+    t.assertTrue(condSerialized.contains("@br_if"), "contains conditional branch")
+    t.assertTrue(condSerialized.contains("@icmp"), "contains compare instruction")
+
+    // ── 测试 5: While 循环 (Phi 节点) ──
+    t.begin("HatSerializer.whileLoop")
+    val loopHat: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn sum_to(@n: Int) -> Int\n" +
+        "  bb entry:\n" +
+        "    @sum = @i32_const 0 : Int\n" +
+        "    @i@0 = @i32_const 1 : Int\n" +
+        "    @br @check\n" +
+        "\n" +
+        "  bb check:\n" +
+        "    @sum@1 = @phi(@sum, @sum@2) : Int\n" +
+        "    @i@1 = @phi(@i@0, @i@2) : Int\n" +
+        "    @t0 = @icmp @i32_sle(@i@1, @n) : Bool\n" +
+        "    @br_if @t0 => @body, @exit\n" +
+        "\n" +
+        "  bb body:\n" +
+        "    @sum@2 = @add(@sum@1, @i@1) : Int\n" +
+        "    @t1 = @i32_const 1 : Int\n" +
+        "    @i@2 = @add(@i@1, @t1) : Int\n" +
+        "    @br @check\n" +
+        "\n" +
+        "  bb exit:\n" +
+        "    @ret @sum@1 : Int\n"
+
+    val loopResult: MirSsaProgram = HatParserUtils.parseHat(loopHat)
+    val loopSerialized: String = HatSerializerUtils.serializeHat(loopResult, "main")
+    t.assertTrue(loopSerialized.contains("@fn sum_to"), "contains sum_to function")
+    t.assertTrue(loopSerialized.contains("@phi"), "contains Phi nodes")
+    t.assertTrue(loopSerialized.contains("@br"), "contains branch instruction")
+
+    // ── 测试 6: 字符串操作 ──
+    t.begin("HatSerializer.stringOps")
+    val strHat: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn greet(@name: String) -> String\n" +
+        "  bb entry:\n" +
+        "    @t0 = @const_str \"Hello, \" : String\n" +
+        "    @t1 = @str_concat(@t0, @name) : String\n" +
+        "    @t2 = @const_str \"!\" : String\n" +
+        "    @msg = @str_concat(@t1, @t2) : String\n" +
+        "    @ret @msg : String\n"
+
+    val strResult: MirSsaProgram = HatParserUtils.parseHat(strHat)
+    val strSerialized: String = HatSerializerUtils.serializeHat(strResult, "main")
+    t.assertTrue(strSerialized.contains("@fn greet"), "contains greet function")
+    t.assertTrue(strSerialized.contains("@str_concat"), "contains string concat")
+
+    // ── 测试 7: 序列化器工具对象 ──
+    t.begin("HatSerializerUtils")
+    t.assertEq(HatSerializerUtils.strToInt("42"), 42, "strToInt 42")
+    t.assertEq(HatSerializerUtils.strToInt("-1"), -1, "strToInt -1")
+    t.assertEq(HatSerializerUtils.strToInt(""), 0, "strToInt empty")
+    t.assertEq(HatSerializerUtils.toStr(42), "42", "toStr 42")
+    t.assertEq(HatSerializerUtils.toStr(0), "0", "toStr 0")
+
+    // ── 测试 8: 回环稳定性（参数类型 / 块标签 / 前向引用 / 常量引用） ──
+    t.begin("HatSerializer.roundTrip")
+    val rtFirst: String = HatSerializerUtils.serializeHat(loopResult, "main")
+    val rtSecond: String = HatSerializerUtils.serializeHat(HatParserUtils.parseHat(rtFirst), "main")
+    t.assertTrue(rtFirst.contains("@fn sum_to(@n: Int)"), "parameter type preserved (not 'Basic')")
+    t.assertTrue(rtFirst.contains("bb check"), "block label preserved")
+    t.assertTrue(rtFirst.contains("bb body"), "block label preserved (body)")
+    t.assertTrue(rtFirst.contains("=> @body, @exit"), "forward branch labels resolved")
+    t.assertTrue(rtFirst.contains("@br @check"), "branch target label resolved")
+    t.assertTrue(rtFirst.indexOf("?") < 0, "no unresolved operand placeholders")
+    t.assertEq(rtFirst, rtSecond, "serialize(parse(serialize(x))) is stable")
+
+    // ── 测试 9: 常量以 @t<id> 引用（不内联字面量） ──
+    t.begin("HatSerializer.constReference")
+    t.assertTrue(rtFirst.contains("@i32_const 0"), "int const definition emitted")
+    t.assertTrue(rtFirst.contains("@phi(@t1, @t7)") || !rtFirst.contains("@phi(@0"), "phi operands referenced by temp name")
+    t.assertTrue(!rtFirst.contains("@\"Hello"), "no inlined const literal operand")
+
+    // ── 报告结果 ──
+    val failures = t.report()
+    println()
+    if (failures == 0) {
+        println("RESULT: PASS — All HAT serializer tests passed")
+    } else {
+        println("RESULT: FAIL (" + toStr(failures) + " failures)")
+    }
+}

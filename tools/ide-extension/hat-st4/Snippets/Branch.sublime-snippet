@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[; @br_if  => , ]]></content>
+    <tabTrigger>br</tabTrigger>
+    <scope>source.hat</scope>
+    <description>Conditional branch</description>
+</snippet>

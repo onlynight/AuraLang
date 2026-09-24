@@ -1,0 +1,85 @@
+// tests/photon/coerce_test4.aura
+// 精确复现 MirSsaProgram 结构：含 TypeRegistry 字段 + 多个 List 字段
+// 测试从 List 取出结构体后访问/修改字段
+
+class TypeReg {
+    var count: Int = 0
+    var data: List<String> = arrayListOf<String>()
+    init() {
+        this.count = 0
+        this.data = arrayListOf<String>()
+    }
+}
+
+class Func {
+    var name: String = ""
+    var blocks: String = ""
+}
+
+class Program {
+    var types: TypeReg = TypeReg()
+    var funcs: List<Func> = arrayListOf<Func>()
+    var blockCount: Int = 0
+    var currentFunc: Int = -1
+
+    init() {
+        this.types = TypeReg()
+        this.funcs = arrayListOf<Func>()
+        this.blockCount = 0
+        this.currentFunc = -1
+    }
+
+    fun addFunc(name: String): Int {
+        val f: Func = Func()
+        f.name = name
+        f.blocks = ""
+        this.funcs.add(f)
+        this.currentFunc = this.funcs.size - 1
+        return this.currentFunc
+    }
+
+    fun funcOf(id: Int): Func {
+        if (id < 0 || id >= this.funcs.size) {
+            return Func()
+        }
+        return this.funcs[id]
+    }
+
+    fun addBlock(): Int {
+        this.blockCount = this.blockCount + 1
+        if (this.currentFunc >= 0) {
+            val f: Func = this.funcOf(this.currentFunc)
+            if (f.blocks == "") {
+                f.blocks = toStr(this.blockCount)
+            } else {
+                f.blocks = f.blocks + "," + toStr(this.blockCount)
+            }
+        }
+        return this.blockCount
+    }
+}
+
+fun main() {
+    val prog: Program = Program()
+    
+    prog.addFunc("main")
+    prog.addBlock()  // blocks = "1"
+    prog.addBlock()  // blocks = "1,2"
+    prog.addBlock()  // blocks = "1,2,3"
+    
+    prog.addFunc("helper")
+    prog.addBlock()  // blocks = "4"
+    prog.addBlock()  // blocks = "4,5"
+    
+    var ok: Boolean = true
+    var i: Int = 0
+    while (i < 2) {
+        val fi: Func = prog.funcOf(i)
+        println("func" + toStr(i) + ".name=" + fi.name + " blocks=" + fi.blocks)
+        if (i == 0 && fi.blocks != "1,2,3") { ok = false; println("FAIL func0") }
+        if (i == 1 && fi.blocks != "4,5") { ok = false; println("FAIL func1") }
+        i = i + 1
+    }
+    
+    if (ok) { println("ALL OK") } else { println("FAILED") }
+}

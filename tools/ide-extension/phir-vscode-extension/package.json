@@ -1,0 +1,265 @@
+{
+  "name": "phir-vscode-extension",
+  "displayName": "Photon IR Language",
+  "description": "Photon IR (.phir) 语言支持 — 语法高亮 + 代码片段。适用于 NovaOS Photon 编译器的中间表示文件。",
+  "version": "0.1.8",
+  "publisher": "aura-lang",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/aura-lang/auralang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aura-lang/auralang.git"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "keywords": [
+    "photon",
+    "phir",
+    "ir",
+    "compiler",
+    "novaos",
+    "llvm",
+    "cranelift",
+    "mlir"
+  ],
+  "activationEvents": [
+    "onLanguage:phir"
+  ],
+  "main": "./src/extension.js",
+  "scripts": {
+    "package": "npx @vscode/vsce package"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "phir",
+        "aliases": [
+          "Photon IR",
+          "PHIR",
+          "phir"
+        ],
+        "extensions": [
+          ".phir"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./resources/phir-icon-light.png",
+          "dark": "./resources/phir-icon-dark.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "phir",
+        "scopeName": "source.phir",
+        "path": "./syntaxes/phir.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "phir",
+        "path": "./snippets/phir.json"
+      }
+    ]
+  },
+  "configurationDefaults": {
+    "[phir]": {
+      "editor.tokenColorCustomizations": {
+        "textMateRules": [
+          {
+            "scope": "storage.type.native.phir",
+            "settings": {
+              "foreground": "#C586C0"
+            }
+          },
+          {
+            "scope": "storage.type.function.phir",
+            "settings": {
+              "foreground": "#569CD6"
+            }
+          },
+          {
+            "scope": "entity.name.function.phir",
+            "settings": {
+              "foreground": "#DCDCAA"
+            }
+          },
+          {
+            "scope": "entity.name.global.phir",
+            "settings": {
+              "foreground": "#4EC9B0"
+            }
+          },
+          {
+            "scope": "entity.name.block.phir",
+            "settings": {
+              "foreground": "#4FC1FF"
+            }
+          },
+          {
+            "scope": "variable.stack-slot.phir",
+            "settings": {
+              "foreground": "#D7BA7D"
+            }
+          },
+          {
+            "scope": "variable.local.phir, variable.other.phir",
+            "settings": {
+              "foreground": "#9CDCFE"
+            }
+          },
+          {
+            "scope": "storage.type.variable.phir",
+            "settings": {
+              "foreground": "#569CD6"
+            }
+          },
+          {
+            "scope": "entity.name.type.phir",
+            "settings": {
+              "foreground": "#4EC9B0"
+            }
+          },
+          {
+            "scope": "variable.parameter.phir",
+            "settings": {
+              "foreground": "#CE9178"
+            }
+          },
+          {
+            "scope": "keyword.terminator.phir",
+            "settings": {
+              "foreground": "#C586C0"
+            }
+          },
+          {
+            "scope": "keyword.control.phir",
+            "settings": {
+              "foreground": "#C586C0"
+            }
+          },
+          {
+            "scope": "keyword.dialect.phir",
+            "settings": {
+              "foreground": "#4EC9B0"
+            }
+          },
+          {
+            "scope": "support.instruction.phir",
+            "settings": {
+              "foreground": "#DCDCAA"
+            }
+          },
+          {
+            "scope": "entity.name.attr.phir",
+            "settings": {
+              "foreground": "#BC83FF"
+            }
+          },
+          {
+            "scope": "entity.name.calling-convention.phir",
+            "settings": {
+              "foreground": "#BC83FF"
+            }
+          },
+          {
+            "scope": "storage.modifier.ownership.phir",
+            "settings": {
+              "foreground": "#4EC9B0"
+            }
+          },
+          {
+            "scope": "entity.name.operand.phir",
+            "settings": {
+              "foreground": "#B5CEA8"
+            }
+          },
+          {
+            "scope": "variable.language.this.phir, variable.language.vmctx.phir",
+            "settings": {
+              "foreground": "#569CD6"
+            }
+          },
+          {
+            "scope": "variable.debug-var.phir",
+            "settings": {
+              "foreground": "#B5CEA8"
+            }
+          },
+          {
+            "scope": "variable.scope-id.phir",
+            "settings": {
+              "foreground": "#4EC9B0"
+            }
+          },
+          {
+            "scope": "keyword.operator.assignment.phir",
+            "settings": {
+              "foreground": "#D4D4D4"
+            }
+          },
+          {
+            "scope": "comment.line.number-sign.phir",
+            "settings": {
+              "foreground": "#6A9955"
+            }
+          },
+          {
+            "scope": "string.quoted.double.phir",
+            "settings": {
+              "foreground": "#CE9178"
+            }
+          },
+          {
+            "scope": "constant.numeric.phir, constant.numeric.hex.phir",
+            "settings": {
+              "foreground": "#B5CEA8"
+            }
+          },
+          {
+            "scope": "constant.language.boolean.phir, constant.language.nan.phir",
+            "settings": {
+              "foreground": "#569CD6"
+            }
+          },
+          {
+            "scope": "punctuation.accessor.global.phir",
+            "settings": {
+              "foreground": "#4EC9B0"
+            }
+          },
+          {
+            "scope": "storage.modifier.operand.phir",
+            "settings": {
+              "foreground": "#569CD6"
+            }
+          },
+          {
+            "scope": "entity.name.type.builtin.phir",
+            "settings": {
+              "foreground": "#4EC9B0"
+            }
+          },
+          {
+            "scope": "storage.type.keyword.phir",
+            "settings": {
+              "foreground": "#C586C0"
+            }
+          },
+          {
+            "scope": "meta.module-header.phir",
+            "settings": {
+              "foreground": "#6A9955",
+              "fontStyle": "italic"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

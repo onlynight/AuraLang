@@ -1,0 +1,146 @@
+// tests/photon/S3/08_jit_pipeline_test.aura
+// ═════════════════════════════════════════════════════════════
+// S3 Phase F: Photon JIT 管线测试（VM 安全）
+//
+// 覆盖此前无法执行的 JIT 原生路径的「编码 + 发射 + 分派」环节：
+//   1. compileEncodeOnly / compileJit：HIR → 裸机器码 hex（VM 下可用）
+//   2. JitBackend.compileMachineCode：Photon 管线 → JIT 机器码
+//   3. emitFunction：多函数共享可执行内存（VM 下模拟地址，不触碰 Memory）
+//   4. registerFunction / lookupFunction：按名分派表
+//   5. deoptimize：按函数名禁用入口（回退解释器）
+//   6. 存根（dispatch / call / return / deopt trampoline）
+//
+// 说明：`Memory` 是 extern interface，仅在 AOT / 自举运行时可用；
+// 种子 VM 下不可解析。故本测试使用 JitBackend 的默认「VM 安全」模式
+// （vmMode=true），全程不触碰 Memory。
+//
+// 运行：aura run tests/photon/S3/08_jit_pipeline_test.aura
+// ═════════════════════════════════════════════════════════════
+
+package tests.photon.S3
+
+import aura.lang.std.String
+import aura.lang.std.Collections
+import aura.lang.std.Math
+import aura.lang.std.Iter
+import aura.lang.std.FileSystem
+import aura.lang.std.Process
+
+// ── 前端（显式导入完整依赖闭包：VM 的按需注册要求符号可见）──
+import "../../../aura/compiler/aura/lang/compiler/lexer/Span.aura"
+import "../../../aura/compiler/aura/lang/compiler/lexer/Token.aura"
+import "../../../aura/compiler/aura/lang/compiler/lexer/Lexer.aura"
+import "../../../aura/compiler/aura/lang/compiler/ast/Ast.aura"
+import "../../../aura/compiler/aura/lang/compiler/errors/CompileError.aura"
+import "../../../aura/compiler/aura/lang/compiler/parser/Parser.aura"
+import "../../../aura/compiler/aura/lang/compiler/hir/Hir.aura"
+
+// ── 中端 ──
+import "../../../aura/compiler/aura/lang/compiler/mir/TypeRegistry.aura"
+import "../../../aura/compiler/aura/lang/compiler/mir/SsaMir.aura"
+import "../../../aura/compiler/aura/lang/compiler/mir/SsaBuilder.aura"
+import "../../../aura/compiler/aura/lang/compiler/mir/Linearizer.aura"
+
+// ── Photon 后端 ──
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lowering.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/RegisterAllocator.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PeepholeOptimizer.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/X86Emitter.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/x86_64/X86Encoder.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonPipeline.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/JitBackend.aura"
+
+import "../../../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+
+fun main() {
+    val t = TestRunner()
+    t.begin("Photon JIT pipeline (S3 Phase F)")
+
+    // ── 0. 源码 → HIR ──
+    val src: String = "fun main(): Int { return 42 }"
+    val p = Parser(src)
+    p.parseProgram()
+    val hl = HirLowerer()
+    hl.lower(p.ast)
+    val hir: Hir = hl.hir
+    t.assertTrue(hir.count > 0, "HIR built from source")
+
+    // ── 1. compileEncodeOnly：仅编码（VM 下可用）──
+    val pipeline = PhotonPipeline()
+    val enc = pipeline.compileEncodeOnly(hir, "build/photon", "jit_probe")
+    t.assertTrue(enc.success, "compileEncodeOnly success")
+    t.assertTrue(enc.machineCodeHex != "", "compileEncodeOnly produces machine code")
+
+    // ── 2. compileJit：JIT 命名入口（等价）──
+    val jir = pipeline.compileJit(hir, "jit_probe")
+    t.assertTrue(jir.success, "compileJit success")
+    t.assertTrue(jir.machineCodeHex == enc.machineCodeHex,
+        "compileJit == compileEncodeOnly")
+
+    // ── 3. JitBackend：默认 VM 安全模式 ──
+    val jb = JitBackend()
+    t.assertTrue(jb.isVmMode(), "JitBackend defaults to VM-safe mode")
+
+    val hex: String = jb.compileMachineCode(hir, "build/photon", "jit_probe")
+    t.assertTrue(hex != "", "compileMachineCode produces hex")
+    t.assertTrue(hex.length % 2 == 0, "machine code hex has even length")
+    t.assertTrue(jb.functionCount() == 0, "functionCount starts at 0")
+
+    // ── 4. emitFunction：多函数共享一块可执行内存 ──
+    val entry0: Int = jb.emitFunction("main", hex)
+    t.assertTrue(entry0 > 0, "emitFunction returns nonzero entry (simulated)")
+    t.assertTrue(jb.functionCount() == 1, "functionCount tracks emitted functions")
+
+    val entry1: Int = jb.emitFunction("helper", hex)
+    t.assertTrue(entry1 > entry0, "second function entry is beyond first (shared block)")
+    t.assertTrue(jb.functionCount() == 2, "functionCount tracks both functions")
+
+    // ── 5. 分派表：注册 + 按名查找 ──
+    val slot: Int = jb.registerFunction("main", entry0)
+    t.assertTrue(slot == 0, "first dispatch slot is 0")
+    t.assertTrue(jb.getDispatchEntry(0) == entry0, "dispatch entry stored")
+    t.assertTrue(jb.lookupFunction("main") == entry0, "lookupFunction finds registered entry")
+    t.assertTrue(jb.slotCount() == 1, "slotCount tracks allocated slots")
+
+    val slot2: Int = jb.registerFunction("helper", entry1)
+    t.assertTrue(slot2 == 1, "second dispatch slot is 1")
+    t.assertTrue(jb.lookupFunction("helper") == entry1, "lookupFunction finds latest entry")
+
+    // ── 6. 存根生成 ──
+    val dispatchStub: String = jb.buildDispatchStub(0)
+    t.assertTrue(dispatchStub.length == 18, "dispatch stub is 9 bytes")
+    val callStub: String = jb.buildCallStub(entry0)
+    t.assertTrue(callStub.length == 24, "call stub is 12 bytes")
+    val retStub: String = jb.buildReturnStub()
+    t.assertTrue(retStub.length == 10, "return stub is 5 bytes")
+    val tramp: String = jb.buildDeoptTrampoline(0)
+    t.assertTrue(tramp != "", "deopt trampoline is generated")
+
+    // ── 7. 布局信息（VM 下字符串查找不可用，改用数值查询）──
+    val layout: String = jb.getJitCodeLayout()
+    t.assertTrue(layout != "", "layout info is generated")
+    t.assertTrue(layout.length > 10, "layout has content")
+    t.assertTrue(jb.isVmMode(), "layout reflects VM-safe mode")
+    t.assertTrue(jb.functionCount() == 2, "layout reports function count")
+
+    // ── 8. 真实执行入口在 VM 下是安全空操作 ──
+    // `executeNative` 走 `JitExec.callI64`（extern，VM 下不可解析）；
+    // VM 模式必须先短路返回，绝不触碰该调用。
+    t.assertTrue(jb.executeNative(entry0, 0) == 0, "executeNative is a no-op under VM mode")
+    t.assertTrue(jb.executeNative0(entry0) == 0, "executeNative0 is a no-op under VM mode")
+    t.assertTrue(jb.executeNative(0, 0) == 0, "executeNative rejects null entry")
+
+    // ── 9. 去优化：按函数名禁用入口 ──
+    jb.deoptimize("main")
+    t.assertTrue(jb.getDispatchEntry(0) == 0, "deoptimize('main') clears its slot")
+    t.assertTrue(jb.getDispatchEntry(1) == entry1, "deoptimize leaves other slots intact")
+    jb.deoptimize("helper")
+    t.assertTrue(jb.getDispatchEntry(1) == 0, "deoptimize('helper') clears its slot")
+
+    println("")
+    val failures: Int = t.report()
+    Process.exit(failures)
+}

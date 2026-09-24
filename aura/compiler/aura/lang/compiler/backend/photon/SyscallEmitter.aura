@@ -1,0 +1,192 @@
+// aura:///aura/lang/compiler/backend/photon/SyscallEmitter.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// 系统调用指令发射器 — Phase 2 (零依赖 runtime)
+//
+// 目标：runtime 直接发射 `syscall` 指令进入内核态执行 Nt* 系统调用，
+// 不再通过 IAT 导入 kernel32.dll。
+//
+// ── Linux x86_64 syscall 约定 ──
+//   rax = syscall 号
+//   rdi/rsi/rdx/r10/r8/r9 = 参数 1-6
+//   返回值在 rax
+//
+// ── Windows x86_64 syscall 约定 (Nt*) ──
+//   rax = 服务号
+//   r10/rdx/r8/r9 = 参数 1-4   （⚠️ arg1 在 r10，不是 rcx！）
+//   [rsp+0x28..] = 参数 5+（调用方通过 `call` 进入，故 arg5 起点为 rsp+0x28）
+//   返回值在 rax (NTSTATUS)
+//
+//   为什么 arg1 在 r10：`syscall` 指令会把返回地址写入 rcx、
+//   把 rflags 写入 r11，因此内核约定从 r10 读取第 1 个参数。
+//   ntdll 的 stub 正是 `mov r10, rcx; mov eax, N; syscall; ret`。
+//   若把 arg1 放在 rcx，内核会读到 r10 中的垃圾值 → INVALID_HANDLE / 访问违规。
+//
+// ── 用法（runtime 侧）──
+//
+//   // 方式一：仅发射 syscall（寄存器由调用方预先设置好）
+//   SyscallEmitter.emitSyscall(enc, 0x15)  // NtWriteFile
+//
+//   // 方式二：完整 Windows syscall（含寄存器设置，栈参数由调用方设置）
+//   SyscallEmitter.emitWindowsSyscall(enc, 0x15, "rcx", "zero", "zero", "zero")
+//
+// ── "zero" 约定 ──
+//   参数值为 "zero" 时，发射 `xor reg, reg`（而非 mov reg, 0）：
+//   更紧凑且零延迟。其他值为寄存器名（如 "rcx", "rax"），
+//   发射 `mov dst, src`。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import "x86_64/X86Encoder.aura"
+
+/// 系统调用发射器：生成 syscall 指令序列。
+object SyscallEmitter {
+
+    /// Linux x86_64 syscall 寄存器顺序（参数 1-6）。
+    val LINUX_SYSCALL_REGS: List<String> = arrayListOf<String>(
+        "rdi", "rsi", "rdx", "r10", "r8", "r9"
+    )
+
+    /// Windows x86_64 syscall 寄存器顺序（参数 1-4）。
+    val WINDOWS_SYSCALL_REGS: List<String> = arrayListOf<String>(
+        "rcx", "rdx", "r8", "r9"
+    )
+
+    // ── 核心 syscall 发射 ──
+
+    /// 发射 syscall 指令（仅设置服务号 + 执行 syscall）。
+    ///
+    /// 寄存器参数由调用方在此方法之前设置好。
+    ///
+    /// @param enc 编码器
+    /// @param serviceNum 服务号（写入 rax）
+    fun emitSyscall(enc: X86Encoder, serviceNum: Int): Unit {
+        enc.emitMovRI32("rax", serviceNum)
+        enc.emitSyscall()
+    }
+
+    /// 发射 Windows Nt* syscall（含寄存器参数设置）。
+    ///
+    /// 栈参数（第 5+ 个参数）由调用方在此方法之前通过
+    /// `emitStackStore` 写入 [rsp+0x20..] 区域。
+    ///
+    /// @param enc 编码器
+    /// @param serviceNum Nt* 服务号
+    /// @param rcx 参数 1：寄存器名或 "zero"
+    /// @param rdx 参数 2：寄存器名或 "zero"
+    /// @param r8  参数 3：寄存器名或 "zero"
+    /// @param r9  参数 4：寄存器名或 "zero"
+    fun emitWindowsSyscall(
+        enc: X86Encoder, serviceNum: Int,
+        rcx: String, rdx: String, r8: String, r9: String
+    ): Unit {
+        SyscallEmitter.emitRegOrZero(enc, "rcx", rcx)
+        SyscallEmitter.emitRegOrZero(enc, "rdx", rdx)
+        SyscallEmitter.emitRegOrZero(enc, "r8", r8)
+        SyscallEmitter.emitRegOrZero(enc, "r9", r9)
+        // arg1 必须复制到 r10（内核从 r10 读取第 1 个参数，见文件头说明）。
+        enc.emitMovRR("r10", "rcx")
+        SyscallEmitter.emitSyscall(enc, serviceNum)
+    }
+
+    /// 发射 Linux syscall（含寄存器参数设置）。
+    ///
+    /// 栈参数（第 7+ 个参数）由调用方在此方法之前写入。
+    ///
+    /// @param enc 编码器
+    /// @param syscallNum syscall 号
+    /// @param rdi 参数 1：寄存器名或 "zero"
+    /// @param rsi 参数 2：寄存器名或 "zero"
+    /// @param rdx 参数 3：寄存器名或 "zero"
+    /// @param r10 参数 4：寄存器名或 "zero"
+    /// @param r8  参数 5：寄存器名或 "zero"
+    /// @param r9  参数 6：寄存器名或 "zero"
+    fun emitLinuxSyscall(
+        enc: X86Encoder, syscallNum: Int,
+        rdi: String, rsi: String, rdx: String,
+        r10: String, r8: String, r9: String
+    ): Unit {
+        SyscallEmitter.emitRegOrZero(enc, "rdi", rdi)
+        SyscallEmitter.emitRegOrZero(enc, "rsi", rsi)
+        SyscallEmitter.emitRegOrZero(enc, "rdx", rdx)
+        SyscallEmitter.emitRegOrZero(enc, "r10", r10)
+        SyscallEmitter.emitRegOrZero(enc, "r8", r8)
+        SyscallEmitter.emitRegOrZero(enc, "r9", r9)
+        SyscallEmitter.emitSyscall(enc, syscallNum)
+    }
+
+    // ── 判定 ──
+
+    /// 判断是否为有效的 Linux syscall 号（0-500 范围）。
+    fun isLinuxSyscall(syscallNum: Int): Boolean {
+        return syscallNum >= 0 && syscallNum <= 500
+    }
+
+    /// 判断是否为有效的 Windows Nt* 服务号（0x00-0xFF 范围）。
+    fun isWindowsSyscall(serviceNum: Int): Boolean {
+        return serviceNum >= 0x00 && serviceNum <= 0xFF
+    }
+
+    // ── 内部辅助 ──
+
+    /// 发射寄存器设置：如果 src 为 "zero"，发射 `xor dst, dst`；
+    /// 否则发射 `mov dst, src`。
+    private fun emitRegOrZero(enc: X86Encoder, dst: String, src: String): Unit {
+        if (src == "zero") {
+            enc.emitXorRR(dst, dst)
+        } else if (src != "" && src != dst) {
+            enc.emitMovRR(dst, src)
+        }
+    }
+
+    /// 按逗号分隔字符串，返回 List<String>。
+    ///
+    /// 使用 `text.substring(i, i+1) == ","` 判断分隔符
+    /// （而非 `s[pos]`，后者在 Aura VM 上可能不可用）。
+    private fun splitComma(text: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (text == "") {
+            return result
+        }
+        val len: Int = text.length
+        var start: Int = 0
+        var i: Int = 0
+        while (i < len) {
+            if (text.substring(i, i + 1) == ",") {
+                if (i > start) {
+                    result.add(text.substring(start, i))
+                }
+                start = i + 1
+            }
+            i = i + 1
+        }
+        if (start < len) {
+            result.add(text.substring(start, len))
+        }
+        return result
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// SyscallEmitterUtils — 顶层辅助函数
+// ─────────────────────────────────────────────────────────────
+
+object SyscallEmitterUtils {
+
+    /// 创建空的 syscall 发射器（SyscallEmitter 是 object，无需实例化）。
+    ///
+    /// 保留此方法以兼容旧调用方。
+    fun empty(): SyscallEmitter {
+        return SyscallEmitter
+    }
+
+    /// 获取 Linux syscall 寄存器列表。
+    fun linuxRegs(): List<String> {
+        return SyscallEmitter.LINUX_SYSCALL_REGS
+    }
+
+    /// 获取 Windows syscall 寄存器列表。
+    fun windowsRegs(): List<String> {
+        return SyscallEmitter.WINDOWS_SYSCALL_REGS
+    }
+}

@@ -1,0 +1,29 @@
+// tests/photon/P4/test_thread.aura
+// Phase 4.6: Thread support test
+//
+// Test: Thread creation and mutex operations
+
+import aura.lang.std.String
+import aura.lang.concurrent.Thread
+import aura.lang.concurrent.Mutex
+import aura.lang.concurrent.Condvar
+
+fun main() {
+    // 测试 Mutex
+    val mutex: Mutex = Mutex()
+    println("Mutex created")
+    
+    // 锁定
+    mutex.lock()
+    println("Locked: " + toStr(mutex.isLocked()))
+    
+    // 解锁
+    mutex.unlock()
+    println("Unlocked: " + toStr(!mutex.isLocked()))
+    
+    // 获取当前线程 ID
+    val tid: Long = Thread.currentThreadId()
+    println("Thread ID: " + toStr(tid))
+    
+    println("Thread test passed")
+}

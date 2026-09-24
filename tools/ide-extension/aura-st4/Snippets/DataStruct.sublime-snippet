@@ -1,0 +1,10 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[struct (
+    val : ,
+    val : 
+)]]></content>
+    <tabTrigger>data</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Data struct (auto toString/equals/hashCode/copy)</description>
+</snippet>

@@ -1,0 +1,33 @@
+// tests/photon/P1/05_functions.aura
+// Phase 1.5: 函数调用测试
+//
+// 测试: 函数定义和调用
+
+import aura.lang.std.String
+
+fun add(a: Int, b: Int): Int {
+    return a + b
+}
+
+fun multiply(a: Int, b: Int): Int {
+    return a * b
+}
+
+fun main() {
+    var sum: Int = add(3, 4)
+    println("add(3,4) = " + toStr(sum))
+    
+    var product: Int = multiply(5, 6)
+    println("multiply(5,6) = " + toStr(product))
+    
+    // 递归测试
+    var fact: Int = factorial(5)
+    println("factorial(5) = " + toStr(fact))
+}
+
+fun factorial(n: Int): Int {
+    if (n <= 1) {
+        return 1
+    }
+    return n * factorial(n - 1)
+}

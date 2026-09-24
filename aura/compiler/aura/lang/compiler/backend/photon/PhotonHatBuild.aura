@@ -1,0 +1,58 @@
+// aura:///aura/lang/compiler/backend/photon/PhotonHatBuild.aura
+// HAT v2.0 端到端编译驱动 — .hat → SSA MIR → LIR → X86 → COFF → Link → .exe
+//
+// 用法: aura run aura/compiler/aura/lang/compiler/backend/photon/PhotonHatBuild.aura
+//
+// 输出标记（供构建脚本解析）：
+//   ===COFF-MAIN===<hex>
+//   ===COFF-RUNTIME===<hex>
+//   ===RESULT===<success|fail>
+
+import aura.lang.std.String
+import aura.lang.std.Env
+import aura.lang.std.Process
+
+import "PhotonPipeline.aura"
+import "PhotonRuntime.aura"
+
+fun main() {
+    val hatPath = Env.get("AURA_HAT_SRC", "tests/hat/hello_world.hat")
+    val phirPath = Env.get("AURA_HAT_PHIR", "")
+    val outDir = Env.get("AURA_HAT_OUT", "build/hat_test")
+    val moduleName = Env.get("AURA_HAT_MODULE", "hello")
+
+    val pipeline = PhotonPipelineUtils.emptyPipeline()
+    pipeline.outDir = outDir
+    pipeline.moduleName = moduleName
+
+    // 可选前置步骤：把 .phir 转成 .hat（复用 PHIR 用例源），再走 HAT 管线
+    if (phirPath != "") {
+        if (!pipeline.phirToHat(phirPath, hatPath, moduleName)) {
+            println("===RESULT===fail")
+            println("===ERR===phirToHat failed: " + phirPath)
+            Process.exit(1)
+        }
+    }
+
+    val result = pipeline.compileHat(hatPath)
+
+    // 输出 COFF hex（主对象）
+    println("===COFF-MAIN===")
+    println(result.coffHex)
+
+    // 输出 COFF hex（runtime 对象）
+    val rtHex: String = PhotonRuntime.buildRuntimeObject()
+    println("===COFF-RUNTIME===")
+    println(rtHex)
+
+    // 输出链接信息
+    println("===LINK===")
+    println(result.linkCommand)
+
+    println("===RESULT===" + (if (result.success) "success" else "fail"))
+    if (!result.success) {
+        println("===ERR===" + result.errorMessage)
+    }
+
+    Process.exit(0)
+}

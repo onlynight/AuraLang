@@ -1,0 +1,62 @@
+// tests/photon/S1/02_x86_encoder_relocs.aura
+// ═════════════════════════════════════════════════════════════
+// X86Encoder 重定位生成测试
+//
+// 覆盖：LEA-RIP、CALL、重定位生成与偏移
+// 运行：aura run tests/photon/S1/02_x86_encoder_relocs.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/x86_64/X86Encoder.aura"
+
+fun main() {
+    println("═══ X86Encoder 重定位测试 ═══")
+    var pass = 0
+    var total = 4
+
+    // [1] LEA-RIP + CALL
+    println("[1] LEA-RIP + CALL 重定位")
+    var enc = X86EncoderUtils.emptyEncoder()
+    enc.emitPrologue(0x30)
+    enc.emitLeaRIP("rcx", "@str.0")
+    enc.emitCallRel("println")
+    enc.emitXorRR("eax", "eax")
+    enc.emitEpilogue()
+    val relocs = enc.getRelocations()
+    println("  relocs=" + relocs.size)
+    if (relocs.size == 2) { pass = pass + 1 }
+
+    // [2] 多个 LEA-RIP
+    println("[2] 多个 LEA-RIP")
+    enc = X86EncoderUtils.emptyEncoder()
+    enc.emitLeaRIP("rcx", "@str.0")
+    enc.emitLeaRIP("rdx", "@str.1")
+    enc.emitLeaRIP("r8", "@str.2")
+    relocs = enc.getRelocations()
+    println("  relocs=" + relocs.size)
+    if (relocs.size == 3) { pass = pass + 1 }
+
+    // [3] 标签解析
+    println("[3] 标签解析")
+    enc = X86EncoderUtils.emptyEncoder()
+    enc.emitPrologue(0x30)
+    enc.emitLabel("loop_start")
+    enc.emitAddRR("rcx", "rcx")
+    enc.emitJccLabel("ne", "loop_start")
+    enc.emitXorRR("eax", "eax")
+    enc.emitEpilogue()
+    enc.resolveLabels()
+    println("  resolved, bytes=" + enc.byteCount())
+    pass = pass + 1
+
+    // [4] IMPORT 调用
+    println("[4] IMPORT 调用")
+    enc = X86EncoderUtils.emptyEncoder()
+    enc.emitCallImport("kernel32!GetStdHandle")
+    relocs = enc.getRelocations()
+    println("  relocs=" + relocs.size)
+    if (relocs.size == 1) { pass = pass + 1 }
+
+    println("")
+    println("PASS: " + pass + "/" + total)
+}

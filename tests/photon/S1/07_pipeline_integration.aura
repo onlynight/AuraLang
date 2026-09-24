@@ -1,0 +1,52 @@
+// tests/photon/S1/07_pipeline_integration.aura
+// ═════════════════════════════════════════════════════════════
+// PhotonPipeline 集成测试（S1 管线工具函数）
+// 运行：aura run tests/photon/S1/07_pipeline_integration.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonPipeline.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonSystemLinker.aura"
+
+fun main() {
+    println("═══ PhotonPipeline 集成测试 ═══")
+    var pass: Int = 0
+    var fail: Int = 0
+
+    // ── [1] PhotonPipelineUtils ──
+    println("[1] PhotonPipelineUtils")
+    val p = PhotonPipelineUtils.emptyPipeline()
+    if (p != null) { pass = pass + 1 }
+    else { fail = fail + 1 }
+
+    val os = PhotonPipelineUtils.detectOS()
+    if (os == "windows" || os == "linux" || os == "macos") { pass = pass + 1 }
+    else { fail = fail + 1 }
+
+    val arch = PhotonPipelineUtils.detectArch()
+    if (arch == "x86_64" || arch == "aarch64") { pass = pass + 1 }
+    else { fail = fail + 1 }
+
+    val triple = PhotonPipelineUtils.buildTriple(os, arch)
+    if (triple != "") { pass = pass + 1 }
+    else { fail = fail + 1 }
+
+    // ── [2] PhotonSystemLinkerUtils ──
+    println("[2] PhotonSystemLinkerUtils")
+    val linker = PhotonSystemLinkerUtils.defaultLinker()
+    if (linker != null) { pass = pass + 1 }
+    else { fail = fail + 1 }
+
+    val cmd = linker.buildLldLinkCommand("input.obj", "output.exe")
+    if (cmd != "" && cmd.contains("lld-link")) { pass = pass + 1 }
+    else { fail = fail + 1 }
+
+    val linkerName = PhotonSystemLinkerUtils.linkerForOs("windows")
+    if (linkerName != "") { pass = pass + 1 }
+    else { fail = fail + 1 }
+
+    println("")
+    println("PASS: " + pass + "/" + (pass + fail))
+    if (fail == 0) { println("ALL PASS") }
+    else { println("FAILURES: " + fail) }
+}

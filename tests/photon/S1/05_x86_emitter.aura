@@ -1,0 +1,57 @@
+// tests/photon/S1/05_x86_emitter.aura
+// ═════════════════════════════════════════════════════════════
+// X86Emitter 单元测试
+// 运行：aura run tests/photon/S1/05_x86_emitter.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/X86Emitter.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
+
+fun main() {
+    println("═══ X86Emitter 测试 ═══")
+    var pass: Int = 0
+    var fail: Int = 0
+
+    // ── [1] 空 DAG ──
+    println("[1] 空 DAG")
+    val d1 = MachineDagUtils.emptyDag()
+    val e1 = X86EmitterUtils.emptyEmitter()
+    e1.emitFunction(d1, "test")
+    val hex1 = e1.getOutputHex()
+    if (hex1 != "") { pass = pass + 1; println("  hex len=" + hex1.length) }
+    else { fail = fail + 1 }
+
+    // ── [2] 常量指令 ──
+    println("[2] 常量指令 (mov eax, 42)")
+    val d2 = MachineDagUtils.emptyDag()
+    val n2 = d2.addNode("Value", "Const", 0, "", "", "", -1, "42")
+    d2.selectPattern(6, MachineDagUtils.toStr(n2), n2)
+    val e2 = X86EmitterUtils.emptyEmitter()
+    e2.emitFunction(d2, "test")
+    val hex2 = e2.getOutputHex()
+    if (hex2 != "") { pass = pass + 1; println("  hex=" + hex2.substring(0, 20)) }
+    else { fail = fail + 1 }
+
+    // ── [3] 返回指令 ──
+    println("[3] 返回指令")
+    val d3 = MachineDagUtils.emptyDag()
+    val n3 = d3.addNode("Value", "Ret", 0, "", "", "", -1, "")
+    d3.selectPattern(30, MachineDagUtils.toStr(n3), -1)
+    val e3 = X86EmitterUtils.emptyEmitter()
+    e3.emitFunction(d3, "test")
+    val hex3 = e3.getOutputHex()
+    if (hex3 != "") { pass = pass + 1; println("  hex len=" + hex3.length) }
+    else { fail = fail + 1 }
+
+    // ── [4] 工具函数 ──
+    println("[4] 工具函数")
+    if (X86EmitterUtils.emptyEmitter() != null) { pass = pass + 1 }
+    else { fail = fail + 1 }
+
+    println("")
+    println("PASS: " + pass + "/" + (pass + fail))
+    if (fail == 0) { println("ALL PASS") }
+    else { println("FAILURES: " + fail) }
+}

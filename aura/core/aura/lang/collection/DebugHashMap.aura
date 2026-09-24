@@ -1,0 +1,26 @@
+// aura:///aura/lang/collection/DebugHashMap.aura
+package aura.lang.collection
+// Debug: test HashMap creation
+
+import aura.lang.std.String
+import aura.lang.collection.HashMap
+import aura.lang.collection.ArrayList
+
+fun main() {
+    println("═══ Debug HashMap ═══")
+
+    println("[1] HashMap<String, Int>()")
+    val m = HashMap<String, Int>()
+    m.put("a", 1)
+    m.put("b", 2)
+    println("  containsKey(a)=" + m.containsKey("a"))
+    println("  get(a)=" + m.get("a"))
+    println("  PASS")
+
+    println("[2] ArrayList<String>()")
+    val list = ArrayList<String>()
+    list.add("hello")
+    list.add("world")
+    println("  size=" + list.size)
+    println("  PASS")
+}

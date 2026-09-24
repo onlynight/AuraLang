@@ -1,0 +1,37 @@
+// 调试：List.add 是否需要回写
+fun withAssign(): String {
+    var l: List<String> = arrayListOf<String>()
+    l = l.add("alpha")
+    l = l.add("beta")
+    var out: String = "size=" + toStr(l.size) + ";"
+    var i: Int = 0
+    while (i < l.size) {
+        out = out + "[" + l.get(i) + "]"
+        i = i + 1
+    }
+    return out
+}
+
+fun noAssign(): String {
+    var l: List<String> = arrayListOf<String>()
+    l.add("alpha")
+    l.add("beta")
+    var out: String = "size=" + toStr(l.size) + ";"
+    var i: Int = 0
+    while (i < l.size) {
+        out = out + "[" + l.get(i) + "]"
+        i = i + 1
+    }
+    return out
+}
+
+fun charAtTest(): String {
+    val s: String = "42"
+    return "charCodeAt(1)=" + toStr(s.charCodeAt(1)) + " charAt(1)=" + s.charAt(1) + " sub=" + s.substring(1, 2)
+}
+
+fun main() {
+    println("withAssign: " + withAssign())
+    println("noAssign:   " + noAssign())
+    println("charAtTest: " + charAtTest())
+}

@@ -1,0 +1,20 @@
+// 调试：split 边界行为
+fun show(name: String, l: List<String>): String {
+    var out: String = name + " n=" + toStr(l.size) + ";"
+    var i: Int = 0
+    while (i < l.size) {
+        out = out + "[" + l.get(i) + "]"
+        i = i + 1
+    }
+    return out
+}
+
+fun main() {
+    println(show("empty.split(,) ", "".split(",")))
+    println(show("one.split(,)   ", "a".split(",")))
+    println(show("a,b.split(,)   ", "a,b".split(",")))
+    println(show("a,b.split(,)x2 ", "a,b".split("|")))
+    println(show("nl.split(nl)   ", "a\nb".split("\n")))
+    println(show("listOf1        ", listOf("")))
+    println(show("listOf3        ", listOf("a", "b", "c")))
+}

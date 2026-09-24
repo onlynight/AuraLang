@@ -1,0 +1,96 @@
+// tests/photon/S3/05_library_output_test.aura
+// E3: 库输出测试 — dll/so/lib
+//
+// 验证 PhotonPipeline 支持不同输出类型：
+//   - exe: 可执行文件（默认）
+//   - dll: Windows 动态链接库
+//   - so: Linux 共享库
+//   - lib: 静态库（.lib/.a）
+
+import aura.lang.std.String
+import aura.lang.std.Process
+
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonPipeline.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonSystemLinker.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonObjectWriter.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lowering.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/x86_64/X86Encoder.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/X86Emitter.aura"
+import "../../../aura/compiler/aura/lang/compiler/hir/Hir.aura"
+import "../../../aura/compiler/aura/lang/compiler/mir/SsaBuilder.aura"
+
+var pass: Int = 0
+var fail: Int = 0
+
+fun check(cond: Boolean, name: String): Unit {
+    if (cond) {
+        println("  PASS: " + name)
+        pass = pass + 1
+    } else {
+        println("  FAIL: " + name)
+        fail = fail + 1
+    }
+}
+
+fun main(): Unit {
+    println("═══ E3 库输出测试 ═══")
+
+    // ── 1. exe 输出类型（默认）──
+    println("[1] exe 输出类型")
+    val pipeline1 = PhotonPipelineUtils.emptyPipeline()
+    pipeline1.setOutputType("exe")
+    val linker1 = PhotonSystemLinkerUtils.defaultLinker()
+    linker1.setOutputType("exe")
+    val cmd1 = linker1.buildCommand()
+    check(cmd1.contains("/OUT:"), "exe link command contains /OUT")
+    check(!cmd1.contains("/DLL"), "exe link command does not contain /DLL")
+
+    // ── 2. dll 输出类型 ──
+    println("[2] dll 输出类型")
+    val linker2 = PhotonSystemLinkerUtils.defaultLinker()
+    linker2.setOutputType("dll")
+    val cmd2 = linker2.buildCommand()
+    check(cmd2.contains("/DLL"), "dll link command contains /DLL")
+    check(cmd2.contains(".dll"), "dll output path ends with .dll")
+    check(!cmd2.contains("/ENTRY:main"), "dll link command does not contain /ENTRY:main")
+
+    // ── 3. lib 输出类型 ──
+    println("[3] lib 输出类型")
+    val linker3 = PhotonSystemLinkerUtils.defaultLinker()
+    linker3.setOutputType("lib")
+    val cmd3 = linker3.buildCommand()
+    check(cmd3.contains(".lib"), "lib output path ends with .lib")
+
+    // ── 4. 完整管线 dll 编译 ──
+    println("[4] 完整管线 dll 编译")
+    val hir = HirBuilder.buildSimpleFunction()
+    val pipeline2 = PhotonPipelineUtils.emptyPipeline()
+    pipeline2.setOutputType("dll")
+    val result = pipeline2.compileHir(hir, "build/photon", "test_lib")
+    check(result.success, "dll pipeline success")
+    check(result.linkCommand.contains("/DLL"), "dll link command has /DLL")
+    check(result.executablePath.endsWith(".dll"), "dll output path is .dll")
+
+    // ── 结果 ──
+    println("")
+    println("═══ 结果 ═══")
+    println("PASS: " + toStr(pass) + "/" + toStr(pass + fail))
+    if (fail == 0) {
+        println("ALL PASS — 库输出就绪")
+    } else {
+        println("FAIL: " + toStr(fail))
+    }
+    Process.exit(if (fail == 0) 0 else 1)
+}
+
+/// 辅助类：构建简单 HIR 用于测试。
+class HirBuilder {
+    fun buildSimpleFunction(): Hir {
+        val hir = Hir()
+        // 空 HIR — 仅用于测试管线流程
+        return hir
+    }
+}

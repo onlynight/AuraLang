@@ -1,0 +1,9 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[for ( in ) {
+    
+}]]></content>
+    <tabTrigger>for</tabTrigger>
+    <scope>source.aura</scope>
+    <description>For loop</description>
+</snippet>

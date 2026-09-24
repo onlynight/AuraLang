@@ -1,0 +1,22 @@
+[
+    {
+        "caption": "Hat: Run (Hat)",
+        "command": "run_hat"
+    },
+    {
+        "caption": "Hat: Format Document",
+        "command": "format_hat"
+    },
+    {
+        "caption": "Hat: Symbol Outline",
+        "command": "hat_symbol_outline"
+    },
+    {
+        "caption": "Hat: Check (Hat)",
+        "command": "check_hat"
+    },
+    {
+        "caption": "Hat: Auto Indent",
+        "command": "hat_auto_indent"
+    }
+]

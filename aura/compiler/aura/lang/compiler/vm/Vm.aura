@@ -22,6 +22,7 @@ import aura.lang.std.Env
 import aura.lang.std.Time
 import aura.lang.native.Memory
 import aura.lang.native.Cpu
+import aura.lang.native.time.Clock
 import aura.lang.native.thread.ThreadOps
 import aura.lang.collection.HashMap
 import aura.lang.compiler.lexer.Span
@@ -62,6 +63,9 @@ class Vm {
     private var returnValue: Any = null
     private var error: String = ""
     private var exitCode: Int = 0
+
+    /// 时钟读取缓冲区（16 字节，惰性分配后复用；`Time.now` 原语用）。
+    private var clockBuf: Long = 0L
 
     // 栈：VmStack（原生列表 + 显式栈指针，O(1) push/pop，AOT 自举安全）
     private var stack: VmStack = VmStack()
@@ -1051,7 +1055,10 @@ class Vm {
         // ── Time ──
         else if (funcName == "Time.now" || funcName == "aura.lang.std.Time.now"
             || funcName == "Time.sinceEpoch" || funcName == "aura.lang.std.Time.sinceEpoch") {
-            this.stack.push(Time.getNowMs())
+            // 不能写 `Time.getNowMs()`：std 的纯 Aura 函数不在本模块编译单元的
+            // fn_index 里 → `未解析的函数调用 'Time.getNowMs'`。
+            // 直接走原生时钟接口（与 std `ClockImpl.timeMs()` 同一条实现路径）。
+            this.stack.push(this.clockNowMs())
             return
         }
 
@@ -1233,15 +1240,34 @@ class Vm {
     /// `.auc` 的 `xs[0]`（`List<Int>`）走的就是 `GET_INDEX`（实测 Rust VM 输出
     /// `x0=1`），若数组另用「元素内联」布局，同一个操作码无法兼顾，且列表会被
     /// 当成数组读 → 读到 items 指针当元素（实测访问违规崩溃）。
+    /// 当前 Unix 时间戳（毫秒），基于 `Clock.clockGettime(CLOCK_REALTIME)`。
+    ///
+    /// 缓冲区惰性分配后复用（每次取时间都 malloc 会在长循环里持续泄漏）；
+    /// 读取失败（返回值非 0）时返回 0，与 VM 其余原语的容错风格一致。
+    private fun clockNowMs(): Long {
+        if (this.clockBuf == 0L) {
+            this.clockBuf = Memory.alloc(16L)
+        }
+        if (this.clockBuf == 0L) { return 0L }
+        val rc: Long = Clock.clockGettime(0, this.clockBuf)
+        if (rc != 0L) { return 0L }
+        val sec: Long = Memory.read64(this.clockBuf)
+        val nsec: Long = Memory.read64(this.clockBuf + 8L)
+        return sec * 1000L + nsec / 1000000L
+    }
+
     private fun newArray(size: Any): Unit {
         val count: Int = VmOps.toI32(toStr(size))
         val ptr: Long = Memory.alloc(24)
-        val items: Long = Memory.alloc((count * 8).toLong())
-        Memory.write64(ptr, count.toLong())
-        Memory.write64(ptr + 8, count.toLong())
+        // Int → Long 用 `as Long`（`.toLong()` 重名无法解析）
+        val itemsBytes: Long = (count * 8) as Long
+        val countL: Long = count as Long
+        val items: Long = Memory.alloc(itemsBytes)
+        Memory.write64(ptr, countL)
+        Memory.write64(ptr + 8, countL)
         Memory.write64(ptr + 16, items)
         // 初始化为 0
-        Memory.set(items, 0, (count * 8).toLong())
+        Memory.set(items, 0, itemsBytes)
         this.stack.push(ptr)
     }
 
@@ -1725,7 +1751,7 @@ class Vm {
 
     private fun channelNew(): Unit {
         val cap: Any = this.stack.pop()
-        var capacity: Long = VmOps.toI32(toStr(cap)).toLong()
+        var capacity: Long = VmOps.toI32(toStr(cap)) as Long
         if (capacity <= 0L) { capacity = 64L }
         val addr: Long = Memory.alloc(32L + capacity * 8L)
         Memory.write64(addr, 0L)

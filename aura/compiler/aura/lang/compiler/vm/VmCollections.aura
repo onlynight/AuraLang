@@ -3,7 +3,7 @@ package aura.lang.compiler.vm
 // ─────────────────────────────────────────────────────────────
 // VM 集合操作 — P0 完整指令集支持
 //
-// **布局必须与 `aura.lang.std.collection.Collections` 完全一致**，因为 VM 执行的
+// **布局必须与 `aura.lang.collection.Collections` 完全一致**，因为 VM 执行的
 // `.auc` 是由 Rust 编译器产出的、其内建集合调用（`listOf`/`Collections.getAt`
 // 等）都按该布局访问内存：
 //

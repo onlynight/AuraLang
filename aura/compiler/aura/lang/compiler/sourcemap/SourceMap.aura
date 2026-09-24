@@ -62,7 +62,9 @@ class SourceFile {
         this.id = id
         this.name = name
         this.source = source
-        this.lineStarts = [0]
+        // 必须用 listOf：列表字面量 `[…]` 在本运行时求值为 null
+        //（字段初始化尤其致命，后续 add/取值全部落在 null 上）
+        this.lineStarts = listOf(0)
         var i: Int = 0
         while (i < source.length) {
             if (source.charCodeAt(i) == 10) {

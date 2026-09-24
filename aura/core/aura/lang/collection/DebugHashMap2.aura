@@ -1,0 +1,13 @@
+// aura:///aura/lang/collection/DebugHashMap2.aura
+package aura.lang.collection
+
+import aura.lang.std.String
+import aura.lang.collection.HashMap
+
+fun main() {
+    println("═══ Debug HashMap2 ═══")
+    println("[1] HashMap<String, Any>()")
+    val m = HashMap<String, Any>()
+    m.put("a", 1)
+    println("  PASS")
+}

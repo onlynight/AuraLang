@@ -1,0 +1,268 @@
+%YAML 1.2
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# HAT v3.0 syntax highlighting (Sublime Text 4)
+#
+# Mirrors the VSCode extension grammar verbatim in scope names so one theme
+# can cover both editors:
+#   tools/ide-extension/hat-vscode-extension/syntaxes/hat.tmLanguage.json
+# Design notes: docs/photon/hat-highlight-scheme.md
+#
+# Architecture — a line sigil plus independent token rules:
+#
+#   1. `meta-sigil` eats the leading `;` and indentation once, so no other
+#      rule has to repeat `(?:;\s*)?`. `;` is a format marker, NOT a comment.
+#   2. The four line-level contexts only *name* things (module header,
+#      metadata, declaration, basic-block label) — they never swallow a line.
+#   3. Every instruction / literal / type / SSA value / punctuation mark is
+#      matched by its own token rule, so a line highlights correctly even when
+#      no line-level rule matches it.
+#
+# There are no comment rules: HAT has no line comments.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: HAT
+scope: source.hat
+version: 2
+
+file_extensions:
+  - hat
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Contexts
+# ═══════════════════════════════════════════════════════════════════════════
+
+contexts:
+
+  main:
+    - include: module-header
+    - include: meta-key-value
+    - include: decl-line
+    - include: bb-label
+    - include: tokens
+    - include: meta-sigil
+
+  # ── Line sigil ──────────────────────────────────────────────────────────
+  # The leading `;` + indentation of every HAT line. Not a comment: the
+  # serializer prefixes every line with it, the parser strips it back off.
+  # Listed last in `main` so the more specific line rules win at position 0.
+
+  meta-sigil:
+    - match: '^;[ \t]*'
+      scope: punctuation.definition.meta.hat
+
+  # ── Metadata header ─────────────────────────────────────────────────────
+
+  module-header:
+    - match: '^[ \t]*(?:;[ \t]*)?module\s+([\w.]+)\s+target\s+([\w.-]+)'
+      captures:
+        1: entity.name.type.module.hat
+        2: keyword.other.target.hat
+
+  meta-key-value:
+    - match: '^[ \t]*(?:;[ \t]*)?(schema|source)=([^\s]+)'
+      captures:
+        1: keyword.other.meta.hat
+        2: string.unquoted.hat
+
+  # ── Declaration line ────────────────────────────────────────────────────
+  # Only the keyword is consumed here; the rest of the line is handled by
+  # `decl-body`, which reuses `tokens` so `@n: Int` / `-> Int` still color.
+
+  decl-line:
+    - match: '^[ \t]*(?:;[ \t]*)?(@fn|@extern|@struct|@enum)\b'
+      captures:
+        1: keyword.declaration.hat
+      push: decl-body
+
+  decl-body:
+    - match: '$\n?'
+      pop: true
+    - match: '[A-Za-z_][\w.]*(?=\s*\()'
+      scope: entity.name.function.hat
+    - match: '@[A-Z][A-Za-z0-9_]*'
+      scope: entity.name.type.hat
+    - match: '@[\w]+(?=\s*:)'
+      scope: variable.parameter.hat
+    - match: '->'
+      scope: keyword.other.arrow.hat
+    - include: tokens
+    - match: '\b[A-Z][A-Z0-9_]*\b'
+      scope: variable.other.enummember.hat
+
+  # ── Basic block label ───────────────────────────────────────────────────
+
+  bb-label:
+    - match: '^[ \t]*(?:;[ \t]*)?(bb)\s+([\w.]+)\s*:'
+      captures:
+        1: keyword.other.bb.hat
+        2: entity.name.type.label.hat
+
+  # ── Token layer ─────────────────────────────────────────────────────────
+  # Order matters: the most specific rule wins, so target/quoted forms come
+  # before the bare opcodes, and opcodes come before the SSA-value fallback.
+
+  tokens:
+    - include: span-annotation
+    - include: br-if-target
+    - include: br-target
+    - include: call-target
+    - include: op-call
+    - include: op-phi
+    - include: op-terminator
+    - include: op-const
+    - include: op-convert
+    - include: op-cmp-sub
+    - include: op-cmp
+    - include: op-arith
+    - include: op-logical
+    - include: op-bitwise
+    - include: op-string
+    - include: op-memory
+    - include: op-collection
+    - include: op-object
+    - include: literal
+    - include: type
+    - include: attribute
+    - include: field
+    - include: value
+    - include: punct
+
+  span-annotation:
+    - match: '@span\s+(L\d+:\d+-\d+)'
+      captures:
+        1: comment.block.span.hat
+
+  br-if-target:
+    - match: '(@br_if)(\s+)(@[\w.]+)(\s*=>\s*)(@[\w.]+)(\s*,\s*)(@[\w.]+)'
+      captures:
+        1: keyword.other.instruction.terminator.hat
+        2: punctuation.separator.hat
+        3: variable.ssaval.hat
+        4: keyword.other.arrow.hat
+        5: entity.name.type.label.hat
+        6: punctuation.separator.hat
+        7: entity.name.type.label.hat
+
+  br-target:
+    - match: '(@br)(\s+)(@[\w.]+)'
+      captures:
+        1: keyword.other.instruction.terminator.hat
+        2: punctuation.separator.hat
+        3: entity.name.type.label.hat
+
+  call-target:
+    - match: '(@call)(\s+)(@[\w.]+)'
+      captures:
+        1: keyword.other.instruction.call.hat
+        2: punctuation.separator.hat
+        3: entity.name.function.call.hat
+
+  op-call:
+    - match: '@call\b'
+      scope: keyword.other.instruction.call.hat
+
+  op-phi:
+    - match: '@phi\b'
+      scope: keyword.other.instruction.phi.hat
+
+  op-terminator:
+    - match: '@(br_if|br|ret)\b'
+      scope: keyword.other.instruction.terminator.hat
+
+  op-const:
+    - match: '@(i32_const|i64_const|f64_const|f32_const|const_str|bool_const|null)\b'
+      scope: keyword.other.instruction.constant.hat
+
+  op-convert:
+    - match: '@(i32_to_f64|f64_to_i32|i32_to_str|f64_to_str|str_to_i32)\b'
+      scope: keyword.other.instruction.conversion.hat
+
+  op-cmp-sub:
+    - match: '@(?:i32|f64|str)_(?:eq|ne|slt|sgt|sle|sge|ult|ugt|lt|le|gt|ge)\b'
+      scope: keyword.other.instruction.comparison.hat
+
+  op-cmp:
+    - match: '@(icmp|fcmp)\b'
+      scope: keyword.other.instruction.comparison.hat
+
+  op-arith:
+    - match: '@(add|sub|mul|div|rem|neg)\b'
+      scope: keyword.other.instruction.arithmetic.hat
+
+  op-logical:
+    - match: '@(and|or|xor|not)\b'
+      scope: keyword.other.instruction.logical.hat
+
+  op-bitwise:
+    - match: '@(band|bor|bxor|shl|shr|ushr)\b'
+      scope: keyword.other.instruction.bitwise.hat
+
+  op-string:
+    - match: '@(str_concat|str_len|str_sub|str_char)\b'
+      scope: keyword.other.instruction.string.hat
+
+  op-memory:
+    - match: '@(alloc|store|load)\b'
+      scope: keyword.other.instruction.memory.hat
+
+  op-collection:
+    - match: '@(alloc_list|alloc_map|list_set|list_get|list_len|map_set|map_get)\b'
+      scope: keyword.other.instruction.collection.hat
+
+  op-object:
+    - match: '@(new|field_set|field)\b'
+      scope: keyword.other.instruction.object.hat
+
+  # ── Literals ────────────────────────────────────────────────────────────
+
+  literal:
+    - match: '"(?:[^"\\]|\\.)*"'
+      scope: string.quoted.double.hat
+    - match: '\b(true|false)\b'
+      scope: constant.language.hat
+    - match: '-?\d+\.\d+(?:[eE][+-]?\d+)?'
+      scope: constant.numeric.float.hat
+    - match: '-?\b\d+\b'
+      scope: constant.numeric.integer.hat
+
+  # ── Types ───────────────────────────────────────────────────────────────
+
+  type:
+    - match: '!(?:stackslot|list|map|ptr|fn)\b'
+      scope: storage.type.special.hat
+    - match: '\b(?:Int|Float|Bool|Unit|String|Any|Char|Void)\b'
+      scope: storage.type.basic.hat
+    - match: '@[A-Z][A-Za-z0-9_]*'
+      scope: storage.type.user.hat
+
+  # ── Attribute key / field access ────────────────────────────────────────
+
+  attribute:
+    - match: '\b(?:size|align|count)\b'
+      scope: variable.attribute.hat
+
+  field:
+    - match: '\.\w+'
+      scope: variable.field.hat
+
+  # ── SSA values (fallback) ───────────────────────────────────────────────
+
+  value:
+    - match: '@"(?:[^"\\]|\\.)*"'
+      scope: variable.ssaval.literal.hat
+    - match: '@[A-Za-z_][\w]*(?:@\d+)?'
+      scope: variable.ssaval.hat
+
+  # ── Punctuation ─────────────────────────────────────────────────────────
+  # `=>` must precede `=` so the arrow is not split into two assignments.
+
+  punct:
+    - match: '=>|->'
+      scope: keyword.other.arrow.hat
+    - match: '='
+      scope: keyword.other.assignment.hat
+    - match: '[()\[\]{}]'
+      scope: punctuation.section.hat
+    - match: '[:,]'
+      scope: punctuation.separator.hat

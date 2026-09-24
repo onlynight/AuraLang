@@ -1,0 +1,256 @@
+// aura:///aura/lang/compiler/backend/photon/PhotonExceptionHandler.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// Photon 异常处理 — setjmp/longjmp + 异常表
+//
+// 对应后端异常处理阶段（Phase E+）。
+//
+// ── 设计原则 ──
+//
+// 1. 使用 setjmp/longjmp 实现非局部跳转（可移植到 Windows/Linux/macOS）
+// 2. 异常表记录每个 catch 块的入口地址和异常类型
+// 3. 抛出异常时遍历异常表，找到匹配的 catch 块
+//
+// ── 异常表布局 ──
+//
+//   exceptionTable[0] = { handlerAddr, exceptionType }
+//   exceptionTable[1] = { handlerAddr, exceptionType }
+//   ...
+//
+//   handlerAddr: catch 块入口地址
+//   exceptionType: 异常类型 ID（0 = 所有异常）
+//
+// ── 运行时支持 ──
+//
+//   setjmp(buffer)    — 保存当前执行上下文
+//   longjmp(buffer, 1) — 跳转到保存的上下文
+//   throw(exception)   — 抛出异常（遍历异常表）
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.backend.photon.x86_64.X86Encoder
+
+/// Photon 异常处理器：生成异常处理代码和异常表。
+class PhotonExceptionHandler {
+
+    /// 异常表条目（逗号分隔的 "handlerAddr|exceptionType" 格式）。
+    var exceptionTable: String = ""
+
+    /// 异常计数器。
+    private var exceptionCount: Int = 0
+
+    /// 异常类型 ID 分配器。
+    private var typeIdCounter: Int = 0
+
+    /// 输出指令列表。
+    private var outputInstrs: List<String> = arrayListOf<String>()
+
+    init() {
+        this.exceptionTable = ""
+        this.exceptionCount = 0
+        this.typeIdCounter = 0
+        this.outputInstrs = arrayListOf<String>()
+    }
+
+    // ── 异常类型注册 ──
+
+    /// 注册异常类型，返回类型 ID。
+    fun registerExceptionType(typeName: String): Int {
+        val typeId: Int = this.typeIdCounter
+        this.typeIdCounter = this.typeIdCounter + 1
+        return typeId
+    }
+
+    // ── try/catch 生成 ──
+
+    /// 生成 try/catch 代码。
+    ///
+    /// @param tryBody    try 块入口标签
+    /// @param catchBody  catch 块入口标签
+    /// @param exceptionType  捕获的异常类型 ID（0 = 所有异常）
+    fun emitTryCatch(tryBody: String, catchBody: String, exceptionType: Int): Unit {
+        // 保存 setjmp 缓冲区到栈上
+        val bufAddr: Int = -8  // 栈偏移（rsp-8）
+        this.outputInstrs.add("lea rax, [rsp+" + toStr(bufAddr) + "]")
+        this.outputInstrs.add("call setjmp")
+        this.outputInstrs.add("test eax, eax")
+        this.outputInstrs.add("jz " + tryBody + "  ; 首次执行跳转到 try")
+
+        // 从 setjmp 返回（异常路径）
+        // 异常已匹配，跳转到 catch 块
+        this.outputInstrs.add("jmp " + catchBody)
+
+        // 注册异常处理器
+        this.exceptionTable = this.exceptionTable + catchBody + "|" + toStr(exceptionType) + "\n"
+        this.exceptionCount = this.exceptionCount + 1
+    }
+
+    // ── throw 生成 ──
+
+    /// 生成 throw 代码。
+    ///
+    /// @param exceptionAddr  异常对象地址（寄存器或栈地址）
+    fun emitThrow(exceptionAddr: String): Unit {
+        // 调用 throw 函数（遍历异常表）
+        this.outputInstrs.add("mov rax, " + exceptionAddr)
+        this.outputInstrs.add("call throwException")
+    }
+
+    // ── finally 生成 ──
+
+    /// 生成 finally 代码（简化：始终执行）。
+    ///
+    /// @param finallyBody  finally 块入口标签
+    fun emitFinally(finallyBody: String): Unit {
+        // 简化实现：在 try/catch 后直接跳转到 finally
+        this.outputInstrs.add("jmp " + finallyBody)
+    }
+
+    // ── 异常表生成 ──
+
+    /// 生成异常表机器码。
+    ///
+    /// @param encoder      x86 编码器
+    /// @param tableBase    异常表基址（栈偏移或寄存器）
+    fun generateExceptionTable(encoder: X86Encoder, tableBase: Int): Unit {
+        if (this.exceptionTable == "") {
+            return
+        }
+
+        // 异常表存储在 .rdata 段
+        // 每个条目 16 字节：handlerAddr (8 bytes) + exceptionType (8 bytes)
+        val entries: List<String> = this.splitLines(this.exceptionTable)
+        var i: Int = 0
+        while (i < entries.size) {
+            val entry: String = entries[i]
+            val parts: List<String> = this.splitBar(entry)
+            if (parts.size >= 2) {
+                val handler: String = parts[0]
+                val type: String = parts[1]
+                // 生成异常表条目（简化：直接写入常量）
+                encoder.emitMov64("rax", 0)  // placeholder
+                encoder.emitMov64("rbx", 0)  // placeholder
+            }
+            i = i + 1
+        }
+    }
+
+    // ── 运行时函数 ──
+
+    /// 生成运行时支持函数（setjmp/longjmp/throw）。
+    ///
+    /// @param encoder      x86 编码器
+    fun generateRuntimeFuncs(encoder: X86Encoder): Unit {
+        // setjmp/longjmp 由 CRT 提供，无需生成
+        // throwException 需要实现
+        // 简化：仅生成调用存根
+    }
+
+    // ── 工具方法 ──
+
+    /// 获取异常表条目数。
+    fun getExceptionCount(): Int {
+        return this.exceptionCount
+    }
+
+    /// 获取异常表字符串。
+    fun getExceptionTableStr(): String {
+        return this.exceptionTable
+    }
+
+    /// 获取输出指令列表。
+    fun getOutputInstrs(): List<String> {
+        return this.outputInstrs
+    }
+
+    // ── 字符串工具 ──
+
+    /// 按逗号分隔。
+    private fun splitLines(text: String): List<String> {
+        if (text == "") {
+            return arrayListOf<String>()
+        }
+        val result: List<String> = arrayListOf<String>()
+        var start: Int = 0
+        var pos: Int = 0
+        val len: Int = text.length
+        while (pos < len) {
+            if (pos == len || text[pos] == '\n') {
+                result.add(text.substring(start, pos))
+                start = pos + 1
+            }
+            pos = pos + 1
+        }
+        return result
+    }
+
+    /// 按竖线分隔。
+    private fun splitBar(text: String): List<String> {
+        if (text == "") {
+            return arrayListOf<String>()
+        }
+        val result: List<String> = arrayListOf<String>()
+        var start: Int = 0
+        var pos: Int = 0
+        val len: Int = text.length
+        while (pos < len) {
+            if (pos == len || text[pos] == '|') {
+                result.add(text.substring(start, pos))
+                start = pos + 1
+            }
+            pos = pos + 1
+        }
+        return result
+    }
+
+    /// 整数转字符串。
+    private fun toStr(n: Int): String {
+        if (n == 0) {
+            return "0"
+        }
+        var s: String = ""
+        var v: Int = n
+        var neg: Boolean = false
+        if (v < 0) {
+            neg = true
+            v = -v
+        }
+        while (v > 0) {
+            val d: Int = v % 10
+            s = this.digitToChar(d) + s
+            v = v / 10
+        }
+        if (neg) {
+            s = "-" + s
+        }
+        return s
+    }
+
+    /// 数字转字符。
+    private fun digitToChar(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        return "9"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// PhotonExceptionHandlerUtils — 工具对象
+// ─────────────────────────────────────────────────────────────
+
+/// PhotonExceptionHandler 工具方法。
+object PhotonExceptionHandlerUtils {
+
+    /// 创建空异常处理器。
+    fun emptyHandler(): PhotonExceptionHandler {
+        return PhotonExceptionHandler()
+    }
+}

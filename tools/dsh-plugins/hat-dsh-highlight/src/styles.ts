@@ -1,0 +1,128 @@
+/**
+ * Viewport CSS for the HAT code viewer.
+ *
+ * Two concerns, one stylesheet:
+ *
+ *   1. `--HAT-*` color variables, in the light values on `:root` and the dark
+ *      values under `body[data-ds-dark-theme]`. Tokens reference these
+ *      variables (see theme.ts), so a theme switch repaints without re-running
+ *      the tokenizer.
+ *
+ *   2. The viewer's own layout, scoped under `[data-hat-code]` so it cannot
+ *      collide with host styles, and consuming DSH's `--dsw-*` tokens for
+ *      surfaces and text so it reads as part of the host.
+ *
+ * Installed as `<style data-plugin-css="...">` tags the way DSH's own
+ * dsh-client-ui-theme does it, which is what makes the HMR receiver track
+ * changes.
+ */
+
+import { themeVariableCss } from './theme.js';
+
+/** Component CSS, scoped under `[data-hat-code]`. */
+export const VIEWER_CSS = /* css */ `
+[data-hat-code]{
+  display:flex;
+  flex-direction:column;
+  flex:1 1 auto;
+  min-height:0;
+  height:100%;
+  overflow:hidden;
+  font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  font-size:13px;
+  line-height:20px;
+  color:var(--HAT-foreground);
+}
+[data-hat-code] [data-hat-banner]{
+  flex:none;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:5px 12px;
+  border-bottom:1px solid var(--dsw-alias-border-l2,#21262d);
+  background:var(--dsw-alias-markdown-code-block-banner,transparent);
+  font-family:var(--dsw-font-family,sans-serif);
+  font-size:12px;
+  line-height:18px;
+  color:var(--dsw-alias-label-secondary,inherit);
+}
+[data-hat-code] [data-hat-lang]{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  letter-spacing:0.02em;
+}
+[data-hat-code] [data-hat-status]{
+  margin-left:auto;
+  color:var(--dsw-alias-label-tertiary,inherit);
+}
+[data-hat-code] [data-hat-copy]{
+  margin-left:auto;
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  padding:2px 8px;
+  border:1px solid var(--dsw-alias-border-l2,#21262d);
+  border-radius:6px;
+  background:transparent;
+  color:var(--dsw-alias-label-secondary,inherit);
+  font-family:var(--dsw-font-family,sans-serif);
+  font-size:12px;
+  line-height:16px;
+  cursor:pointer;
+}
+[data-hat-code] [data-hat-copy]:hover{
+  background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,0.12));
+  color:var(--dsw-alias-label-primary,inherit);
+}
+[data-hat-code] [data-hat-copy][data-copied="true"]{
+  color:var(--dsw-alias-state-success-primary,inherit);
+  border-color:var(--dsw-alias-state-success-primary,inherit);
+}
+[data-hat-code] [data-hat-scroll]{
+  flex:1 1 auto;
+  min-height:0;
+  overflow:auto;
+  padding:8px 0 12px;
+  position:relative;
+  scrollbar-color:var(--dsw-alias-scrollbar-bg-l1,transparent) transparent;
+}
+[data-hat-code] [data-hat-grid]{
+  display:grid;
+  grid-template-columns:max-content minmax(0,1fr);
+  grid-auto-flow:row;
+  grid-auto-rows:min-content;
+  align-items:baseline;
+  width:100%;
+}
+[data-hat-code] [data-hat-num]{
+  padding:0 12px 0 16px;
+  text-align:right;
+  white-space:pre;
+  color:var(--dsw-alias-label-tertiary,inherit);
+  user-select:none;
+}
+[data-hat-code] [data-hat-text]{
+  padding-right:16px;
+  white-space:pre;
+  overflow-wrap:normal;
+  word-break:normal;
+}
+[data-hat-code][data-wrap="true"] [data-hat-text]{
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+}
+[data-hat-code] [data-hat-empty]{
+  padding:16px;
+  color:var(--dsw-alias-label-tertiary,inherit);
+  font-family:var(--dsw-font-family,sans-serif);
+  font-size:13px;
+}
+`;
+
+/**
+ * Every stylesheet this plugin installs.
+ */
+export const PLUGIN_CSS: ReadonlyArray<readonly [string, string]> = [
+  ['HAT-theme-variables.css', themeVariableCss()],
+  ['HAT-code-viewer.css', VIEWER_CSS],
+];

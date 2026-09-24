@@ -1,0 +1,168 @@
+// aura:///tests/hat_parser_tests.aura
+// HAT v2.0 解析器单元测试
+//
+// 运行: aura run tests/hat_parser_tests.aura
+
+import aura.lang.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/mir/SsaMir.aura"
+import "../aura/compiler/aura/lang/compiler/mir/TypeRegistry.aura"
+import "../aura/compiler/aura/lang/compiler/hir/hat/HatParser.aura"
+
+fun main() {
+    println("=== HAT v2.0 Parser Tests ===")
+    println()
+
+    val t = TestRunner()
+
+    // ── 测试 1: 空模块 ──
+    t.begin("HatParser.emptyModule")
+    val emptyHat: String = "; module test target x86_64\n; schema=HAT/2.0\n"
+    val emptyResult: MirSsaProgram = HatParserUtils.parseHat(emptyHat)
+    t.assertEq(emptyResult.functionCount, 0, "empty module has 0 functions")
+    t.assertEq(emptyResult.blockCount, 0, "empty module has 0 blocks")
+
+    // ── 测试 2: Hello World ──
+    t.begin("HatParser.helloWorld")
+    val helloHat: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn main() -> Unit\n" +
+        "  bb entry:\n" +
+        "    @t0 = @const_str \"Hello, World!\" : String\n" +
+        "    @ret () : Unit\n"
+
+    val helloResult: MirSsaProgram = HatParserUtils.parseHat(helloHat)
+    t.assertEq(helloResult.functionCount, 1, "hello world has 1 function")
+    t.assertEq(helloResult.blockCount, 1, "hello world has 1 block")
+    t.assertTrue(helloResult.valueCount > 0, "hello world has values")
+
+    // ── 测试 3: 函数调用 ──
+    t.begin("HatParser.functionCall")
+    val callHat: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn add(@a: Int, @b: Int) -> Int\n" +
+        "  bb entry:\n" +
+        "    @t0 = @add(@a, @b) : Int\n" +
+        "    @ret @t0 : Int\n" +
+        "\n" +
+        "@fn main() -> Unit\n" +
+        "  bb entry:\n" +
+        "    @t0 = @i32_const 3 : Int\n" +
+        "    @t1 = @i32_const 4 : Int\n" +
+        "    @t2 = @call @add(@t0, @t1) : Int\n" +
+        "    @ret () : Unit\n"
+
+    val callResult: MirSsaProgram = HatParserUtils.parseHat(callHat)
+    t.assertEq(callResult.functionCount, 2, "call test has 2 functions")
+    t.assertTrue(callResult.blockCount >= 2, "call test has >= 2 blocks")
+
+    // ── 测试 4: 条件分支 ──
+    t.begin("HatParser.conditional")
+    val condHat: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn max(@a: Int, @b: Int) -> Int\n" +
+        "  bb entry:\n" +
+        "    @t0 = @icmp @i32_sgt(@a, @b) : Bool\n" +
+        "    @br_if @t0 => @then, @else\n" +
+        "\n" +
+        "  bb then:\n" +
+        "    @ret @a : Int\n" +
+        "\n" +
+        "  bb else:\n" +
+        "    @ret @b : Int\n"
+
+    val condResult: MirSsaProgram = HatParserUtils.parseHat(condHat)
+    t.assertEq(condResult.functionCount, 1, "conditional has 1 function")
+    t.assertEq(condResult.blockCount, 3, "conditional has 3 blocks")
+
+    // ── 测试 5: While 循环 (Phi 节点) ──
+    t.begin("HatParser.whileLoop")
+    val loopHat: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn sum_to(@n: Int) -> Int\n" +
+        "  bb entry:\n" +
+        "    @sum = @i32_const 0 : Int\n" +
+        "    @i@0 = @i32_const 1 : Int\n" +
+        "    @br @check\n" +
+        "\n" +
+        "  bb check:\n" +
+        "    @sum@1 = @phi(@sum, @sum@2) : Int\n" +
+        "    @i@1 = @phi(@i@0, @i@2) : Int\n" +
+        "    @t0 = @icmp @i32_sle(@i@1, @n) : Bool\n" +
+        "    @br_if @t0 => @body, @exit\n" +
+        "\n" +
+        "  bb body:\n" +
+        "    @sum@2 = @add(@sum@1, @i@1) : Int\n" +
+        "    @t1 = @i32_const 1 : Int\n" +
+        "    @i@2 = @add(@i@1, @t1) : Int\n" +
+        "    @br @check\n" +
+        "\n" +
+        "  bb exit:\n" +
+        "    @ret @sum@1 : Int\n"
+
+    val loopResult: MirSsaProgram = HatParserUtils.parseHat(loopHat)
+    t.assertEq(loopResult.functionCount, 1, "while loop has 1 function")
+    t.assertEq(loopResult.blockCount, 4, "while loop has 4 blocks")
+    t.assertTrue(loopResult.valueCount > 0, "while loop has values")
+
+    // ── 测试 6: 字符串操作 ──
+    t.begin("HatParser.stringOps")
+    val strHat: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn greet(@name: String) -> String\n" +
+        "  bb entry:\n" +
+        "    @t0 = @const_str \"Hello, \" : String\n" +
+        "    @t1 = @str_concat(@t0, @name) : String\n" +
+        "    @t2 = @const_str \"!\" : String\n" +
+        "    @msg = @str_concat(@t1, @t2) : String\n" +
+        "    @ret @msg : String\n"
+
+    val strResult: MirSsaProgram = HatParserUtils.parseHat(strHat)
+    t.assertEq(strResult.functionCount, 1, "string ops has 1 function")
+    t.assertTrue(strResult.valueCount >= 4, "string ops has >= 4 values")
+
+    // ── 测试 7: 错误处理 - 缺少终止符 ──
+    t.begin("HatParser.missingTerminator")
+    val noTermHat: String =
+        "; module main target x86_64\n" +
+        "; schema=HAT/2.0\n" +
+        "\n" +
+        "@fn test() -> Unit\n" +
+        "  bb entry:\n" +
+        "    @t0 = @i32_const 1 : Int\n"
+
+    val noTermResult: MirSsaProgram = HatParserUtils.parseHat(noTermHat)
+    t.assertEq(noTermResult.functionCount, 1, "missing terminator test has 1 function")
+
+    // ── 测试 8: 错误处理 - 空文件 ──
+    t.begin("HatParser.emptyFile")
+    val emptyFileResult: MirSsaProgram = HatParserUtils.parseHat("")
+    t.assertEq(emptyFileResult.functionCount, 0, "empty file has 0 functions")
+
+    // ── 测试 9: 解析器工具对象 ──
+    t.begin("HatParserUtils")
+    t.assertEq(HatParserUtils.strToInt("42"), 42, "strToInt 42")
+    t.assertEq(HatParserUtils.strToInt("-1"), -1, "strToInt -1")
+    t.assertEq(HatParserUtils.strToInt(""), 0, "strToInt empty")
+    t.assertEq(HatParserUtils.toStr(42), "42", "toStr 42")
+    t.assertEq(HatParserUtils.toStr(0), "0", "toStr 0")
+
+    // ── 报告结果 ──
+    val failures = t.report()
+    println()
+    if (failures == 0) {
+        println("RESULT: PASS — All HAT parser tests passed")
+    } else {
+        println("RESULT: FAIL (" + toStr(failures) + " failures)")
+    }
+}

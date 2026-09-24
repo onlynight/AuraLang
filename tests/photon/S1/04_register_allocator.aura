@@ -1,0 +1,108 @@
+// tests/photon/S1/04_register_allocator.aura
+// ═════════════════════════════════════════════════════════════
+// RegisterAllocator 单元测试
+// 运行：aura run tests/photon/S1/04_register_allocator.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/RegisterAllocator.aura"
+
+fun toStr(n: Int): String {
+    if (n == 0) { return "0" }
+    var neg: Boolean = false
+    if (n < 0) { neg = true; n = -n }
+    var result: String = ""
+    while (n > 0) {
+        val digit: Int = n % 10
+        var dStr: String = ""
+        if (digit == 0) { dStr = "0" } else if (digit == 1) { dStr = "1" }
+        else if (digit == 2) { dStr = "2" } else if (digit == 3) { dStr = "3" }
+        else if (digit == 4) { dStr = "4" } else if (digit == 5) { dStr = "5" }
+        else if (digit == 6) { dStr = "6" } else if (digit == 7) { dStr = "7" }
+        else if (digit == 8) { dStr = "8" } else if (digit == 9) { dStr = "9" }
+        result = dStr + result
+        n = n / 10
+    }
+    if (neg) { result = "-" + result }
+    return result
+}
+
+fun main() {
+    println("═══ RegisterAllocator 测试 ═══")
+    var pass: Int = 0
+    var fail: Int = 0
+
+    // ── [1] 空 DAG ──
+    println("[1] 空 DAG")
+    val d1 = MachineDagUtils.emptyDag()
+    val r1 = RegisterAllocatorUtils.emptyAllocator()
+    r1.allocate(d1)
+    if (r1.getSpillSlots() == 0) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // ── [2] 单节点 DAG ──
+    println("[2] 单节点 DAG")
+    val d2 = MachineDagUtils.emptyDag()
+    val n2 = d2.addNode("Value", "Const", 0, "", "", "", -1, "42")
+    val r2 = RegisterAllocatorUtils.emptyAllocator()
+    r2.allocate(d2)
+    val reg2 = d2.nodeOf(n2).reg
+    if (reg2 != "") { pass = pass + 1; println("  reg=" + reg2) }
+    else { fail = fail + 1 }
+
+    // ── [3] 两节点（无干扰，允许相同寄存器）──
+    println("[3] 两节点（无干扰）")
+    val d3 = MachineDagUtils.emptyDag()
+    val n3a = d3.addNode("Value", "Const", 0, "", "", "", -1, "10")
+    val n3b = d3.addNode("Value", "Const", 0, "", "", "", -1, "20")
+    val r3 = RegisterAllocatorUtils.emptyAllocator()
+    r3.allocate(d3)
+    val ra = d3.nodeOf(n3a).reg
+    val rb = d3.nodeOf(n3b).reg
+    if (ra != "" && rb != "") {
+        pass = pass + 1
+        println("  reg_a=" + ra + " reg_b=" + rb)
+    } else { fail = fail + 1 }
+
+    // ── [4] 带干扰的 DAG（Add 操作引用两个 Const）──
+    println("[4] 带干扰的 DAG")
+    val d4 = MachineDagUtils.emptyDag()
+    val n4a = d4.addNode("Value", "Const", 0, "", "", "", -1, "100")
+    val n4b = d4.addNode("Value", "Const", 0, "", "", "", -1, "200")
+    val r4 = RegisterAllocatorUtils.emptyAllocator()
+    r4.allocate(d4)
+    if (d4.nodeOf(n4a).reg != "") {
+        pass = pass + 1
+        println("  reg_a=" + d4.nodeOf(n4a).reg)
+    } else { fail = fail + 1 }
+
+    // ── [5] 多节点寄存器分配 ──
+    println("[5] 多节点寄存器分配")
+    val d5 = MachineDagUtils.emptyDag()
+    var i: Int = 0
+    var nodeIds: List<Int> = arrayListOf<Int>()
+    while (i < 5) {
+        val nid = d5.addNode("Value", "Const", 0, "", "", "", -1, toStr(i))
+        nodeIds.add(nid)
+        i = i + 1
+    }
+    val r5 = RegisterAllocatorUtils.emptyAllocator()
+    r5.allocate(d5)
+    var allAssigned: Boolean = true
+    i = 0
+    while (i < nodeIds.size) {
+        if (d5.nodeOf(nodeIds[i]).reg == "") { allAssigned = false }
+        i = i + 1
+    }
+    if (allAssigned) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // ── [6] 工具函数 ──
+    println("[6] 工具函数")
+    if (RegisterAllocatorUtils.emptyAllocator() != null) { pass = pass + 1 }
+    else { fail = fail + 1 }
+
+    println("")
+    println("PASS: " + pass + "/" + (pass + fail))
+    if (fail == 0) { println("ALL PASS") }
+    else { println("FAILURES: " + fail) }
+}

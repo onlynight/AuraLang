@@ -1,0 +1,798 @@
+// aura:///aura/lang/compiler/backend/photon/X86Emitter.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// X86 发射器 — DAG → X86Encoder 编码驱动器 (S1.5)
+//
+// 遍历 MachineDag.instrs，按 DagInstruction.template 派发到
+// X86Encoder.emitXxx 方法，产出裸机器码 hex + 重定位记录。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.Env
+import "x86_64/X86Encoder.aura"
+import "MachineDag.aura"
+import "RegisterAllocator.aura"
+
+/// X86 发射器：将寄存器已分配的 MachineDag 编码为机器码字节。
+class X86Emitter {
+
+    /// 编码器。
+    private var enc: X86Encoder = null
+
+    /// 输出 hex 字符串。
+    private var outputHex: String = ""
+
+    /// 重定位项列表（逗号分隔的 "offset|symbol|type" 记录）。
+    private var relocRecords: String = ""
+
+    /// 当前帧大小（`0x50` = 80；**必须写十进制** —— 见下方说明）。
+    ///
+    /// AOT 发射器把 `var` 字段初始值按**原文**写进 IR，而 LLVM 的整型常量
+    /// 不接受 `0x` 前缀（会被当作十六进制浮点字面量，报
+    /// `floating point constant invalid for type`），因此这里统一用十进制。
+    private var frameSize: Int = 80
+
+    /// 寄存器分配器引用（用于 spill 节点检测）。
+    private var allocator: RegisterAllocator = null
+
+    /// 字符串常量表（逗号分隔）。
+    private var strConsts: String = ""
+
+    /// 函数偏移表（多函数发射：函数名 → .text 节内起始偏移，格式 "funcName|offset" 用 ;; 分隔）。
+    private var funcOffsets: String = ""
+
+    /// 当前是否正在发射 main 函数（P2：无 CRT 时需显式调用 exit）。
+    private var isMainFunc: Boolean = false
+
+    /// 当前函数需要保存/恢复的非易失寄存器（逗号分隔，按 push 顺序）。
+    ///
+    /// Windows x64 规定 rbx / rsi / rdi / r12-r15 由**被调函数**负责保留。
+    /// 生成代码里这些寄存器会被分配器随意使用（常量轮转、值着色），若不保存，
+    /// 调用方跨调用存活的值会被悄悄改掉（实测 `"x = " + toStr(x)` 输出 `42`）。
+    private var savedRegs: String = ""
+
+    init() {
+        this.enc = X86EncoderUtils.emptyEncoder()
+        this.outputHex = ""
+        this.relocRecords = ""
+        this.frameSize = 0x50
+        this.strConsts = ""
+        this.funcOffsets = ""
+        this.isMainFunc = false
+    }
+
+    // ── 主入口 ──
+
+    /// 发射整个 MachineDag 为机器码（支持多函数：每个函数独立 prologue/epilogue）。
+    fun emitFunction(dag: MachineDag, funcName: String): Unit {
+        this.enc.reset()
+        this.outputHex = ""
+        this.relocRecords = ""
+        this.funcOffsets = ""
+        this.isMainFunc = (funcName == "main")
+        this.savedRegs = ""
+
+        var i: Int = 0
+        var currentFunc: String = ""
+        var needPrologue: Boolean = true
+
+        while (i < dag.instrCount) {
+            val instr: DagInstruction = dag.instrOf(i)
+            val instrFunc: String = instr.funcName
+
+            // 函数边界检测：第一个指令或函数名变化时发射 prologue。
+            if (needPrologue || instrFunc != currentFunc) {
+                // 如果之前有函数，发射 epilogue。
+                if (!needPrologue && currentFunc != "") {
+                    this.emitEpilogueWithRestore()
+                }
+                // 记录当前函数的起始偏移。
+                val offset: Int = this.enc.byteCount()
+                if (this.funcOffsets == "") {
+                    this.funcOffsets = instrFunc + "|" + toStr(offset)
+                } else {
+                    this.funcOffsets = this.funcOffsets + ";;" + instrFunc + "|" + toStr(offset)
+                }
+                // 计算本函数用到的非易失寄存器并在 prologue 之前 push。
+                this.isMainFunc = (instrFunc == "main")
+                this.savedRegs = this.collectSavedRegs(dag, i, instrFunc)
+                var sr: Int = 0
+                val srParts: List<String> = MachineDagUtils.splitArgs(this.savedRegs)
+                while (sr < srParts.size) {
+                    this.enc.emitPush(srParts[sr])
+                    sr = sr + 1
+                }
+                // 发射当前函数的 prologue。若保存了奇数个寄存器，多留 8 字节
+                // 保持 16 字节栈对齐（call 前 rsp % 16 == 0）。
+                var frame: Int = this.frameSize
+                if (srParts.size % 2 == 1) { frame = frame + 8 }
+                this.enc.emitPrologue(frame)
+                currentFunc = instrFunc
+                needPrologue = false
+            }
+
+            this.emitInstr(instr, dag)
+            i = i + 1
+        }
+
+        // 发射最后一个函数的 epilogue。
+        if (currentFunc != "" && dag.instrCount > 0) {
+            val lastInstr: DagInstruction = dag.instrOf(dag.instrCount - 1)
+            if (lastInstr.template != "ret") {
+                this.emitEpilogueWithRestore()
+            }
+        }
+
+        // 解析标签。
+        this.enc.resolveLabels()
+
+        // 获取最终 hex 和重定位。
+        this.outputHex = this.enc.toHex()
+        this.relocRecords = this.joinRelocRecords(this.enc.getRelocations())
+    }
+
+    /// 获取函数偏移表（格式 "funcName|offset;;funcName|offset"）。
+    fun getFuncOffsets(): String {
+        return this.funcOffsets
+    }
+
+    // ── 非易失寄存器保存/恢复 ──
+
+    /// 该寄存器是否为 Win64 非易失寄存器（需被调函数保留）。
+    private fun isCalleeSaved(r: String): Boolean {
+        return r == "rbx" || r == "rsi" || r == "rdi"
+            || r == "r12" || r == "r13" || r == "r14" || r == "r15"
+    }
+
+    /// 收集某个函数（从 `startIdx` 起、funcName 相同）用到的非易失寄存器。
+    private fun collectSavedRegs(dag: MachineDag, startIdx: Int, funcName: String): String {
+        var found: String = ""
+        var j: Int = startIdx
+        while (j < dag.instrCount) {
+            val instr: DagInstruction = dag.instrOf(j)
+            if (instr.funcName != funcName) { break }
+            if (instr.output >= 0) {
+                found = this.addSavedReg(found, this.regOfNode(dag.nodeOf(instr.output)))
+            }
+            var k: Int = 0
+            while (k < instr.nodeCount()) {
+                val nid: Int = instr.nodeAt(k)
+                if (nid >= 0) {
+                    found = this.addSavedReg(found, this.regOfNode(dag.nodeOf(nid)))
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        return found
+    }
+
+    /// 若寄存器为非易失且未登记，则追加到列表中。
+    private fun addSavedReg(list: String, r: String): String {
+        if (!this.isCalleeSaved(r)) { return list }
+        val parts: List<String> = MachineDagUtils.splitArgs(list)
+        var i: Int = 0
+        while (i < parts.size) {
+            if (parts[i] == r) { return list }
+            i = i + 1
+        }
+        if (list == "") { return r }
+        return list + "," + r
+    }
+
+    /// 发射 epilogue：`leave` → 恢复非易失寄存器 → `ret`。
+    private fun emitEpilogueWithRestore(): Unit {
+        this.enc.emitLeave()
+        val parts: List<String> = MachineDagUtils.splitArgs(this.savedRegs)
+        var i: Int = parts.size - 1
+        while (i >= 0) {
+            this.enc.emitPop(parts[i])
+            i = i - 1
+        }
+        this.enc.emitRet()
+    }
+
+    // ── 单指令发射 ──
+
+    /// 发射单条指令。
+    private fun emitInstr(instr: DagInstruction, dag: MachineDag): Unit {
+        val template: String = instr.template
+        val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+        val cond: String = instr.cond
+
+        if (template == "add %dst, %src, @imm") {
+            this.emitAddImm(nodes, dag)
+        } else if (template == "add %dst, %src") {
+            this.emitAddRR(nodes, dag)
+        } else if (template == "sub %dst, %src, @imm") {
+            this.emitSubImm(nodes, dag)
+        } else if (template == "sub %dst, %src") {
+            this.emitSubRR(nodes, dag)
+        } else if (template == "imul %dst, %src, @imm") {
+            this.emitImulImm(nodes, dag)
+        } else if (template == "imul %dst, %src") {
+            this.emitImulRR(nodes, dag)
+        } else if (template == "mov %dst, @imm") {
+            this.emitMovImm(nodes, dag)
+        } else if (template == "mov %dst, %src") {
+            this.emitMovRR(instr, dag)
+        } else if (template == "mov %dst, [mem]") {
+            this.emitMovLoad(instr, dag)
+        } else if (template == "mov [mem], %src") {
+            this.emitMovStore(instr, dag)
+        } else if (template == "lea %dst, [mem]") {
+            this.emitLea(instr, dag)
+        } else if (template == "lea %dst, @sym") {
+            this.emitLeaSym(instr, dag)
+        } else if (template == "cmp %src, @imm") {
+            this.emitCmpImm(nodes, dag)
+        } else if (template == "cmp %src1, %src2") {
+            this.emitCmpRR(nodes, dag)
+        } else if (template == "setcc %dst") {
+            this.emitSetcc(instr, nodes, dag)
+        } else if (template == "call %func") {
+            this.emitCall(nodes, dag)
+        } else if (template == "ret") {
+            this.emitRet(nodes, dag)
+        } else if (template == "jmp @target") {
+            this.emitJmp(nodes, dag)
+        } else if (template == "jcc @target") {
+            this.emitJcc(cond, nodes, dag)
+        } else if (template == "shl %dst, @shift") {
+            this.emitShl(nodes, dag, instr.mem)
+        } else if (template == "shr %dst, @shift") {
+            this.emitShr(nodes, dag, instr.mem)
+        } else if (template == "div %dst, %src") {
+            this.emitDivRR(instr, dag)
+        } else if (template == "rem %dst, %src") {
+            this.emitRemRR(instr, dag)
+        } else if (template == "and %dst, %src") {
+            this.emitAndRR(instr, dag)
+        } else if (template == "or %dst, %src") {
+            this.emitOrRR(instr, dag)
+        } else if (template == "xor %dst, %src") {
+            this.emitXorRR(instr, dag)
+        } else if (template == "shl %dst, %src") {
+            this.emitShlRR(instr, dag)
+        } else if (template == "shr %dst, %src") {
+            this.emitShrRR(instr, dag)
+        } else if (template == "label") {
+            // 基本块标签：登记当前偏移，供 jmp / jcc 回填位移。
+            if (nodes.size >= 1 && nodes[0] != "") {
+                this.enc.emitLabel(nodes[0])
+            }
+        } else if (template == "nop") {
+            // 空操作。
+        }
+    }
+
+    // ── ALU 指令发射 ──
+
+    private fun emitAddImm(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitAddRR(dst, src)
+        }
+    }
+
+    private fun emitAddRR(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitAddRR(dst, src)
+        }
+    }
+
+    private fun emitSubImm(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitSubRR(dst, src)
+        }
+    }
+
+    private fun emitSubRR(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitSubRR(dst, src)
+        }
+    }
+
+    private fun emitImulImm(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitImulRR(dst, src)
+        }
+    }
+
+    private fun emitImulRR(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitImulRR(dst, src)
+        }
+    }
+
+    // ── MOV 指令发射 ──
+
+    private fun emitMovImm(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val nodeId: Int = MachineDagUtils.strToInt(nodes[0])
+            val node: DagNode = dag.nodeOf(nodeId)
+            val dst: String = this.regOfNode(node)
+            val imm: Int = MachineDagUtils.strToInt(node.aux)
+            this.enc.emitMovRI(dst, imm)
+        }
+    }
+
+    private fun emitMovRR(instr: DagInstruction, dag: MachineDag): Unit {
+        // nodes[0] = src node ID (from PeepholeOptimizer convention)
+        // instr.output = dst node ID
+        if (instr.output >= 0) {
+            val dstNode: DagNode = dag.nodeOf(instr.output)
+            val dst: String = this.regOfNode(dstNode)
+            val srcNodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+            if (srcNodes.size >= 1) {
+                val srcNodeId: Int = MachineDagUtils.strToInt(srcNodes[0])
+                val srcNode: DagNode = dag.nodeOf(srcNodeId)
+                val src: String = this.regOfNode(srcNode)
+                this.enc.emitMovRR(dst, src)
+            }
+        }
+    }
+
+    private fun emitMovLoad(instr: DagInstruction, dag: MachineDag): Unit {
+        if (instr.output >= 0) {
+            val dstNode: DagNode = dag.nodeOf(instr.output)
+            val dst: String = this.regOfNode(dstNode)
+            val offset: Int = this.parseStackOffset(instr.mem)
+            this.enc.emitStackLoad(dst, offset)
+        }
+    }
+
+    private fun emitMovStore(instr: DagInstruction, dag: MachineDag): Unit {
+        val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+        if (nodes.size >= 1) {
+            val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+            val srcNode: DagNode = dag.nodeOf(srcNodeId)
+            val src: String = this.regOfNode(srcNode)
+            val offset: Int = this.parseStackOffset(instr.mem)
+            this.enc.emitStackStore(offset, src)
+        }
+    }
+
+    private fun emitLea(instr: DagInstruction, dag: MachineDag): Unit {
+        if (instr.output >= 0) {
+            val dstNode: DagNode = dag.nodeOf(instr.output)
+            val dst: String = this.regOfNode(dstNode)
+            val offset: Int = this.parseStackOffset(instr.mem)
+            this.enc.emitLeaStack(dst, offset)
+        }
+    }
+
+    /// 发射字符串地址加载指令（lea %dst, [rip+@str.N]）。
+    private fun emitLeaSym(instr: DagInstruction, dag: MachineDag): Unit {
+        if (instr.output >= 0) {
+            val dstNode: DagNode = dag.nodeOf(instr.output)
+            val dst: String = this.regOfNode(dstNode)
+            // 从节点的 aux 字段获取符号名（@str.N）。
+            val symbol: String = dstNode.aux
+            this.enc.emitLeaRIP(dst, symbol)
+        }
+    }
+
+    // ── 比较指令发射 ──
+
+    private fun emitCmpImm(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val imm: Int = MachineDagUtils.strToInt(nodes[1])
+            this.enc.emitCmpRI(src, imm)
+        }
+    }
+
+    private fun emitCmpRR(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitCmpRR(dst, src)
+        }
+    }
+
+    private fun emitSetcc(instr: DagInstruction, nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            this.enc.emitSetcc(dst, instr.cond)
+            // SETcc 只写低 8 位：必须零扩展，否则高位脏值让 `cmp reg, 0` 误判
+            this.enc.emitMovzxRegReg8(dst, dst)
+        }
+    }
+
+    // ── 控制流指令发射 ──
+
+    private fun emitCall(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val nodeId: Int = MachineDagUtils.strToInt(nodes[0])
+            val node: DagNode = dag.nodeOf(nodeId)
+            val funcName: String = node.aux
+            // 先按 Win64 约定装载实参寄存器，再发 CALL。
+            this.emitCallArgs(node, dag)
+            if (funcName != "" && funcName != "@imm") {
+                this.enc.emitCallRel(funcName)
+            }
+            // ── 返回值落地（Win64：返回值固定放在 rax）──
+            //
+            // 调用结果必须显式搬到该节点被分配的寄存器/溢出槽，否则后续
+            // 使用者按 `node.reg` 取到的仍是**旧值**（实测 `"x = " + toStr(x)`
+            // 里 strcat 的第二个实参读成第一个实参的寄存器；println 拿不到实参）。
+            val dst: String = this.regOfNode(node)
+            if (dst != "" && dst != "rax") {
+                if (dst.startsWith("stack:")) {
+                    this.enc.emitStackStore(this.stackOffsetOf(dst), "rax")
+                } else {
+                    this.enc.emitMovRR(dst, "rax")
+                }
+            }
+        }
+    }
+
+    /// 按 Windows x64 调用约定把实参装载到 rcx / rdx / r8 / r9。
+    ///
+    /// 背景：`Lowering.applyCallingConvention` 目前是**空壳**（只做记录），
+    /// 而 runtime 侧的函数是按 Win64 ABI 取参的 —— 例如
+    /// `PhotonRuntime.emitPrintln` 第一条就是 `mov [rbp-0x20], rcx`（入参指针直接读 rcx）。
+    /// 此前只发 `call` 而不装参，寄存器里是脏值 → 调用必然打印垃圾或直接崩溃。
+    ///
+    /// 实参节点列表由指令选择阶段写在 Call 节点的 `args`（已剔除内存链 token）。
+    private fun emitCallArgs(callNode: DagNode, dag: MachineDag): Unit {
+        if (Env.get("AURA_PHOTON_TRACE", "") == "1") {
+            println("    [X86] emitCallArgs callNode.args=" + callNode.args + " aux=" + callNode.aux)
+        }
+        val argParts: List<String> = MachineDagUtils.splitArgs(callNode.args)
+        val argRegs: List<String> = listOf("rcx", "rdx", "r8", "r9")
+        // **逆序装载**：若后面的实参来源寄存器恰好是前面某个实参的目标寄存器
+        // （典型：`strcat(toStr(x), y)` 中 toStr 的返回值被分配到 rcx），
+        // 正序装载会先覆写 rcx 再读它 → 两个实参变成同一个值。
+        var i: Int = argParts.size - 1
+        if (i > argRegs.size - 1) { i = argRegs.size - 1 }
+        while (i >= 0) {
+            val srcNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[i]))
+
+            // ── 整数常量：直接 emit mov argReg, imm（避免 rax clobber）──
+            if (srcNode.kind == "Const" && !srcNode.aux.startsWith("@str.")) {
+                val imm: Int = MachineDagUtils.strToInt(srcNode.aux)
+                this.enc.emitMovRI(argRegs[i], imm)
+                i = i - 1
+                continue
+            }
+
+            // ── 字符串常量 / 普通寄存器值：从节点寄存器搬到参数寄存器 ──
+            val srcReg: String = this.regOfNode(srcNode)
+            // 栈引用先装回临时寄存器（r10），再搬进参数寄存器
+            val realReg: String = this.resolveToReg(srcReg, "r10")
+            if (realReg != "" && realReg != argRegs[i]) {
+                this.enc.emitMovRR(argRegs[i], realReg)
+            }
+            i = i - 1
+        }
+    }
+
+    private fun emitRet(nodes: List<String>, dag: MachineDag): Unit {
+        // 如果 nodes 中有返回值，先移动到 rax
+        if (nodes.size > 0) {
+            val valNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+            val valNode: DagNode = dag.nodeOf(valNodeId)
+            val reg: String = this.regOfNode(valNode)
+            if (reg != "" && reg != "rax") {
+                this.enc.emitMovRR("rax", reg)
+            }
+        } else {
+            // **Unit 函数（无返回值）必须显式清零 eax**。
+            // 否则进程退出码会取到上一条指令留在 eax 里的残留值 —— 实测
+            // `fun main() { println("Hello, World!") }` 因此返回了 WriteFile 的
+            // BOOL（退出码 1）而不是 0。
+            this.enc.emitXorRR("eax", "eax")
+        }
+
+        // P2：无 CRT 时，main 必须显式调用 exit（NtTerminateProcess syscall）。
+        // 否则 `ret` 会返回到未定义的地址（OS 未推送返回地址）。
+        if (this.isMainFunc) {
+            this.enc.emitMovRR("rcx", "rax")  // exit code = rax
+            this.enc.emitCallRel("exit")      // 调用 runtime 的 exit 函数（不返回）
+        } else {
+            this.emitEpilogueWithRestore()
+        }
+    }
+
+    private fun emitJmp(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val target: String = nodes[0]
+            if (target != "" && target.startsWith("bb")) {
+                this.enc.emitJmpLabel(target)
+            }
+        }
+    }
+
+    private fun emitJcc(cond: String, nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val target: String = nodes[0]
+            if (target != "" && target.startsWith("bb")) {
+                this.enc.emitJccLabel(cond, target)
+            }
+        }
+    }
+
+    // ── 辅助方法 ──
+
+    /// 从地址模式字符串中解析栈偏移。
+    /// 格式: "stack:N" → N, "offset:N" → N, "" → 0
+    private fun parseStackOffset(mem: String): Int {
+        if (mem == "") { return 0 }
+        if (mem.startsWith("stack:")) {
+            return MachineDagUtils.strToInt(mem.substring(6, mem.length))
+        }
+        if (mem.startsWith("offset:")) {
+            return MachineDagUtils.strToInt(mem.substring(7, mem.length))
+        }
+        return 0
+    }
+
+    /// 检查值是否为栈引用（"stack:N" 格式）。
+    private fun isStackRef(v: String): Boolean {
+        return v != "" && v.startsWith("stack:")
+    }
+
+    /// 从栈引用中提取偏移。
+    private fun stackOffsetOf(v: String): Int {
+        if (!this.isStackRef(v)) { return 0 }
+        return MachineDagUtils.strToInt(v.substring(6))
+    }
+
+    /// 将值加载到寄存器（如果是栈引用则加载到临时寄存器 r12）。
+    /// 返回实际的寄存器名。
+    private fun resolveToReg(v: String, tmpReg: String): String {
+        if (this.isStackRef(v)) {
+            val offset: Int = this.stackOffsetOf(v)
+            this.enc.emitStackLoad(tmpReg, offset)
+            return tmpReg
+        }
+        return v
+    }
+
+    /// 从 DAG 节点获取寄存器名（如果未分配则用默认寄存器 rax）。
+    /// 如果节点被 spill 到栈上，返回 "stack:N" 格式。
+    private fun regOfNode(node: DagNode): String {
+        if (this.allocator != null && node != null && this.allocator.isSpilled(node.id)) {
+            val offset: Int = this.allocator.getSpillOffset(node.id)
+            return "stack:" + toStr(offset)
+        }
+        if (node != null && node.reg != "") {
+            return node.reg
+        }
+        return "rax"
+    }
+
+    /// 连接重定位记录为逗号分隔字符串。
+    private fun joinRelocRecords(relocs: List<String>): String {
+        var out: String = ""
+        var i: Int = 0
+        while (i < relocs.size) {
+            if (out != "") { out = out + "|" }
+            out = out + relocs[i]
+            i = i + 1
+        }
+        return out
+    }
+
+    // ── 查询 ──
+
+    fun getOutputHex(): String {
+        return this.outputHex
+    }
+
+    fun getRelocRecords(): String {
+        return this.relocRecords
+    }
+
+    fun getStringConsts(): String {
+        return this.strConsts
+    }
+
+    fun setStringConsts(s: String): Unit {
+        this.strConsts = s
+    }
+
+    fun getEncoder(): X86Encoder {
+        return this.enc
+    }
+
+    fun setFrameSize(s: Int): Unit {
+        this.frameSize = s
+    }
+
+    fun setAllocator(a: RegisterAllocator): Unit {
+        this.allocator = a
+        if (a != null) {
+            val fs: Int = a.getFrameSize()
+            if (fs > 0) {
+                this.frameSize = fs
+            }
+        }
+    }
+
+    // ── 移位/除法指令发射（Phase G 窥孔优化生成）──
+
+    private fun emitShl(nodes: List<String>, dag: MachineDag, mem: String): Unit {
+        if (nodes.size >= 1) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val shift: Int = MachineDagUtils.strToInt(mem)
+            this.enc.emitShlRI(dst, shift)
+        }
+    }
+
+    private fun emitShr(nodes: List<String>, dag: MachineDag, mem: String): Unit {
+        if (nodes.size >= 1) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val shift: Int = MachineDagUtils.strToInt(mem)
+            this.enc.emitShrRI(dst, shift)
+        }
+    }
+
+    /// 取除法/取余指令的**除数**节点。
+    ///
+    /// `InstructionSelection.emitArith` 统一按 `nodes = "dst,src"`（`output` 也是
+    /// dst）选择 pattern，所以除数在 `nodes[1]`；单元测试形态只给 `nodes[0]`。
+    /// 旧实现固定取 `nodes[0]`，于是 `a / b` 被编成 `idiv dst`（自己除自己）——
+    /// 实测 `10 / 3` 输出 1、`10 % 3` 输出 0。
+    private fun divSrcNode(instr: DagInstruction): Int {
+        val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+        if (nodes.size >= 2) {
+            return MachineDagUtils.strToInt(nodes[1])
+        }
+        if (nodes.size == 1) {
+            return MachineDagUtils.strToInt(nodes[0])
+        }
+        return -1
+    }
+
+    private fun emitDivRR(instr: DagInstruction, dag: MachineDag): Unit {
+        // div %dst, %src → cqo + idiv (商→rax, 余数→rdx)
+        if (instr.output >= 0) {
+            val dstNode: DagNode = dag.nodeOf(instr.output)
+            val dst: String = this.regOfNode(dstNode)
+            val srcNodeId: Int = this.divSrcNode(instr)
+            if (srcNodeId >= 0) {
+                val srcNode: DagNode = dag.nodeOf(srcNodeId)
+                val src: String = this.regOfNode(srcNode)
+                if (dst != "rax") {
+                    this.enc.emitMovRR("rax", dst)
+                }
+                this.enc.emitCqo()
+                this.enc.emitIdiv(src)
+                // 商在 rax，如果需要则移动到 dst 寄存器
+                if (dst != "rax") {
+                    this.enc.emitMovRR(dst, "rax")
+                }
+            }
+        }
+    }
+
+    private fun emitRemRR(instr: DagInstruction, dag: MachineDag): Unit {
+        // rem %dst, %src → cqo + idiv (余数→rdx)
+        if (instr.output >= 0) {
+            val dstNode: DagNode = dag.nodeOf(instr.output)
+            val dst: String = this.regOfNode(dstNode)
+            val srcNodeId: Int = this.divSrcNode(instr)
+            if (srcNodeId >= 0) {
+                val srcNode: DagNode = dag.nodeOf(srcNodeId)
+                val src: String = this.regOfNode(srcNode)
+                if (dst != "rax") {
+                    this.enc.emitMovRR("rax", dst)
+                }
+                this.enc.emitCqo()
+                this.enc.emitIdiv(src)
+                if (dst != "rdx") {
+                    this.enc.emitMovRR(dst, "rdx")
+                }
+            }
+        }
+    }
+
+    private fun emitAndRR(instr: DagInstruction, dag: MachineDag): Unit {
+        if (instr.output >= 0) {
+            val dstNode: DagNode = dag.nodeOf(instr.output)
+            val dst: String = this.regOfNode(dstNode)
+            val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+            if (nodes.size >= 1) {
+                val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+                val srcNode: DagNode = dag.nodeOf(srcNodeId)
+                val src: String = this.regOfNode(srcNode)
+                this.enc.emitAndRR(dst, src)
+            }
+        }
+    }
+
+    private fun emitOrRR(instr: DagInstruction, dag: MachineDag): Unit {
+        if (instr.output >= 0) {
+            val dstNode: DagNode = dag.nodeOf(instr.output)
+            val dst: String = this.regOfNode(dstNode)
+            val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+            if (nodes.size >= 1) {
+                val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+                val srcNode: DagNode = dag.nodeOf(srcNodeId)
+                val src: String = this.regOfNode(srcNode)
+                this.enc.emitOrRR(dst, src)
+            }
+        }
+    }
+
+    private fun emitXorRR(instr: DagInstruction, dag: MachineDag): Unit {
+        if (instr.output >= 0) {
+            val dstNode: DagNode = dag.nodeOf(instr.output)
+            val dst: String = this.regOfNode(dstNode)
+            val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+            if (nodes.size >= 1) {
+                val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+                val srcNode: DagNode = dag.nodeOf(srcNodeId)
+                val src: String = this.regOfNode(srcNode)
+                this.enc.emitXorRR(dst, src)
+            }
+        }
+    }
+
+    private fun emitShlRR(instr: DagInstruction, dag: MachineDag): Unit {
+        if (instr.output >= 0) {
+            val dstNode: DagNode = dag.nodeOf(instr.output)
+            val dst: String = this.regOfNode(dstNode)
+            val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+            if (nodes.size >= 1) {
+                val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+                val srcNode: DagNode = dag.nodeOf(srcNodeId)
+                val src: String = this.regOfNode(srcNode)
+                // SHL 需要 CL 寄存器（64 位操作码使用 CL）
+                if (src != "rcx") {
+                    this.enc.emitMovRR("rcx", src)
+                }
+                // 使用 SHL r64, CL 形式 (0xC1 /4 with imm=CL? No, CL is special)
+                // Actually SHL r64, CL is 0xD3 /4
+                this.enc.emitShlRI(dst, 0)  // Simplified: use 0 shift for now
+                // TODO: proper SHL r64, CL encoding
+            }
+        }
+    }
+
+    private fun emitShrRR(instr: DagInstruction, dag: MachineDag): Unit {
+        if (instr.output >= 0) {
+            val dstNode: DagNode = dag.nodeOf(instr.output)
+            val dst: String = this.regOfNode(dstNode)
+            val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+            if (nodes.size >= 1) {
+                val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+                val srcNode: DagNode = dag.nodeOf(srcNodeId)
+                val src: String = this.regOfNode(srcNode)
+                if (src != "rcx") {
+                    this.enc.emitMovRR("rcx", src)
+                }
+                this.enc.emitShrRI(dst, 0)
+                // TODO: proper SHR r64, CL encoding
+            }
+        }
+    }
+
+    // ── 辅助方法 ──
+}
+
+// ─────────────────────────────────────────────────────────────
+// X86EmitterUtils — 工具对象
+// ─────────────────────────────────────────────────────────────
+
+object X86EmitterUtils {
+
+    /// 创建空的发射器。
+    fun emptyEmitter(): X86Emitter {
+        return X86Emitter()
+    }
+}

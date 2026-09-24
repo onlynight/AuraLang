@@ -1,0 +1,9 @@
+// tests/photon/P3/test_syscall_read.aura
+// Phase 3: Native function test - Linux read syscall
+// @native(0) = Linux read syscall
+
+import aura.lang.std.String
+
+fun main() {
+    println("test_syscall_read")
+}

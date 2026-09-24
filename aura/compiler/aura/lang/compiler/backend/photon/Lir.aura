@@ -35,6 +35,11 @@ package aura.lang.compiler.backend.photon
 
 import aura.lang.std.String
 import "../../mir/TypeRegistry.aura"
+// 本文件调用 `MachineDagUtils.strToInt`：必须显式导入，否则 `MachineDagUtils`
+// 不在编译单元内 → 接收者类型退化为 `<error>` → `strToInt` 与
+// `LirUtils.strToInt` 重名、「全表唯一候选」兜底失效 → 降级为裸名调用
+// （`[bytecode] error: 未解析的函数调用 'strToInt'`）。
+import "MachineDag.aura"
 
 // ─────────────────────────────────────────────────────────────
 // LirValue — LIR 值节点
@@ -67,6 +72,14 @@ class LirValue {
     /// 使用计数（DCE 用）。
     var useCount: Int = 0
 
+    /// 内存链 ID（-1 = 非内存指令；>=0 = 该指令的内存链槽位）。
+    /// S2: 用于 Load/Store 指令的内存依赖排序。
+    var chain: Int = -1
+
+    // ── IR 缓存（避免每次访问都 split+strToInt）──
+    private var _cachedArgs: List<Int> = null
+    private var _argsParsed: Boolean = false
+
     init() {
         this.id = 0
         this.op = ""
@@ -75,18 +88,18 @@ class LirValue {
         this.aux = ""
         this.block = 0
         this.useCount = 0
+        this.chain = -1
+        this._cachedArgs = null
+        this._argsParsed = false
     }
 
     /// 获取第 i 个操作数的 ValueID。
     fun argAt(i: Int): Int {
-        if (this.args == "") {
-            return -1
+        this.ensureArgsParsed()
+        if (this._cachedArgs != null && i >= 0 && i < this._cachedArgs.size) {
+            return this._cachedArgs[i]
         }
-        val parts: List<String> = LirUtils.splitArgs(this.args)
-        if (i < 0 || i >= parts.size) {
-            return -1
-        }
-        return LirUtils.strToInt(parts[i])
+        return -1
     }
 
     /// 获取操作数个数。
@@ -94,7 +107,41 @@ class LirValue {
         if (this.args == "") {
             return 0
         }
-        return LirUtils.splitArgs(this.args).size
+        this.ensureArgsParsed()
+        if (this._cachedArgs != null) {
+            return this._cachedArgs.size
+        }
+        return 0
+    }
+
+    private fun ensureArgsParsed(): Unit {
+        if (!this._argsParsed) {
+            this._cachedArgs = this.parseArgs(this.args)
+            this._argsParsed = true
+        }
+    }
+
+    private fun parseArgs(text: String): List<Int> {
+        val result: List<Int> = arrayListOf<Int>()
+        if (text == "") {
+            return result
+        }
+        var current: String = ""
+        var i: Int = 0
+        while (i < text.length) {
+            var c: String = text.substring(i, i + 1)
+            if (c == ",") {
+                result.add(MachineDagUtils.strToInt(current))
+                current = ""
+            } else {
+                current = current + c
+            }
+            i = i + 1
+        }
+        if (current != "") {
+            result.add(MachineDagUtils.strToInt(current))
+        }
+        return result
     }
 
     /// 是否为常量指令（Const 或 ConstImm）。
@@ -269,6 +316,25 @@ class LirProgram {
         v.aux = aux
         v.block = blockId
         v.useCount = 0
+        v.chain = -1
+        this.values.add(v)
+        this.valueCount = this.values.size
+        return v.id
+    }
+
+    /// 创建一个新的 LIR 值节点（带内存链 ID），返回 ValueID。
+    /// S2: 用于 Load/Store 指令的内存依赖排序。
+    fun addValueWithChain(op: String, typeId: Int, args: String, aux: String,
+                          blockId: Int, chainId: Int): Int {
+        val v: LirValue = LirValue()
+        v.id = this.valueCount
+        v.op = op
+        v.type = typeId
+        v.args = args
+        v.aux = aux
+        v.block = blockId
+        v.useCount = 0
+        v.chain = chainId
         this.values.add(v)
         this.valueCount = this.values.size
         return v.id
@@ -280,6 +346,25 @@ class LirProgram {
             return LirValue()
         }
         return this.values[id]
+    }
+
+    /// 同 `addValue`，但**同时把值登记到所属块的指令列表**（`LirBlock.instrs`）。
+    ///
+    /// Photon 管线里「块指令列表」是下游各级的枚举依据：InstructionSelection 遍历
+    /// `LirBlock.instrs` 生成 DAG，寄存器分配 / 窥孔 / 发射器同理。而 Lowering 原先
+    /// 一律用 `addValue` 建值（只写 `values` 表，靠 `block` 字段记录归属），于是每个
+    /// 块的 `instrs` 恒为空 → Phase C `DAG nodes=0` → Phase E 机器码 **0 字节**
+    /// （photon 端到端「成功: true 但产物是空壳」的直接原因之一）。
+    ///
+    /// 这里特意保持与 `addValue` **完全相同的实参顺序**，只为让 Lowering 能整体
+    /// 机械替换（无需逐处重排实参，避免引入新的错位）。
+    fun addInstrValue(op: String, typeId: Int, args: String, aux: String, blockId: Int): Int {
+        val vid: Int = this.addValue(op, typeId, args, aux, blockId)
+        if (blockId >= 0 && blockId < this.blocks.size) {
+            val b: LirBlock = this.blocks[blockId]
+            b.instrs = LirBlockUtils.instrsAdd(b.instrs, vid)
+        }
+        return vid
     }
 
     // ── 块管理 ──
@@ -379,12 +464,12 @@ object LirUtils {
         var total: Int = 0
         var i: Int = 0
         var neg: Boolean = false
-        if (len > 0 && text[0] == "-") {
+        if (len > 0 && text.charAt(0).toString() == "-") {
             neg = true
             i = 1
         }
         while (i < len) {
-            val digit: Int = "0123456789".indexOf(text[i])
+            val digit: Int = "0123456789".indexOf(text.charAt(i))
             if (digit >= 0 && digit <= 9) {
                 total = total * 10 + digit
             }
@@ -432,22 +517,12 @@ object LirUtils {
 
     /// 按逗号切分 args 字符串，返回 List<String>。
     fun splitArgs(text: String): List<String> {
-        val out: List<String> = arrayListOf<String>()
+        // 见 MirUtils.mirSplit：`arrayListOf + add` 在本 VM 下读回 null。
+        // 空串保持「空表」（调用方用 size==0 表示「无参数」）。
         if (text == "") {
-            return out
+            return emptyList()
         }
-        val len: Int = text.length
-        var start: Int = 0
-        var i: Int = 0
-        while (i < len) {
-            if (text[i] == ",") {
-                out.add(text.substring(start, i))
-                start = i + 1
-            }
-            i = i + 1
-        }
-        out.add(text.substring(start, len))
-        return out
+        return text.split(",")
     }
 }
 

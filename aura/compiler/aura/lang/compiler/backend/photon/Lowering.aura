@@ -30,6 +30,10 @@ package aura.lang.compiler.backend.photon
 import aura.lang.std.String
 import "../../mir/SsaMir.aura"
 import "../../mir/TypeRegistry.aura"
+// 本文件直接构造 LirProgram / 调用 LirUtils，必须显式导入：
+// 否则 `LirProgram` 的方法（addValue/blockOf/…）与 `LirUtils.strToInt`
+// 在接收者类型未知时只能靠「全表唯一候选」兜底，重名即失败 → 裸名调用未解析。
+import "Lir.aura"
 
 // ─────────────────────────────────────────────────────────────
 // Lowering — MIR 到 LIR 的降低器
@@ -51,9 +55,13 @@ class Lowering {
     /// 当前正在降低的函数索引。
     var currentFunc: Int = -1
 
+    /// 内存链计数器（S2: 用于 Load/Store 指令的内存依赖排序）。
+    var chainCounter: Int = 0
+
     init() {
         this.types = TypeRegistry()
         this.currentFunc = -1
+        this.chainCounter = 0
     }
 
     // ── 主入口 ──
@@ -63,6 +71,10 @@ class Lowering {
         val dst: LirProgram = LirUtils.emptyProgram()
         // 复制类型注册表引用
         this.types = src.types
+        // 同样写进产物：LIR 的值节点携带的是同一套类型 id，
+        // 下游（InstructionSelector.emitConst 判定字符串常量）必须用同一个
+        // 注册表才能正确解读；只设 this.types 会让 `dst.types` 停留在空表。
+        dst.types = src.types
 
         // 遍历每个函数
         var fi: Int = 0
@@ -94,10 +106,20 @@ class Lowering {
         val blockParts: List<String> = LirUtils.splitArgs(srcFunc.blocks)
         var bi: Int = 0
         var entryLirBlock: Int = -1
+
+        // ── 第一遍：建块 ──
+        //
+        // 块 id 必须与 SSA 块 id **保持一致**：`Br` / `CondBr` 的 args 里装的
+        // 是块 id，下游（InstructionSelection.emitBr/emitCondBr）直接拿它当
+        // 标签查表，没有任何重映射环节。SSA 侧块按创建顺序连续编号（同一函数
+        // 的块也是连续的），此处同序 `addBlock()` 即天然对齐。
         while (bi < blockParts.size) {
             val srcBlockId: Int = SsaMirUtils.strToInt(blockParts[bi])
             if (srcBlockId >= 0) {
-                val dstBlockId: Int = this.lowerBlock(srcBlockId, src, dst, lfunc)
+                val dstBlockId: Int = dst.addBlock()
+                val dstBlock: LirBlock = dst.blockOf(dstBlockId)
+                dstBlock.label = "bb" + LirUtils.toStr(dstBlockId)
+                lfunc.blocks = LirBlockUtils.succsAdd(lfunc.blocks, dstBlockId)
                 if (entryLirBlock < 0) {
                     entryLirBlock = dstBlockId
                 }
@@ -107,54 +129,50 @@ class Lowering {
 
         lfunc.entryBlock = entryLirBlock
 
+        // 本函数的块 id 集合（",0,1,2," 形式，便于 contains 判断）。
+        var blockSet: String = ","
+        bi = 0
+        while (bi < blockParts.size) {
+            val srcBlockId: Int = SsaMirUtils.strToInt(blockParts[bi])
+            if (srcBlockId >= 0) {
+                blockSet = blockSet + LirUtils.toStr(srcBlockId) + ","
+            }
+            bi = bi + 1
+        }
+
+        // ── 第二遍：按 SSA 值 id **全局升序**降低 ──
+        //
+        // ⚠ 为什么必须是全局升序，而不是「逐块降低」：
+        // 每个 SSA 值恰好产出 1 个 LIR 值（addValue/addInstrValue/addPhi/
+        // setTerminator 都是「追加一个值」），因此只要按 SSA id 升序降低，
+        // **LIR 值 id 就恒等于 SSA 值 id**，args 里的操作数引用天然有效。
+        //
+        // 旧实现按块顺序降低：`SsaBuilder.buildWhile` 先构建循环体、再构建条件块，
+        // 于是循环体值的 id 比条件块（Phi 所在块）**小**。按块顺序降低会让 LIR id
+        // 与 SSA id 错位，而 `lowerValue` 只原样复制 `args`（不做重映射）——
+        // 实测 04_control_flow 的 `"while i = " + toStr(i)` 被降成
+        // `Add(Phi, Const5)`（整数相加），运行即段错误。
+        var vi: Int = 0
+        while (vi < src.valueCount) {
+            val v: MirValue = src.valueOf(vi)
+            if (blockSet.indexOf("," + LirUtils.toStr(v.block) + ",") >= 0) {
+                val dstBlockId: Int = v.block
+                val blk: MirBlock = src.blockOf(v.block)
+                if (blk.term == vi) {
+                    this.lowerTerminator(vi, src, dst, dstBlockId)
+                } else if (v.op == "Phi") {
+                    dst.addPhi(dstBlockId, v.type, v.args, v.aux)
+                } else {
+                    this.lowerValue(vi, src, dst, dstBlockId)
+                }
+            }
+            vi = vi + 1
+        }
+
         // 结束当前函数
         dst.endFunction()
         this.currentFunc = -1
         return lfuncId
-    }
-
-    // ── 块级降低 ──
-
-    /// 降低一个基本块。
-    fun lowerBlock(srcBlockId: Int, src: MirSsaProgram, dst: LirProgram, lfunc: LirFunction): Int {
-        val srcBlock: MirBlock = src.blockOf(srcBlockId)
-        val dstBlockId: Int = dst.addBlock()
-        val dstBlock: LirBlock = dst.blockOf(dstBlockId)
-
-        // 设置块标签
-        dstBlock.label = "bb" + LirUtils.toStr(dstBlockId)
-
-        // 添加块到函数的块列表
-        lfunc.blocks = LirBlockUtils.succsAdd(lfunc.blocks, dstBlockId)
-
-        // 降低 Phi 节点
-        val phiParts: List<String> = LirUtils.splitArgs(srcBlock.phis)
-        var pi: Int = 0
-        while (pi < phiParts.size) {
-            val srcValId: Int = SsaMirUtils.strToInt(phiParts[pi])
-            if (srcValId >= 0) {
-                this.lowerValue(srcValId, src, dst, dstBlockId)
-            }
-            pi = pi + 1
-        }
-
-        // 降低普通指令
-        val instrParts: List<String> = LirUtils.splitArgs(srcBlock.instrs)
-        var ii: Int = 0
-        while (ii < instrParts.size) {
-            val srcValId: Int = SsaMirUtils.strToInt(instrParts[ii])
-            if (srcValId >= 0) {
-                this.lowerValue(srcValId, src, dst, dstBlockId)
-            }
-            ii = ii + 1
-        }
-
-        // 降低终结指令
-        if (srcBlock.term >= 0) {
-            this.lowerTerminator(srcBlock.term, src, dst, dstBlockId)
-        }
-
-        return dstBlockId
     }
 
     // ── 值级降低 ──
@@ -168,13 +186,19 @@ class Lowering {
         if (op == "Const") {
             // 整数常量 → ConstImm，浮点常量 → Const
             val isFloat: Boolean = this.types.isFloat(srcVal.type)
-            val lirOp: String = isFloat ? "Const" : "ConstImm"
-            return dst.addValue(lirOp, srcVal.type, "", srcVal.aux, dstBlockId)
+            // 注意：Aura 没有 `cond ? a : b` 三元运算符（`?:` 是 Elvis），
+            // 写成三元会被前端按 Elvis 解析并产生错乱的结果与伪告警，
+            // 必须用 if/else 表达式。
+            val lirOp: String = if (isFloat) "Const" else "ConstImm"
+            return dst.addInstrValue(lirOp, srcVal.type, "", srcVal.aux, dstBlockId)
         }
 
         // ── Phi 节点 ──
+        //
+        // Phi 必须走 `addPhi`（登记到 `LirBlock.phis`），不能当成普通指令 ——
+        // 否则它会出现在块指令列表里被指令选择当成可发射指令处理。
         if (op == "Phi") {
-            return dst.addValue("Phi", srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+            return dst.addPhi(dstBlockId, srcVal.type, srcVal.args, srcVal.aux)
         }
 
         // ── 整数算术运算 ──
@@ -182,12 +206,12 @@ class Lowering {
             || op == "SDiv" || op == "SRem"
             || op == "And" || op == "Or" || op == "Xor"
             || op == "Shl" || op == "Shr") {
-            return dst.addValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+            return dst.addInstrValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
         }
 
         // ── 浮点运算 ──
         if (op == "AddF" || op == "SubF" || op == "MulF" || op == "DivF") {
-            return dst.addValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+            return dst.addInstrValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
         }
 
         // ── 内存操作（Load / Store / LoadPtr / StorePtr）──
@@ -200,7 +224,7 @@ class Lowering {
 
         // ── 地址计算 ──
         if (op == "Gep") {
-            return dst.addValue("Gep", srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+            return dst.addInstrValue("Gep", srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
         }
 
         // ── 比较运算（ICmp* / FCmp* → Setcc）──
@@ -216,21 +240,32 @@ class Lowering {
 
         // ── 栈操作 ──
         if (op == "AllocStack" || op == "FrameAddr") {
-            return dst.addValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+            return dst.addInstrValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+        }
+
+        // ── 函数调用（**非终结指令**形态）──
+        //
+        // ⚠ 这里此前完全没有 Call 分支：SSA 里由 `SsaBuilder.buildCall` 产生的
+        // `Call` 值一路落到本函数末尾的「默认：直接复制」分支，于是 LIR 里**不存在
+        // Call 指令**，指令选择端 `emitCall` 永不触发 —— 机器码里连一个 `e8`
+        // 都没有（实测 helloworld 的 `println("Hello, World!")` 被整条丢掉，
+        // 程序静默无输出）。终结指令形态的 Call 由 `lowerTerminator` 处理。
+        if (op == "Call") {
+            return this.lowerCallValue(srcVal, dst, dstBlockId)
         }
 
         // ── 数据移动 ──
         if (op == "Mov" || op == "Mov64") {
-            return dst.addValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+            return dst.addInstrValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
         }
 
         // ── 地址模式指令 ──
         if (op == "AddImm" || op == "SubImm" || op == "AddReg" || op == "SubReg") {
-            return dst.addValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+            return dst.addInstrValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
         }
 
         // ── 默认：直接复制 ──
-        return dst.addValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+        return dst.addInstrValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
     }
 
     // ── Load 降低（带地址模式计算）──
@@ -244,19 +279,27 @@ class Lowering {
         val argParts: List<String> = LirUtils.splitArgs(args)
         val argCount: Int = argParts.size
 
+        // S2: 分配内存链 ID
+        val chainId: Int = this.chainCounter
+        this.chainCounter = this.chainCounter + 1
+
         if (argCount >= 2) {
             val base: Int = SsaMirUtils.strToInt(argParts[0])
             val offset: Int = SsaMirUtils.strToInt(argParts[1])
-            val scale: Int = argCount >= 3 ? SsaMirUtils.strToInt(argParts[2]) : 0
+            // 无三元运算符：用 if 语句代替 `argCount >= 3 ? … : 0`
+            var scale: Int = 0
+            if (argCount >= 3) {
+                scale = SsaMirUtils.strToInt(argParts[2])
+            }
 
             // 计算地址模式字符串
             val addrMode: String = this.computeAddressMode(base, offset, scale)
 
-            return dst.addValue("Load", srcVal.type, addrMode, "", dstBlockId)
+            return dst.addValueWithChain("Load", srcVal.type, addrMode, "", dstBlockId, chainId)
         }
 
         // 无参数，直接复制
-        return dst.addValue("Load", srcVal.type, args, srcVal.aux, dstBlockId)
+        return dst.addValueWithChain("Load", srcVal.type, args, srcVal.aux, dstBlockId, chainId)
     }
 
     // ── Store 降低（带地址模式计算）──
@@ -270,22 +313,30 @@ class Lowering {
         val argParts: List<String> = LirUtils.splitArgs(args)
         val argCount: Int = argParts.size
 
+        // S2: 分配内存链 ID
+        val chainId: Int = this.chainCounter
+        this.chainCounter = this.chainCounter + 1
+
         if (argCount >= 3) {
             val value: Int = SsaMirUtils.strToInt(argParts[0])
             val base: Int = SsaMirUtils.strToInt(argParts[1])
             val offset: Int = SsaMirUtils.strToInt(argParts[2])
-            val scale: Int = argCount >= 4 ? SsaMirUtils.strToInt(argParts[3]) : 0
+            // 无三元运算符：用 if 语句代替 `argCount >= 4 ? … : 0`
+            var scale: Int = 0
+            if (argCount >= 4) {
+                scale = SsaMirUtils.strToInt(argParts[3])
+            }
 
             // 计算地址模式字符串
             val addrMode: String = this.computeAddressMode(base, offset, scale)
 
             // LIR Store: value,addrMode
             val lirArgs: String = LirUtils.toStr(value) + "," + addrMode
-            return dst.addValue("Store", srcVal.type, lirArgs, "", dstBlockId)
+            return dst.addValueWithChain("Store", srcVal.type, lirArgs, "", dstBlockId, chainId)
         }
 
         // 无参数，直接复制
-        return dst.addValue("Store", srcVal.type, args, srcVal.aux, dstBlockId)
+        return dst.addValueWithChain("Store", srcVal.type, args, srcVal.aux, dstBlockId, chainId)
     }
 
     // ── 比较降低 ──
@@ -297,7 +348,7 @@ class Lowering {
 
         // Setcc 指令：args = lhs,rhs，结果类型为 Bool（i1）
         val boolType: Int = this.types.boolType()
-        return dst.addValue(lirCmpOp, boolType, srcVal.args, "", dstBlockId)
+        return dst.addInstrValue(lirCmpOp, boolType, srcVal.args, "", dstBlockId)
     }
 
     // ── 类型转换降低 ──
@@ -320,7 +371,7 @@ class Lowering {
             castKind = "Cast"
         }
 
-        return dst.addValue(castKind, srcVal.type, srcVal.args, "", dstBlockId)
+        return dst.addInstrValue(castKind, srcVal.type, srcVal.args, "", dstBlockId)
     }
 
     // ── 终结指令降低 ──
@@ -361,6 +412,17 @@ class Lowering {
 
     // ── Call 终结指令降低 ──
 
+    /// 降低 **非终结指令**形态的 Call（登记到块指令列表）。
+    ///
+    /// 与 `lowerCallTerminator` 同语义，差别只在产物登记方式：这里用
+    /// `addInstrValue`（写进 `LirBlock.instrs`），终结形态用 `setTerminator`
+    /// （写进 `LirBlock.term`）。被调函数名放 `aux`，供指令选择/发射器取用。
+    fun lowerCallValue(srcVal: MirValue, dst: LirProgram, dstBlockId: Int): Int {
+        this.applyCallingConvention(srcVal.argCount())
+        val calledName: String = if (srcVal.aux != "") srcVal.aux else ""
+        return dst.addInstrValue("Call", srcVal.type, srcVal.args, calledName, dstBlockId)
+    }
+
     /// 降低 Call 终结指令（设置调用约定）。
     fun lowerCallTerminator(srcVal: MirValue, dst: LirProgram, dstBlockId: Int): Int {
         // 应用调用约定
@@ -368,7 +430,7 @@ class Lowering {
         this.applyCallingConvention(paramCount)
 
         // 收集被调函数名（aux 字段存储函数名）
-        val calledName: String = srcVal.aux != "" ? srcVal.aux : ""
+        val calledName: String = if (srcVal.aux != "") srcVal.aux else ""
 
         // 添加调用指令
         return dst.setTerminator(dstBlockId, "Call", srcVal.type, srcVal.args, calledName)

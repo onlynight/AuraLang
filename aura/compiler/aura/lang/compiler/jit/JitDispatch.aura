@@ -219,7 +219,12 @@ class JitInterp {
     }
 
     /// 弹栈（空栈置错）。
-    fun pop(): String {
+    ///
+    /// 名字**不能**叫 `pop`：`VmStack`（3 个重载）/`VmFrameStack`/
+    /// `VmCollections`/`JitCoreVm` 都定义了 `pop`，`this.pop()` 在接收者
+    /// 静态类型缺失时只能靠「全表唯一候选」兜底 → 重名即失败 → 降级为裸名
+    /// 调用（`未解析的函数调用 'pop'`）。改用唯一名保证可解析。
+    fun jitInterpPop(): String {
         val n: Int = jitLineCount(this.stack)
         if (n == 0) {
             this.error = "stack-underflow"
@@ -261,66 +266,66 @@ class JitInterp {
             this.push(this.getLocal(arg))
             return
         } else if (op == "StoreVar") {
-            this.setLocal(arg, this.pop())
+            this.setLocal(arg, this.jitInterpPop())
             return
         } else if (op == "Pop") {
-            this.pop()
+            this.jitInterpPop()
             return
         } else if (op == "Dup") {
-            val v: String = this.pop()
+            val v: String = this.jitInterpPop()
             this.push(v)
             this.push(v)
             return
         } else if (op == "Add" || op == "Sub" || op == "Mul" || op == "Div" || op == "Rem") {
-            val b: Int = jitParseInt(this.pop())
-            val a: Int = jitParseInt(this.pop())
+            val b: Int = jitParseInt(this.jitInterpPop())
+            val a: Int = jitParseInt(this.jitInterpPop())
             this.push(this.arith(op, a, b))
             return
         } else if (op == "Neg") {
-            val a: Int = jitParseInt(this.pop())
+            val a: Int = jitParseInt(this.jitInterpPop())
             this.push(toStr(0 - a))
             return
         } else if (op == "Not") {
-            val a: Int = jitParseInt(this.pop())
+            val a: Int = jitParseInt(this.jitInterpPop())
             this.push(toStr(0 - a - 1))
             return
         } else if (jitIsCompareOp(op)) {
-            val b: Int = jitParseInt(this.pop())
-            val a: Int = jitParseInt(this.pop())
+            val b: Int = jitParseInt(this.jitInterpPop())
+            val a: Int = jitParseInt(this.jitInterpPop())
             this.push(jitFoldCompare(op, a, b))
             return
         } else if (op == "And" || op == "BitAnd") {
-            val b: Int = jitParseInt(this.pop())
-            val a: Int = jitParseInt(this.pop())
+            val b: Int = jitParseInt(this.jitInterpPop())
+            val a: Int = jitParseInt(this.jitInterpPop())
             this.push(toStr(jitBitAnd(a, b)))
             return
         } else if (op == "Shl") {
-            val b: Int = jitParseInt(this.pop())
-            val a: Int = jitParseInt(this.pop())
+            val b: Int = jitParseInt(this.jitInterpPop())
+            val a: Int = jitParseInt(this.jitInterpPop())
             this.push(toStr(this.shiftLeft(a, b)))
             return
         } else if (op == "Shr") {
-            val b: Int = jitParseInt(this.pop())
-            val a: Int = jitParseInt(this.pop())
+            val b: Int = jitParseInt(this.jitInterpPop())
+            val a: Int = jitParseInt(this.jitInterpPop())
             this.push(toStr(this.shiftRight(a, b)))
             return
         } else if (op == "Jump") {
             this.ip = jitParseInt(arg)
             return
         } else if (op == "JumpIfTrue") {
-            val c: Int = jitParseInt(this.pop())
+            val c: Int = jitParseInt(this.jitInterpPop())
             if (c != 0) {
                 this.ip = jitParseInt(arg)
             }
             return
         } else if (op == "JumpIfFalse") {
-            val c: Int = jitParseInt(this.pop())
+            val c: Int = jitParseInt(this.jitInterpPop())
             if (c == 0) {
                 this.ip = jitParseInt(arg)
             }
             return
         } else if (op == "Return") {
-            this.result = this.pop()
+            this.result = this.jitInterpPop()
             this.halt = true
             return
         } else if (op == "ReturnUnit") {

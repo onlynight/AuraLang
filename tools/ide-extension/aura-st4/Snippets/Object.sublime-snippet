@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[object ${1:Name} {
+    fun ${2:method}(${3:params}): ${4:ReturnType} {
+        $0
+    }
+}]]></content>
+    <tabTrigger>obj</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Singleton object</description>
+</snippet>

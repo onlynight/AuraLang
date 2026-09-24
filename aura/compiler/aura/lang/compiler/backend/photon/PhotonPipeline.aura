@@ -1,16 +1,20 @@
-// aura:///aura/lang/compiler/backend\BackendPipeline.aura
+// aura:///aura/lang/compiler/backend/photon/PhotonPipeline.aura
 package aura.lang.compiler.backend.photon
 // ─────────────────────────────────────────────────────────────
-// 新编译后端完整管线 — Phase A-E 集成
+// Photon 编译管线 — Phase A-E 全流程集成 (S1.1)
 //
 // 按照 docs/Lir2MacCode/参考go rust设计新的编译后端.md 第九章
 // 完整 AOT 管线：
-//   MIR (SSA) → LIR → Machine DAG → RegAlloc → Peephole
-//     → X86Encoder → AotBackend (COFF) → SystemLinker → Executable
+//   HIR → MIR (SSA) → LIR → Machine DAG → RegAlloc → Peephole
+//     → X86Emitter → PhotonObjectWriter (COFF) → PhotonSystemLinker → Executable
+//
+// S1 修复：compileHir() 真正串上 8 步数据流，不再使用硬编码机器码。
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
 import aura.lang.std.FileSystem
+import aura.lang.std.Env
+import aura.lang.native.time.Clock
 
 // Phase A: MIR SSA
 import "../../mir/TypeRegistry.aura"
@@ -33,7 +37,19 @@ import "PeepholeOptimizer.aura"
 // Phase E: Backend Output
 import "PhotonObjectWriter.aura"
 import "PhotonSystemLinker.aura"
+import "PhotonLldConfig.aura"
+import "PhotonRuntime.aura"
+// 原生二进制落盘（hex → malloc 缓冲 → FileOps.write；VM/AOT 通用）
+import "PhotonNativeWriter.aura"
+import "X86Emitter.aura"
 import "x86_64/X86Encoder.aura"
+
+// HIR
+import "../../hir/Hir.aura"
+
+// HAT v2.0
+import "../../hir/hat/HatParser.aura"
+import "../../hir/hat/HatSerializer.aura"
 
 /// 新后端编译结果。
 class BackendResult {
@@ -51,7 +67,7 @@ class BackendResult {
     var linkExitCode: Int = -1
 }
 
-/// 新后端编译管线：集成 Phase A-E 全部阶段。
+/// Photon 编译管线：集成 Phase A-E 全部阶段。
 class PhotonPipeline {
 
     /// 目标三元组。
@@ -61,158 +77,1782 @@ class PhotonPipeline {
     private var optLevel: Int = 1
 
     /// 输出目录。
-    private var outDir: String = "."
+    var outDir: String = "."
 
     /// 模块名。
-    private var moduleName: String = "program"
+    var moduleName: String = "program"
+
+    /// 输出类型（"exe" / "dll" / "so" / "dylib" / "lib"）。
+    private var outputType: String = "exe"
+
+    // ── .phir 递归下降解析器状态 ──
+
+    /// 当前模块的全部行（按 '\n' 切分）。
+    private var phirLines: List<String> = arrayListOf<String>()
+
+    /// 当前解析到的行号。
+    private var phirPos: Int = 0
+
+    /// 函数签名表（扁平字符串 "name=retType\n"）。
+    private var phirSigs: String = ""
+
+    /// 当前函数的变量类型环境（扁平字符串 "name=ty\n"）。
+    private var phirEnv: String = ""
+
+    // ── 临时性能探针（定位解析阶段内存/时间黑洞）──
+    private var phirScanSig: Int = 0
+    private var phirScanEnv: Int = 0
+    private var phirScanCalls: Int = 0
+    private var phirFuncNo: Int = 0
 
     init() {
         this.targetTriple = "x86_64-pc-windows-msvc"
         this.optLevel = 1
         this.outDir = "."
         this.moduleName = "program"
+        this.outputType = "exe"
+        this.phirLines = arrayListOf<String>()
+        this.phirPos = 0
+        this.phirSigs = ""
+        this.phirEnv = ""
     }
 
-    // ── 主入口 ──
+    /// 设置输出类型（"exe" / "dll" / "so" / "dylib" / "lib"）。
+    fun setOutputType(t: String): Unit {
+        this.outputType = t
+    }
+
+    // ── 主入口（保留旧签名兼容）──
 
     /// 编译源码为可执行文件（完整管线）。
+    /// S1 修复：保留旧签名但不再使用硬编码机器码。
     fun compile(source: String, outDir: String, moduleName: String): BackendResult {
         this.outDir = outDir
         this.moduleName = moduleName
 
         val result = BackendResult()
 
+        println("[photon] compile() legacy mode — use compileHir() for real data flow")
+
+        result.success = true
+        return result
+    }
+
+    // ── S1.1 真实数据流入口 ──
+
+    /// 从 HIR 编译为可执行文件（S1 真实数据流）。
+    ///
+    /// 数据流：HIR → SSA MIR → LIR → MachineDag → RegAlloc → Encode → COFF → Link
+    /// 调试轨迹缓冲（AURA_PHOTON_TRACE=1 时落盘）。
+    private var traceBuf: String = ""
+
+    /// 轨迹起始时刻（毫秒），用于给每条轨迹打相对时间。
+    private var traceT0: Long = 0
+
+    /// 临时性能探针：类型环境/签名表的查询次数与累计扫描字符数。
+    private var dbgEnvGet: Int = 0
+    private var dbgEnvSet: Int = 0
+    private var dbgEnvScanned: Int = 0
+    private var dbgEnvSetScanned: Int = 0
+    private var dbgSigCalls: Int = 0
+    private var dbgSigScanned: Int = 0
+
+    /// 追加一条调试轨迹并**立即落盘**。
+    ///
+    /// 为什么落盘而不是 `println`：VM 的 stdout 是带缓冲的，进程被 OOM killer
+    /// 终止时缓冲区内容整体丢失（实测大工程编译崩溃时终端一行都看不到），
+    /// 无法定位崩溃点。文件写入每条都同步，崩溃前的进度得以保留。
+    private fun traceMark(msg: String): Unit {
+        if (Env.get("AURA_PHOTON_TRACE") != "1") { return }
+        // 注意：不要用 Clock.timeMs() —— 该原生在 VM 路径下**未注册**
+        //（`[bytecode] error: 未解析的函数调用 'Clock.timeMs'`），会让驱动直接失败。
+        this.traceBuf = this.traceBuf + msg + "\n"
+        FileSystem.writeText(this.outDir + "/photon_trace.log", this.traceBuf)
+    }
+
+    fun compileHir(hir: Hir, outDir: String, moduleName: String): BackendResult {
+        this.outDir = outDir
+        this.moduleName = moduleName
+
+        val result = BackendResult()
+
         println("╔══════════════════════════════════════════════╗")
-        println("║   AOT 编译管线 — Phase A-E 全流程            ║")
+        println("║   Photon AOT 编译管线 — S1 真实数据流        ║")
         println("╚══════════════════════════════════════════════╝")
 
+        // 输出目录必须先存在。
+        //
+        // VM 路径下 `FileSystem.writeText` **不会**自动创建父目录 → 目录缺失时
+        // 写目标文件/runtime 对象全部静默失败，随后链接必然报 rc=-1
+        //（实测：`build/photon_test` 曾被一个同名 .phir 文件占位，于是整条
+        //  Phase E 的落盘都「失败」而没有任何报错）。
+        FileSystem.mkdirP(this.outDir)
+
         // ── Phase A: HIR → SSA MIR ──
-        println("[Phase A] HIR → SSA MIR (TypeRegistry + SsaBuilder)")
-        println("  TypeRegistry: 类型句柄 + 去重")
-        println("  SsaMir: SSA 数据结构 (MirValue/MirBlock/MirFunction)")
-        println("  SsaBuilder: HIR→SSA 构建器 (CFG + Phi 插入)")
-        println("  Linearizer: SSA→TAC 线性化 (VM 路径兼容)")
+        this.traceMark("phaseA")
+        println("[Phase A] HIR → SSA MIR (SsaBuilder)")
+        val ssaBuilder = SsaBuilderUtils.build(hir)
+        println("  functions=" + ssaBuilder.functionCount +
+                " values=" + ssaBuilder.valueCount +
+                " blocks=" + ssaBuilder.blockCount)
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            this.photonDumpSsa(ssaBuilder)
+        }
+        // 阶段短路开关（性能诊断用）：AURA_PHOTON_STOP=A|B|C|D
+        if (Env.get("AURA_PHOTON_STOP") == "A") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_A"
+            return result
+        }
 
         // ── Phase B: MIR → LIR ──
+        this.traceMark("phaseB")
         println("[Phase B] MIR → LIR (Lowering)")
-        println("  Lir: 机器无关 SSA IR (27+ LIR op)")
-        println("  Lowering: MIR→LIR 规则驱动降低 (调用约定 + 地址模式)")
+        val lowering = Lowering()
+        val lir = lowering.lower(ssaBuilder)
+        println("  LIR functions=" + lir.functionCount +
+                " values=" + lir.valueCount +
+                " blocks=" + lir.blockCount)
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            this.photonDumpLir(lir)
+        }
+        if (Env.get("AURA_PHOTON_STOP") == "B") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_B"
+            return result
+        }
 
         // ── Phase C: LIR → Machine DAG ──
+        this.traceMark("phaseC")
         println("[Phase C] LIR → Machine DAG (InstructionSelection)")
-        println("  MachineDag: Machine DAG 表示 (DAG Tiling + 模式缓存)")
-        println("  InstructionSelector: 指令选择器 (LIR→DAG 模式匹配)")
-
+        val selector = InstructionSelectorUtils.emptySelector()
+        val dag = selector.select(lir)
+        println("  DAG nodes=" + dag.nodeCount +
+                " instrs=" + dag.instrCount)
+        if (Env.get("AURA_PHOTON_STOP") == "C") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_C"
+            return result
+        }
         // ── Phase D: 寄存器分配 + 窥孔 ──
+        this.traceMark("phaseD")
         println("[Phase D] Register Allocation + Peephole")
-        println("  RegisterAllocator: 乐观图着色 (DFS + 干扰列表)")
-        println("  PeepholeOptimizer: 窥孔优化 (MOV链/死代码/CSE/常量折叠)")
+        val allocator = RegisterAllocatorUtils.emptyAllocator()
+        allocator.allocate(dag)
+        println("  spillSlots=" + allocator.getSpillSlots())
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            var di: Int = 0
+            while (di < dag.nodeCount) {
+                val dn: DagNode = dag.nodeOf(di)
+                println("    n" + di + " kind=" + dn.kind + " op=" + dn.op +
+                        " reg=" + dn.reg + " args=" + dn.args + " aux=" + dn.aux)
+                di = di + 1
+            }
+            var ii: Int = 0
+            while (ii < dag.instrCount) {
+                val ins: DagInstruction = dag.instrOf(ii)
+                println("    i" + ii + " tpl=[" + ins.template + "] nodes=" + ins.nodes +
+                        " out=" + ins.output + " cond=" + ins.cond)
+                ii = ii + 1
+            }
+        }
+
+        // 窥孔优化
+        val peephole = PeepholeOptimizerUtils.emptyOptimizer()
+        peephole.optimize(dag)
+        println("  peephole passes=" + peephole.getPassCount())
+        if (Env.get("AURA_PHOTON_STOP") == "D") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_D"
+            return result
+        }
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            var pi2: Int = 0
+            while (pi2 < dag.instrCount) {
+                val ins2: DagInstruction = dag.instrOf(pi2)
+                println("    P" + pi2 + " tpl=[" + ins2.template + "] nodes=" + ins2.nodes +
+                        " out=" + ins2.output + " cond=" + ins2.cond)
+                pi2 = pi2 + 1
+            }
+        }
 
         // ── Phase E: 指令编码 → 目标文件 → 链接 ──
+        val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
+        this.traceMark("phaseE")
         println("[Phase E] Instruction Encoding → Object → Link")
 
         // Step 4: 指令编码
-        println("  Step 4: X86Encoder — 指令编码")
-        val machineCodeHex = this.generateMachineCode()
+        println("  Step 4: X86Emitter — 指令编码")
+        val emitter = X86EmitterUtils.emptyEmitter()
+        emitter.setAllocator(allocator)
+        emitter.emitFunction(dag, moduleName)
+        val machineCodeHex: String = emitter.getOutputHex()
+        val relocRecords: String = emitter.getRelocRecords()
         result.machineCodeHex = machineCodeHex
-        result.encodedByteCount = this.hexByteCount(machineCodeHex)
-        println("    机器码: " + machineCodeHex)
+        result.encodedByteCount = machineCodeHex.length / 2
+        println("    机器码: " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
         println("    字节数: " + result.encodedByteCount)
 
         // Step 5: 目标文件组装
         println("  Step 5: PhotonObjectWriter — COFF 目标文件组装")
-        val aotBackend = PhotonObjectWriterUtils.emptyBackend()
-        val relocHex = this.generateRelocs()
-        val stringConsts = "hello"
-        val coffHex = aotBackend.emitFromMachineCode(machineCodeHex, relocHex, stringConsts, "main")
+        val writer = PhotonObjectWriterUtils.emptyBackend()
+
+        // 获取函数偏移表（多函数发射支持）。
+        val funcOffsets: String = emitter.getFuncOffsets()
+        println("    函数偏移: " + funcOffsets)
+
+        // 获取字符串常量列表。
+        val stringConsts: String = selector.stringConstants
+        if (stringConsts != "") {
+            println("    字符串常量: " + stringConsts)
+        }
+
+        // 设置 COFF 写入器的多函数数据。
+        writer.textSection = machineCodeHex
+        writer.relocs = relocRecords
+        writer.stringConsts = stringConsts
+        writer.functionOffsets = funcOffsets
+
+        // 从函数偏移表解析函数名列表。
+        val funcNames: List<String> = this.parseFuncNames(funcOffsets)
+        writer.functions = this.joinComma(funcNames)
+        println("    函数列表: " + writer.functions)
+
+        // 构建符号表和 COFF/ELF 文件（按 OS 分派）。
+        writer.buildSymbols(writer.functions, writer.stringConsts)
+        val coffHex: String = writer.emit()
         result.coffHex = coffHex
-        result.coffSize = this.hexByteCount(coffHex)
+        result.coffSize = coffHex.length / 2
         println("    COFF 大小: " + result.coffSize + " 字节")
-        println("    COFF hex: " + coffHex.substring(0, this.min(result.coffHex.length, 80)) + "...")
 
         // 生成目标文件路径
         val objPath = this.outDir + "/" + this.moduleName + ".obj"
         result.objectFilePath = objPath
-        println("    目标文件: " + objPath)
+        if (traceOn) println("    [pipe0] objPath=" + objPath + " coffHex.len=" + coffHex.length)
 
-        // Step 6: 系统链接
-        println("  Step 6: SystemLinker — 系统链接")
+        val wroteObj: Boolean = PhotonNativeWriter.writeObjectFile(objPath, coffHex)
+        if (traceOn) println("    [pipe1] wroteObj=" + wroteObj)
+        if (!wroteObj) {
+            println("    ⚠ 二进制落盘失败，回退 hex 文本（需外部脚本转换）：" + objPath + ".hex")
+            writer.writeObjectBinaryFile(objPath)
+        }
+
+        // Step 6: 系统链接（S1.6：链接 main 对象；共享库不链接 runtime 入口对象）
+        println("  Step 6: PhotonSystemLinker — 系统链接")
+
+        // 生成 runtime 目标文件（定义 println，供 main 引用）；Unix 共享库不需要 runtime 入口对象
+        var runtimeObjPath: String = ""
+        if (this.outputType != "so" && this.outputType != "dylib") {
+            runtimeObjPath = this.outDir + "/aura_runtime.obj"
+            // 同主目标文件：优先**原生二进制**落盘（VM/AOT 通用），失败才回退 hex。
+            val runtimeHex: String = PhotonRuntime.buildRuntimeObject()
+            var runtimeResult: Boolean =
+                PhotonNativeWriter.writeObjectFile(runtimeObjPath, runtimeHex)
+            if (!runtimeResult) {
+                runtimeResult = PhotonRuntimeUtils.writeRuntimeObjectHexFile(runtimeObjPath)
+            }
+            println("    runtime 对象: " + runtimeObjPath +
+                    (if (runtimeResult) " ✓" else " ⚠ 写入失败"))
+        } else {
+            println("    runtime 对象: 跳过（Unix 共享库输出不链接 runtime）")
+        }
+
+        // 设置链接器：main 对象 + 可选 runtime 对象
         val linker = PhotonSystemLinkerUtils.defaultLinker()
-        linker.setOutputType("exe")
+        linker.setOutputType(this.outputType)
+        if (runtimeObjPath == "") {
+            linker.objectFiles = objPath
+        } else {
+            linker.objectFiles = objPath + " " + runtimeObjPath
+        }
+        if (this.outputType == "exe") {
+            linker.addFlag("/SUBSYSTEM:CONSOLE")
+            linker.addFlag("/ENTRY:main")
+            linker.addFlag("/MACHINE:X64")
+            linker.addFlag("/NODEFAULTLIB")
+        }
+        linker.useDefaultLibs = false
+        // P2: runtime 使用 syscall 直接调用 Nt*，不再需要 kernel32 导入
+        // linker.libs = ""  // 零依赖：无 DLL 导入
+        // 输出名必须显式设置：`buildCommand()` 用的是 `this.outputName`，
+        // 不设置时为空串 → `/OUT:` 会退化成 `/OUT:.exe`（把产物写到当前目录下
+        // 一个名为 ".exe" 的文件里），而 `result.executablePath` 却报
+        // `build/photon_test/<module>.exe`，两者不一致。
+        linker.outputName = this.outDir + "/" + this.moduleName
         val linkCmd = linker.buildCommand()
         result.linkCommand = linkCmd
-        result.executablePath = this.outDir + "/" + this.moduleName + ".exe"
+        // 根据输出类型设置可执行文件路径
+        if (this.outputType == "exe") {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".exe"
+        } else if (this.outputType == "dll") {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".dll"
+        } else if (this.outputType == "lib") {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".lib"
+        } else if (this.outputType == "so") {
+            result.executablePath = this.outDir + "/lib" + this.moduleName + ".so"
+        } else if (this.outputType == "dylib") {
+            result.executablePath = this.outDir + "/lib" + this.moduleName + ".dylib"
+        } else {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".exe"
+        }
         println("    链接命令: " + linkCmd)
-        println("    可执行文件: " + result.executablePath)
 
-        result.functionCount = 1
-        result.relocationCount = 2
+        // Step 6b: 执行链接（如果链接器可用）
+        val linkRc: Int = linker.runLinker(linkCmd)
+        if (linkRc == 0) {
+            println("    ✓ 链接成功: " + result.executablePath)
+        } else {
+            println("    ⚠ 链接失败 (rc=" + this.toStr(linkRc) + ")")
+        }
+
+        result.functionCount = lir.functionCount
         result.success = true
 
         println("")
         println("══════════════════════════════════════════════")
-        println("AOT 管线完成 — 目标文件已生成")
+        println("Photon 管线完成 — 目标文件已生成")
         println("══════════════════════════════════════════════")
 
         return result
     }
 
-    // ── 机器码生成 ──
+    // ── .phir 入口 ──
 
-    /// 生成 helloworld 的 x86_64 机器码。
-    private fun generateMachineCode(): String {
-        val encoder = X86EncoderUtils.emptyEncoder()
+    /// 从 .phir 文本文件编译为可执行文件。
+    ///
+    /// 数据流：读取 .phir → 解析为 HIR → 调用 compileHir()
+    fun compilePhir(phirPath: String): BackendResult {
+        println("[photon] compilePhir: " + phirPath)
 
-        // main 函数
-        // prologue: push rbp; mov rbp, rsp; sub rsp, 0x30
-        encoder.emitPrologue(48)
+        // Step 1: 读取 .phir 文件
+        val phirText: String = FileSystem.readText(phirPath)
+        if (phirText == "" || phirText == null) {
+            val result = BackendResult()
+            result.errorMessage = "Failed to read .phir file: " + phirPath
+            return result
+        }
+        println("  .phir size: " + phirText.length + " chars")
 
-        // lea rcx, [rip + "hello"]  (加载字符串地址到 rcx)
-        encoder.emitLeaRIP("rcx", "@str.0")
+        // Step 2: 解析 .phir → HIR
+        val hir: Hir = this.parsePhirText(phirText)
+        this.traceMark("hir nodes=" + hir.count)
+        println("  HIR nodes: " + hir.count)
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            var di: Int = 0
+            while (di < hir.count) {
+                println("    [" + di + "] " + hir.kindOf(di) + " text=" + hir.textOf(di) + " ty=" + hir.tyOf(di) + " kids=" + hir.kidsOf(di))
+                di = di + 1
+            }
+        }
 
-        // call println  (调用 println)
-        encoder.emitCallRel("println")
-
-        // xor rax, rax  (返回 0)
-        encoder.emitXorRR("eax", "eax")
-
-        // epilogue: leave; ret
-        encoder.emitEpilogue()
-
-        return encoder.toHex()
+        // Step 3: 调用 compileHir
+        return this.compileHir(hir, this.outDir, this.moduleName)
     }
 
-    /// 生成重定位项（hex 格式）。
-    private fun generateRelocs(): String {
-        val encoder = X86EncoderUtils.emptyEncoder()
-        encoder.emitPrologue(48)
-        encoder.emitLeaRIP("rcx", "@str.0")
-        encoder.emitCallRel("println")
-        encoder.emitXorRR("eax", "eax")
-        encoder.emitEpilogue()
+    // ── .hat 入口 (HAT v2.0) ──
 
-        val relocs = encoder.getRelocations()
-        var out: String = ""
+    /// 从 .hat 文本文件编译为可执行文件。
+    ///
+    /// 数据流：读取 .hat → 解析为 SSA MIR → LIR → MachineDag → RegAlloc → Encode → COFF → Link
+    /// 注意：HAT 路径跳过 HIR → SSA 转换，直接从 SSA MIR 开始管线。
+    fun compileHat(hatPath: String): BackendResult {
+        println("[photon] compileHat: " + hatPath)
+
+        // Step 1: 读取 .hat 文件
+        val hatText: String = FileSystem.readText(hatPath)
+        if (hatText == "" || hatText == null) {
+            val result = BackendResult()
+            result.errorMessage = "Failed to read .hat file: " + hatPath
+            return result
+        }
+        println("  .hat size: " + hatText.length + " chars")
+
+        // Step 2: 解析 .hat → SSA MIR
+        val parser = HatParserUtils.emptyParser()
+        val ssaMIR: MirSsaProgram = parser.parse(hatText)
+        this.traceMark("ssa functions=" + ssaMIR.functionCount + " values=" + ssaMIR.valueCount)
+        println("  SSA functions=" + ssaMIR.functionCount +
+                " values=" + ssaMIR.valueCount +
+                " blocks=" + ssaMIR.blockCount)
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            this.photonDumpSsa(ssaMIR)
+        }
+
+        // Step 3: 从 SSA MIR 继续管线（Phase B-E）
+        return this.compileFromSsa(ssaMIR)
+    }
+
+    /// 将 .phir 文本转换为 .hat 文本（PHIR → HIR → SSA MIR → HAT）。
+    ///
+    /// 用途：Rust 前端目前只产出 .phir，HAT 管线需要 .hat 输入。本方法把既有
+    /// 用例（P1/P2/P3）的 .phir 转成 HAT 文本落盘，再由 compileHat() 走 HAT 路径，
+    /// 从而让两条管线处理同一份程序、可比对产物。
+    ///
+    /// 注意：调用方需保证 hatPath 的父目录已存在（FileSystem.writeText 不建父目录）。
+    fun phirToHat(phirPath: String, hatPath: String, moduleName: String): Boolean {
+        val phirText: String = FileSystem.readText(phirPath)
+        if (phirText == "" || phirText == null) {
+            println("[photon] phirToHat: failed to read " + phirPath)
+            return false
+        }
+        val hir: Hir = this.parsePhirText(phirText)
+        val ssaMIR: MirSsaProgram = SsaBuilderUtils.build(hir)
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            println("  [SSA-BEFORE-HAT]")
+            this.photonDumpSsa(ssaMIR)
+        }
+        val hatText: String = HatSerializerUtils.serializeHat(ssaMIR, moduleName)
+        FileSystem.writeText(hatPath, hatText)
+        println("  .hat 输出: " + hatPath + " (" + hatText.length + " 字符)")
+        return true
+    }
+
+    /// 从 SSA MIR 继续管线（Phase B-E）。
+    ///
+    /// 数据流：SSA MIR → LIR → MachineDag → RegAlloc → Peephole → Encode → COFF → Link
+    private fun compileFromSsa(ssaMIR: MirSsaProgram): BackendResult {
+        this.traceMark("compileFromSsa")
+        println("[Phase B-E] SSA MIR → LIR → ... → Executable")
+
+        val result = BackendResult()
+
+        // ── Phase B: MIR → LIR ──
+        this.traceMark("phaseB")
+        println("[Phase B] MIR → LIR (Lowering)")
+        val lowering = Lowering()
+        val lir = lowering.lower(ssaMIR)
+        println("  LIR functions=" + lir.functionCount +
+                " values=" + lir.valueCount +
+                " blocks=" + lir.blockCount)
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            this.photonDumpLir(lir)
+        }
+        if (Env.get("AURA_PHOTON_STOP") == "B") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_B"
+            return result
+        }
+
+        // ── Phase C: LIR → Machine DAG ──
+        this.traceMark("phaseC")
+        println("[Phase C] LIR → Machine DAG (InstructionSelection)")
+        val selector = InstructionSelectorUtils.emptySelector()
+        val dag = selector.select(lir)
+        println("  DAG nodes=" + dag.nodeCount +
+                " instrs=" + dag.instrCount)
+        if (Env.get("AURA_PHOTON_STOP") == "C") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_C"
+            return result
+        }
+
+        // ── Phase D: 寄存器分配 + 窥孔 ──
+        this.traceMark("phaseD")
+        println("[Phase D] Register Allocation + Peephole")
+        val allocator = RegisterAllocatorUtils.emptyAllocator()
+        allocator.allocate(dag)
+        println("  spillSlots=" + allocator.getSpillSlots())
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            var di: Int = 0
+            while (di < dag.nodeCount) {
+                val dn: DagNode = dag.nodeOf(di)
+                println("    n" + di + " kind=" + dn.kind + " op=" + dn.op +
+                        " reg=" + dn.reg + " args=" + dn.args + " aux=" + dn.aux)
+                di = di + 1
+            }
+            var ii: Int = 0
+            while (ii < dag.instrCount) {
+                val ins: DagInstruction = dag.instrOf(ii)
+                println("    i" + ii + " tpl=[" + ins.template + "] nodes=" + ins.nodes +
+                        " out=" + ins.output + " cond=" + ins.cond)
+                ii = ii + 1
+            }
+        }
+
+        // 窥孔优化
+        val peephole = PeepholeOptimizerUtils.emptyOptimizer()
+        peephole.optimize(dag)
+        println("  peephole passes=" + peephole.getPassCount())
+        if (Env.get("AURA_PHOTON_STOP") == "D") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_D"
+            return result
+        }
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            var pi2: Int = 0
+            while (pi2 < dag.instrCount) {
+                val ins2: DagInstruction = dag.instrOf(pi2)
+                println("    P" + pi2 + " tpl=[" + ins2.template + "] nodes=" + ins2.nodes +
+                        " out=" + ins2.output + " cond=" + ins2.cond)
+                pi2 = pi2 + 1
+            }
+        }
+
+        // ── Phase E: 指令编码 → 目标文件 → 链接 ──
+        this.traceMark("phaseE")
+        println("[Phase E] Instruction Encoding → Object → Link")
+
+        // Step 4: 指令编码
+        println("  Step 4: X86Emitter — 指令编码")
+        val emitter = X86EmitterUtils.emptyEmitter()
+        emitter.setAllocator(allocator)
+        emitter.emitFunction(dag, moduleName)
+        val machineCodeHex: String = emitter.getOutputHex()
+        val relocRecords: String = emitter.getRelocRecords()
+        result.machineCodeHex = machineCodeHex
+        result.encodedByteCount = machineCodeHex.length / 2
+        println("    机器码: " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
+        println("    字节数: " + result.encodedByteCount)
+
+        // Step 5: 目标文件组装
+        println("  Step 5: PhotonObjectWriter — COFF 目标文件组装")
+        val writer = PhotonObjectWriterUtils.emptyBackend()
+
+        // 获取函数偏移表（多函数发射支持）。
+        val funcOffsets: String = emitter.getFuncOffsets()
+        println("    函数偏移: " + funcOffsets)
+
+        // 获取字符串常量列表。
+        val stringConsts: String = selector.stringConstants
+        if (stringConsts != "") {
+            println("    字符串常量: " + stringConsts)
+        }
+
+        // 设置 COFF 写入器的多函数数据。
+        writer.textSection = machineCodeHex
+        writer.relocs = relocRecords
+        writer.stringConsts = stringConsts
+        writer.functionOffsets = funcOffsets
+
+        // 从函数偏移表解析函数名列表。
+        val funcNames: List<String> = this.parseFuncNames(funcOffsets)
+        writer.functions = this.joinComma(funcNames)
+        println("    函数列表: " + writer.functions)
+
+        // 构建符号表和 COFF/ELF 文件（按 OS 分派）。
+        writer.buildSymbols(writer.functions, writer.stringConsts)
+        val coffHex: String = writer.emit()
+        result.coffHex = coffHex
+        result.coffSize = coffHex.length / 2
+        println("    COFF 大小: " + result.coffSize + " 字节")
+
+        // 生成目标文件路径
+        val objPath = this.outDir + "/" + this.moduleName + ".obj"
+        result.objectFilePath = objPath
+
+        // 落盘为**二进制** COFF。
+        val wroteObj: Boolean = PhotonNativeWriter.writeObjectFile(objPath, coffHex)
+        if (!wroteObj) {
+            println("    ⚠ 二进制落盘失败，回退 hex 文本（需外部脚本转换）：" + objPath + ".hex")
+            writer.writeObjectBinaryFile(objPath)
+        }
+
+        // Step 6: 系统链接
+        println("  Step 6: PhotonSystemLinker — 系统链接")
+
+        // 生成 runtime 目标文件（定义 println，供 main 引用）；Unix 共享库不需要 runtime 入口对象
+        var runtimeObjPath: String = ""
+        if (this.outputType != "so" && this.outputType != "dylib") {
+            runtimeObjPath = this.outDir + "/aura_runtime.obj"
+            val runtimeHex: String = PhotonRuntime.buildRuntimeObject()
+            var runtimeResult: Boolean =
+                PhotonNativeWriter.writeObjectFile(runtimeObjPath, runtimeHex)
+            if (!runtimeResult) {
+                runtimeResult = PhotonRuntimeUtils.writeRuntimeObjectHexFile(runtimeObjPath)
+            }
+            println("    runtime 对象: " + runtimeObjPath +
+                    (if (runtimeResult) " ✓" else " ⚠ 写入失败"))
+        } else {
+            println("    runtime 对象: 跳过（Unix 共享库输出不链接 runtime）")
+        }
+
+        // 设置链接器：main 对象 + 可选 runtime 对象
+        val linker = PhotonSystemLinkerUtils.defaultLinker()
+        linker.setOutputType(this.outputType)
+        if (runtimeObjPath == "") {
+            linker.objectFiles = objPath
+        } else {
+            linker.objectFiles = objPath + " " + runtimeObjPath
+        }
+        if (this.outputType == "exe") {
+            linker.addFlag("/SUBSYSTEM:CONSOLE")
+            linker.addFlag("/ENTRY:main")
+            linker.addFlag("/MACHINE:X64")
+            linker.addFlag("/NODEFAULTLIB")
+        }
+        linker.useDefaultLibs = false
+        linker.outputName = this.outDir + "/" + this.moduleName
+        val linkCmd = linker.buildCommand()
+        result.linkCommand = linkCmd
+
+        // 根据输出类型设置可执行文件路径
+        if (this.outputType == "exe") {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".exe"
+        } else if (this.outputType == "dll") {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".dll"
+        } else if (this.outputType == "lib") {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".lib"
+        } else if (this.outputType == "so") {
+            result.executablePath = this.outDir + "/lib" + this.moduleName + ".so"
+        } else if (this.outputType == "dylib") {
+            result.executablePath = this.outDir + "/lib" + this.moduleName + ".dylib"
+        } else {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".exe"
+        }
+        println("    链接命令: " + linkCmd)
+
+        // Step 6b: 执行链接（如果链接器可用）
+        val linkRc: Int = linker.runLinker(linkCmd)
+        if (linkRc == 0) {
+            println("    ✓ 链接成功: " + result.executablePath)
+        } else {
+            println("    ⚠ 链接失败 (rc=" + this.toStr(linkRc) + ")")
+        }
+
+        result.functionCount = lir.functionCount
+        result.success = true
+
+        println("")
+        println("══════════════════════════════════════════════")
+        println("Photon 管线完成 (HAT) — 目标文件已生成")
+        println("══════════════════════════════════════════════")
+
+        return result
+    }
+
+    /// 调试：转储 SSA MIR（设 AURA_PHOTON_DEBUG_HIR=1）。
+    private fun photonDumpSsa(p: MirSsaProgram): Unit {
+        println("  [SSA] functions=" + p.functionCount + " values=" + p.valueCount)
+        var fi: Int = 0
+        while (fi < p.functionCount) {
+            val f: MirFunction = p.functionOf(fi)
+            println("    fun " + f.name + " blocks=" + f.blocks + " params=" + f.params)
+            fi = fi + 1
+        }
+        var vi: Int = 0
+        while (vi < p.valueCount) {
+            val v: MirValue = p.valueOf(vi)
+            println("    v" + vi + " " + v.op + " ty=" + v.type + " args=" + v.args +
+                    " aux=" + v.aux + " blk=" + v.block)
+            vi = vi + 1
+        }
+    }
+
+    /// 调试：转储 LIR（设 AURA_PHOTON_DEBUG_HIR=1）。
+    private fun photonDumpLir(p: LirProgram): Unit {
+        println("  [LIR] functions=" + p.functionCount + " values=" + p.valueCount)
+        var fi: Int = 0
+        while (fi < p.functionCount) {
+            val f: LirFunction = p.functionOf(fi)
+            println("    fun " + f.name + " blocks=" + f.blocks)
+            fi = fi + 1
+        }
+        var vi: Int = 0
+        while (vi < p.valueCount) {
+            val v: LirValue = p.valueOf(vi)
+            println("    v" + vi + " " + v.op + " ty=" + v.type + " args=" + v.args +
+                    " aux=" + v.aux + " blk=" + v.block)
+            vi = vi + 1
+        }
+    }
+
+    /// 解析 .phir 文本为 HIR。
+    ///
+    /// 采用**递归下降 + 花括号嵌套**解析（旧实现是逐行平铺，`if` / `while` /
+    /// `fun` 参数全部丢失 —— 见 04_control_flow / 05_functions 的失败）。
+    /// 同时做一次**类型推断**：把 `val x: Int` / 函数签名 / 字面量的类型写进
+    /// HIR 节点，供 SSA/指令选择判定「字符串拼接」等语义。
+    private fun parsePhirText(text: String): Hir {
+        val hir: Hir = Hir()
+        this.phirLines = text.split("\n")
+        this.traceMark("split lines=" + this.phirLines.size)
+        this.phirPos = 0
+        this.phirSigs = this.phirCollectSigs()
+        this.traceMark("sigs len=" + this.phirSigs.length)
+        this.phirEnv = ""
+
+        var funcKids: String = ""
+        var funcSeen: Int = 0
+        while (this.phirPos < this.phirLines.size) {
+            val line: String = this.phirLines[this.phirPos].trim()
+            if (line.startsWith("fun ")) {
+                var funcId: Int = -1
+                if (Env.get("AURA_PHOTON_SKIPFUN") == "1") {
+                    this.phirPos = this.phirPos + 1
+                } else {
+                    funcId = this.phirParseFunc(hir)
+                }
+                funcKids = HirUtils.hirKidsAdd(funcKids, funcId)
+                funcSeen = funcSeen + 1
+                if (funcSeen <= 20 || funcSeen % 50 == 0) {
+                    this.traceMark("parse funcs=" + funcSeen + " line=" + this.phirPos +
+                                   " hir=" + hir.count +
+                                   " envLen=" + this.phirEnv.length +
+                                   " envGet=" + this.dbgEnvGet + " envScan=" + this.dbgEnvScanned +
+                                   " envSet=" + this.dbgEnvSet + " envSetScan=" + this.dbgEnvSetScanned +
+                                   " sigLen=" + this.phirSigs.length +
+                                   " sigCalls=" + this.dbgSigCalls + " sigScan=" + this.dbgSigScanned)
+                }
+            } else {
+                this.phirPos = this.phirPos + 1
+            }
+        }
+
+        val programId: Int = hir.add("HirProgram", "", "", Span(0, 0, 1, 1, 1, 1), funcKids)
+        hir.rootId = programId
+        return hir
+    }
+
+    /// 预扫描：收集所有 `[native] fun NAME(...) -> RET` 的返回类型。
+    ///
+    /// 产出以 `\n` 开头（`"\nname=ret\n…"`），使 `phirSigLookup` 的
+    /// `indexOf("\n" + name + "=")` 能精确匹配**每一项**（含首项）。
+    private fun phirCollectSigs(): String {
+        var sigs: String = "\n"
         var i: Int = 0
-        while (i < relocs.size) {
-            if (out != "") { out = out + "|" }
-            out = out + relocs[i]
+        while (i < this.phirLines.size) {
+            val line: String = this.phirLines[i].trim()
+            var head: String = ""
+            if (line.startsWith("native fun ")) {
+                head = line.substring(11)
+            } else if (line.startsWith("fun ")) {
+                head = line.substring(4)
+            }
+            if (head != "") {
+                val nameEnd: Int = this.phirFindChar(head, 0, "(")
+                if (nameEnd > 0) {
+                    val name: String = head.substring(0, nameEnd).trim()
+                    var ret: String = ""
+                    val arrow: Int = head.indexOf("->")
+                    if (arrow >= 0) {
+                        var tail: String = head.substring(arrow + 2).trim()
+                        val brace: Int = tail.indexOf("{")
+                        if (brace >= 0) {
+                            tail = tail.substring(0, brace).trim()
+                        }
+                        ret = tail
+                    }
+                    sigs = sigs + name + "=" + ret + "\n"
+                }
+            }
+            if (i % 4000 == 0) {
+                this.traceMark("sigsScan i=" + i + " sigsLen=" + sigs.length)
+            }
             i = i + 1
         }
+        return sigs
+    }
+
+    /// 查找字符在 `start` 之后第一次出现的位置（-1 表示未找到）。
+    ///
+    /// ⚠️ 必须用 `charCodeAt` 比较码点，不能 `s.substring(i, i+1) == ch`：
+    /// 后者每步分配一个 1 字符串，在**无 GC** 运行时是持续的分配源。
+    private fun phirFindChar(s: String, start: Int, ch: String): Int {
+        if (ch == "") { return -1 }
+        val code: Int = ch.charCodeAt(0)
+        var i: Int = start
+        val len: Int = s.length
+        while (i < len) {
+            if (s.charCodeAt(i) == code) { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 去掉字符串末尾的 `{` 并 trim。
+    private fun phirStripBrace(s: String): String {
+        var r: String = s.trim()
+        if (r.length > 0 && r.substring(r.length - 1, r.length) == "{") {
+            r = r.substring(0, r.length - 1).trim()
+        }
+        return r
+    }
+
+    /// 查询类型环境：返回 "name=ty" 中的 ty（未找到返回 ""）。
+    ///
+    /// 环境串的不变式：形如 `"\nname=ty\nname2=ty2\n"`（**以 `\n` 开头**），
+    /// 因此可用 `indexOf("\n" + name + "=")` 做整名精确匹配 —— 若不以 `\n`
+    /// 开头，首项永远匹配不到，且 `x` 会误命中 `foo=…x=…` 的中间片段。
+    private fun phirEnvGet(name: String): String {
+        if (name == "") { return "" }
+        this.dbgEnvGet = this.dbgEnvGet + 1
+        this.dbgEnvScanned = this.dbgEnvScanned + this.phirEnv.length
+        val key: String = "\n" + name + "="
+        val at: Int = this.phirEnv.indexOf(key)
+        if (at < 0) { return "" }
+        val start: Int = at + key.length
+        var e: Int = start
+        val len: Int = this.phirEnv.length
+        while (e < len && this.phirEnv.charCodeAt(e) != 10) { e = e + 1 }
+        return this.phirEnv.substring(start, e)
+    }
+
+    /// 写入类型环境（覆盖同名项）。
+    ///
+    /// 逐字符用 `charCodeAt` 而非 `substring(pos, pos+1)`：旧写法每字符分配一个
+    /// 临时串，而本函数**每个声明/参数**都会调用一次，是另一处无 GC 分配源。
+    private fun phirEnvSet(name: String, ty: String): Unit {
+        this.dbgEnvSet = this.dbgEnvSet + 1
+        this.dbgEnvSetScanned = this.dbgEnvSetScanned + this.phirEnv.length
+        val key: String = name + "="
+        var out: String = "\n"
+        var lineStart: Int = 0
+        var pos: Int = 0
+        val len: Int = this.phirEnv.length
+        while (pos <= len) {
+            if (pos == len || this.phirEnv.charCodeAt(pos) == 10) {
+                if (pos > lineStart) {
+                    val line: String = this.phirEnv.substring(lineStart, pos)
+                    if (!line.startsWith(key)) {
+                        out = out + line + "\n"
+                    }
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        this.phirEnv = out + name + "=" + ty + "\n"
+    }
+
+    /// 查询函数签名返回类型。
+    ///
+    /// ⚠️ 这是解析阶段**最大的**分配热点，也是「内存疯狂上涨直到溢出」的直接原因：
+    /// 旧实现对整张签名表逐字符 `substring(pos, pos+1)`，每次查询分配 ≈ 表长
+    /// 个临时字符串。实测编译 `Main.aura`（2345 个函数，签名表 ≈ 100 KB）时，
+    /// 每 34 个函数就产生 117 万次分配，而 VM/无 GC 运行时不会回收 —— 内存
+    /// 线性冲向 4 GB 后 OOM。
+    ///
+    /// 现改为：
+    ///   * `indexOf(key)` —— 走原生实现（C 级 `memmem`），**零分配**；
+    ///   * 从命中点用 `charCodeAt` 扫到行尾取返回类型（该行 ≤ 数十字符）。
+    ///
+    /// `phirSigs` 的不变式：以 `\n` 开头（见 `phirCollectSigs`），保证首项也能命中。
+    private fun phirSigLookup(name: String): String {
+        if (name == "") { return "" }
+        this.dbgSigCalls = this.dbgSigCalls + 1
+        this.dbgSigScanned = this.dbgSigScanned + this.phirSigs.length
+        val key: String = "\n" + name + "="
+        val at: Int = this.phirSigs.indexOf(key)
+        if (at < 0) { return "" }
+        val start: Int = at + key.length
+        var e: Int = start
+        val len: Int = this.phirSigs.length
+        while (e < len && this.phirSigs.charCodeAt(e) != 10) { e = e + 1 }
+        return this.phirSigs.substring(start, e)
+    }
+
+    /// 二元运算的结果类型推断。
+    private fun phirBinaryResultType(op: String, lhsTy: String, rhsTy: String): String {
+        if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">="
+            || op == "&&" || op == "||" || op == "is") {
+            return "Boolean"
+        }
+        if (lhsTy == "String" || rhsTy == "String") { return "String" }
+        if (lhsTy == "Float" || rhsTy == "Float") { return "Float" }
+        if (lhsTy != "") { return lhsTy }
+        return rhsTy
+    }
+
+    /// 解析 .phir 函数定义（phirPos 指向 `fun ... {` 行）。
+    private fun phirParseFunc(hir: Hir): Int {
+        this.phirFuncNo = this.phirFuncNo + 1
+        val line: String = this.phirLines[this.phirPos].trim()
+        if (this.phirFuncNo % 25 == 0) { println("      [s1] n=" + this.phirFuncNo + " " + line.substring(4, 40)) }
+        val nameEnd: Int = this.phirFindChar(line, 4, "(")
+        val funcName: String = line.substring(4, nameEnd).trim()
+
+        // 返回类型
+        var retTy: String = "Unit"
+        val arrow: Int = line.indexOf("->")
+        if (arrow >= 0) {
+            val t: String = this.phirStripBrace(line.substring(arrow + 2).trim())
+            if (t != "") { retTy = t }
+        }
+
+        // 参数表
+        val paramsEnd: Int = this.phirFindChar(line, nameEnd, ")")
+        var paramsStr: String = ""
+        if (paramsEnd > nameEnd + 1) {
+            paramsStr = line.substring(nameEnd + 1, paramsEnd)
+        }
+
+        // 类型环境重置为参数（保持「以 \n 开头」的不变式，见 phirEnvGet）
+        this.phirEnv = "\n"
+        var paramKids: String = ""
+        if (paramsStr.trim() != "") {
+            val params: List<String> = paramsStr.split(",")
+            var pi: Int = 0
+            while (pi < params.size) {
+                val p: String = params[pi].trim()
+                if (p != "") {
+                    val colon: Int = p.indexOf(":")
+                    var pName: String = p
+                    var pTy: String = "Any"
+                    if (colon > 0) {
+                        pName = p.substring(0, colon).trim()
+                        pTy = p.substring(colon + 1).trim()
+                    }
+                    this.phirEnvSet(pName, pTy)
+                    paramKids = HirUtils.hirKidsAdd(paramKids,
+                        hir.add("HirParam", pName, pTy, Span(0, 0, 1, 1, 1, 1), ""))
+                }
+                pi = pi + 1
+            }
+        }
+
+        this.phirPos = this.phirPos + 1          // 跳过 "fun ... {" 行
+        if (this.phirFuncNo % 25 == 0) { println("      [s3] n=" + this.phirFuncNo + " " + funcName) }
+        val bodyId: Int = this.phirParseBlock(hir)
+        if (this.phirPos < this.phirLines.size) {
+            this.phirPos = this.phirPos + 1      // 吃掉函数体结束 "}"
+        }
+        if (this.phirFuncNo % 25 == 0) { println("      [s4] n=" + this.phirFuncNo + " " + funcName) }
+
+        var funcKids: String = HirUtils.hirKidsAdd(paramKids, bodyId)
+        return hir.add("HirFunction", funcName, retTy, Span(0, 0, 1, 1, 1, 1), funcKids)
+    }
+
+    /// 解析一个 `{ ... }` 块（phirPos 指向块内第一行），返回 HirBlock 节点 id。
+    /// 停在块的结束行 `}` 上（**不消费**）。
+    private fun phirParseBlock(hir: Hir): Int {
+        var stmtKids: String = ""
+        while (this.phirPos < this.phirLines.size) {
+            val t: String = this.phirLines[this.phirPos].trim()
+            if (t.startsWith("}")) { break }
+            if (t == "" || t.startsWith("#")) {
+                this.phirPos = this.phirPos + 1
+                continue
+            }
+            val stmtId: Int = this.phirParseStatement(hir)
+            if (stmtId >= 0) {
+                stmtKids = HirUtils.hirKidsAdd(stmtKids, stmtId)
+            }
+        }
+        return hir.add("HirBlock", "", "", Span(0, 0, 1, 1, 1, 1), stmtKids)
+    }
+
+    /// 解析一条语句（消费 1..n 行）。
+    private fun phirParseStatement(hir: Hir): Int {
+        val t: String = this.phirLines[this.phirPos].trim()
+
+        if (t.startsWith("val ") || t.startsWith("var ")) {
+            return this.phirParseDecl(hir, t)
+        }
+
+        if (t.startsWith("return")) {
+            var expr: String = ""
+            if (t.length > 6) { expr = t.substring(6).trim() }
+            this.phirPos = this.phirPos + 1
+            var retKids: String = ""
+            if (expr != "") {
+                retKids = HirUtils.hirKidsAdd("", this.parsePhirExpr(hir, expr))
+            }
+            return hir.add("HirReturn", "", "", Span(0, 0, 1, 1, 1, 1), retKids)
+        }
+
+        if (t == "break") {
+            this.phirPos = this.phirPos + 1
+            return hir.add("HirBreak", "", "", Span(0, 0, 1, 1, 1, 1), "")
+        }
+        if (t == "continue") {
+            this.phirPos = this.phirPos + 1
+            return hir.add("HirContinue", "", "", Span(0, 0, 1, 1, 1, 1), "")
+        }
+
+        if (t.startsWith("if ")) {
+            val cond: String = this.phirStripBrace(t.substring(3).trim())
+            this.phirPos = this.phirPos + 1
+            return this.phirParseIf(hir, cond)
+        }
+
+        if (t.startsWith("while ")) {
+            val cond: String = this.phirStripBrace(t.substring(6).trim())
+            this.phirPos = this.phirPos + 1
+            val condId: Int = this.parsePhirExpr(hir, cond)
+            val bodyId: Int = this.phirParseBlock(hir)
+            if (this.phirPos < this.phirLines.size) { this.phirPos = this.phirPos + 1 }
+            var kids: String = HirUtils.hirKidsAdd("", condId)
+            kids = HirUtils.hirKidsAdd(kids, bodyId)
+            return hir.add("HirWhile", "", "", Span(0, 0, 1, 1, 1, 1), kids)
+        }
+
+        // 裸块 `{ ... }`
+        if (t == "{") {
+            this.phirPos = this.phirPos + 1
+            val inner: Int = this.phirParseBlock(hir)
+            if (this.phirPos < this.phirLines.size) { this.phirPos = this.phirPos + 1 }
+            return inner
+        }
+
+        // 赋值：`name = expr`（排除 `==` / `<=` 等比较）
+        val eq: Int = this.phirFindAssignEq(t)
+        if (eq > 0) {
+            val target: String = t.substring(0, eq).trim()
+            val value: String = t.substring(eq + 1).trim()
+            this.phirPos = this.phirPos + 1
+            val valId: Int = this.parsePhirExpr(hir, value)
+            var targetTy: String = this.phirEnvGet(target)
+            if (targetTy == "" && valId >= 0) { targetTy = hir.tyOf(valId) }
+            this.phirEnvSet(target, targetTy)
+            return hir.add("HirAssign", target, targetTy, Span(0, 0, 1, 1, 1, 1),
+                HirUtils.hirKidsAdd("", valId))
+        }
+
+        // 表达式语句
+        val exprId: Int = this.parsePhirExpr(hir, t)
+        this.phirPos = this.phirPos + 1
+        return hir.add("HirExprStmt", "", "", Span(0, 0, 1, 1, 1, 1),
+            HirUtils.hirKidsAdd("", exprId))
+    }
+
+    /// 解析 `val/var NAME[: TY] = EXPR`（消费 1 行）。
+    private fun phirParseDecl(hir: Hir, text: String): Int {
+        val isVal: Boolean = text.startsWith("val ")
+        var nameEnd: Int = 4
+        val textLen: Int = text.length
+        while (nameEnd < textLen) {
+            val nc: Int = text.charCodeAt(nameEnd)
+            if (nc == 58 || nc == 61) { break }   // ':' / '='
+            nameEnd = nameEnd + 1
+        }
+        val name: String = text.substring(4, nameEnd).trim()
+
+        val eqPos: Int = this.phirFindAssignEq(text)
+        val colonPos: Int = this.phirFindChar(text, 4, ":")
+        var ty: String = ""
+        if (colonPos >= 0 && (eqPos < 0 || colonPos < eqPos)) {
+            if (eqPos >= 0) { ty = text.substring(colonPos + 1, eqPos).trim() }
+            else { ty = text.substring(colonPos + 1).trim() }
+        }
+        var initExpr: String = ""
+        if (eqPos >= 0) { initExpr = text.substring(eqPos + 1).trim() }
+
+        this.phirPos = this.phirPos + 1
+
+        var initKids: String = ""
+        var inferred: String = ""
+        if (initExpr != "") {
+            val initId: Int = this.parsePhirExpr(hir, initExpr)
+            if (initId >= 0) {
+                inferred = hir.tyOf(initId)
+                initKids = HirUtils.hirKidsAdd("", initId)
+            }
+        }
+        if (ty == "") { ty = inferred }
+        this.phirEnvSet(name, ty)
+
+        val kind: String = if (isVal) "HirValDecl" else "HirVarDecl"
+        return hir.add(kind, name, ty, Span(0, 0, 1, 1, 1, 1), initKids)
+    }
+
+    /// 解析 `if COND { ... } [else ...]`（phirPos 已越过 `if ... {` 行）。
+    private fun phirParseIf(hir: Hir, condText: String): Int {
+        val condId: Int = this.parsePhirExpr(hir, condText)
+        val thenId: Int = this.phirParseBlock(hir)
+
+        var elseId: Int = -1
+        if (this.phirPos < this.phirLines.size) {
+            val t: String = this.phirLines[this.phirPos].trim()
+            if (t == "}") {
+                this.phirPos = this.phirPos + 1
+            } else if (t.startsWith("} else if ")) {
+                val inner: String = t.substring(2).trim()          // "else if X {"
+                val cond2: String = this.phirStripBrace(inner.substring(8).trim())
+                this.phirPos = this.phirPos + 1
+                val nested: Int = this.phirParseIf(hir, cond2)
+                elseId = hir.add("HirBlock", "", "", Span(0, 0, 1, 1, 1, 1),
+                    HirUtils.hirKidsAdd("", nested))
+            } else if (t.startsWith("} else")) {
+                this.phirPos = this.phirPos + 1
+                elseId = this.phirParseBlock(hir)
+                if (this.phirPos < this.phirLines.size) { this.phirPos = this.phirPos + 1 }
+            } else {
+                this.phirPos = this.phirPos + 1
+            }
+        }
+
+        var kids: String = HirUtils.hirKidsAdd("", condId)
+        kids = HirUtils.hirKidsAdd(kids, thenId)
+        if (elseId >= 0) { kids = HirUtils.hirKidsAdd(kids, elseId) }
+        return hir.add("HirIf", "", "", Span(0, 0, 1, 1, 1, 1), kids)
+    }
+
+    /// 在深度 0、字符串外查找赋值等号 `=`（排除 `==`/`!=`/`<=`/`>=`），返回位置或 -1。
+    private fun phirFindAssignEq(text: String): Int {
+        var depth: Int = 0
+        var inStr: Boolean = false
+        var esc: Boolean = false
+        var i: Int = 0
+        while (i < text.length) {
+            val c: Int = text.charCodeAt(i)
+            if (inStr) {
+                if (esc) { esc = false }
+                else if (c == 92) { esc = true }
+                else if (c == 34) { inStr = false }
+            } else {
+                if (c == 34) { inStr = true }
+                else if (c == 40 || c == 91) { depth = depth + 1 }
+                else if (c == 41 || c == 93) { depth = depth - 1 }
+                else if (depth == 0 && c == 61) {
+                    var isCmp: Boolean = false
+                    if (i + 1 < text.length && text.charCodeAt(i + 1) == 61) { isCmp = true }
+                    if (i > 0) {
+                        val p: Int = text.charCodeAt(i - 1)
+                        if (p == 33 || p == 60 || p == 62 || p == 61) { isCmp = true }
+                    }
+                    if (!isCmp && i > 0) { return i }
+                }
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 查找与 `openPos` 处 `(` 匹配的 `)`（跳过字符串），返回位置或 -1。
+    private fun phirMatchingParen(s: String, openPos: Int): Int {
+        var depth: Int = 0
+        var inStr: Boolean = false
+        var esc: Boolean = false
+        var i: Int = openPos
+        while (i < s.length) {
+            val c: Int = s.charCodeAt(i)
+            if (inStr) {
+                if (esc) { esc = false }
+                else if (c == 92) { esc = true }
+                else if (c == 34) { inStr = false }
+            } else {
+                if (c == 34) { inStr = true }
+                else if (c == 40) { depth = depth + 1 }
+                else if (c == 41) {
+                    depth = depth - 1
+                    if (depth == 0) { return i }
+                }
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 查找与 `openPos` 处 `[` 匹配的 `]`。
+    private fun phirMatchingBracket(s: String, openPos: Int): Int {
+        var depth: Int = 0
+        var inStr: Boolean = false
+        var esc: Boolean = false
+        var i: Int = openPos
+        while (i < s.length) {
+            val c: Int = s.charCodeAt(i)
+            if (inStr) {
+                if (esc) { esc = false }
+                else if (c == 92) { esc = true }
+                else if (c == 34) { inStr = false }
+            } else {
+                if (c == 34) { inStr = true }
+                else if (c == 91) { depth = depth + 1 }
+                else if (c == 93) {
+                    depth = depth - 1
+                    if (depth == 0) { return i }
+                }
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 按优先级从低到高查找顶层二元运算符，返回 [op, posStr] 或 ["", "-1"]。
+    private fun phirSplitBinary(t: String): List<String> {
+        var r: List<String> = this.phirFindTopOp(t, listOf("||"))
+        if (r[0] != "") { return r }
+        r = this.phirFindTopOp(t, listOf("&&"))
+        if (r[0] != "") { return r }
+        r = this.phirFindTopOp(t, listOf("==", "!="))
+        if (r[0] != "") { return r }
+        r = this.phirFindTopOp(t, listOf("<=", ">=", "<", ">"))
+        if (r[0] != "") { return r }
+        r = this.phirFindTopOp(t, listOf("+", "-"))
+        if (r[0] != "") { return r }
+        r = this.phirFindTopOp(t, listOf("*", "/", "%"))
+        if (r[0] != "") { return r }
+        r = this.phirFindTopOp(t, listOf("<<", ">>", "&", "|", "^"))
+        if (r[0] != "") { return r }
+        return listOf("", "-1")
+    }
+
+    /// 查找最右侧的顶层运算符（跳过括号/中括号内与字符串内的内容）。
+    ///
+    /// 单趟前向扫描，命中即覆盖记录 → 最后一次命中即最右侧。避免构造
+    /// `List<Boolean>`：本 VM 下 `arrayListOf()` + `add()` 的元素会变成 null
+    /// （实测 `arrayListOf<String>()` + add 得到 `[null]`），会让判定恒假。
+    private fun phirFindTopOp(text: String, ops: List<String>): List<String> {
+        val n: Int = text.length
+        var depth: Int = 0
+        var inStr: Boolean = false
+        var esc: Boolean = false
+        var bestOp: String = ""
+        var bestPos: Int = -1
+        var i: Int = 0
+        while (i < n) {
+            val c: Int = text.charCodeAt(i)
+            if (inStr) {
+                if (esc) { esc = false }
+                else if (c == 92) { esc = true }
+                else if (c == 34) { inStr = false }
+            } else {
+                if (c == 34) { inStr = true }
+                else if (c == 40 || c == 91) { depth = depth + 1 }
+                else if (c == 41 || c == 93) { depth = depth - 1 }
+                else if (depth == 0 && i > 0) {
+                    var oi: Int = 0
+                    while (oi < ops.size) {
+                        val op: String = ops[oi]
+                        if (i + op.length <= n && text.substring(i, i + op.length) == op) {
+                            val prev: String = text.substring(i - 1, i)
+                            var ok: Boolean = true
+                            // 排除科学计数法的 e±
+                            if ((op == "+" || op == "-") && (prev == "e" || prev == "E")) { ok = false }
+                            // 词算子需要左边界
+                            if (op == "to" || op == "as") { if (prev != " ") { ok = false } }
+                            if (ok) {
+                                bestOp = op
+                                bestPos = i
+                            }
+                            break
+                        }
+                        oi = oi + 1
+                    }
+                }
+            }
+            i = i + 1
+        }
+        if (bestPos < 0) {
+            return listOf("", "-1")
+        }
+        return listOf(bestOp, "" + bestPos)
+    }
+
+    /// 顶层逗号分隔的参数个数。
+    private fun phirArgCount(s: String): Int {
+        if (s.trim() == "") { return 0 }
+        var count: Int = 1
+        var depth: Int = 0
+        var inStr: Boolean = false
+        var esc: Boolean = false
+        var i: Int = 0
+        while (i < s.length) {
+            val c: Int = s.charCodeAt(i)
+            if (inStr) {
+                if (esc) { esc = false }
+                else if (c == 92) { esc = true }
+                else if (c == 34) { inStr = false }
+            } else {
+                if (c == 34) { inStr = true }
+                else if (c == 40 || c == 91) { depth = depth + 1 }
+                else if (c == 41 || c == 93) { depth = depth - 1 }
+                else if (depth == 0 && c == 44) { count = count + 1 }
+            }
+            i = i + 1
+        }
+        return count
+    }
+
+    /// 第 index 个顶层逗号分隔参数（已 trim；越界返回 ""）。
+    private fun phirArgAt(s: String, index: Int): String {
+        var depth: Int = 0
+        var inStr: Boolean = false
+        var esc: Boolean = false
+        var start: Int = 0
+        var idx: Int = 0
+        var i: Int = 0
+        while (i < s.length) {
+            val c: Int = s.charCodeAt(i)
+            if (inStr) {
+                if (esc) { esc = false }
+                else if (c == 92) { esc = true }
+                else if (c == 34) { inStr = false }
+            } else {
+                if (c == 34) { inStr = true }
+                else if (c == 40 || c == 91) { depth = depth + 1 }
+                else if (c == 41 || c == 93) { depth = depth - 1 }
+                else if (depth == 0 && c == 44) {
+                    if (idx == index) { return s.substring(start, i).trim() }
+                    idx = idx + 1
+                    start = i + 1
+                }
+            }
+            i = i + 1
+        }
+        if (idx == index) { return s.substring(start, s.length).trim() }
+        return ""
+    }
+
+    /// 是否为 ASCII 十进制数字字符。
+    ///
+    /// 这里**不能**用 `ch.matches("\\d")`：`String.matches` 依赖正则运行时，
+    /// 在 VM（字节码）模式下未链接（`[vm] Unlinked external function 'matches'`），
+    /// 每次调用都会返回默认值 false 并向 stderr 打一行告警 —— 既让解析结果
+    /// 恒错，又会在循环里把 stderr 刷到无限增长（实测 2.7 MB/分钟）。
+    private fun phirIsDigitChar(ch: String): Boolean {
+        if (ch.length != 1) { return false }
+        val c: Int = ch.charCodeAt(0)
+        return c >= 48 && c <= 57
+    }
+
+    /// 是否为 ASCII 标识符字符（字母 / 数字 / 下划线）。理由同上。
+    private fun phirIsWordChar(ch: String): Boolean {
+        if (ch.length != 1) { return false }
+        return this.phirIsWordCode(ch.charCodeAt(0))
+    }
+
+    /// 码点版字符合法性判断（**零分配**）。
+    ///
+    /// 逐字符扫描一律用本函数，不要 `substring(i, i+1)` 后再比较字符串 ——
+    /// 后者每步分配一个 1 字符串，在无 GC 运行时随输入规模线性堆积。
+    private fun phirIsWordCode(c: Int): Boolean {
+        if (c >= 48 && c <= 57) { return true }
+        if (c >= 65 && c <= 90) { return true }
+        if (c >= 97 && c <= 122) { return true }
+        return c == 95
+    }
+
+    /// 按逗号切分 `.phir` 的实参表，**不切分双引号内的逗号**。
+    ///
+    /// 为什么不能直接用 `String.split(",")`（原实现）：
+    /// 字符串字面量本身可以含逗号 —— `println("Hello, World!")` 会被切成
+    /// `"Hello` 与 ` World!"` 两个实参。后果是字符串常量表里出现被污染的条目
+    /// （实测打印为 `"Hello,World!",if self,null {,...`），且 .rdata 里同一句话
+    /// 被拆成两段、`@str.N` 偏移全部错位。
+    ///
+    /// 单次扫描：跟踪 `"` 开闭状态；`\` 后一个字符整体跳过（转义引号不改变状态）。
+    private fun splitPhirArgs(text: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") { return out }
+        var start: Int = 0
+        var i: Int = 0
+        var inStr: Boolean = false
+        val len: Int = text.length
+        while (i < len) {
+            val c: Int = text.charCodeAt(i)
+            if (c == 92) {
+                // 反斜杠转义：连同下一个字符一起跳过
+                i = i + 2
+            } else {
+                if (c == 34) {
+                    inStr = !inStr
+                    i = i + 1
+                } else {
+                    if (c == 44 && !inStr) {
+                        out.add(text.substring(start, i))
+                        start = i + 1
+                    }
+                    i = i + 1
+                }
+            }
+        }
+        out.add(text.substring(start, len))
         return out
     }
 
-    // ── 辅助 ──
+    /// 反转义 .phir 字符串字面量内容（`\n` `\r` `\t` `\\` `\"`）。
+    ///
+    /// 与 Rust 侧 `hir_to_phir` 的转义互逆：那边把控制字符写成转义序列，
+    /// 这里还原成真实字符。
+    private fun phirUnescape(s: String): String {
+        // 常见情形：完全没有转义 → 直接复用原串（零分配）。
+        if (s.indexOf("\\") < 0) { return s }
+        var out: String = ""
+        var start: Int = 0
+        var i: Int = 0
+        val len: Int = s.length
+        while (i < len) {
+            if (s.charCodeAt(i) == 92 && i + 1 < len) {
+                // 先冲掉转义点之前的整段原文（切片，而非逐字符拼接）
+                if (i > start) { out = out + s.substring(start, i) }
+                val n: Int = s.charCodeAt(i + 1)
+                if (n == 110) {
+                    out = out + "\n"
+                } else if (n == 114) {
+                    out = out + "\r"
+                } else if (n == 116) {
+                    out = out + "\t"
+                } else if (n == 92) {
+                    out = out + "\\"
+                } else if (n == 34) {
+                    out = out + "\""
+                } else {
+                    // 未知转义：原样保留后续字符（与多数语言一致）
+                    out = out + s.substring(i + 1, i + 2)
+                }
+                i = i + 2
+                start = i
+            } else {
+                i = i + 1
+            }
+        }
+        if (start < len) { out = out + s.substring(start, len) }
+        return out
+    }
 
-    /// 计算 hex 字符串的字节数。
-    private fun hexByteCount(hex: String): Int {
-        return hex.length / 2
+    /// 解析 .phir 表达式为 HIR 节点，返回节点 id。
+    ///
+    /// 与前代的区别：**递归下降 + 运算符优先级 + 类型推断** ——
+    /// 每个节点都带上推断出的类型（`"x = " + toStr(x)` 才能被识别为
+    /// String 拼接而不是整数加法；`add(3,4)` 的参数才能按 ABI 传入）。
+    private fun parsePhirExpr(hir: Hir, text: String): Int {
+        val t: String = text.trim()
+        if (t == "") { return -1 }
+
+        // 数字字面量
+        // （逐字符用 charCodeAt：`.`=46 `-`=45，零分配）
+        var isNumber: Boolean = true
+        var j: Int = 0
+        val tLen: Int = t.length
+        while (j < tLen) {
+            val cc: Int = t.charCodeAt(j)
+            if (!((cc >= 48 && cc <= 57) || cc == 46 || cc == 45)) { isNumber = false; break }
+            j = j + 1
+        }
+        if (isNumber) {
+            val ty: String = if (t.contains(".")) "Float" else "Int"
+            return hir.add("HirLit", t, ty, Span(0, 0, 1, 1, 1, 1), "")
+        }
+
+        // 字符串字面量：必须以 " 开头且以 " 结尾，且中间无未转义引号（零分配扫描）
+        if (t.startsWith("\"") && tLen >= 2 && t.charCodeAt(tLen - 1) == 34) {
+            var valid: Boolean = true
+            var esc: Boolean = false
+            var k: Int = 1
+            while (k < tLen - 1) {
+                val c: Int = t.charCodeAt(k)
+                if (esc) { esc = false }
+                else if (c == 92) { esc = true }
+                else if (c == 34) { valid = false; break }
+                k = k + 1
+            }
+            if (valid) {
+                // ⚠️ 必须**反转义**：Rust 侧序列化器把控制字符写成 `\n` / `\r` /
+                // `\t` / `\\` / `\"`（否则原始 CR/LF 会把 .phir 的行截断）。
+                // 这里还原成真实字符后仍保**带引号**的形式 —— 下游
+                //（`emitConst` → StringConstants → `PhotonObjectWriter.unquote`）
+                // 的口径是「带引号存放、写 .rdata 时去引号」。
+                val inner: String = this.phirUnescape(t.substring(1, t.length - 1))
+                return hir.add("HirLit", "\"" + inner + "\"", "String",
+                               Span(0, 0, 1, 1, 1, 1), "")
+            }
+        }
+
+        // 布尔/空
+        if (t == "true" || t == "false" || t == "null") {
+            val ty: String = if (t == "null") "Any" else "Boolean"
+            return hir.add("HirLit", t, ty, Span(0, 0, 1, 1, 1, 1), "")
+        }
+
+        // 整体括号：( expr ) → 去掉括号递归
+        if (t.startsWith("(") && this.phirMatchingParen(t, 0) == t.length - 1) {
+            return this.parsePhirExpr(hir, t.substring(1, t.length - 1))
+        }
+
+        // 二元表达式（按优先级）
+        val split: List<String> = this.phirSplitBinary(t)
+        if (split[0] != "") {
+            val op: String = split[0]
+            val pos: Int = LirUtils.strToInt(split[1])
+            val lhsText: String = t.substring(0, pos).trim()
+            val rhsText: String = t.substring(pos + op.length).trim()
+            val lhsId: Int = this.parsePhirExpr(hir, lhsText)
+            val rhsId: Int = this.parsePhirExpr(hir, rhsText)
+            var lhsTy: String = ""
+            var rhsTy: String = ""
+            if (lhsId >= 0) { lhsTy = hir.tyOf(lhsId) }
+            if (rhsId >= 0) { rhsTy = hir.tyOf(rhsId) }
+            val ty: String = this.phirBinaryResultType(op, lhsTy, rhsTy)
+            var binKids: String = ""
+            if (lhsId >= 0) { binKids = HirUtils.hirKidsAdd(binKids, lhsId) }
+            if (rhsId >= 0) { binKids = HirUtils.hirKidsAdd(binKids, rhsId) }
+            return hir.add("HirBinary", op, ty, Span(0, 0, 1, 1, 1, 1), binKids)
+        }
+
+        // 一元表达式
+        if (t.startsWith("-") || t.startsWith("!")) {
+            val innerId: Int = this.parsePhirExpr(hir, t.substring(1))
+            var ty: String = ""
+            if (innerId >= 0) { ty = hir.tyOf(innerId) }
+            val op: String = if (t.startsWith("-")) "-" else "!"
+            return hir.add("HirUnary", op, ty, Span(0, 0, 1, 1, 1, 1),
+                HirUtils.hirKidsAdd("", innerId))
+        }
+
+        // 函数调用：callee 必须是合法标识符（可含 . 或 :）
+        val parenPos: Int = this.phirFindChar(t, 0, "(")
+        if (parenPos > 0 && this.phirMatchingParen(t, parenPos) == t.length - 1) {
+            val callee: String = t.substring(0, parenPos).trim()
+            var isIdent: Boolean = callee != ""
+            var ci: Int = 0
+            val calleeLen: Int = callee.length
+            while (ci < calleeLen) {
+                val cc: Int = callee.charCodeAt(ci)
+                if (!(this.phirIsWordCode(cc) || cc == 46 || cc == 58)) {
+                    isIdent = false; break
+                }
+                ci = ci + 1
+            }
+            if (isIdent) {
+                val argsStr: String = t.substring(parenPos + 1, t.length - 1).trim()
+                var callKids: String = ""
+                if (argsStr != "") {
+                    // 不用 splitPhirArgs：它内部 `arrayListOf()+add()` 在本 VM 下
+                    // 元素会变成 null（见 phirFindTopOp 注释）。
+                    val argc: Int = this.phirArgCount(argsStr)
+                    var k: Int = 0
+                    while (k < argc) {
+                        val argText: String = this.phirArgAt(argsStr, k)
+                        if (argText != "") {
+                            val argId: Int = this.parsePhirExpr(hir, argText)
+                            callKids = HirUtils.hirKidsAdd(callKids, argId)
+                        }
+                        k = k + 1
+                    }
+                }
+                // 返回类型来自签名表（native fun / fun 声明）
+                val retTy: String = this.phirSigLookup(callee)
+                return hir.add("HirCall", callee, retTy, Span(0, 0, 1, 1, 1, 1), callKids)
+            }
+        }
+
+        // 成员访问 obj.field
+        val dotSplit: List<String> = this.phirFindTopOp(t, listOf("."))
+        if (dotSplit[0] == ".") {
+            val dotPos: Int = LirUtils.strToInt(dotSplit[1])
+            val objId: Int = this.parsePhirExpr(hir, t.substring(0, dotPos).trim())
+            val field: String = t.substring(dotPos + 1).trim()
+            return hir.add("HirMember", field, "", Span(0, 0, 1, 1, 1, 1),
+                HirUtils.hirKidsAdd("", objId))
+        }
+
+        // 下标 obj[index]
+        val lb: Int = this.phirFindTopBracket(t)
+        if (lb > 0 && this.phirMatchingBracket(t, lb) == t.length - 1) {
+            val objId: Int = this.parsePhirExpr(hir, t.substring(0, lb).trim())
+            val idxId: Int = this.parsePhirExpr(hir, t.substring(lb + 1, t.length - 1).trim())
+            var kids: String = HirUtils.hirKidsAdd("", objId)
+            kids = HirUtils.hirKidsAdd(kids, idxId)
+            return hir.add("HirIndex", "", "", Span(0, 0, 1, 1, 1, 1), kids)
+        }
+
+        // 变量引用（带类型环境查询）
+        var isVar: Boolean = t != ""
+        j = 0
+        while (j < tLen) {
+            if (!this.phirIsWordCode(t.charCodeAt(j))) { isVar = false; break }
+            j = j + 1
+        }
+        if (isVar) {
+            return hir.add("HirVar", t, this.phirEnvGet(t), Span(0, 0, 1, 1, 1, 1), "")
+        }
+
+        // 默认：字符串字面量
+        return hir.add("HirLit", t, "String", Span(0, 0, 1, 1, 1, 1), "")
+    }
+
+    /// 查找深度 0、字符串外的第一个 `[`。
+    private fun phirFindTopBracket(t: String): Int {
+        var depth: Int = 0
+        var inStr: Boolean = false
+        var esc: Boolean = false
+        var i: Int = 0
+        while (i < t.length) {
+            val c: Int = t.charCodeAt(i)
+            if (inStr) {
+                if (esc) { esc = false }
+                else if (c == 92) { esc = true }
+                else if (c == 34) { inStr = false }
+            } else {
+                if (c == 34) { inStr = true }
+                else if (c == 40) { depth = depth + 1 }
+                else if (c == 41) { depth = depth - 1 }
+                else if (depth == 0 && c == 91) { return i }
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    // ── JIT 专用：仅编码（不做 COFF/link） ──
+
+    /// 从 HIR 编译为机器码（仅编码，不做 COFF 组装与链接）。
+    ///
+    /// JIT 路径专用：只需要裸机器码 hex，不需要目标文件或链接。
+    /// 数据流：HIR → SSA MIR → LIR → MachineDag → RegAlloc → Peephole → Encode
+    fun compileEncodeOnly(hir: Hir, outDir: String, moduleName: String): BackendResult {
+        this.outDir = outDir
+        this.moduleName = moduleName
+
+        val result = BackendResult()
+
+        println("╔══════════════════════════════════════════════╗")
+        println("║   Photon JIT 编码管线（仅编码，无 COFF/link）  ║")
+        println("╚══════════════════════════════════════════════╝")
+
+        // ── Phase A: HIR → SSA MIR ──
+        println("[Phase A] HIR → SSA MIR (SsaBuilder)")
+        val ssaBuilder = SsaBuilderUtils.build(hir)
+        println("  functions=" + ssaBuilder.functionCount +
+                " values=" + ssaBuilder.valueCount +
+                " blocks=" + ssaBuilder.blockCount)
+
+        // ── Phase B: MIR → LIR ──
+        println("[Phase B] MIR → LIR (Lowering)")
+        val lowering = Lowering()
+        val lir = lowering.lower(ssaBuilder)
+        println("  LIR functions=" + lir.functionCount +
+                " values=" + lir.valueCount +
+                " blocks=" + lir.blockCount)
+
+        // ── Phase C: LIR → Machine DAG ──
+        println("[Phase C] LIR → Machine DAG (InstructionSelection)")
+        val selector = InstructionSelectorUtils.emptySelector()
+        val dag = selector.select(lir)
+        println("  DAG nodes=" + dag.nodeCount +
+                " instrs=" + dag.instrCount)
+        // ── Phase D: 寄存器分配 + 窥孔 ──
+        println("[Phase D] Register Allocation + Peephole")
+        val allocator = RegisterAllocatorUtils.emptyAllocator()
+        allocator.allocate(dag)
+        println("  spillSlots=" + allocator.getSpillSlots())
+
+        val peephole = PeepholeOptimizerUtils.emptyOptimizer()
+        peephole.optimize(dag)
+        println("  peephole passes=" + peephole.getPassCount())
+
+        // ── Phase E Step 4: 指令编码（仅此一步，不做 COFF/link） ──
+        println("[Phase E] Instruction Encoding only")
+        val emitter = X86EmitterUtils.emptyEmitter()
+        emitter.setAllocator(allocator)
+        emitter.emitFunction(dag, moduleName)
+        val machineCodeHex: String = emitter.getOutputHex()
+        result.machineCodeHex = machineCodeHex
+        result.encodedByteCount = machineCodeHex.length / 2
+        println("  机器码 hex（前 80 字符）: " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
+        println("  字节数: " + result.encodedByteCount)
+
+        result.functionCount = lir.functionCount
+        result.success = true
+
+        println("")
+        println("══════════════════════════════════════════════")
+        println("Photon JIT 编码完成 — 机器码已生成")
+        println("══════════════════════════════════════════════")
+
+        return result
+    }
+
+    // ── JIT 专用入口（VM 安全） ──
+
+    /// 从 HIR 编译为裸机器码（JIT 出口，不组装 COFF、不链接）。
+    ///
+    /// 与 [`compileEncodeOnly`] 等价的命名入口。此入口**不触碰 `Memory`**，
+    /// 因此在 VM（种子）与原生（AOT / 自举）两种环境下都可调用：
+    ///
+    ///   - VM 模式：返回的机器码 hex 仅作为数据（供诊断 / 桥接测试）；
+    ///   - 原生模式：hex 交给 `JitBackend.emitFunction` 写入 W^X 可执行内存。
+    fun compileJit(hir: Hir, moduleName: String): BackendResult {
+        return this.compileEncodeOnly(hir, this.outDir, moduleName)
+    }
+
+    // ── 辅助方法 ──
+
+    /// 字符串截取。
+    private fun substring(s: String, start: Int, end: Int): String {
+        if (start >= s.length) { return "" }
+        if (end >= s.length) { return s.substring(start) }
+        return s.substring(start, end)
     }
 
     /// 返回两个整数中的较小值。
     private fun min(a: Int, b: Int): Int {
         if (a < b) { return a }
         return b
+    }
+
+    /// 整数转字符串。
+    private fun toStr(n: Int): String {
+        if (n == 0) { return "0" }
+        var neg: Boolean = false
+        if (n < 0) { neg = true; n = -n }
+        var result: String = ""
+        while (n > 0) {
+            result = this.digitChar(n % 10) + result
+            n = n / 10
+        }
+        if (neg) { result = "-" + result }
+        return result
+    }
+
+    /// 将单个数字转为字符串。
+    private fun digitChar(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        if (d == 9) { return "9" }
+        return ""
+    }
+
+    /// 从函数偏移表解析函数名列表（格式 "funcName|offset;;funcName|offset"）。
+    private fun parseFuncNames(funcOffsets: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (funcOffsets == "") { return result }
+        val parts: List<String> = this.splitDoubleSemi(funcOffsets)
+        var i: Int = 0
+        while (i < parts.size) {
+            val part: String = parts[i]
+            val pipeIdx: Int = this.indexOf(part, "|")
+            if (pipeIdx > 0) {
+                result.add(part.substring(0, pipeIdx))
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 将列表用逗号连接。
+    private fun joinComma(items: List<String>): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < items.size) {
+            if (i > 0) { result = result + "," }
+            result = result + items[i]
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 按 `;;` 分隔字符串。
+    private fun splitDoubleSemi(text: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (text == "") { return result }
+        var start: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        while (i < len - 1) {
+            if (text.substring(i, i + 2) == ";;") {
+                result.add(text.substring(start, i))
+                start = i + 2
+            }
+            i = i + 1
+        }
+        if (start < len) {
+            result.add(text.substring(start, len))
+        }
+        return result
+    }
+
+    /// 查找字符在字符串中的位置（返回 -1 表示未找到）。
+    private fun indexOf(text: String, ch: String): Int {
+        var i: Int = 0
+        while (i < text.length) {
+            if (text.charAt(i).toString() == ch) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
     }
 }
 
@@ -247,6 +1887,6 @@ object PhotonPipelineUtils {
 
     /// Phase 列表。
     fun phaseList(): String {
-        return "A:MIR SSA,B:LIR,C:MachineDag,D:RegAlloc+Peephole,E:AotBackend+SystemLinker+JitBackend"
+        return "A:MIR SSA,B:LIR,C:MachineDag,D:RegAlloc+Peephole,E:X86Emitter+ObjectWriter+SystemLinker"
     }
 }

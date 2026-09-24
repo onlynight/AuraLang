@@ -4,7 +4,7 @@ package aura.lang.cli
 import aura.lang.std.IO
 import aura.lang.std.String
 import aura.lang.std.FileSystem
-import aura.lang.cli.CompilerApi
+import "CompilerApi.aura"
 import aura.lang.native.process.ProcessNative
 import aura.lang.compiler.aot.Aot
 
@@ -147,7 +147,7 @@ object ReplUtils {
             return 1
         }
 
-        val exePath: String = AotUtils.aotWinPath(outPath + ".exe")
+        val exePath: String = Aot.aotWinPath(outPath + ".exe")
         val runCode: Int = ProcessNative.run(exePath)
         return runCode
     }

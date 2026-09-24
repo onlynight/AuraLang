@@ -1,0 +1,703 @@
+%YAML 1.2
+---
+name: Photon IR
+scope: source.phir
+version: 2
+
+file_extensions:
+  - phir
+
+variables:
+  builtin_types: '\b(?:void|bool|i1|i8|i16|i32|i64|i128|f32|f64|ptr|string|vector|Int|Long|Short|Byte|Float|Double|Boolean|Char|String|Any|Nothing|Unit|List|Map|Set|Array|MutableList|MutableMap|MutableSet|Result|Optional|Throwable|Exception|Iterable|Iterator|Sequence|Pair|Triple|Comparable|Number|Annotation)\b'
+  control_keywords: '\b(?:if|else|while|return|br|br_table|unreachable|call|invoke|scope|debug|printf|verify|store|load)\b'
+  statement_keywords: '\b(?:let|var|val|const|copy|move|call|invoke|br|return|store|load|debug|printf|verify|scope|native|fun|bb|fn|sig|gv|ss|vmctx|self|this|owned|borrowed|guaranteed|copy)\b'
+  numeric_literal: '\b(?:0x[0-9A-Fa-f]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?(?:[uUlLfFdD])?)\b'
+
+contexts:
+  main:
+    - include: comments
+    - include: module-header
+    - include: globals
+    - include: native-function-declaration
+    - include: function-declaration
+    - include: preamble-stack-slot
+    - include: preamble-fn-ref
+    - include: preamble-sig
+    - include: preamble-global-value
+    - include: basic-block
+    - include: statement-def
+    - include: statement-assignment
+    - include: statement-store
+    - include: statement-load
+    - include: statement-debug
+    - include: terminator-return
+    - include: terminator-br-if
+    - include: terminator-br
+    - include: terminator-call
+    - include: terminator-unreachable
+    - include: exception-landing
+    - include: attribute-block
+    - include: instruction-opcode
+    - include: dialect-instruction
+    - include: operand
+    - include: local-reference
+    - include: stack-slot-reference
+    - include: global-reference
+    - include: self-reference
+    - include: vmctx
+    - include: builtin-types
+    - include: type-annotation
+    - include: function-call
+    - include: field-access
+    - include: index-access
+    - include: deref
+    - include: operators
+    - include: string
+    - include: numeric-literal
+    - include: boolean-literal
+    - include: null-literal
+    - include: variable
+    - match: ','
+      scope: punctuation.separator.delimiter.phir
+    - match: ';'
+      scope: punctuation.terminator.statement.phir
+    - match: '\.'
+      scope: punctuation.separator.period.phir
+
+  comments:
+    - include: comment-line
+
+  comment-line:
+    - match: '#'
+      scope: punctuation.definition.comment.phir
+      push: comment-line-body
+
+  comment-line-body:
+    - meta_scope: comment.line.number-sign.phir
+    - match: $
+      pop: 1
+
+  module-header:
+    - match: '(#)\s*(module|source|dialect)\b'
+      captures:
+        1: punctuation.definition.comment.phir
+        2: storage.type.keyword.phir
+      push: module-header-body
+
+  module-header-body:
+    - meta_scope: meta.module-header.phir
+    - match: '0x[0-9A-Fa-f]+'
+      scope: constant.numeric.hex.phir
+    - match: '"[^"]*"'
+      scope: string.quoted.double.phir
+    - match: '\b[\w-]+'
+      scope: entity.name.module.phir
+    - match: $
+      pop: 1
+
+  globals:
+    - match: '(@)([\w.]+)(?=\s*=)'
+      captures:
+        1: punctuation.accessor.global.phir
+        2: entity.name.global.phir
+      push: globals-body
+
+  globals-body:
+    - meta_scope: meta.global.phir
+    - match: '\b(void|bool|i1|i8|i16|i32|i64|i128|f32|f64|ptr|string)\b'
+      scope: storage.type.builtin.phir
+    - include: string
+    - include: numeric-literal
+    - match: '\btrue\b'
+      scope: constant.language.boolean.phir
+    - match: '\bfalse\b'
+      scope: constant.language.boolean.phir
+    - match: ';|$'
+      pop: 1
+
+  native-function-declaration:
+    - match: '\b(native)\s+(fun)\s+([\w.]+)(\s*\()'
+      captures:
+        1: storage.type.native.phir
+        2: storage.type.function.phir
+        3: entity.name.function.phir
+        4: punctuation.section.parameters.begin.phir
+      push: native-function-declaration-body
+
+  native-function-declaration-body:
+    - meta_scope: meta.function.native.phir
+    - include: comments
+    - include: parameter
+    - include: return-arrow
+    - include: type-annotation
+    - include: builtin-types
+    - match: '\)'
+      scope: punctuation.section.parameters.end.phir
+      pop: 1
+
+  function-declaration:
+    - match: '\b(fun)\s+([\w.]+)'
+      captures:
+        1: storage.type.function.phir
+        2: entity.name.function.phir
+      push: function-declaration-body
+
+  function-declaration-body:
+    - meta_scope: meta.function.phir
+    - include: comments
+    - include: function-parameters
+    - include: return-type
+    - include: block-open-brace
+    - include: body
+    - match: '^(\})$'
+      scope: punctuation.section.block.end.phir
+      pop: 1
+
+  function-parameters:
+    - match: '\('
+      scope: punctuation.section.parameters.begin.phir
+      push: function-parameters-body
+
+  function-parameters-body:
+    - include: comments
+    - include: parameter
+    - include: type-annotation
+    - include: builtin-types
+    - match: '\)'
+      scope: punctuation.section.parameters.end.phir
+      pop: 1
+
+  return-type:
+    - match: '(->)\s*'
+      captures:
+        1: keyword.operator.assignment.phir
+      push: return-type-body
+
+  return-type-body:
+    - include: comments
+    - include: builtin-types
+    - match: '[\w.]+(?:<[^>]+>)?'
+      scope: entity.name.type.phir
+    - match: '(?=\s*\{|\s*$|\s*;|\s*,)'
+      pop: 1
+
+  type-name:
+    - match: '[\w.]+(?:<[^>]+>)?'
+      scope: entity.name.type.phir
+
+  block-open-brace:
+    - match: '\{(?=\s*$)'
+      scope: punctuation.section.block.begin.phir
+
+  parameter:
+    - match: '([\w]+)(\s*:\s*([\w?]+(?:<[^>]+>)?(?:\s*->\s*[\w?]+(?:<[^>]+>)?)?)?)(,)?'
+      captures:
+        1: variable.parameter.phir
+        3: entity.name.type.phir
+        4: punctuation.separator.delimiter.phir
+
+  return-arrow:
+    - match: '->'
+      scope: keyword.operator.assignment.phir
+
+  type-annotation:
+    - match: '(:)\s*([\w?]+(?:<[^>]+>)?(?:\s*->\s*[\w?]+(?:<[^>]+>)?)?)'
+      captures:
+        1: punctuation.separator.type-annotation.phir
+        2: entity.name.type.phir
+
+  builtin-types:
+    - match: '{{builtin_types}}'
+      scope: storage.type.builtin.phir
+
+  preamble-stack-slot:
+    - match: '(ss\d+)\s*=(?!=)\s*([\w?]+(?:<[^>]+>)?)\s+(\d+)'
+      captures:
+        1: variable.stack-slot.phir
+        2: entity.name.type.builtin.phir
+        3: constant.numeric.phir
+
+  preamble-fn-ref:
+    - match: '(fn\d+)\s*=(?!=)'
+      captures:
+        1: entity.name.parameter.phir
+      push: preamble-line
+
+  preamble-sig:
+    - match: '(sig\d+)\s*='
+      captures:
+        1: entity.name.parameter.phir
+      push: preamble-line
+
+  preamble-global-value:
+    - match: '(gv\d+)\s*='
+      captures:
+        1: entity.name.parameter.phir
+      push: preamble-line
+
+  preamble-line:
+    - meta_scope: meta.preamble.phir
+    - include: comments
+    - include: global-reference
+    - include: parameter
+    - include: return-arrow
+    - include: type-annotation
+    - include: builtin-types
+    - match: ';|$'
+      pop: 1
+
+  basic-block:
+    - match: '\b(bb)\s+([\w]+)(\s*\([^)]*\))?:'
+      captures:
+        1: storage.type.keyword.phir
+        2: entity.name.block.phir
+        3: meta.block-params.phir
+      push: basic-block-body
+
+  basic-block-body:
+    - meta_scope: meta.block.phir
+    - include: comments
+    - include: block-params
+    - include: block-open-brace
+    - include: body
+    - match: '(?=\bb\b|^\s*\}|$)'
+      pop: 1
+
+  block-params:
+    - match: '\('
+      scope: punctuation.section.parameters.begin.phir
+      push: block-params-body
+
+  block-params-body:
+    - include: parameter
+    - match: '\)'
+      scope: punctuation.section.parameters.end.phir
+      pop: 1
+
+  statement-assignment:
+    - match: '([\w]+)\s*=(?!=)'
+      captures:
+        1: variable.local.phir
+      push: statement-line
+
+  statement-line:
+    - meta_scope: meta.statement.phir
+    - include: comments
+    - include: operand
+    - include: dialect-instruction
+    - include: instruction-opcode
+    - include: attribute-block
+    - include: numeric-literal
+    - include: boolean-literal
+    - include: local-reference
+    - include: stack-slot-reference
+    - include: global-reference
+    - include: type-annotation
+    - include: builtin-types
+    - include: operators
+    - include: string
+    - include: return-arrow
+    - include: constant-add
+    - include: null-literal
+    - include: self-reference
+    - include: field-access
+    - include: function-call
+    - include: variable
+    - match: ';|$'
+      pop: 1
+
+  statement-store:
+    - match: '\b(store)\b'
+      captures:
+        1: keyword.statement.phir
+      push: statement-line
+
+  statement-load:
+    - match: '\b(load)\b'
+      captures:
+        1: keyword.statement.phir
+      push: statement-line
+
+  statement-def:
+    - match: '\b(let|var|val)\b'
+      captures:
+        1: storage.type.variable.phir
+      push: statement-line
+
+  declaration-keyword:
+    - match: '\b(let|var|val)\b'
+      scope: storage.type.variable.phir
+
+  statement-debug:
+    - match: '\b(debug|printf|verify)\b'
+      captures:
+        1: keyword.statement.phir
+      push: debug-line
+
+  debug-line:
+    - meta_scope: meta.statement.debug.phir
+    - include: comments
+    - include: debug-variable
+    - include: local-reference
+    - match: ';|$'
+      pop: 1
+
+  debug-variable:
+    - match: '([\w]+)\s*(=>\s*)(v\d+)'
+      captures:
+        1: variable.debug-var.phir
+        2: keyword.operator.assignment.phir
+        3: variable.local.phir
+
+  terminator-return:
+    - match: '\b(return)\b'
+      captures:
+        1: keyword.terminator.phir
+      push: statement-line
+
+  terminator-br-if:
+    - match: '\b(br)\s+(if)\b'
+      captures:
+        1: keyword.terminator.phir
+        2: keyword.terminator.phir
+      push: statement-line
+
+  terminator-br:
+    - match: '\b(br)\b'
+      captures:
+        1: keyword.terminator.phir
+      push: statement-line
+
+  terminator-call:
+    - match: '(?:(v\d+)\s*=(?!=)\s*)?(call)\b'
+      captures:
+        1: variable.local.phir
+        2: keyword.terminator.phir
+      push: statement-line
+
+  terminator-unreachable:
+    - match: '\b(unreachable)\b'
+      scope: keyword.terminator.phir
+
+  exception-landing:
+    - match: '(\[\s*)(return|unwind)(\s*:\s*)'
+      captures:
+        1: punctuation.section.exception.begin.phir
+        2: keyword.statement.phir
+        3: keyword.operator.assignment.phir
+      push: exception-body
+
+  exception-body:
+    - include: block-target
+    - include: comma
+    - match: '(\])'
+      scope: punctuation.section.exception.end.phir
+      pop: 1
+
+  scope-block:
+    - match: '\b(scope)\s+(\d+)(\s*\{)'
+      captures:
+        1: keyword.statement.phir
+        2: variable.scope-id.phir
+        3: punctuation.section.scope.begin.phir
+      push: scope-body
+
+  scope-body:
+    - meta_scope: meta.scope.phir
+    - include: comments
+    - include: block-open-brace
+    - include: body
+    - match: '(\})'
+      scope: punctuation.section.scope.end.phir
+      pop: 1
+
+  indent-if:
+    - match: '\b(if)\b'
+      captures:
+        1: keyword.control.phir
+      push: block-line
+
+  indent-else:
+    - match: '\b(else)\b'
+      captures:
+        1: keyword.control.phir
+
+  indent-while:
+    - match: '\b(while)\b'
+      captures:
+        1: keyword.control.phir
+      push: block-line
+
+  block-line:
+    - meta_scope: meta.block.phir
+    - include: comments
+    - include: block-open-brace
+    - include: body
+    - match: '^\s*(\})'
+      scope: punctuation.section.block.end.phir
+      pop: 1
+
+  attribute-block:
+    - match: '(\{)\s*'
+      captures:
+        1: punctuation.section.block.begin.phir
+      push: attribute-body
+
+  attribute-body:
+    - meta_scope: meta.attribute.phir
+    - include: attribute-name
+    - include: atomic-attr
+    - include: attribute-block
+    - match: '(\})'
+      scope: punctuation.section.block.end.phir
+      pop: 1
+
+  attribute-name:
+    - match: '\b(commutative|associative|readonly|volatile|nounwind|noreturn|norecurse|tail|inline|speculatable|seqcst|release|acquire|unordered|relaxed|monotonic)\b'
+      scope: entity.name.attr.phir
+
+  atomic-attr:
+    - match: '\b(atomic)\b'
+      captures:
+        1: entity.name.attr.phir
+      push: atomic-body
+
+  atomic-body:
+    - include: attribute-name
+    - match: '(?=\s|})'
+      pop: 1
+
+  function-attribute:
+    - match: '\b(noinline|cold|noreturn|nosideeffects|noalias|nobuiltin|always_inline)\b'
+      scope: entity.name.attr.phir
+
+  calling-convention:
+    - match: '\b(system_v|fast|cold|windows_fastcall|probstack|apple_aarch64|winch)\b'
+      scope: entity.name.calling-convention.phir
+
+  ownership-modifier:
+    - match: '\b(owned|borrowed|guaranteed|copy)\b(?=\s*\()'
+      scope: storage.modifier.ownership.phir
+
+  instruction-opcode:
+    - match: '\b(add|sub|mul|div|rem|imul|idiv|irem|fadd|fsub|fmul|fdiv|frem|fneg|fabs|fmin|fmax|frnd|iand|ior|ixor|ishl|ishr|iushr|and|or|xor|shl|shr|ushr|icmp|fcmp|phi|select|sextend|uextend|ireduce|br|br_table|call|invoke|vcall|ret|new|retain|release|getfield|setfield|gep|syscall|fence|const|ss_load|ss_store|vadd|vsub|vmul|vdiv|vsplat|vload|vstore)\b'
+      scope: support.instruction.phir support.function.phir
+
+  dialect-instruction:
+    - match: '\b((?:load|store|fpromote|fdemote|fcvt|fcvt_from_uint|fcvt_to_uint|fcvt_from_sint|fcvt_to_sint|fcvt_from_float|fcvt_to_float|fmin|fmax|frnd|vload|vstore|atom\.load|atom\.store|atom\.cas|atom\.cmpxchg)\.)(\w+)?'
+      captures:
+        1: keyword.dialect.phir
+        2: entity.name.type.builtin.phir
+
+  operand:
+    - match: '\b(const|copy|move)\b'
+      captures:
+        1: storage.modifier.operand.phir
+      push: statement-line
+
+  local-reference:
+    - match: '\b(v\d+)\b'
+      scope: variable.local.phir
+
+  stack-slot-reference:
+    - match: '\b(ss\d+)\b'
+      scope: variable.stack-slot.phir
+
+  global-reference:
+    - match: '(@)([\w.]+)'
+      captures:
+        1: punctuation.accessor.global.phir
+        2: entity.name.global.phir
+
+  local-copy-reference:
+    - match: '%%([\w]+)'
+      captures:
+        1: variable.local.phir
+
+  self-reference:
+    - match: '\b(this|self)\b'
+      scope: variable.language.this.phir
+
+  vmctx:
+    - match: '\b(vmctx)\b'
+      scope: variable.language.vmctx.phir
+
+  field-access:
+    - match: '([\w]+)(\.)([\w]+)'
+      captures:
+        1: variable.local.phir
+        2: punctuation.separator.period.phir
+        3: variable.other.property.phir
+
+  index-access:
+    - match: '([\w]+)(\[])([^\]]+)(\])'
+      captures:
+        1: variable.local.phir
+        2: punctuation.section.index.begin.phir
+        3: constant.numeric.phir
+        4: punctuation.section.index.end.phir
+
+  deref:
+    - match: '(\*)(v\d+)'
+      captures:
+        1: keyword.operator.bitwise.phir
+        2: variable.local.phir
+
+  operators:
+    - include: comparison-operators
+    - include: assignment-operators
+    - include: arithmetic-operators
+    - include: logical-operators
+    - include: bitwise-operators
+    - include: other-operators
+
+  comparison-operators:
+    - match: '(==|!=|<=|>=|<|>)'
+      scope: keyword.operator.comparison.phir
+
+  assignment-operators:
+    - match: '=>|->|=|\?'
+      scope: keyword.operator.assignment.phir
+
+  arithmetic-operators:
+    - match: '([+*/%-])'
+      scope: keyword.operator.arithmetic.phir
+
+  logical-operators:
+    - match: '(&&|\|\|)'
+      scope: keyword.operator.logical.phir
+
+  bitwise-operators:
+    - match: '(&|\||\^|~|<<|>>>|>>)'
+      scope: keyword.operator.bitwise.phir
+
+  other-operators:
+    - match: '\b(is|as)\b'
+      scope: keyword.operator.comparison.phir
+
+  comma:
+    - match: ','
+      scope: punctuation.separator.delimiter.phir
+
+  string:
+    - match: '("|)([^"]*)(")'
+      captures:
+        1: punctuation.definition.string.begin.phir
+        2: string.quoted.double.phir
+        3: punctuation.definition.string.end.phir
+    - match: '\\"'
+      scope: constant.character.escape.phir
+
+  numeric-literal:
+    - match: '0x[0-9A-Fa-f]+'
+      scope: constant.numeric.hex.phir
+    - match: '\b\d+(?:\.\d+)?(?:e[+-]?\d+)?(?:[uUlLfFdD])?\b'
+      scope: constant.numeric.phir
+
+  boolean-literal:
+    - match: '\b(true|false)\b'
+      scope: constant.language.boolean.phir
+
+  null-literal:
+    - match: '\bnull\b'
+      scope: constant.language.null.phir
+
+  variable:
+    - match: '\b([a-zA-Z_]\w*)\b'
+      scope: variable.other.phir
+
+  constant-add:
+    - match: '\b(add)\b'
+      scope: support.instruction.phir support.function.phir
+
+  function-call:
+    - match: '([\w.]+)(\s*\()'
+      captures:
+        1: entity.name.function.call.phir
+        2: punctuation.section.parameters.begin.phir
+      push: function-call-body
+
+  function-call-body:
+    - meta_scope: meta.function-call.phir
+    - include: comments
+    - include: call-args-content
+    - match: '(\))'
+      scope: punctuation.section.parameters.end.phir
+      pop: 1
+
+  call-args-content:
+    - include: local-reference
+    - include: stack-slot-reference
+    - include: global-reference
+    - include: self-reference
+    - include: string
+    - include: numeric-literal
+    - include: boolean-literal
+    - include: null-literal
+    - include: builtin-types
+    - include: field-access
+    - include: function-call
+    - include: operators
+    - include: variable
+    - include: comma
+
+  call-args:
+    - match: '\('
+      scope: punctuation.section.parameters.begin.phir
+      push: call-args-body
+
+  call-args-body:
+    - include: local-reference
+    - include: global-reference
+    - include: numeric-literal
+    - include: boolean-literal
+    - include: type-annotation
+    - include: builtin-types
+    - include: comma
+    - match: '\)'
+      scope: punctuation.section.parameters.end.phir
+      pop: 1
+
+  body:
+    - include: comments
+    - include: attribute-block
+    - include: function-attribute
+    - include: calling-convention
+    - include: ownership-modifier
+    - include: dialect-instruction
+    - include: declaration-keyword
+    - include: instruction-opcode
+    - include: operand
+    - include: local-reference
+    - include: stack-slot-reference
+    - include: global-reference
+    - include: self-reference
+    - include: vmctx
+    - include: builtin-types
+    - include: type-annotation
+    - include: function-call
+    - include: field-access
+    - include: index-access
+    - include: deref
+    - include: operators
+    - include: string
+    - include: numeric-literal
+    - include: boolean-literal
+    - include: null-literal
+    - include: return-arrow
+    - include: debug-variable
+    - include: keywords
+    - include: variable
+    - include: comma
+    - match: ';'
+      scope: punctuation.terminator.statement.phir
+    - match: '\.'
+      scope: punctuation.separator.period.phir
+
+  keywords:
+    - match: '\b(fun|native|if|else|while|return|br|unreachable|call|invoke|scope|debug|printf|verify|store|load|let|val|var)\b'
+      scope: keyword.control.phir
+
+  block-target:
+    - match: '\b([\w]+)\b'
+      scope: entity.name.block.phir

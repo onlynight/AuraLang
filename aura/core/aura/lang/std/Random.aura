@@ -9,9 +9,28 @@ package aura.lang.std
 /// ```
 ///
 /// @since 0.2
-class Random(seed: Long = 0) {
-    
-    private var state: Long = if (seed != 0) { seed } else { 12345L }
+/// 说明：构造参数用 **`init(...)` 块**表达（语言既有惯例），而不是
+/// `class Random(seed: Long = 0)` —— 后者是「主构造器参数」语法，AST 中没有
+/// 这个概念（`ClassDecl.constructors` 才是构造器），写出来会直接报
+/// `parse error: Expected Arrow, got LBrace`。
+class Random {
+
+    /// 内部状态（XorShift64）。
+    private var state: Long = 12345L
+
+    /// 默认种子。
+    init() {
+        this.state = 12345L
+    }
+
+    /// 指定种子；`0` 视为使用默认种子。
+    init(seed: Long) {
+        if (seed != 0L) {
+            this.state = seed
+        } else {
+            this.state = 12345L
+        }
+    }
     
     // ── 核心随机数生成（XorShift64）──
     

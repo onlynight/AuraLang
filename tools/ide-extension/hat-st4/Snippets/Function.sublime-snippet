@@ -1,0 +1,11 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[; @fn () -> 
+bb :
+    @result = @i32_const 
+    ; @ret @result : Int
+]]></content>
+    <tabTrigger>fn</tabTrigger>
+    <scope>source.hat</scope>
+    <description>Create a new function</description>
+</snippet>

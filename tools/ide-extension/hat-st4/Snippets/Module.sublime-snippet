@@ -1,0 +1,9 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[; module  target 
+; schema=hat.v2
+]]></content>
+    <tabTrigger>module</tabTrigger>
+    <scope>source.hat</scope>
+    <description>Create a new module header</description>
+</snippet>

@@ -1,0 +1,75 @@
+// tests/photon/S3/02_end_to_end_exe.aura
+// ═════════════════════════════════════════════════════════════
+// S3: 端到端 exe 测试 — 验证管线可生成可执行文件
+// 运行：aura run tests/photon/S3/02_end_to_end_exe.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/RegisterAllocator.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/X86Emitter.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonObjectWriter.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonSystemLinker.aura"
+
+fun main() {
+    println("═══ S3 端到端 exe 测试 ═══")
+    var pass = 0
+    var total = 3
+
+    // [1] 完整管线：LIR → DAG → RegAlloc → Encode → COFF → Link
+    println("[1] 完整管线")
+    val lir = LirUtils.emptyProgram()
+    val t = lir.types
+    val i32 = t.intType(32)
+    val fid = lir.addFunction("main", i32, i32, false)
+    val func = lir.functionOf(fid)
+    val bid = lir.addBlock()
+    func.blocks = LirBlockUtils.succsAdd(func.blocks, bid)
+    func.entryBlock = bid
+    val v1 = lir.addInstr(bid, "Const", i32, "", "42")
+    lir.setTerminator(bid, "Ret", i32, LirUtils.toStr(v1), "")
+
+    val sel = InstructionSelectorUtils.emptySelector()
+    val dag = sel.select(lir)
+    val alloc = RegisterAllocatorUtils.emptyAllocator()
+    alloc.allocate(dag)
+    val emit = X86EmitterUtils.emptyEmitter()
+    emit.emitFunction(dag, "main")
+    val enc = X86EncoderUtils.emptyEncoder()
+    val writer = PhotonObjectWriterUtils.emptyBackend()
+    val coffHex = writer.emitFromMachineCode(emit.getOutputHex(), emit.getRelocRecords(), "", "main")
+
+    if (coffHex != "" && coffHex.length > 100) {
+        pass = pass + 1
+        println("  COFF hex length=" + coffHex.length)
+    }
+
+    // [2] 二进制文件写入
+    println("[2] 二进制文件写入")
+    val testPath = "build/photon/test_main.obj"
+    val ok = writer.writeObjectBinaryFile(testPath)
+    if (ok) {
+        pass = pass + 1
+        println("  binary file written: " + testPath)
+    } else {
+        println("  binary file write failed")
+    }
+
+    // [3] 链接命令构建
+    println("[3] 链接命令构建")
+    val linker = PhotonSystemLinkerUtils.defaultLinker()
+    linker.setOutputType("exe")
+    val cmd = linker.buildCommand()
+    if (cmd != "" && cmd.length > 10) {
+        pass = pass + 1
+        println("  link command: " + cmd)
+    }
+
+    println("")
+    println("PASS: " + pass + "/" + total)
+    if (pass == total) {
+        println("ALL PASS — 端到端管线就绪")
+    }
+}

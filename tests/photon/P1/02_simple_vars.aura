@@ -1,0 +1,17 @@
+// tests/photon/P1/02_simple_vars.aura
+// Phase 1.2: 简单变量测试
+//
+// 测试: 变量声明和赋值
+
+import aura.lang.std.String
+
+fun main() {
+    var x: Int = 42
+    println("x = " + toStr(x))
+    
+    var y: Long = 1000000
+    println("y = " + toStr(y))
+    
+    var z: Boolean = true
+    println("z = " + toStr(z))
+}

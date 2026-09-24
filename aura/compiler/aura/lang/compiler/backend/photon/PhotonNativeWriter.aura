@@ -33,6 +33,7 @@ import aura.lang.native.Memory
 import aura.lang.native.memory.Allocator
 import aura.lang.native.file.FileOps
 import aura.lang.native.io.Stdio
+import aura.lang.std.Env
 
 object PhotonNativeWriter {
 
@@ -45,12 +46,15 @@ object PhotonNativeWriter {
     /// - 用显式长度 `FileOps.write`，不做 strlen → 可安全写含 `0x00` 的二进制；
     /// - 返回是否全部字节写完。
     fun writeObjectFile(path: String, coffHex: String): Boolean {
+        val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
         val total: Int = coffHex.length / 2
+        if (traceOn) println("    [wnw0] writeObjectFile path=" + path + " total=" + total)
         if (total <= 0) {
             return false
         }
 
-        val buf: Long = Allocator.malloc(total as Long)
+        val buf: Long = Memory.alloc(total)
+        if (traceOn) println("    [wnw1] Memory.alloc buf=" + buf)
         if (buf == 0) {
             return false
         }
@@ -59,36 +63,51 @@ object PhotonNativeWriter {
             Memory.write(buf + i, PhotonNativeWriter.hexByteAt(coffHex, i) as Byte)
             i = i + 1
         }
+        if (traceOn) println("    [wnw2] malloc write done i=" + i)
 
-        val pathBuf: Long = Stdio.stringToBuffer(path)
+        // Allocate path buffer directly (bypass Allocator.malloc / Stdio.stringToBuffer)
+        val pathLen: Int = path.length
+        if (traceOn) println("    [wnw2b] pathLen=" + pathLen)
+        val pathBuf: Long = Memory.alloc(pathLen + 1)
+        if (traceOn) println("    [wnw3] pathBuf=" + pathBuf)
         if (pathBuf == 0) {
-            Allocator.free(buf)
+            Memory.free(buf)
             return false
         }
+        var pi: Int = 0
+        while (pi < pathLen) {
+            Memory.write(pathBuf + pi, path.charCodeAt(pi))
+            pi = pi + 1
+        }
+        Memory.write(pathBuf + pathLen, 0)
 
         val fd: Int = FileOps.open(pathBuf, PhotonNativeWriter.O_WRONLY_CREAT_TRUNC)
+        if (traceOn) println("    [wnw4] fd=" + fd)
         if (fd < 0) {
-            Allocator.free(buf)
-            Allocator.free(pathBuf)
+            Memory.free(buf)
+            Memory.free(pathBuf)
             return false
         }
 
         var written: Long = 0
         var ok: Boolean = true
-        val want: Long = total as Long
+        val want: Long = total
+        if (traceOn) println("    [wnw5] want=" + want)
         while (written < want) {
             val n: Long = FileOps.write(fd, buf + written, want - written)
+            if (traceOn) println("    [wnw6] write n=" + n + " written=" + written)
             if (n <= 0) {
                 ok = false
-                written = want          // 退出循环
+                written = want
             } else {
                 written = written + n
             }
         }
 
         FileOps.close(fd)
-        Allocator.free(buf)
-        Allocator.free(pathBuf)
+        Memory.free(buf)
+        Memory.free(pathBuf)
+        if (traceOn) println("    [wnw7] done ok=" + ok)
         return ok && written == want
     }
 

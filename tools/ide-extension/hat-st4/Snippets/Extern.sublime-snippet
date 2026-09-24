@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[; @extern () -> ]]></content>
+    <tabTrigger>extern</tabTrigger>
+    <scope>source.hat</scope>
+    <description>Declare an extern function</description>
+</snippet>

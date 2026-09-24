@@ -1,0 +1,58 @@
+{
+  "name": "hat-language-support",
+  "displayName": "HAT v3.0 Language Support",
+  "description": "Syntax highlighting and code snippets for HAT (HIR-Advanced Text) SSA IR format",
+  "version": "3.0.2",
+  "publisher": "aura-lang",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/aura-lang/auralang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aura-lang/auralang.git"
+  },
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "hat",
+    "aura",
+    "photon",
+    "ir",
+    "compiler",
+    "novaos",
+    "ssa"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "hat",
+        "aliases": ["HAT", "hat"],
+        "extensions": [".hat"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "hat",
+        "scopeName": "source.hat",
+        "path": "./syntaxes/hat.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "hat",
+        "path": "./snippets/hat.json"
+      }
+    ],
+    "themes": [
+      {
+        "label": "HAT Theme (Dark)",
+        "uiTheme": "vs-dark",
+        "path": "./colors/hat-colors.json"
+      }
+    ]
+  }
+}

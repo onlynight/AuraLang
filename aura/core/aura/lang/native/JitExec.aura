@@ -1,0 +1,36 @@
+// aura:///aura/lang/native/JitExec.aura
+package aura.lang.native
+// ─────────────────────────────────────────────────────────────
+// JIT 原生执行原语 — Photon JIT 出口的最后一块
+//
+// JIT 把 HIR 编译成裸机器码并写入可执行内存后，需要把控制权交给入口地址。
+// 这一步在 Aura 语言层面就是「调用一个函数指针」，因此这里声明两个原语：
+//
+//   * `call0(entry)`         → `long (*)(void)`
+//   * `callI64(entry, arg0)` → `long (*)(long)`
+//
+// ── 与 MEMORY 的差异 ──
+//
+// `Memory.*` / `FileOps.*` 由 AOT 发射器**映射到具体符号**（malloc / store /
+// CRT 调用）。本原语没有对应符号：AOT 发射器对它的**调用点**直接发射
+// `inttoptr` + 间接 `call`（见 `aot/Emit.aura` 的 `JitExec.*` 分支）。
+// 契约：
+//   * 目标函数遵循平台 C ABI（Windows x64：第 1 个参数 `rcx`，返回值 `rax`）；
+//   * `entry` 必须是可执行内存地址（由 `JitBackend.emitFunction` 返回）；
+//   * 仅 AOT / 自举（原生）运行时可用 —— VM 字节码后端无法解析该符号
+//     （`未解析的函数调用 'JitExec.callI64'`），调用它会以
+//     `call to undefined function #65535` 崩溃。因此 `JitBackend` 用
+//     `vmMode` 守卫，VM 下永不触碰本原语。
+//
+// 本声明为**纯声明**（无函数体）：AOT 只为它保留 `declare`，不会发射 `define`，
+// 也不会向链接器引入新的必需符号，未使用该入口的程序产物完全不变。
+// ─────────────────────────────────────────────────────────────
+
+extern interface JitExec {
+
+    /// 调用 `entry` 处无参函数，返回 `rax`。
+    fun call0(entry: Long): Long
+
+    /// 调用 `entry` 处单参函数（`arg0` 按平台 C ABI 传第 1 个参数），返回 `rax`。
+    fun callI64(entry: Long, arg0: Long): Long
+}

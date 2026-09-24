@@ -14,15 +14,26 @@ package aura.lang.compiler.backend.photon
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.std.Env
 
 /// 寄存器分配器：乐观图着色算法。
 class RegisterAllocator {
 
     /// 可用颜色（物理寄存器名）。
-    private var availColors: String = "rax,rbx,rcx,rdx,rsi,rdi,r12,r13,r14,r15"
+    ///
+    /// **只用 Windows x64 的非易失（callee-saved）寄存器**：被调函数必须原样
+    /// 保留它们，因此跨调用存活的值放在这里才安全。易失寄存器（rax/rcx/rdx/
+    /// r8-r11）会被 `call` 本身的返回值、实参装载以及被调函数无条件覆写 ——
+    /// 实测 `"x = " + toStr(x)` 里字符串地址被 `toStr` 的返回值顶掉。
+    private var availColors: String = "rbx,rsi,rdi,r12,r13,r14,r15"
 
-    /// 节点颜色表（扁平字符串 "nodeId|color\n"）。
-    private var colorMap: String = ""
+    /// 节点颜色表（**按 DAG 节点 ID 直接下标**，O(1)）。
+    ///
+    /// ⚠️ 旧实现是扁平字符串 `"nodeId|color\n"` + 全表扫描查找：条目数与
+    /// 整个 DAG 的节点数同阶，每次 `colorGet` 都要 O(N) 扫描并逐行
+    /// `substring` 分配 ⇒ Phase D（干扰图 + 着色）在真实工程上退化为 O(N²)
+    /// 并持续分配内存。键是整数节点 ID，直接下标即可。
+    private var colors: List<String> = arrayListOf<String>()
 
     /// 溢出节点列表（逗号分隔的 nodeId）。
     private var spilled: String = ""
@@ -36,29 +47,108 @@ class RegisterAllocator {
     /// DAG 引用。
     private var dag: MachineDag = null
 
+    /// 帧布局（栈偏移表："spillSlot|offset\n"）。
+    private var frameLayout: String = ""
+
+    /// 最大活跃虚拟寄存器数（用于帧大小计算）。
+    private var maxLiveRegs: Int = 0
+
+    /// 标签 → 指令索引映射（"bb0|0\nbb1|3\n..."），用于控制流感知的 liveness 分析。
+    private var labelIndexMap: String = ""
+
+    /// 节点活跃区间表（"nodeId|firstIdx|lastIdx\n"，已做回边修正）。
+    private var nodeSpan: String = ""
+
+    /// 循环回边表（"targetIdx|jumpIdx\n"）。
+    private var backEdges: String = ""
+
+    /// 标签名 → 指令索引（"bbN|idx\n"）。
+    private var labelInstrMap: String = ""
+
     init() {
-        this.colorMap = ""
+        this.colors = arrayListOf<String>()
         this.spilled = ""
         this.callStack = ""
         this.spillSlots = 0
         this.dag = null
+        this.frameLayout = ""
+        this.maxLiveRegs = 0
+        this.labelIndexMap = ""
+        this.nodeSpan = ""
+        this.backEdges = ""
+        this.labelInstrMap = ""
     }
 
     /// 主入口：执行寄存器分配。
     fun allocate(d: MachineDag): Unit {
         this.dag = d
-        this.colorMap = ""
+        this.colors = arrayListOf<String>()
         this.spilled = ""
         this.callStack = ""
         this.spillSlots = 0
+        this.frameLayout = ""
+        this.maxLiveRegs = 0
+        this.labelIndexMap = ""
+        this.nodeSpan = ""
+        this.backEdges = ""
+        this.labelInstrMap = ""
 
-        // DFS 遍历所有根节点
-        val roots: List<String> = d.roots.split(",")
+        // Step -1: 回边（循环）分析与回边修正后的活跃区间。
+        // 必须在着色前算好：着色逐节点进行，区间一算错就无法挽回
+        //（见 buildBackEdges 的说明）。
+        this.buildBackEdges()
+        this.buildNodeSpans()
+
+        // Phase D: 基于 liveness 的干扰图构建
+        // Step 0: **登记固定寄存器节点**。
+        //
+        // Const / Param / 调用点等节点在指令选择阶段就已经写死了物理寄存器
+        //（Const 用轮转寄存器、Param 用 ABI 寄存器、Call 的返回值固定 rax）。
+        // 它们不参与着色 —— 但如果不把它们登记进 colorMap，干扰图就**看不到**
+        // 这些寄存器已被占用，着色器会把同一个物理寄存器分给别的活值。
+        // 实测症状：strcat 的两个实参都读成同一个寄存器、println 拿不到实参。
+        var fi: Int = 0
+        while (fi < d.nodeCount) {
+            val fn: DagNode = d.nodeOf(fi)
+            if (fn.kind != "Value" && fn.kind != "Reg" && fn.kind != "Const" && fn.reg != "") {
+                this.colorPut(fi, fn.reg)
+            }
+            fi = fi + 1
+        }
+
+        // Step 1: 活跃区间在 `buildIntervalInterference` 里现场扫描指令流计算
+
+        // Step 2: 迭代分配（按活跃区间构建干扰图）
+        //
+        // ⚠️ `Const` 也必须参与着色（与 Value/Reg 同等）：指令选择阶段不再给
+        // 常量预分配轮转寄存器，否则常量会一次性占满整个非易失寄存器池
+        //（见 InstructionSelection.emitConst 的说明）。
         var i: Int = 0
-        while (i < roots.size) {
-            val root: Int = strToInt(roots[i])
-            if (root >= 0) {
-                this.dfs(root)
+        while (i < d.nodeCount) {
+            val node: DagNode = d.nodeOf(i)
+            if (node.kind == "Value" || node.kind == "Reg" || node.kind == "Const") {
+                val interference: String = this.buildIntervalInterference(i)
+                this.assignColor(i, interference)
+            }
+            i = i + 1
+        }
+
+        // S1.4: 将颜色回写到 DagNode.reg
+        this.applyColors()
+
+        // Phase D: 计算栈帧布局
+        this.computeFrameLayout()
+    }
+
+    /// S1.4: 将颜色表中的寄存器名回写到 DagNode.reg 字段。
+    fun applyColors(): Unit {
+        var i: Int = 0
+        val len: Int = this.colors.size
+        while (i < len) {
+            val color: String = this.colors[i]
+            if (color != "" && i < this.dag.nodeCount) {
+                val node: DagNode = this.dag.nodeOf(i)
+                node.reg = color
             }
             i = i + 1
         }
@@ -77,7 +167,7 @@ class RegisterAllocator {
 
         // 递归处理子节点
         if (node.kind == "Value" || node.kind == "Reg") {
-            val args: List<String> = node.args.split(",")
+            val args: List<String> = this.splitComma(node.args)
             var j: Int = 0
             while (j < args.size) {
                 val arg: Int = strToInt(args[j])
@@ -110,7 +200,7 @@ class RegisterAllocator {
     private fun buildInterference(nodeId: Int): String {
         var result: String = ""
         val node: DagNode = this.dag.nodeOf(nodeId)
-        val args: List<String> = node.args.split(",")
+        val args: List<String> = this.splitComma(node.args)
         var i: Int = 0
         while (i < args.size) {
             val arg: Int = strToInt(args[i])
@@ -133,8 +223,8 @@ class RegisterAllocator {
 
     /// 查找空闲颜色。
     private fun getFreeColor(used: String): String {
-        val avail: List<String> = this.availColors.split(",")
-        val usedList: List<String> = used.split(",")
+        val avail: List<String> = this.splitComma(this.availColors)
+        val usedList: List<String> = this.splitComma(used)
         var i: Int = 0
         while (i < avail.size) {
             var conflict: Boolean = false
@@ -156,8 +246,8 @@ class RegisterAllocator {
 
     /// 乐观重着色。
     private fun tryOptimisticRecolor(nodeId: Int, interference: String): Boolean {
-        val avail: List<String> = this.availColors.split(",")
-        val usedList: List<String> = interference.split(",")
+        val avail: List<String> = this.splitComma(this.availColors)
+        val usedList: List<String> = this.splitComma(interference)
         var i: Int = 0
         while (i < usedList.size) {
             val conflictColor: String = usedList[i]
@@ -179,7 +269,7 @@ class RegisterAllocator {
     /// 查找使用指定颜色的冲突节点。
     private fun findConflictingNode(nodeId: Int, color: String): Int {
         val node: DagNode = this.dag.nodeOf(nodeId)
-        val args: List<String> = node.args.split(",")
+        val args: List<String> = this.splitComma(node.args)
         var i: Int = 0
         while (i < args.size) {
             val arg: Int = strToInt(args[i])
@@ -204,56 +294,622 @@ class RegisterAllocator {
         this.spillSlots = this.spillSlots + 1
     }
 
-    // ── 颜色表操作（扁平字符串）──
+    // ── Phase D: Liveness 分析 ──
+
+    /// 计算每条指令的 live-at-end 集合（基于 CFG 的反向定点迭代）。
+    ///
+    /// live-out[i] = ∪ { live-in[k] | k ∈ succ(i) } - def(i) ∪ use(i)
+    /// 使用控制流感知的前驱/后继关系，正确处理分支和合并。
+    private fun computeLiveAtEnd(): List<String> {
+        val instrs: List<DagInstruction> = this.dag.instrs
+        val n: Int = instrs.size
+        val liveAtEnd: List<String> = arrayListOf<String>()
+
+        // 初始化：所有指令的 live-out 为空
+        var i: Int = 0
+        while (i < n) {
+            liveAtEnd.add("")
+            i = i + 1
+        }
+
+        // 构建标签 → 指令索引映射
+        this.buildLabelIndexMap(instrs)
+
+        // 反向定点迭代
+        var changed: Boolean = true
+        var iteration: Int = 0
+        while (changed && iteration < 100) {
+            changed = false
+            iteration = iteration + 1
+
+            var j: Int = n - 1
+            while (j >= 0) {
+                val instr: DagInstruction = instrs[j]
+
+                // 计算 use 集合（指令使用的节点）
+                val useSet: String = this.getInstrUseSet(instr)
+
+                // 计算 def 集合（指令定义的节点）
+                val defSet: String = ""
+                if (instr.output >= 0) {
+                    defSet = toStr(instr.output)
+                }
+
+                // 获取后继指令的 live-in 并集
+                val succIndices: List<Int> = this.getSuccIndices(j, instrs)
+                val succLiveIn: String = this.unionLiveIn(succIndices, liveAtEnd)
+
+                // live-out[j] = succLiveIn - def ∪ use
+                var liveOut: String = succLiveIn
+                if (defSet != "") {
+                    liveOut = this.removeNode(liveOut, defSet)
+                }
+                if (useSet != "") {
+                    liveOut = this.addNodes(liveOut, useSet)
+                }
+
+                // 检查是否收敛
+                if (liveAtEnd[j] != liveOut) {
+                    liveAtEnd.set(j, liveOut)
+                    changed = true
+                }
+
+                j = j - 1
+            }
+        }
+        return liveAtEnd
+    }
+
+    /// 构建标签 → 指令索引映射。
+    ///
+    /// 扫描指令序列，找到每个基本块的入口点（第一条指令和每条终止指令后的下一条指令），
+    /// 按顺序映射为 "bb0", "bb1", "bb2", ...
+    private fun buildLabelIndexMap(instrs: List<DagInstruction>): Unit {
+        this.labelIndexMap = ""
+        val n: Int = instrs.size
+
+        // 收集基本块入口点
+        val entryPoints: List<Int> = arrayListOf<Int>()
+        entryPoints.add(0)
+
+        var i: Int = 0
+        while (i < n - 1) {
+            val instr: DagInstruction = instrs[i]
+            if (this.isTerminatorTemplate(instr.template)) {
+                entryPoints.add(i + 1)
+            }
+            i = i + 1
+        }
+
+        // 构建映射字符串 "bbN|index\n"
+        var j: Int = 0
+        while (j < entryPoints.size) {
+            val label: String = "bb" + toStr(j)
+            val idx: Int = entryPoints[j]
+            this.labelIndexMap = this.labelIndexMap + label + "|" + toStr(idx) + "\n"
+            j = j + 1
+        }
+    }
+
+    /// 判断指令模板是否为终止指令。
+    private fun isTerminatorTemplate(template: String): Boolean {
+        return template == "ret" || template == "jmp @target" ||
+               template == "jcc @target" || template == "br %label"
+    }
+
+    /// 获取后继指令索引列表。
+    ///
+    /// - ret: 无后继
+    /// - jmp/br: 仅跳转到目标
+    /// - jcc: 目标 + fall-through
+    /// - 普通指令: fall-through
+    private fun getSuccIndices(index: Int, instrs: List<DagInstruction>): List<Int> {
+        val succs: List<Int> = arrayListOf<Int>()
+        val n: Int = instrs.size
+        val instr: DagInstruction = instrs[index]
+        val template: String = instr.template
+
+        if (template == "ret") {
+            // 终止指令：无后继
+        } else if (template == "jmp @target" || template == "br %label") {
+            // 无条件跳转：仅跳转到目标
+            val nodes: List<String> = this.splitComma(instr.nodes)
+            if (nodes.size >= 1) {
+                val target: String = nodes[0]
+                val targetIdx: Int = this.labelToIndex(target)
+                if (targetIdx >= 0) {
+                    succs.add(targetIdx)
+                }
+            }
+        } else if (template == "jcc @target") {
+            // 条件跳转：目标 + fall-through
+            val nodes: List<String> = this.splitComma(instr.nodes)
+            if (nodes.size >= 1) {
+                val target: String = nodes[0]
+                val targetIdx: Int = this.labelToIndex(target)
+                if (targetIdx >= 0) {
+                    succs.add(targetIdx)
+                }
+            }
+            // Fall-through
+            if (index < n - 1) {
+                succs.add(index + 1)
+            }
+        } else {
+            // 普通指令：fall-through
+            if (index < n - 1) {
+                succs.add(index + 1)
+            }
+        }
+
+        return succs
+    }
+
+    /// 将标签名映射到指令索引。
+    private fun labelToIndex(label: String): Int {
+        if (this.labelIndexMap == "") { return -1 }
+        val targetKey: String = label + "|"
+        var lineStart: Int = 0
+        var pos: Int = 0
+        val len: Int = this.labelIndexMap.length
+        while (pos <= len) {
+            if (pos == len || this.labelIndexMap.charAt(pos).toString() == "\n") {
+                val line: String = this.labelIndexMap.substring(lineStart, pos)
+                if (line.length > targetKey.length && line.startsWith(targetKey)) {
+                    val idxStr: String = line.substring(targetKey.length, line.length)
+                    return this.strToInt(idxStr)
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        return -1
+    }
+
+    /// 联合所有后继指令的 live-in 集合。
+    private fun unionLiveIn(succIndices: List<Int>, liveAtEnd: List<String>): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < succIndices.size) {
+            val idx: Int = succIndices[i]
+            if (idx >= 0 && idx < liveAtEnd.size) {
+                val succLiveIn: String = liveAtEnd[idx]
+                result = this.addNodes(result, succLiveIn)
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 获取指令使用的节点集合（逗号分隔）。
+    private fun getInstrUseSet(instr: DagInstruction): String {
+        var result: String = ""
+        var j: Int = 0
+        while (j < instr.nodeCount()) {
+            val nodeId: Int = instr.nodeAt(j)
+            if (nodeId >= 0) {
+                if (result != "") { result = result + "," }
+                result = result + toStr(nodeId)
+            }
+            j = j + 1
+        }
+        return result
+    }
+
+    /// 从逗号分隔字符串中移除节点。
+    private fun removeNode(set: String, node: String): String {
+        if (set == "" || node == "") { return set }
+        val parts: List<String> = this.splitComma(set)
+        var result: String = ""
+        var i: Int = 0
+        while (i < parts.size) {
+            if (parts[i] != node) {
+                if (result != "") { result = result + "," }
+                result = result + parts[i]
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 向逗号分隔字符串中添加节点。
+    private fun addNodes(set: String, nodes: String): String {
+        if (nodes == "") { return set }
+        val parts: List<String> = this.splitComma(nodes)
+        var result: String = set
+        var i: Int = 0
+        while (i < parts.size) {
+            if (this.containsNode(result, parts[i])) {
+                // 已存在，跳过
+            } else {
+                if (result != "") { result = result + "," }
+                result = result + parts[i]
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 检查逗号分隔字符串中是否包含指定节点。
+    private fun containsNode(set: String, node: String): Boolean {
+        if (set == "" || node == "") { return false }
+        val parts: List<String> = this.splitComma(set)
+        var i: Int = 0
+        while (i < parts.size) {
+            if (parts[i] == node) { return true }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 基于**活跃区间**构建干扰列表（区间现场扫描指令流计算，不落表）。
+    ///
+    /// 干扰 = 所有活跃区间与当前节点重叠、且**已分配寄存器**的节点颜色。
+    ///
+    /// 为什么不用「只看 args」的旧实现：字符串常量在寄存器里等着一会儿当参数，
+    /// 它不是当前节点的直接参数，却被着色器无视 —— 同一个物理寄存器被分给
+    /// 两者，实测 `toStr` 的返回值落到 `rbx`（正好是 `"x = "` 常量的寄存器），
+    /// 常量被覆写、`strcat` 两个实参变成同值。
+    ///
+    /// 区间必须是**回边修正后**的（见 `buildBackEdges` / `buildNodeSpans`），
+    /// 否则循环携带值会被线性区间错误地判为「短命」。
+    private fun buildIntervalInterference(nodeId: Int): String {
+        var result: String = ""
+        val firstN: Int = this.nodeFirstIdx(nodeId)
+        val lastN: Int = this.nodeLastIdx(nodeId)
+        if (firstN < 0) {
+            // 没有活跃区间信息：退化为「args 颜色」这一保守近似
+            return this.buildInterference(nodeId)
+        }
+        var m: Int = 0
+        while (m < this.dag.nodeCount) {
+            if (m != nodeId) {
+                val c: String = this.colorGet(m)
+                if (c != "" && !this.containsNode(result, c)) {
+                    val firstM: Int = this.nodeFirstIdx(m)
+                    val lastM: Int = this.nodeLastIdx(m)
+                    if (firstM >= 0 && firstN <= lastM && firstM <= lastN) {
+                        if (result != "") { result = result + "," }
+                        result = result + c
+                    }
+                }
+            }
+            m = m + 1
+        }
+        return result
+    }
+
+    // ── 回边（循环）感知的活跃区间 ──
+
+    /// 扫描指令流，收集「循环回边」与「标签 → 指令索引」。
+    ///
+    /// 为什么需要回边：活跃区间用 [firstIdx, lastIdx] 的**线性**区间近似，
+    /// 无法表达「循环回边让活跃区间绕圈」。实测 P2/01_nested_loop：
+    /// 外层循环的 `sum` Phi 由循环体内的 phi-MOV 定义（索引 28）、被循环体外的
+    /// 打印块使用（索引 20），线性区间算成 [3,20]，与循环体内临时值的 [33,34]
+    /// 不相交 → 分配器把同一个 `rbx` 分给两者 → 循环体覆盖掉 Phi，
+    /// 循环结束后打印 `1`（应为 100）。
+    private fun buildBackEdges(): Unit {
+        this.backEdges = ""
+        this.labelInstrMap = ""
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var i: Int = 0
+        while (i < instrs.size) {
+            if (instrs[i].template == "label") {
+                val parts: List<String> = this.splitPipe(instrs[i].nodes)
+                if (parts.size >= 1 && parts[0] != "") {
+                    this.labelInstrMap = this.labelInstrMap + parts[0] + "|" + toStr(i) + "\n"
+                }
+            }
+            i = i + 1
+        }
+        i = 0
+        while (i < instrs.size) {
+            val tpl: String = instrs[i].template
+            if (tpl == "jmp @target" || tpl == "jcc @target") {
+                val parts: List<String> = this.splitPipe(instrs[i].nodes)
+                if (parts.size >= 1 && parts[0] != "") {
+                    val tgt: Int = this.labelInstrIndexOf(parts[0])
+                    if (tgt >= 0 && tgt < i) {
+                        this.backEdges = this.backEdges + toStr(tgt) + "|" + toStr(i) + "\n"
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    /// 标签名 → 指令索引。
+    private fun labelInstrIndexOf(name: String): Int {
+        if (this.labelInstrMap == "") { return -1 }
+        val targetKey: String = name + "|"
+        val lines: List<String> = this.splitNewline(this.labelInstrMap)
+        var i: Int = 0
+        while (i < lines.size) {
+            if (lines[i] != "" && lines[i].startsWith(targetKey)) {
+                val rest: String = lines[i].substring(targetKey.length, lines[i].length)
+                return strToInt(rest)
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 计算所有节点的**回边修正后**活跃区间，写入 `nodeSpan`
+    ///（格式 `nodeId|firstIdx|lastIdx\n`）。
+    ///
+    /// 修正规则：若节点的线性区间 [f,l] 与某条回边区间 [t,j]（t <= j，且
+    /// t 是回边目标、j 是回边指令索引）**相交但不被其包含**，说明该值跨越了
+    /// 循环边界（在本轮迭代定义、下一轮迭代使用），把区间扩展到覆盖该回边。
+    /// 迭代到不动点，嵌套循环随之逐层扩展。
+    private fun buildNodeSpans(): Unit {
+        this.nodeSpan = ""
+        var i: Int = 0
+        while (i < this.dag.nodeCount) {
+            var f: Int = this.rawFirstIdx(i)
+            var l: Int = this.rawLastIdx(i)
+            if (f >= 0 && this.backEdges != "") {
+                var changed: Boolean = true
+                var guard: Int = 0
+                while (changed && guard < 8) {
+                    changed = false
+                    guard = guard + 1
+                    val edges: List<String> = this.splitNewline(this.backEdges)
+                    var e: Int = 0
+                    while (e < edges.size) {
+                        if (edges[e] != "") {
+                            val p: List<String> = this.splitPipe(edges[e])
+                            if (p.size >= 2) {
+                                val t: Int = strToInt(p[0])
+                                val j: Int = strToInt(p[1])
+                                val intersects: Boolean = f <= j && l >= t
+                                val contained: Boolean = f >= t && l <= j
+                                if (intersects && !contained) {
+                                    if (f > t) { f = t; changed = true }
+                                    if (l < j) { l = j; changed = true }
+                                }
+                            }
+                        }
+                        e = e + 1
+                    }
+                }
+            }
+            this.nodeSpan = this.nodeSpan + toStr(i) + "|" + toStr(f) + "|" + toStr(l) + "\n"
+            i = i + 1
+        }
+    }
+
+    /// 读取 `nodeSpan` 中的字段（field=1 首索引，field=2 末索引）。
+    private fun spanField(nodeId: Int, field: Int): Int {
+        if (this.nodeSpan == "") { return -1 }
+        val targetKey: String = toStr(nodeId) + "|"
+        val lines: List<String> = this.splitNewline(this.nodeSpan)
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = lines[i]
+            if (line != "" && line.startsWith(targetKey)) {
+                val parts: List<String> = this.splitPipe(line)
+                if (parts.size >= 3) {
+                    return strToInt(parts[field])
+                }
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 节点首次出现的指令索引（回边修正后；-1 = 未出现）。
+    private fun nodeFirstIdx(nodeId: Int): Int {
+        return this.spanField(nodeId, 1)
+    }
+
+    /// 节点最后出现的指令索引（回边修正后；-1 = 未出现）。
+    private fun nodeLastIdx(nodeId: Int): Int {
+        return this.spanField(nodeId, 2)
+    }
+
+    /// 节点首次出现的指令索引（未修正）。
+    private fun rawFirstIdx(nodeId: Int): Int {
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var j: Int = 0
+        while (j < instrs.size) {
+            if (this.instrTouches(instrs[j], nodeId)) { return j }
+            j = j + 1
+        }
+        return -1
+    }
+
+    /// 节点最后出现的指令索引（未修正）。
+    private fun rawLastIdx(nodeId: Int): Int {
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var j: Int = instrs.size - 1
+        while (j >= 0) {
+            if (this.instrTouches(instrs[j], nodeId)) { return j }
+            j = j - 1
+        }
+        return -1
+    }
+
+    /// 指令是否「触及」该节点：定义、操作数、或 call 节点的实参装载点。
+    ///
+    /// 第三项很关键：`call` 的实参寄存器装载由 X86Emitter 现场发 `mov argreg, src`，
+    /// 不在 DAG 指令里；不把实参算作使用点的话，「等着一会儿当实参」的值活跃
+    /// 区间会过早结束，寄存器被复用 → 实参取到错误的值。
+    private fun instrTouches(instr: DagInstruction, nodeId: Int): Boolean {
+        if (instr.output == nodeId) { return true }
+        var k: Int = 0
+        while (k < instr.nodeCount()) {
+            val nid: Int = instr.nodeAt(k)
+            if (nid == nodeId) { return true }
+            if (nid >= 0) {
+                val cn: DagNode = this.dag.nodeOf(nid)
+                if (cn.args != "") {
+                    val parts: List<String> = this.splitComma(cn.args)
+                    var ai: Int = 0
+                    while (ai < parts.size) {
+                        if (strToInt(parts[ai]) == nodeId) { return true }
+                        ai = ai + 1
+                    }
+                }
+            }
+            k = k + 1
+        }
+        return false
+    }
+
+    // ── Phase D: 栈帧布局 ──
+
+    /// 计算栈帧布局（Phase D spill slot 布局）。
+    ///
+    /// 根据溢出槽数量和调用约定计算帧大小和槽位偏移。
+    /// Windows x64: 前 4 个参数在寄存器中，第 5 个参数在栈上（影子空间 32 字节）。
+    private fun computeFrameLayout(): Unit {
+        if (this.spillSlots == 0) {
+            this.frameLayout = ""
+            return
+        }
+
+        // 帧大小 = 影子空间 (32) + 溢出槽 × 8 + 对齐填充
+        val shadowSpace: Int = 32
+        val spillAreaSize: Int = this.spillSlots * 8
+        var frameSize: Int = shadowSpace + spillAreaSize
+        // 对齐到 16 字节
+        if (frameSize % 16 != 0) {
+            frameSize = frameSize + (16 - frameSize % 16)
+        }
+
+        // 构建帧布局表
+        this.frameLayout = "frameSize|" + toStr(frameSize)
+        var slot: Int = 0
+        while (slot < this.spillSlots) {
+            val offset: Int = shadowSpace + slot * 8
+            this.frameLayout = this.frameLayout + "\nslot" + toStr(slot) + "|-0x" + this.toHexString(offset)
+            slot = slot + 1
+        }
+    }
+
+    /// 整数转十六进制字符串。
+    private fun toHexString(n: Int): String {
+        if (n == 0) { return "0" }
+        val hexChars: String = "0123456789abcdef"
+        var result: String = ""
+        var value: Int = n
+        while (value > 0) {
+            val digit: Int = value % 16
+            result = hexChars.charAt(digit).toString() + result
+            value = value / 16
+        }
+        return result
+    }
+
+    /// 获取栈帧布局。
+    fun getFrameLayout(): String {
+        return this.frameLayout
+    }
+
+    /// 获取栈帧大小（字节）。帧布局为 "frameSize|N\nslot0|-0x20\n…"。
+    fun getFrameSize(): Int {
+        if (this.frameLayout == "") { return 0x50 }  // 默认 80 字节
+        val firstLine: String = this.splitNewline(this.frameLayout)[0]
+        val sep: Int = firstLine.indexOf("|")
+        if (sep > 0) {
+            return strToInt(firstLine.substring(sep + 1))
+        }
+        return 0x50
+    }
+
+    /// 获取溢出槽数量。
+    fun getSpillSlots(): Int {
+        return this.spillSlots
+    }
+
+    /// 获取指定节点的 spill slot 偏移。
+    fun getSpillOffset(nodeId: Int): Int {
+        val color: String = this.getColor(nodeId)
+        if (color == "" || !color.startsWith("spill_slot_")) { return 0 }
+        // 从 color 中提取 slot 编号
+        val slotStr: String = color.substring(11)
+        val slotNum: Int = strToInt(slotStr)
+        // 查找帧布局中的偏移
+        if (this.frameLayout == "") { return 0 }
+        val lines: List<String> = this.splitNewline(this.frameLayout)
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = lines[i]
+            if (line.startsWith("slot" + toStr(slotNum) + "|")) {
+                val offsetPart: String = line.substring(line.indexOf("|") + 1)
+                // 格式: "-0x18"
+                if (offsetPart.startsWith("-0x")) {
+                    return this.hexToInt(offsetPart.substring(3))
+                }
+                if (offsetPart.startsWith("-")) {
+                    return -strToInt(offsetPart.substring(1))
+                }
+            }
+            i = i + 1
+        }
+        // 默认计算: shadowSpace(32) + slotNum * 8
+        return 32 + slotNum * 8
+    }
+
+    // ── 字符串工具（`String.split` 可用；`arrayListOf + add` 会丢元素）──
+
+    /// 按逗号分割字符串。
+    private fun splitComma(text: String): List<String> {
+        if (text == "") { return emptyList() }
+        return text.split(",")
+    }
+
+    /// 按换行符分割字符串。
+    private fun splitNewline(text: String): List<String> {
+        if (text == "") { return emptyList() }
+        return text.split("\n")
+    }
+
+    /// 按竖线分割字符串。
+    private fun splitPipe(text: String): List<String> {
+        if (text == "") { return emptyList() }
+        return text.split("|")
+    }
+
+    // ── 颜色表操作（按节点 ID 下标）──
 
     /// 存储颜色。
+    ///
+    /// ⚠️ 一律用**下标**读写 `List`：本 VM 下 `list.get(i)` 是「未链接外部函数」，
+    /// 调用被静默忽略并返回 null（实测 `list.get(0)` → null）；`list.set(i, v)`
+    /// 同样不可靠。`list[i]` 读 / `list[i] = v` 写才是该 VM 支持的路径。
     private fun colorPut(nodeId: Int, color: String): Unit {
-        this.colorRemove(nodeId)
-        this.colorMap = this.colorMap + toStr(nodeId) + "|" + color + "\n"
+        if (nodeId < 0) { return }
+        while (this.colors.size <= nodeId) { this.colors.add("") }
+        this.colors[nodeId] = color
     }
 
     /// 读取颜色。
     private fun colorGet(nodeId: Int): String {
-        val lines: List<String> = this.colorMap.split("\n")
-        var i: Int = 0
-        while (i < lines.size) {
-            if (lines[i] != "" && lines[i].contains("|")) {
-                val parts: List<String> = lines[i].split("|")
-                if (parts.size >= 2 && strToInt(parts[0]) == nodeId) {
-                    return parts[1]
-                }
-            }
-            i = i + 1
-        }
-        return ""
+        if (nodeId < 0 || nodeId >= this.colors.size) { return "" }
+        return this.colors[nodeId]
     }
 
     /// 删除颜色。
     private fun colorRemove(nodeId: Int): Unit {
-        val lines: List<String> = this.colorMap.split("\n")
-        var result: String = ""
-        var i: Int = 0
-        while (i < lines.size) {
-            if (lines[i] != "" && lines[i].contains("|")) {
-                val parts: List<String> = lines[i].split("|")
-                if (parts.size >= 2 && strToInt(parts[0]) != nodeId) {
-                    if (result != "") { result = result + "\n" }
-                    result = result + lines[i]
-                }
-            }
-            i = i + 1
-        }
-        this.colorMap = result
+        if (nodeId < 0 || nodeId >= this.colors.size) { return }
+        this.colors[nodeId] = ""
     }
 
     // ── 调用栈操作 ──
 
     private fun callStackContains(nodeId: Int): Boolean {
         if (this.callStack == "") { return false }
-        val parts: List<String> = this.callStack.split(",")
+        val target: String = "," + toStr(nodeId)
+        val withBoundaries: String = "," + this.callStack
         var i: Int = 0
-        while (i < parts.size) {
-            if (strToInt(parts[i]) == nodeId) { return true }
+        val tlen: Int = target.length
+        val len: Int = withBoundaries.length
+        while (i <= len - tlen) {
+            if (withBoundaries.substring(i, i + tlen) == target) {
+                return true
+            }
             i = i + 1
         }
         return false
@@ -268,18 +924,17 @@ class RegisterAllocator {
     }
 
     private fun callStackPop(): Unit {
-        val parts: List<String> = this.callStack.split(",")
-        if (parts.size <= 1) {
+        if (this.callStack == "") { return }
+        var lastComma: Int = -1
+        var i: Int = this.callStack.length - 1
+        while (i >= 0) {
+            if (this.callStack.charAt(i).toString() == ",") { lastComma = i; break }
+            i = i - 1
+        }
+        if (lastComma < 0) {
             this.callStack = ""
         } else {
-            var result: String = ""
-            var i: Int = 0
-            while (i < parts.size - 1) {
-                if (result != "") { result = result + "," }
-                result = result + parts[i]
-                i = i + 1
-            }
-            this.callStack = result
+            this.callStack = this.callStack.substring(0, lastComma)
         }
     }
 
@@ -287,10 +942,6 @@ class RegisterAllocator {
 
     fun isReservedReg(reg: String): Boolean {
         return reg == "rbp" || reg == "rsp"
-    }
-
-    fun getSpillSlots(): Int {
-        return this.spillSlots
     }
 
     fun isSpilled(nodeId: Int): Boolean {
@@ -332,17 +983,50 @@ class RegisterAllocator {
         return total
     }
 
+    /// 解析无符号十六进制字符串（"20" → 32）。帧布局偏移以 "-0x20" 形式记录。
+    private fun hexToInt(text: String): Int {
+        var total: Int = 0
+        var i: Int = 0
+        while (i < text.length) {
+            val c: Int = text.charCodeAt(i)
+            var digit: Int = -1
+            if (c >= 48 && c <= 57) { digit = c - 48 }
+            if (c >= 97 && c <= 102) { digit = c - 97 + 10 }
+            if (c >= 65 && c <= 70) { digit = c - 65 + 10 }
+            if (digit >= 0) { total = total * 16 + digit }
+            i = i + 1
+        }
+        return total
+    }
+
     private fun toStr(n: Int): String {
         if (n == 0) { return "0" }
         var neg: Boolean = false
         if (n < 0) { neg = true; n = -n }
         var result: String = ""
         while (n > 0) {
-            result = toStr(n % 10) + result
+            val digit: Int = n % 10
+            val digitStr: String = this.digitChar(digit)
+            result = digitStr + result
             n = n / 10
         }
         if (neg) { result = "-" + result }
         return result
+    }
+
+    /// 将单个数字转为字符串。
+    private fun digitChar(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        if (d == 9) { return "9" }
+        return ""
     }
 }
 

@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[; @ = @call @ ()]]></content>
+    <tabTrigger>call</tabTrigger>
+    <scope>source.hat</scope>
+    <description>Function call instruction</description>
+</snippet>

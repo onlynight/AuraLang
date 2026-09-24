@@ -1,0 +1,46 @@
+// 调试：不同 List 构造 + add 是否可用
+fun p1(): String {
+    val l = arrayListOf()
+    l.add("alpha")
+    l.add("beta")
+    return "size=" + toStr(l.size) + ";" + l.get(0) + "," + l.get(1)
+}
+
+fun p2(): String {
+    val l: ArrayList<String> = ArrayList()
+    l.add("alpha")
+    l.add("beta")
+    return "size=" + toStr(l.size) + ";" + l.get(0) + "," + l.get(1)
+}
+
+fun p3(): String {
+    val l: ArrayList<String> = ArrayList<String>()
+    l.add("alpha")
+    l.add("beta")
+    return "size=" + toStr(l.size) + ";" + l.get(0) + "," + l.get(1)
+}
+
+fun p4(): String {
+    val l: ArrayList<Int> = ArrayList<Int>()
+    l.add(11)
+    l.add(22)
+    return "size=" + toStr(l.size) + ";" + toStr(l.get(0)) + "," + toStr(l.get(1))
+}
+
+fun p5(): String {
+    val l: ArrayList<Boolean> = ArrayList<Boolean>()
+    l.add(true)
+    l.add(false)
+    var s: String = ""
+    if (l.get(0)) { s = s + "1" } else { s = s + "0" }
+    if (l.get(1)) { s = s + "1" } else { s = s + "0" }
+    return "size=" + toStr(l.size) + ";" + s
+}
+
+fun main() {
+    println("p1 arrayListOf():      " + p1())
+    println("p2 ArrayList():        " + p2())
+    println("p3 ArrayList<String>:  " + p3())
+    println("p4 ArrayList<Int>:     " + p4())
+    println("p5 ArrayList<Boolean>: " + p5())
+}

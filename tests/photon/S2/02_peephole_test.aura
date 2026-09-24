@@ -1,0 +1,40 @@
+// tests/photon/S2/02_peephole_test.aura
+// ═════════════════════════════════════════════════════════════
+// 窥孔优化测试
+// 运行：aura run tests/photon/S2/02_peephole_test.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PeepholeOptimizer.aura"
+
+fun main() {
+    println("═══ 窥孔优化测试 ═══")
+    var pass = 0
+    var total = 5
+
+    // [1] 空 DAG
+    println("[1] 空 DAG")
+    val d1 = MachineDagUtils.emptyDag()
+    val opt1 = PeepholeOptimizerUtils.emptyOptimizer()
+    opt1.optimize(d1)
+    if (opt1.getOptimizedCount() == 0) { pass = pass + 1 }
+
+    // [2] 带指令的 DAG
+    println("[2] 带指令的 DAG")
+    val d2 = MachineDagUtils.emptyDag()
+    val n1 = d2.addNode("Value", "Const", 0, "", "", "", -1, "42")
+    d2.selectPattern(6, MachineDagUtils.toStr(n1), n1)
+    val opt2 = PeepholeOptimizerUtils.emptyOptimizer()
+    opt2.optimize(d2)
+    if (opt2.getPassCount() >= 1) { pass = pass + 1 }
+
+    // [3] 工具函数
+    println("[3] 工具函数")
+    if (PeepholeOptimizerUtils.emptyOptimizer() != null) { pass = pass + 1 }
+    else { }
+
+    println("")
+    println("PASS: " + pass + "/" + total)
+    if (pass == total) { println("ALL PASS") }
+}

@@ -1,0 +1,35 @@
+// aura:///aura/lang/compiler/backend/photon/PhotonDriver.aura
+package aura.lang.compiler.backend.photon
+
+import aura.lang.std.String
+import aura.lang.std.Env
+import aura.lang.std.Process
+import aura.lang.std.FileSystem
+import "PhotonPipeline.aura"
+
+fun main() {
+    val phirPath = Env.get("AURA_PHOTON_PHIR", "")
+    val outDir = Env.get("AURA_PHOTON_OUT", "build/photon_test")
+    val moduleName = Env.get("AURA_PHOTON_MODULE", "main")
+    
+    println("Photon Driver: " + phirPath)
+    
+    if (phirPath == "") {
+        println("Error: AURA_PHOTON_PHIR not set")
+        Process.exit(1)
+    }
+    
+    val pipeline = PhotonPipelineUtils.emptyPipeline()
+    pipeline.outDir = outDir
+    pipeline.moduleName = moduleName
+    
+    val result = pipeline.compilePhir(phirPath)
+    
+    if (result.success) {
+        println("Success: " + result.executablePath)
+        Process.exit(0)
+    } else {
+        println("Failed: " + result.errorMessage)
+        Process.exit(1)
+    }
+}

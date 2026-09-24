@@ -30,6 +30,7 @@ package aura.lang.compiler.backend.photon
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.std.Env
 
 // ─────────────────────────────────────────────────────────────
 // DagNode — DAG 节点
@@ -170,6 +171,9 @@ class DagInstruction {
     /// 指令的十六进制编码（空格分隔字节）。
     var bytes: String = ""
 
+    /// 所属函数名（多函数发射时用于标记指令边界）。
+    var funcName: String = ""
+
     init() {
         this.id = 0
         this.template = ""
@@ -179,9 +183,16 @@ class DagInstruction {
         this.cond = ""
         this.mem = ""
         this.bytes = ""
+        this.funcName = ""
     }
 
     /// 获取第 i 个输入节点的 ID。
+    ///
+    /// ⚠️ 非数字 token 必须返回 -1：`label` / `jmp @target` / `jcc @target` 的
+    /// `nodes` 存的是**标签名**（如 `bb4`），而 `MachineDagUtils.strToInt` 会从
+    /// 任意字符串里**提取数字**（`strToInt("bb4") == 4`）。若不拦截，活跃区间
+    /// 分析会把「标签 bb4」当成「节点 4」，跨函数/跨块的假干扰随之产生，
+    /// 分配器把寄存器全判为占用 → 节点无颜色 → 回退 `rax` → 互相覆写。
     fun nodeAt(i: Int): Int {
         if (this.nodes == "") {
             return -1
@@ -190,7 +201,11 @@ class DagInstruction {
         if (i < 0 || i >= parts.size) {
             return -1
         }
-        return MachineDagUtils.strToInt(parts[i])
+        val token: String = parts[i]
+        if (!MachineDagUtils.isNumericToken(token)) {
+            return -1
+        }
+        return MachineDagUtils.strToInt(token)
     }
 
     /// 获取输入节点个数。
@@ -217,7 +232,12 @@ class DagInstruction {
     }
 
     /// 是否为终止指令（RET/JMP 等）。
-    fun isTerminator(): Boolean {
+    ///
+    /// 名字**不能**叫 `isTerminator`：该方法名同时被 `LirInstruction`、
+    /// `SsaMirValue` 使用，而旧前端在接收者类型未落到具体类时只能靠
+    /// 「全表唯一候选」兜底解析，重名即降级为裸名调用
+    /// （`[bytecode] error: 未解析的函数调用 'isTerminator'`）。
+    fun isDagTerminator(): Boolean {
         return (this.flags & 8) != 0
     }
 }
@@ -317,6 +337,9 @@ class MachineDag {
         i.bytes = bytes
         this.instrs.add(i)
         this.instrCount = this.instrs.size
+        if (template == "ret" && Env.get("AURA_PHOTON_TRACE", "") == "1") {
+            println("    [DAG] addInstr RET id=" + toStr(i.id) + " instrCount=" + toStr(this.instrCount) + " nodes=" + nodes)
+        }
         return i.id
     }
 
@@ -339,6 +362,12 @@ class MachineDag {
     ///
     /// 返回新指令的 ID。
     fun selectPattern(patternId: Int, inputNodes: String, outputNode: Int): Int {
+        // ⚠️ 这条打印是**逐模式**的（每个 LIR 值至少一次）：真实工程 12 万个值
+        // 就是 12 万次字符串拼接 + 写管道，曾让 Phase C 成为整条管线的主要耗时。
+        // 必须门控在 AURA_PHOTON_TRACE 下。
+        if (Env.get("AURA_PHOTON_TRACE", "") == "1") {
+            println("    [DAG] selectPattern patternId=" + toStr(patternId) + " inputNodes=" + inputNodes + " outputNode=" + toStr(outputNode))
+        }
         // 检查模式缓存：同一模式已匹配过则复用。
         val cached: Int = this.patternCacheGet(patternId)
         if (cached >= 0) {
@@ -363,6 +392,23 @@ class MachineDag {
         // 缓存此模式的首次匹配结果。
         this.patternCachePut(patternId, id)
         return id
+    }
+
+    /// 模式缓存查询。
+    private fun patternCacheGet(patternId: Int): Int {
+        // S1: 暂时禁用模式缓存以避免 VM 的 split 限制
+        return -1
+    }
+
+    /// 模式缓存写入。
+    private fun patternCachePut(patternId: Int, instrId: Int): Unit {
+        if (this.patternCacheKeys == "") {
+            this.patternCacheKeys = toStr(patternId)
+            this.patternCacheVals = toStr(instrId)
+        } else {
+            this.patternCacheKeys = this.patternCacheKeys + "," + toStr(patternId)
+            this.patternCacheVals = this.patternCacheVals + "," + toStr(instrId)
+        }
     }
 
     // ── 根/链管理 ──
@@ -401,12 +447,12 @@ object MachineDagUtils {
         var total: Int = 0
         var i: Int = 0
         var neg: Boolean = false
-        if (len > 0 && text[0] == "-") {
+        if (len > 0 && text.charAt(0).toString() == "-") {
             neg = true
             i = 1
         }
         while (i < len) {
-            val digit: Int = "0123456789".indexOf(text[i])
+            val digit: Int = "0123456789".indexOf(text.charAt(i))
             if (digit >= 0 && digit <= 9) {
                 total = total * 10 + digit
             }
@@ -416,6 +462,21 @@ object MachineDagUtils {
             return -total
         }
         return total
+    }
+
+    /// 判断字符串是否为合法的整数 token（可带前导 `-`）。
+    ///
+    /// 用于区分「节点 ID」与「标签名」等非数字占位串。
+    fun isNumericToken(text: String): Boolean {
+        if (text == "") { return false }
+        var k: Int = 0
+        if (text.charAt(0).toString() == "-") { k = 1 }
+        if (k >= text.length) { return false }
+        while (k < text.length) {
+            if ("0123456789".indexOf(text.charAt(k)) < 0) { return false }
+            k = k + 1
+        }
+        return true
     }
 
     /// 整数转字符串。
@@ -454,22 +515,11 @@ object MachineDagUtils {
 
     /// 按逗号切分 args 字符串，返回 List<String>。
     fun splitArgs(text: String): List<String> {
-        val out: List<String> = arrayListOf<String>()
+        // 见 MirUtils.mirSplit：`arrayListOf + add` 在本 VM 下读回 null。
         if (text == "") {
-            return out
+            return emptyList()
         }
-        val len: Int = text.length
-        var start: Int = 0
-        var i: Int = 0
-        while (i < len) {
-            if (text[i] == ",") {
-                out.add(text.substring(start, i))
-                start = i + 1
-            }
-            i = i + 1
-        }
-        out.add(text.substring(start, len))
-        return out
+        return text.split(",")
     }
 
     // ── 模式 → 指令模板映射 ──
@@ -482,29 +532,41 @@ object MachineDagUtils {
         // 20..29 : 控制流指令
         // 30..39 : 条件设置指令
         // 40..49 : 调用指令
-        if (patternId == 0) { return "add %dst, %src, $imm" }
+        // 注意：用 @ 代替 $ 以避免 Aura 字符串插值（$var → null）
+        if (patternId == 0) { return "add %dst, %src, @imm" }
         if (patternId == 1) { return "add %dst, %src" }
-        if (patternId == 2) { return "sub %dst, %src, $imm" }
+        if (patternId == 2) { return "sub %dst, %src, @imm" }
         if (patternId == 3) { return "sub %dst, %src" }
-        if (patternId == 4) { return "imul %dst, %src, $imm" }
+        if (patternId == 4) { return "imul %dst, %src, @imm" }
         if (patternId == 5) { return "imul %dst, %src" }
-        if (patternId == 6) { return "mov %dst, $imm" }
+        if (patternId == 6) { return "mov %dst, @imm" }
         if (patternId == 7) { return "mov %dst, %src" }
+        if (patternId == 8) { return "and %dst, %src" }
+        if (patternId == 9) { return "or %dst, %src" }
         // 内存指令
         if (patternId == 10) { return "mov %dst, [mem]" }
         if (patternId == 11) { return "mov [mem], %src" }
         if (patternId == 12) { return "lea %dst, [mem]" }
+        if (patternId == 13) { return "xor %dst, %src" }
+        if (patternId == 14) { return "div %dst, %src" }
+        if (patternId == 15) { return "rem %dst, %src" }
+        if (patternId == 16) { return "shl %dst, @shift" }
+        if (patternId == 17) { return "shr %dst, @shift" }
+        if (patternId == 18) { return "shl %dst, %src" }
+        if (patternId == 19) { return "shr %dst, %src" }
         // 比较指令
-        if (patternId == 20) { return "cmp %src, $imm" }
+        if (patternId == 20) { return "cmp %src, @imm" }
         if (patternId == 21) { return "cmp %src1, %src2" }
         // 控制流
         if (patternId == 30) { return "ret" }
-        if (patternId == 31) { return "jmp $target" }
-        if (patternId == 32) { return "jcc $target" }
+        if (patternId == 31) { return "jmp @target" }
+        if (patternId == 32) { return "jcc @target" }
         // 条件设置
         if (patternId == 40) { return "setcc %dst" }
         // 调用
         if (patternId == 50) { return "call %func" }
+        // 字符串地址加载（lea %dst, @sym）
+        if (patternId == 63) { return "lea %dst, @sym" }
         // 默认
         return "nop"
     }
@@ -525,9 +587,18 @@ object MachineDagUtils {
         if (patternId == 5) { return 2 + 4 }
         if (patternId == 6) { return 4 }
         if (patternId == 7) { return 4 }
+        if (patternId == 8) { return 2 + 4 }  // and — sets flags
+        if (patternId == 9) { return 2 + 4 }  // or — sets flags
         if (patternId == 10) { return 4 }
         if (patternId == 11) { return 4 }
         if (patternId == 12) { return 4 }
+        if (patternId == 13) { return 2 + 4 }  // xor — sets flags
+        if (patternId == 14) { return 4 + 16 } // div — side effect
+        if (patternId == 15) { return 4 + 16 } // rem — side effect
+        if (patternId == 16) { return 4 }      // shl imm
+        if (patternId == 17) { return 4 }      // shr imm
+        if (patternId == 18) { return 4 }      // shl reg
+        if (patternId == 19) { return 4 }      // shr reg
         if (patternId == 20) { return 2 }
         if (patternId == 21) { return 2 }
         if (patternId == 30) { return 8 }
@@ -535,6 +606,7 @@ object MachineDagUtils {
         if (patternId == 32) { return 8 }
         if (patternId == 40) { return 1 }
         if (patternId == 50) { return 4 + 16 }
+        if (patternId == 63) { return 4 } // lea %dst, @sym — side effect (loads address)
         return 0
     }
 
@@ -660,31 +732,7 @@ object DagPatterns {
         return -1
     }
 
-    // ── 模式缓存操作 ──
-
-    private fun patternCacheGet(patternId: Int): Int {
-        if (this.patternCacheKeys == "") { return -1 }
-        val keys: List<String> = this.patternCacheKeys.split(",")
-        val vals: List<String> = this.patternCacheVals.split(",")
-        var i: Int = 0
-        while (i < keys.size) {
-            if (strToInt(keys[i]) == patternId) {
-                return strToInt(vals[i])
-            }
-            i = i + 1
-        }
-        return -1
-    }
-
-    private fun patternCachePut(patternId: Int, instrId: Int): Unit {
-        if (this.patternCacheKeys == "") {
-            this.patternCacheKeys = toStr(patternId)
-            this.patternCacheVals = toStr(instrId)
-        } else {
-            this.patternCacheKeys = this.patternCacheKeys + "," + toStr(patternId)
-            this.patternCacheVals = this.patternCacheVals + "," + toStr(instrId)
-        }
-    }
+    // ── 模式缓存操作已移至 MachineDag 类 ──
 
     // ── 工具 ──
 
@@ -710,10 +758,27 @@ object DagPatterns {
         if (n < 0) { neg = true; n = -n }
         var result: String = ""
         while (n > 0) {
-            result = toStr(n % 10) + result
+            val digit: Int = n % 10
+            val digitStr: String = this.digitChar(digit)
+            result = digitStr + result
             n = n / 10
         }
         if (neg) { result = "-" + result }
         return result
+    }
+
+    /// 将单个数字转为字符串。
+    private fun digitChar(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        if (d == 9) { return "9" }
+        return ""
     }
 }

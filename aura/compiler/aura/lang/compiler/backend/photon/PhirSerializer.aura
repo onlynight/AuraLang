@@ -1,0 +1,530 @@
+// aura:///aura/lang/compiler/backend/photon/PhirSerializer.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// PhirSerializer — HIR → Photon IR (.phir) 文本格式序列化器
+//
+// 直接读取 Aura 源码，经 Lexer/Parser/HirLowerer 生成 HIR，
+// 然后遍历 HIR 树序列化为 .phir 伪代码文本（§2.5 缩进语法）。
+//
+// 用法（通过环境变量）:
+//   AURA_PHIR_SOURCE=<source.aura>
+//   AURA_PHIR_OUTPUT=<out.phir>
+//   AURA_PHIR_MODULE=<module_name>
+//   aura run PhirSerializer.aura
+//
+// 输出格式示例:
+//   # module hello target x86_64
+//   # source hello.aura
+//
+//   fun main() -> Unit {
+//       val x: Int = 42
+//       println("x = " + x)
+//       return
+//   }
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.Process
+import aura.lang.std.FileSystem
+import aura.lang.std.Env
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.lexer.Token
+import aura.lang.compiler.lexer.Lexer
+import aura.lang.compiler.ast.Ast
+import aura.lang.compiler.parser.Parser
+import aura.lang.compiler.hir.Hir
+
+// HirLowerer is defined in Hir.aura
+
+/// Photon IR (.phir) 文本格式序列化器。
+class PhirSerializer {
+
+    /// 输出缓冲区。
+    var output: String = ""
+
+    /// 模块名。
+    var moduleName: String = ""
+
+    /// 源码路径。
+    var sourcePath: String = ""
+
+    /// 当前缩进级别。
+    var indent: Int = 0
+
+    init() {
+        this.output = ""
+        this.moduleName = "module"
+        this.sourcePath = ""
+        this.indent = 0
+    }
+
+    // ── 主入口 ──
+
+    /// 从源码字符串序列化为 .phir 文本。
+    fun serializeFromSource(source: String): String {
+        this.output = ""
+        this.indent = 0
+
+        // 解析源码为 AST
+        val parser: Parser = Parser(source)
+        parser.parseProgram()
+
+        // AST → HIR
+        val hirLowerer: HirLowerer = HirLowerer()
+        hirLowerer.lower(parser.ast)
+        val hir: Hir = hirLowerer.hir
+
+        // 写入模块头
+        this.writeModuleHeader()
+
+        // 遍历 Program 的子节点（函数）
+        val rootKids: String = hir.kidsOf(hir.rootId)
+        val kCount: Int = HirUtils.hirKidsCount(rootKids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = HirUtils.hirKidsAt(rootKids, i)
+            val childKind: String = hir.kindOf(childId)
+            if (childKind == "HirFunction") {
+                this.serializeFunction(hir, childId)
+            }
+            i = i + 1
+        }
+
+        return this.output
+    }
+
+    // ── 模块头 ──
+
+    private fun writeModuleHeader(): Unit {
+        this.output = "# module " + this.moduleName + " target x86_64\n"
+        if (this.sourcePath != "") {
+            this.output = this.output + "# source " + this.sourcePath + "\n"
+        }
+        this.output = this.output + "\n"
+    }
+
+    // ── 函数序列化 ──
+
+    private fun serializeFunction(hir: Hir, id: Int): Unit {
+        val name: String = hir.textOf(id)
+        val retType: String = hir.tyOf(id)
+
+        // 获取子节点
+        val kids: String = hir.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+
+        // 构建参数列表和函数体
+        var paramsStr: String = ""
+        var hasParams: Boolean = false
+        var bodyId: Int = -1
+
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = HirUtils.hirKidsAt(kids, i)
+            val childKind: String = hir.kindOf(childId)
+            if (childKind == "HirParam") {
+                if (hasParams) {
+                    paramsStr = paramsStr + ", "
+                }
+                val pName: String = hir.textOf(childId)
+                val pType: String = hir.tyOf(childId)
+                paramsStr = paramsStr + pName + ": " + pType
+                hasParams = true
+            } else if (childKind == "HirBlock") {
+                bodyId = childId
+            }
+            i = i + 1
+        }
+
+        // 写函数签名
+        this.output = this.output + "fun " + name + "(" + paramsStr + ") -> " + retType + " {\n"
+        this.indent = 1
+
+        // 写函数体
+        if (bodyId >= 0) {
+            this.serializeBlock(hir, bodyId)
+        }
+
+        this.indent = 0
+        this.output = this.output + "}\n\n"
+    }
+
+    // ── 块序列化 ──
+
+    private fun serializeBlock(hir: Hir, id: Int): Unit {
+        val kids: String = hir.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = HirUtils.hirKidsAt(kids, i)
+            this.serializeStatement(hir, childId)
+            i = i + 1
+        }
+    }
+
+    // ── 语句序列化 ──
+
+    private fun serializeStatement(hir: Hir, id: Int): Unit {
+        val kind: String = hir.kindOf(id)
+        val text: String = hir.textOf(id)
+        val ty: String = hir.tyOf(id)
+        val kids: String = hir.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+
+        if (kind == "HirValDecl" || kind == "HirVarDecl") {
+            // let/var declaration
+            val name: String = text
+            this.writeIndent()
+            this.output = this.output + "val " + name
+            if (ty != "") {
+                this.output = this.output + ": " + ty
+            }
+            if (kCount > 0) {
+                this.output = this.output + " = "
+                this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            }
+            this.output = this.output + "\n"
+
+        } else if (kind == "HirAssign") {
+            // assignment
+            this.writeIndent()
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            this.output = this.output + " = "
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 1))
+            this.output = this.output + "\n"
+
+        } else if (kind == "HirExprStmt") {
+            // expression statement
+            this.writeIndent()
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            this.output = this.output + "\n"
+
+        } else if (kind == "HirReturn") {
+            // return
+            this.writeIndent()
+            this.output = this.output + "return"
+            if (kCount > 0) {
+                this.output = this.output + " "
+                this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            }
+            this.output = this.output + "\n"
+
+        } else if (kind == "HirIf") {
+            // if statement
+            this.writeIndent()
+            this.output = this.output + "if "
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            this.output = this.output + " {\n"
+            this.indent = this.indent + 1
+            this.serializeBlock(hir, HirUtils.hirKidsAt(kids, 1))
+            this.indent = this.indent - 1
+            this.writeIndent()
+            this.output = this.output + "}"
+
+            if (kCount > 2) {
+                val elseId: Int = HirUtils.hirKidsAt(kids, 2)
+                val elseKind: String = hir.kindOf(elseId)
+                if (elseKind == "HirIf") {
+                    // else if
+                    this.output = this.output + " else "
+                    this.indent = this.indent + 1
+                    this.serializeStatement(hir, elseId)
+                    this.indent = this.indent - 1
+                    if (this.output.length > 0 && this.output.charAt(this.output.length - 1) != "\n") {
+                        this.output = this.output + "\n"
+                    }
+                } else {
+                    // else block
+                    this.output = this.output + " else {\n"
+                    this.indent = this.indent + 1
+                    this.serializeBlock(hir, elseId)
+                    this.indent = this.indent - 1
+                    this.writeIndent()
+                    this.output = this.output + "}\n"
+                }
+            } else {
+                this.output = this.output + "\n"
+            }
+
+        } else if (kind == "HirWhile") {
+            // while loop
+            this.writeIndent()
+            this.output = this.output + "while "
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            this.output = this.output + " {\n"
+            this.indent = this.indent + 1
+            this.serializeBlock(hir, HirUtils.hirKidsAt(kids, 1))
+            this.indent = this.indent - 1
+            this.writeIndent()
+            this.output = this.output + "}\n"
+
+        } else if (kind == "HirFor") {
+            // for loop: kids = [init, cond, incr, body]
+            this.writeIndent()
+            this.output = this.output + "for "
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            this.output = this.output + " ; "
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 1))
+            this.output = this.output + " ; "
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 2))
+            this.output = this.output + " {\n"
+            this.indent = this.indent + 1
+            this.serializeBlock(hir, HirUtils.hirKidsAt(kids, 3))
+            this.indent = this.indent - 1
+            this.writeIndent()
+            this.output = this.output + "}\n"
+
+        } else if (kind == "HirBreak") {
+            this.writeIndent()
+            this.output = this.output + "break\n"
+
+        } else if (kind == "HirContinue") {
+            this.writeIndent()
+            this.output = this.output + "continue\n"
+
+        } else if (kind == "HirBlock") {
+            this.serializeBlock(hir, id)
+
+        } else if (kind == "HirDefer") {
+            this.writeIndent()
+            this.output = this.output + "defer {\n"
+            this.indent = this.indent + 1
+            this.serializeBlock(hir, HirUtils.hirKidsAt(kids, 0))
+            this.indent = this.indent - 1
+            this.writeIndent()
+            this.output = this.output + "}\n"
+
+        } else if (kind == "HirTry") {
+            // try-catch
+            this.writeIndent()
+            this.output = this.output + "try {\n"
+            this.indent = this.indent + 1
+            this.serializeBlock(hir, HirUtils.hirKidsAt(kids, 0))
+            this.indent = this.indent - 1
+            this.writeIndent()
+            this.output = this.output + "}"
+            if (kCount > 1) {
+                this.output = this.output + " catch {\n"
+                this.indent = this.indent + 1
+                this.serializeBlock(hir, HirUtils.hirKidsAt(kids, 1))
+                this.indent = this.indent - 1
+                this.writeIndent()
+                this.output = this.output + "}\n"
+            } else {
+                this.output = this.output + "\n"
+            }
+
+        } else {
+            // 其他语句类型：尝试作为表达式语句处理
+            if (kCount > 0) {
+                this.writeIndent()
+                this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+                this.output = this.output + "\n"
+            }
+        }
+    }
+
+    // ── 表达式序列化 ──
+
+    private fun serializeExpr(hir: Hir, id: Int): Unit {
+        val kind: String = hir.kindOf(id)
+        val text: String = hir.textOf(id)
+        val ty: String = hir.tyOf(id)
+        val kids: String = hir.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+
+        if (kind == "HirLit") {
+            // literal
+            this.output = this.output + text
+
+        } else if (kind == "HirVar") {
+            // variable reference
+            this.output = this.output + text
+
+        } else if (kind == "HirBinary") {
+            // binary expression
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            this.output = this.output + " " + text + " "
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 1))
+
+        } else if (kind == "HirUnary") {
+            // unary expression
+            this.output = this.output + text + " "
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+
+        } else if (kind == "HirCall") {
+            // function call
+            this.output = this.output + text + "("
+            var i: Int = 0
+            while (i < kCount) {
+                if (i > 0) {
+                    this.output = this.output + ", "
+                }
+                this.serializeExpr(hir, HirUtils.hirKidsAt(kids, i))
+                i = i + 1
+            }
+            this.output = this.output + ")"
+
+        } else if (kind == "HirMember") {
+            // member access
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            this.output = this.output + "." + text
+
+        } else if (kind == "HirIndex") {
+            // index access
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            this.output = this.output + "["
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 1))
+            this.output = this.output + "]"
+
+        } else if (kind == "HirNew") {
+            // object creation
+            this.output = this.output + "new " + text + "("
+            var i: Int = 0
+            while (i < kCount) {
+                if (i > 0) {
+                    this.output = this.output + ", "
+                }
+                this.serializeExpr(hir, HirUtils.hirKidsAt(kids, i))
+                i = i + 1
+            }
+            this.output = this.output + ")"
+
+        } else if (kind == "HirIf") {
+            // if expression (ternary)
+            this.output = this.output + "("
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            this.output = this.output + " ? "
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 1))
+            this.output = this.output + " : "
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 2))
+            this.output = this.output + ")"
+
+        } else if (kind == "HirBlock") {
+            // block expression
+            this.output = this.output + "{"
+            this.indent = this.indent + 1
+            this.serializeBlock(hir, id)
+            this.indent = this.indent - 1
+            this.output = this.output + "}"
+
+        } else if (kind == "HirBox") {
+            this.output = this.output + "box("
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            this.output = this.output + ")"
+
+        } else if (kind == "HirWeakRef") {
+            this.output = this.output + "weak("
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            this.output = this.output + ")"
+
+        } else if (kind == "HirAwait") {
+            this.output = this.output + "await "
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+
+        } else if (kind == "HirLambda") {
+            // lambda: fun(params) { body }
+            this.output = this.output + "fun"
+            this.serializeParams(hir, id)
+            if (kCount > this.paramsCount(hir, id)) {
+                val bodyIdx: Int = this.paramsCount(hir, id)
+                this.serializeBlock(hir, HirUtils.hirKidsAt(kids, bodyIdx))
+            }
+
+        } else if (kind == "HirCallVirtual") {
+            // virtual call: recv.name(args)
+            this.serializeExpr(hir, HirUtils.hirKidsAt(kids, 0))
+            this.output = this.output + "." + text + "("
+            var i: Int = 1
+            while (i < kCount) {
+                if (i > 1) {
+                    this.output = this.output + ", "
+                }
+                this.serializeExpr(hir, HirUtils.hirKidsAt(kids, i))
+                i = i + 1
+            }
+            this.output = this.output + ")"
+
+        } else {
+            // 默认：输出 text
+            if (text != "") {
+                this.output = this.output + text
+            }
+        }
+    }
+
+    // ── 辅助方法 ──
+
+    private fun writeIndent(): Unit {
+        var i: Int = 0
+        while (i < this.indent) {
+            this.output = this.output + "    "
+            i = i + 1
+        }
+    }
+
+    private fun paramsCount(hir: Hir, id: Int): Int {
+        val kids: String = hir.kidsOf(id)
+        var count: Int = 0
+        var i: Int = 0
+        while (i < HirUtils.hirKidsCount(kids)) {
+            val childId: Int = HirUtils.hirKidsAt(kids, i)
+            val childKind: String = hir.kindOf(childId)
+            if (childKind == "HirParam") {
+                count = count + 1
+            } else {
+                break
+            }
+            i = i + 1
+        }
+        return count
+    }
+
+    private fun serializeParams(hir: Hir, id: Int): Unit {
+        val kids: String = hir.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+
+        this.output = this.output + "("
+        var i: Int = 0
+        var first: Boolean = true
+        while (i < kCount) {
+            val childId: Int = HirUtils.hirKidsAt(kids, i)
+            val childKind: String = hir.kindOf(childId)
+            if (childKind != "HirParam") break
+
+            if (!first) {
+                this.output = this.output + ", "
+            }
+            val pName: String = hir.textOf(childId)
+            val pType: String = hir.tyOf(childId)
+            this.output = this.output + pName
+            if (pType != "") {
+                this.output = this.output + ": " + pType
+            }
+            first = false
+            i = i + 1
+        }
+        this.output = this.output + ") "
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 工具对象
+// ─────────────────────────────────────────────────────────────
+
+object PhirSerializerUtils {
+
+    /// 创建序列化器。
+    fun emptySerializer(): PhirSerializer {
+        return PhirSerializer()
+    }
+
+    /// 从源码序列化为 .phir 文本。
+    fun serialize(source: String, module: String, path: String): String {
+        val ser: PhirSerializer = PhirSerializer()
+        ser.moduleName = module
+        ser.sourcePath = path
+        return ser.serializeFromSource(source)
+    }
+}

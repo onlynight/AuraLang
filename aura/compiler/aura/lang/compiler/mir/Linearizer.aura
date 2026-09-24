@@ -19,7 +19,7 @@ package aura.lang.compiler.mir
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import "../Mir.aura"
+import "Mir.aura"
 import "../lexer/Span.aura"
 // 同包依赖：SSA 程序 / 扁平字符串助手。
 // 同包符号需显式导入才进入编译单元（否则退化为未解析调用 #65535）。

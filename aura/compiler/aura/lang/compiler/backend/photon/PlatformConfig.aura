@@ -1,0 +1,210 @@
+// aura:///aura/lang/compiler/backend/photon/PlatformConfig.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// 平台配置 �?Phase 6.1
+//
+// 平台检测、服务号表、调用约定配置�?// 支持 Linux x86_64 �?Windows x86_64�?// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 平台类型枚举
+object PlatformType {
+    const val LINUX: String = "linux"
+    const val WINDOWS: String = "windows"
+    const val DARWIN: String = "darwin"
+    const val UNKNOWN: String = "unknown"
+}
+
+/// 架构类型枚举
+object ArchType {
+    const val X86_64: String = "x86_64"
+    const val AARCH64: String = "aarch64"
+    const val UNKNOWN: String = "unknown"
+}
+
+/// 调用约定类型
+object CallingConvention {
+    const val WINDOWS_X64: String = "windows_x64"
+    const val LINUX_X64: String = "linux_x64"
+    const val SYSCALL: String = "syscall"
+}
+
+/// 系统调用约定
+class SyscallConvention {
+    var serviceRegister: String = "rax"
+    var argRegisters: String = ""
+    var shadowSpaceSize: Int = 32
+    var alignment: Int = 16
+    var stackGrowth: String = "down"
+
+    init(platform: String) {
+        this.serviceRegister = "rax"
+        this.shadowSpaceSize = 32
+        this.alignment = 16
+        this.stackGrowth = "down"
+
+        if (platform == "linux") {
+            // Linux x86_64 syscall convention
+            this.argRegisters = "rdi,rsi,rdx,r10,r8,r9"
+            this.serviceRegister = "rax"
+        } else if (platform == "windows") {
+            // Windows x86_64 syscall convention
+            this.argRegisters = "rcx,rdx,r8,r9"
+            this.serviceRegister = "rax"
+        } else {
+            // Default: Linux
+            this.argRegisters = "rdi,rsi,rdx,r10,r8,r9"
+        }
+    }
+
+    /// 获取参数寄存器数�?    fun getArgRegCount(): Int {
+        val regs: List<String> = this.splitComma(this.argRegisters)
+        return regs.count()
+    }
+
+    /// 获取�?i 个参数寄存器
+    fun getArgReg(i: Int): String {
+        val regs: List<String> = this.splitComma(this.argRegisters)
+        if (i < 0 || i >= regs.count()) { return "" }
+        return regs[i]
+    }
+
+    /// 按逗号分隔字符�?    private fun splitComma(s: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (s == "") { return result }
+        var start: Int = 0
+        var pos: Int = 0
+        val len: Int = s.length
+        while (pos < len) {
+            if (s[pos] == ",") {
+                if (pos > start) {
+                    result.add(s.substring(start, pos))
+                }
+                start = pos + 1
+            }
+            pos = pos + 1
+        }
+        if (start < len) {
+            result.add(s.substring(start, len))
+        }
+        return result
+    }
+}
+
+/// 平台配置
+object PlatformConfig {
+    var platform: String = PlatformType.UNKNOWN
+    var arch: String = ArchType.UNKNOWN
+    var os: String = "unknown"
+    var target: String = "unknown"
+    var outputFormat: String = "COFF"
+    var syscallConvention: SyscallConvention = SyscallConvention("linux")
+
+    init() {
+        this.detectPlatform()
+    }
+
+    /// 检测当前平�?    fun detectPlatform(): Unit {
+        // 简化实现：根据环境变量或编译目标检�?        // 实际实现需要读�?OS 信息
+        this.platform = PlatformType.LINUX
+        this.arch = ArchType.X86_64
+        this.os = "linux"
+        this.target = "x86_64-linux"
+        this.outputFormat = "ELF"
+        this.syscallConvention = SyscallConvention("linux")
+    }
+
+    /// 设置 Windows 平台
+    fun setWindows(): Unit {
+        this.platform = PlatformType.WINDOWS
+        this.arch = ArchType.X86_64
+        this.os = "windows"
+        this.target = "x86_64-windows-msvc"
+        this.outputFormat = "COFF"
+        this.syscallConvention = SyscallConvention("windows")
+    }
+
+    /// 设置 Linux 平台
+    fun setLinux(): Unit {
+        this.platform = PlatformType.LINUX
+        this.arch = ArchType.X86_64
+        this.os = "linux"
+        this.target = "x86_64-linux"
+        this.outputFormat = "ELF"
+        this.syscallConvention = SyscallConvention("linux")
+    }
+
+    /// 获取当前平台
+    fun getPlatform(): String {
+        return this.platform
+    }
+
+    /// 获取当前架构
+    fun getArch(): String {
+        return this.arch
+    }
+
+    /// 获取操作系统
+    fun getOS(): String {
+        return this.os
+    }
+
+    /// 获取目标三元�?    fun getTarget(): String {
+        return this.target
+    }
+
+    /// 获取输出格式
+    fun getOutputFormat(): String {
+        return this.outputFormat
+    }
+
+    /// 获取系统调用约定
+    fun getSyscallConvention(): SyscallConvention {
+        return this.syscallConvention
+    }
+
+    /// 检查是否为 Windows 平台
+    fun isWindows(): Boolean {
+        return this.platform == PlatformType.WINDOWS
+    }
+
+    /// 检查是否为 Linux 平台
+    fun isLinux(): Boolean {
+        return this.platform == PlatformType.LINUX
+    }
+
+    /// 检查是否为 x86_64 架构
+    fun isX86_64(): Boolean {
+        return this.arch == ArchType.X86_64
+    }
+
+    /// 获取平台名称（用于日志）
+    fun getPlatformName(): String {
+        return this.arch + "-" + this.os
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// PlatformConfigUtils �?顶层辅助函数
+// ─────────────────────────────────────────────────────────────
+
+object PlatformConfigUtils {
+
+    /// 创建 Linux 平台配置�?    fun linuxConfig(): PlatformConfig {
+        val config: PlatformConfig = PlatformConfig()
+        config.setLinux()
+        return config
+    }
+
+    /// 创建 Windows 平台配置�?    fun windowsConfig(): PlatformConfig {
+        val config: PlatformConfig = PlatformConfig()
+        config.setWindows()
+        return config
+    }
+
+    /// 创建默认�?Linux x86_64 配置�?    fun defaultConfig(): PlatformConfig {
+        val config: PlatformConfig = PlatformConfig()
+        config.setLinux()
+        return config
+    }
+}

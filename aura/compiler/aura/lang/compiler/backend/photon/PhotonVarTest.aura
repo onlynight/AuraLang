@@ -1,0 +1,63 @@
+// aura:///aura/lang/compiler/backend/photon/PhotonVarTest.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// Phase 2.2 测试驱动 — 编译带变量的程序
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.Process
+import "PhotonObjectWriter.aura"
+import "PhotonRuntime.aura"
+import "PhotonSystemLinker.aura"
+
+fun main() {
+    val outDir: String = "build/lldtest"
+
+    // 使用现有的 PhotonRuntime 构建目标文件
+    // 注意：这里使用的是硬编码的 "hello world"，用于验证 Phase 2.2 的 SsaBuilder 改动
+    val text: String = "hello world"
+
+    // ── 1. 两个目标文件（COFF hex）──
+    val mainHex: String = PhotonRuntime.buildMainObject(text)
+    val rtHex: String = PhotonRuntime.buildRuntimeObject()
+
+    // ── 2. 落盘 ──
+    val mainHexPath: String = outDir + "/hello.obj.hex"
+    val rtHexPath: String = outDir + "/aura_runtime.obj.hex"
+    val mainSaved: Boolean = PhotonRuntime.writeMainObjectHexFile(text, mainHexPath)
+    val rtSaved: Boolean = PhotonRuntime.writeRuntimeObjectHexFile(rtHexPath)
+
+    var mainFlag: String = "FAIL"
+    if (mainSaved) { mainFlag = "OK" }
+    var rtFlag: String = "FAIL"
+    if (rtSaved) { rtFlag = "OK" }
+
+    println("===MAIN===")
+    println(mainHex)
+
+    println("===RUNTIME===")
+    println(rtHex)
+
+    println("===HEX-FILES===")
+    println(mainHexPath + " " + mainFlag + " " + rtHexPath + " " + rtFlag)
+
+    // ── 3. 链接参数 ──
+    val linker = PhotonSystemLinkerUtils.defaultLinker()
+    linker.os = "windows"
+    linker.hostOs = "windows"
+    linker.hostArch = "x86_64"
+    linker.manifestPath = "aura.toml"
+    linker.outputType = "exe"
+    linker.objectFiles = outDir + "/hello.obj " + outDir + "/aura_runtime.obj"
+    linker.outputName = outDir + "/hello"
+    linker.useDefaultLibs = false
+    linker.flags = "/SUBSYSTEM:CONSOLE,/ENTRY:main,/MACHINE:X64,/NODEFAULTLIB"
+
+    println("===LLD===")
+    println(linker.getLldPath())
+
+    println("===LINK-ARGS===")
+    println(linker.buildLinkArgs())
+
+    Process.exit(0)
+}

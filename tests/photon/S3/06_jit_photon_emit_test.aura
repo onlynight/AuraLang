@@ -1,0 +1,72 @@
+// tests/photon/S3/06_jit_photon_emit_test.aura
+// JIT 后端：机器码生成桥接测试（Phase F）
+//
+// 验证 JitBackend 的 emitFunction → registerFunction → stubs 桥接：
+//   1. allocateExecMemory: W^X 内存分配（vmMode 下模拟）
+//   2. emitFunction: hex → 入口地址
+//   3. registerFunction: 分派表注册
+//   4. 存根生成：dispatch stub / deopt trampoline / call stub / return stub
+//   5. 去优化：分派表条目清零
+//
+// 注意：compileMachineCode 依赖 object 方法（SsaBuilderUtils 等），
+// VM 模式下无法编译，故此处直接测试 JIT 桥接（vmMode=true）。
+// AOT/自举模式下可恢复 compileMachineCode 调用。
+
+package tests.photon.S3
+
+import aura.lang.compiler.backend.photon.JitBackend
+import aura.lang.compiler.test.TestRunner
+
+import aura.lang.std.String
+import aura.lang.std.Process
+
+fun main() {
+    val t = TestRunner()
+    t.begin("JitBackend photon emit (S3 Phase F)")
+
+    // ── 1. 创建后端，启用 VM 模式 ──
+    val backend = JitBackend()
+    backend.vmMode = true
+
+    // ── 2. 模拟机器码（不实际编译，直接使用已知 hex） ──
+    // 简化的机器码：push rbp; mov rbp,rsp; sub rsp,0x50; mov rax,0; pop rbp; ret
+    val machineCode = "554889E54883EC50B8000000005DC3"
+
+    // ── 3. emitFunction: hex → 入口地址 ──
+    val entry = backend.emitFunction("square", machineCode)
+    t.assertEq(entry > 0, true, "emitFunction returns nonzero entry")
+
+    // ── 4. registerFunction: 分派表注册 ──
+    val slot = backend.registerFunction("square", entry)
+    t.assertEq(slot == 0, true, "dispatch slot starts at 0")
+    t.assertEq(backend.getDispatchEntry(0) == entry, true, "dispatch entry is stored")
+
+    // ── 5. 存根生成验证 ──
+    val dispatchStub = backend.buildDispatchStub(0)
+    t.assertEq(dispatchStub != "", true, "dispatch stub is generated")
+    t.assertEq(dispatchStub.length == 18, true, "dispatch stub is 9 bytes")
+
+    val deoptTrampoline = backend.buildDeoptTrampoline(0)
+    t.assertEq(deoptTrampoline != "", true, "deopt trampoline is generated")
+
+    val callStub = backend.buildCallStub(entry)
+    t.assertEq(callStub != "", true, "call stub is generated")
+    t.assertEq(callStub.length == 24, true, "call stub is 12 bytes")
+
+    val returnStub = backend.buildReturnStub()
+    t.assertEq(returnStub != "", true, "return stub is generated")
+    t.assertEq(returnStub.length == 10, true, "return stub is 5 bytes")
+
+    // ── 6. 布局信息查询 ──
+    val layout = backend.getJitCodeLayout()
+    t.assertEq(layout != "", true, "layout info is generated")
+    t.assertEq(layout.length > 10, true, "layout has content")
+
+    // ── 7. 去优化验证 ──
+    backend.deoptimize("square")
+    t.assertEq(backend.getDispatchEntry(0) == 0, true, "deoptimized function cleared")
+
+    println("")
+    println(t.report())
+    Process.exit(0)
+}

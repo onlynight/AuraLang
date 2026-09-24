@@ -1,0 +1,48 @@
+// tests/photon/phase1_test.aura
+// Phase 1 test case - simple program with control flow
+//
+// Tests: variables, arithmetic, if/else, while loop, function call
+
+fun main() {
+    // Test 1: Basic variables and arithmetic
+    val x: Int = 10
+    val y: Int = 20
+    val z: Int = x + y
+    
+    // Test 2: If/else
+    if (z > 25) {
+        println("Test 1 PASS: z = " + toStr(z))
+    } else {
+        println("Test 1 FAIL: z = " + toStr(z))
+    }
+    
+    // Test 3: While loop
+    var i: Int = 0
+    var sum: Int = 0
+    while (i < 5) {
+        sum = sum + i
+        i = i + 1
+    }
+    
+    if (sum == 10) {
+        println("Test 2 PASS: sum = " + toStr(sum))
+    } else {
+        println("Test 2 FAIL: sum = " + toStr(sum))
+    }
+    
+    // Test 4: Function call
+    val result: Int = addNumbers(3, 4)
+    if (result == 7) {
+        println("Test 3 PASS: addNumbers(3, 4) = " + toStr(result))
+    } else {
+        println("Test 3 FAIL: addNumbers(3, 4) = " + toStr(result))
+    }
+    
+    // Test 5: String concatenation
+    val name: String = "World"
+    println("Hello, " + name + "!")
+}
+
+fun addNumbers(a: Int, b: Int): Int {
+    return a + b
+}

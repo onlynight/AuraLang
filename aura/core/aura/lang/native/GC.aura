@@ -1,0 +1,141 @@
+// aura:///aura/lang/native/GC.aura
+package aura.lang.native
+// ─────────────────────────────────────────────────────────────
+// ARC 引用计数 + 垃圾回收 — Phase 4.2
+//
+// 使用 ARC (Automatic Reference Counting) 管理内存。
+// 零外部依赖，纯 Aura 实现。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import "Memory.aura"
+
+/// ARC 对象头
+/// [0..7]: 引用计数 (Int64)
+/// [8..15]: 类型 ID (Int64)
+/// [16..]: 对象数据
+class ObjectHeader {
+    var refCount: Long = 1
+    var typeId: Long = 0
+    var size: Long = 0
+
+    init(typeId: Long, size: Long) {
+        this.refCount = 1
+        this.typeId = typeId
+        this.size = size
+    }
+
+    init(typeId: Long) {
+        this.refCount = 1
+        this.typeId = typeId
+        this.size = 16  // 默认大小
+    }
+}
+
+/// ARC 引用计数操作
+object ARC {
+    var totalRetain: Long = 0
+    var totalRelease: Long = 0
+
+    /// 增加引用计数
+    fun retain(obj: Long): Unit {
+        if (obj == 0) { return }
+        // 使用 Memory.arcIncrement 原子操作
+        Memory.arcIncrement(obj)
+        ARC.totalRetain = ARC.totalRetain + 1
+    }
+
+    /// 减少引用计数，返回是否已释放
+    fun release(obj: Long): Boolean {
+        if (obj == 0) { return false }
+        ARC.totalRelease = ARC.totalRelease + 1
+        // 使用 Memory.arcDecrement 原子操作
+        val rc: Long = Memory.arcDecrement(obj)
+        if (rc == 0) {
+            GC.freeObject(obj)
+            return true
+        }
+        return false
+    }
+
+    /// 获取引用计数
+    fun refCount(obj: Long): Long {
+        if (obj == 0) { return 0 }
+        return Memory.read64(obj)
+    }
+
+    /// 获取总 retain 次数
+    fun getTotalRetain(): Long {
+        return ARC.totalRetain
+    }
+
+    /// 获取总 release 次数
+    fun getTotalRelease(): Long {
+        return ARC.totalRelease
+    }
+}
+
+/// 垃圾回收器
+object GC {
+    var gcEnabled: Boolean = true
+    var collectedCount: Long = 0
+    var freedMemory: Long = 0
+    var gcCount: Long = 0
+
+    /// 标记-清除 GC (可达性分析)
+    fun collect(): Unit {
+        if (!this.gcEnabled) { return }
+        this.gcCount = this.gcCount + 1
+        // 1. 标记: 从根集合开始遍历
+        // 2. 清除: 释放未标记的对象
+        // 3. 压缩: 可选的内存压缩
+        // TODO: 实现完整的标记-清除算法
+    }
+
+    /// 释放对象 (清理资源)
+    fun freeObject(obj: Long): Unit {
+        if (obj == 0) { return }
+        // 根据 typeId 调用对应的析构函数
+        // 释放对象占用的内存
+        Memory.free(obj)
+        this.collectedCount = this.collectedCount + 1
+        this.freedMemory = this.freedMemory + 16  // 假设默认对象大小
+    }
+
+    /// 获取已收集对象数量
+    fun getCollectedCount(): Long {
+        return this.collectedCount
+    }
+
+    /// 获取已释放内存大小
+    fun getFreedMemory(): Long {
+        return this.freedMemory
+    }
+
+    /// 获取 GC 运行次数
+    fun getGcCount(): Long {
+        return this.gcCount
+    }
+
+    /// 启用/禁用 GC
+    fun setEnabled(enabled: Boolean): Unit {
+        this.gcEnabled = enabled
+    }
+
+    /// 检查 GC 是否启用
+    fun isEnabled(): Boolean {
+        return this.gcEnabled
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// GCUtils — 顶层辅助函数
+// ─────────────────────────────────────────────────────────────
+
+object GCUtils {
+
+    /// 创建空的 ObjectHeader 实例。
+    fun emptyHeader(): ObjectHeader {
+        return ObjectHeader(0)
+    }
+}

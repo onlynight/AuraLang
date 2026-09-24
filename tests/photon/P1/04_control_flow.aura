@@ -1,0 +1,29 @@
+// tests/photon/P1/04_control_flow.aura
+// Phase 1.4: 控制流测试
+//
+// 测试: if/else, while, for 循环
+
+import aura.lang.std.String
+
+fun main() {
+    var x: Int = 5
+    
+    // if/else 测试
+    if (x > 3) {
+        println("x > 3")
+    } else {
+        println("x <= 3")
+    }
+    
+    // while 循环测试
+    var i: Int = 0
+    while (i < 5) {
+        println("while i = " + toStr(i))
+        i = i + 1
+    }
+    
+    // for 循环测试
+    for (var j: Int = 0; j < 3; j = j + 1) {
+        println("for j = " + toStr(j))
+    }
+}

@@ -1,0 +1,99 @@
+// tests/photon/coerce_test2.aura
+// 验证 coerce_arg 修复：精确复现 SsaMir 的 addBlock 模式
+//
+// 关键特征：
+//   1. 结构体含多个 String 字段（逗号分隔列表）
+//   2. List<Struct> 存储多个对象
+//   3. 从 List 取出对象后，多次调用拼接写回字段
+//   4. 模拟 addBlock 的 f.blocks = f.blocks + "," + toStr(bid)
+
+class Block {
+    var id: Int = 0
+    var name: String = ""
+}
+
+class Func {
+    var name: String = ""
+    var blocks: String = ""
+    var entryBlock: Int = 0
+}
+
+class Program {
+    var funcs: List<Func> = arrayListOf<Func>()
+    var blockCount: Int = 0
+    var currentFunc: Int = -1
+
+    init() {
+        this.funcs = arrayListOf<Func>()
+        this.blockCount = 0
+        this.currentFunc = -1
+    }
+
+    fun addFunc(name: String): Int {
+        val f: Func = Func()
+        f.name = name
+        f.blocks = ""
+        f.entryBlock = 0
+        this.funcs.add(f)
+        this.currentFunc = this.funcs.size - 1
+        return this.currentFunc
+    }
+
+    fun funcOf(id: Int): Func {
+        if (id < 0 || id >= this.funcs.size) {
+            return Func()
+        }
+        return this.funcs[id]
+    }
+
+    fun addBlock(): Int {
+        val b: Block = Block()
+        b.id = this.blockCount
+        b.name = "block_" + toStr(this.blockCount)
+        this.blockCount = this.blockCount + 1
+        // ★ 关键代码路径：从 List 取出 Func，拼接写回 blocks 字段
+        if (this.currentFunc >= 0) {
+            val f: Func = this.funcOf(this.currentFunc)
+            if (f.blocks == "") {
+                f.blocks = toStr(b.id)
+            } else {
+                f.blocks = f.blocks + "," + toStr(b.id)
+            }
+        }
+        return b.id
+    }
+}
+
+fun main() {
+    val prog: Program = Program()
+    
+    // 创建函数
+    prog.addFunc("main")
+    prog.addFunc("helper")
+    
+    // 为第一个函数添加多个块
+    prog.addBlock()  // blocks = "0"
+    prog.addBlock()  // blocks = "0,1"
+    prog.addBlock()  // blocks = "0,1,2"
+    
+    val f0: Func = prog.funcOf(0)
+    println("func0.blocks = " + f0.blocks)
+    
+    // 为第二个函数添加块
+    prog.addFunc("second")
+    prog.addBlock()  // blocks = "0"
+    prog.addBlock()  // blocks = "0,1"
+    
+    val f2: Func = prog.funcOf(2)
+    println("func2.blocks = " + f2.blocks)
+    
+    // 验证所有函数
+    var i: Int = 0
+    while (i < prog.funcs.size) {
+        val fi: Func = prog.funcOf(i)
+        println("func" + toStr(i) + ".name=" + fi.name + " blocks=" + fi.blocks)
+        i = i + 1
+    }
+    
+    println("ALL OK")
+}

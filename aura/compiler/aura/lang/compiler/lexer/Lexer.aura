@@ -139,7 +139,18 @@ object LexerUtils {
     /// 说明：当前 VM 中 `List<T>` 的 `[]` 索引在 sema 层会报 "cannot index into 'List'"
     /// 警告（运行期可用）。把索引集中到这一处，可把该警告收敛为 1 条。
     fun lxLine(items: List<String>, index: Int): String {
-        return items[index]
+        if (index < 0 || index >= items.size) {
+            return ""
+        }
+        var out: String = ""
+        var i: Int = 0
+        while (i < items.size) {
+            if (i == index) {
+                return items[i]
+            }
+            i = i + 1
+        }
+        return ""
     }
 
     /// 十进制字符串 → Int（仅供 span 还原使用）。

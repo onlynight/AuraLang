@@ -1,0 +1,121 @@
+{
+  "HAT Module Header": {
+    "prefix": "hatmodule",
+    "body": [
+      "; module ${1:main} target ${2:x86_64-pc-windows-msvc}",
+      "; schema=HAT/2.0",
+      "",
+      "$0"
+    ],
+    "description": "HAT module header with metadata"
+  },
+  "HAT Function": {
+    "prefix": "hatfn",
+    "body": [
+      ";@fn ${1:name}(${2:params}) -> ${3:Unit}",
+      ";  bb entry:",
+      ";    $0",
+      ";    @ret () : Unit"
+    ],
+    "description": "HAT function with entry block"
+  },
+  "HAT Function with Return": {
+    "prefix": "hatfnret",
+    "body": [
+      ";@fn ${1:name}(${2:params}) -> ${3:Int}",
+      ";  bb entry:",
+      ";    @t0 = $0",
+      ";    @ret @t0 : ${3:Int}"
+    ],
+    "description": "HAT function with return value"
+  },
+  "HAT Conditional": {
+    "prefix": "hatif",
+    "body": [
+      ";    @t0 = @icmp @i32_sgt($1, $2) : Bool",
+      ";    @br_if @t0 => @then, @else",
+      ";\n;  bb then:",
+      ";    $0",
+      ";\n;  bb else:",
+      ";    "
+    ],
+    "description": "HAT conditional branch"
+  },
+  "HAT While Loop": {
+    "prefix": "hatwhile",
+    "body": [
+      ";  bb entry:",
+      ";    @i = @i32_const 0 : Int",
+      ";    @br @check",
+      ";\n;  bb check:",
+      ";    @i@1 = @phi(@i, @i@2) : Int",
+      ";    @t0 = @icmp @i32_sle(@i@1, $1) : Bool",
+      ";    @br_if @t0 => @body, @exit",
+      ";\n;  bb body:",
+      ";    $0",
+      ";    @t1 = @i32_const 1 : Int",
+      ";    @i@2 = @add(@i@1, @t1) : Int",
+      ";    @br @check",
+      ";\n;  bb exit:",
+      ";    @ret @i@1 : Int"
+    ],
+    "description": "HAT while loop with Phi nodes"
+  },
+  "HAT For Loop": {
+    "prefix": "hatfor",
+    "body": [
+      ";  bb entry:",
+      ";    @result = @i32_const 1 : Int",
+      ";    @i@0 = @i32_const 1 : Int",
+      ";    @br @check",
+      ";\n;  bb check:",
+      ";    @result@1 = @phi(@result, @result@2) : Int",
+      ";    @i@1 = @phi(@i@0, @i@2) : Int",
+      ";    @t0 = @icmp @i32_sle(@i@1, $1) : Bool",
+      ";    @br_if @t0 => @body, @exit",
+      ";\n;  bb body:",
+      ";    @result@2 = @mul(@result@1, @i@1) : Int",
+      ";    @t1 = @i32_const 1 : Int",
+      ";    @i@2 = @add(@i@1, @t1) : Int",
+      ";    @br @check",
+      ";\n;  bb exit:",
+      ";    @ret @result@1 : Int"
+    ],
+    "description": "HAT for loop (factorial pattern)"
+  },
+  "HAT Phi Node": {
+    "prefix": "hatphi",
+    "body": [
+      ";    @${1:name}@1 = @phi(@${1:name}, @${1:name}@2) : ${2:Int}"
+    ],
+    "description": "HAT Phi node for loop carry value"
+  },
+  "HAT Call": {
+    "prefix": "hatcall",
+    "body": [
+      ";    @t$1 = @call @$2(@$3) : $4"
+    ],
+    "description": "HAT function call"
+  },
+  "HAT String Concat": {
+    "prefix": "hatstrcat",
+    "body": [
+      ";    @t$1 = @str_concat(@$2, @$3) : String"
+    ],
+    "description": "HAT string concatenation"
+  },
+  "HAT Alloc List": {
+    "prefix": "hatalloc",
+    "body": [
+      ";    @${1:list} = @alloc_list { count: $2 } : !list"
+    ],
+    "description": "HAT list allocation"
+  },
+  "HAT Extern": {
+    "prefix": "hatextern",
+    "body": [
+      ";@extern ${1:name}(${2:params}) -> ${3:Unit}"
+    ],
+    "description": "HAT external function declaration"
+  }
+}

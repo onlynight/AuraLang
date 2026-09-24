@@ -1,0 +1,32 @@
+// tests/photon/P4/test_memory_alloc.aura
+// Phase 4.6: Memory allocation test
+//
+// Test: Arena allocator basic operations
+
+import aura.lang.std.String
+import aura.lang.native.Memory
+
+fun main() {
+    // 初始化内存管理器
+    val initialized: Boolean = MemoryManager.init(1024 * 1024)  // 1MB
+    println("init: " + toStr(initialized))
+    
+    // 分配内存
+    val ptr1: Long = MemoryManager.alloc(64)
+    println("alloc1: " + toStr(ptr1))
+    
+    val ptr2: Long = MemoryManager.alloc(128)
+    println("alloc2: " + toStr(ptr2))
+    
+    // 检查内存使用
+    println("used: " + toStr(MemoryManager.getUsedSize()))
+    println("free: " + toStr(MemoryManager.getFreeSize()))
+    
+    // 重置
+    MemoryManager.reset()
+    println("reset done")
+    
+    // 释放
+    MemoryManager.free()
+    println("free done")
+}

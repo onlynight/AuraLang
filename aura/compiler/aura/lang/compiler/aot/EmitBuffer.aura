@@ -2,15 +2,14 @@
 package aura.lang.compiler.aot
 
 // ─────────────────────────────────────────────────────────────
-// 发射缓冲：原生 StringBuilder（AOT: aura_std_cffi.c 的 AuraSb；
+// 发射缓冲：原生 `StringBuilder`（AOT: aura_std_cffi.c 的 AuraSb；
 // VM: compiler/src/std/std_sb.rs）的薄封装。
 //
-// 背景：AOT 运行时没有 GC，此前用「List<String> 分段累积 + joinPieces 树形归并」
-// 组装 IR 时，末尾会产生与「总长度 × log2(片段数)」成正比的中间串，且每个片段
-// 字符串都常驻内存。改用原生可变缓冲区后：
-//   - 追加摊还 O(1)（几何扩容）；
-//   - sbBuild 零拷贝交出内容（finish 转移缓冲区所有权）；
-// 累积与归并开销降为「总长度的一次拷贝」量级。
+// String ↔ 缓冲区的转换**一律走既有的 C 字符串 ABI**（「Aura String ≡ NUL
+// 结尾的 i8*」）：
+//   * 写入：`CString(s)`（`prelu.aura` → `Builtin.cstr`）—— `StringBuilder.append`
+//     的 `text: Long` 要的正是这个 NUL 结尾的 C 字符串；
+//   * 读出：`ReadCStr(ptr)` —— `CString` 的**逆操作**。见 `sbBuild()` 里的说明。
 //
 // 方法名统一加 `sb` 前缀：Aura 是扁平函数命名空间（类方法降级为 `Class.method`），
 // 前缀可避免与 List 的 add/append、StringBuilder.append 等重名解析歧义。
@@ -21,7 +20,7 @@ import aura.lang.std.string.StringBuilder
 /// 原生可变字符串缓冲区的薄封装。
 class EmitBuffer {
 
-    /// 原生缓冲区句柄（`StringBuilder.create()` 返回值，AOT 下为 i64）。
+    /// 原生缓冲区句柄（`StringBuilder.create()` 返回值）。
     var h: Long = 0
 
     init() {
@@ -30,14 +29,38 @@ class EmitBuffer {
 
     /// 追加一段文本（不追加换行）。
     fun sbAdd(s: String) {
-        this.h = StringBuilder.append(this.h, s)
+        // `CString(s)`：Aura String → C 字符串（NUL 结尾），即 `append` 需要的 `text`
+        this.h = StringBuilder.append(this.h, CString(s))
     }
 
-    /// 结束并交出全部内容（**零拷贝**）。
+    /// 结束并交出全部内容。
     ///
     /// 之后句柄失效：必须调用 `sbReset()` 才能继续复用。
     fun sbBuild(): String {
-        return StringBuilder.finish(this.h)
+        // 注意顺序：`finish` 会清空句柄（buf/len/cap 归零），长度必须先取。
+        val n: Long = StringBuilder.length(this.h)
+        val p: Long = StringBuilder.finish(this.h)
+        if (p == 0 || n <= 0) {
+            return ""
+        }
+        // ── 为什么用 `ReadCStr` 而不是 `Stdio.bufferToString` ──────────────
+        // `Stdio.bufferToString(buf, len)` 是**零拷贝**实现：它只在 `buf + len`
+        // 处补一个 NUL，然后 `return buf` —— 把裸缓冲区**当作** `String` 返回。
+        // 这在 AOT 下成立（`String ≡ i8*`，指针即字符串），但在 **VM（字节码）
+        // 路径**下不成立：VM 的 `Value` 有类型标签，`return buf`（`Long`）回来是
+        // `Int`，被 `println` 当整数打印。实测自举编译器的 `--selftest` 打印
+        // 「--- bytecode ---」时输出 `2752021311552`（一个指针数值），字节码全文
+        // 丢失；同一根因也让 `strlen(该值)` 读出 ≈1.8TB（StringBuilder.reserve
+        // 死循环的触发源）。
+        //
+        // `ReadCStr(ptr)` 是 `CString` 的逆操作：
+        //   * VM 侧 —— `native_builtin_read_cstr`（`rust/.../vm/native.rs`）按 NUL
+        //     结尾**拷出一份真 `String`**（`Value::Str`），类型标签正确；
+        //   * AOT 侧 —— 恒等（`String` 本就是 `i8*`，见 `aura_std_cffi.c` 的
+        //     `ReadCStr`），与旧的零拷贝行为完全一致。
+        // NUL 终止由 `StringBuilder` 自身保证（`appendN` 每次追加后写 NUL），
+        // 因此 `ReadCStr(p)` 恰好得到 `n` 个字节。
+        return ReadCStr(p)
     }
 
     /// 清空并复用缓冲区（`sbBuild()` 之后继续使用前必须调用）。

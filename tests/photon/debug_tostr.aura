@@ -1,0 +1,7 @@
+import aura.lang.std.String
+
+fun main() {
+    println("A")
+    println(toStr(42))
+    println("B")
+}

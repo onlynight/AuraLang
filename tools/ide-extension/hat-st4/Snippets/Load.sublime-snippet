@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[; @ = @load ()]]></content>
+    <tabTrigger>load</tabTrigger>
+    <scope>source.hat</scope>
+    <description>Load from memory</description>
+</snippet>

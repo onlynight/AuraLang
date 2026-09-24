@@ -1,9 +1,10 @@
 // aura:///aura/lang/native/Memory.aura
 package aura.lang.native
 // ─────────────────────────────────────────────────────────────
-// 内存操作声明 — Phase S1
+// 内存操作声明 + Arena 分配器 — Phase S1 + Phase 4.1
 //
 // 编译器内置内存操作（直接降低到 LLVM load/store 或 syscall）
+// Arena 分配器（使用 mmap 分配大块内存，bump pointer 分配）
 //
 // 使用 extern interface 封装：
 //   - `fun`（无 @native 注解）→ 编译器内置（load/store/alloc/free）
@@ -13,6 +14,8 @@ package aura.lang.native
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.native.Syscalls
+import aura.lang.native.arch.x86_64_linux.Syscalls as LinuxSyscalls
+import aura.lang.native.arch.x86_64_windows.Syscalls as WindowsSyscalls
 
 // 编译器内置内存操作
 extern interface Memory {
@@ -53,4 +56,128 @@ extern interface Memory {
 
     @native(asm = "lock inc") fun arcIncrement(addr: Long): Long
     @native(asm = "lock dec") fun arcDecrement(addr: Long): Long
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Arena 内存分配器 — Phase 4.1
+// ═══════════════════════════════════════════════════════════════
+//
+// 使用 mmap 分配大块内存，内部使用 bump pointer 分配。
+// 零外部依赖，纯 Aura 实现。
+// ═══════════════════════════════════════════════════════════════
+
+/// Arena 内存分配器
+/// 使用 mmap 分配大块内存，内部使用 bump pointer 分配
+object ArenaAllocator {
+    var baseAddr: Long = 0          // 基地址
+    var currentPtr: Long = 0        // 当前分配指针
+    var totalSize: Long = 0         // 总大小
+    var capacity: Long = 0          // 容量
+    var usedSize: Long = 0          // 已使用大小
+
+    /// 初始化分配器
+    fun init(size: Long): Boolean {
+        // PROT_READ=1, PROT_WRITE=2, PROT_READ|PROT_WRITE=3
+        // MAP_PRIVATE=2, MAP_ANONYMOUS=0x20=32, MAP_PRIVATE|MAP_ANONYMOUS=34
+        this.baseAddr = Memory.mmap(0, size, 3, 34, -1, 0)
+        // MAP_FAILED = -1 (0xFFFFFFFFFFFFFFFF)
+        if (this.baseAddr == -1) { return false }
+        this.currentPtr = this.baseAddr
+        this.totalSize = size
+        this.capacity = size
+        this.usedSize = 0
+        return true
+    }
+
+    /// 分配内存 (对齐到 8 字节)
+    fun alloc(size: Long): Long {
+        val alignedSize: Long = (size + 7) / 8 * 8
+        if (this.currentPtr + alignedSize > this.baseAddr + this.capacity) {
+            return 0  // 内存不足
+        }
+        val ptr: Long = this.currentPtr
+        this.currentPtr = this.currentPtr + alignedSize
+        this.usedSize = this.usedSize + alignedSize
+        return ptr
+    }
+
+    /// 重置分配器 (释放所有内存)
+    fun reset(): Unit {
+        this.currentPtr = this.baseAddr
+        this.usedSize = 0
+    }
+
+    /// 释放全部内存 (返回给 OS)
+    fun free(): Unit {
+        if (this.baseAddr != 0) {
+            Memory.munmap(this.baseAddr, this.capacity)
+            this.baseAddr = 0
+            this.currentPtr = 0
+            this.usedSize = 0
+        }
+    }
+
+    /// 获取已使用内存大小
+    fun getUsedSize(): Long {
+        return this.usedSize
+    }
+
+    /// 获取剩余内存大小
+    fun getFreeSize(): Long {
+        return this.capacity - this.usedSize
+    }
+}
+
+/// 全局内存管理器
+object MemoryManager {
+    val heap: ArenaAllocator = ArenaAllocator()
+    var initialized: Boolean = false
+
+    /// 初始化全局内存管理器
+    fun init(size: Long): Boolean {
+        if (this.initialized) { return true }
+        val result: Boolean = this.heap.init(size)
+        if (result) {
+            this.initialized = true
+        }
+        return result
+    }
+
+    /// 分配内存
+    fun alloc(size: Long): Long {
+        return this.heap.alloc(size)
+    }
+
+    /// 释放全部内存
+    fun free(): Unit {
+        this.heap.free()
+        this.initialized = false
+    }
+
+    /// 重置分配器
+    fun reset(): Unit {
+        this.heap.reset()
+    }
+
+    /// 获取已使用内存大小
+    fun getUsedSize(): Long {
+        return this.heap.getUsedSize()
+    }
+
+    /// 获取剩余内存大小
+    fun getFreeSize(): Long {
+        return this.heap.getFreeSize()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MemoryUtils — 顶层辅助函数
+// ═══════════════════════════════════════════════════════════════
+
+object MemoryUtils {
+
+    /// 创建空的 Arena 分配器实例。
+    fun emptyAllocator(): ArenaAllocator {
+        return ArenaAllocator()
+    }
 }

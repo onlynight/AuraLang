@@ -5266,13 +5266,19 @@ class LlvmEmitter {
             var structTy: String = aTy
             var otherVal: String = b
             var otherTy: String = bTy
-            var otherKid: Int = a1
+            // `otherKid` 是「非可空结构体那一侧」的 HIR kid id，供下方
+            // `isNullLit(hir, otherKid)` 判定是不是与 `null` 字面量比较。
+            // ⚠️ 旧实现写的是 `a1` / `a0` —— 这两个名字在 emitBinary 里**从未声明**
+            //（`a1` 仅在 5149 行的另一分支内作为 String 局部量存在），VM 下静默取 0，
+            // AOT 下则被发射成未定义值 ⇒ 自举编译报
+            //   `module.ll:...: error: use of undefined value '%a0'`。
+            var otherKid: Int = bid
             if (!EmitUtils.isNullableStructTy(aTy)) {
                 structVal = b
                 structTy = bTy
                 otherVal = a
                 otherTy = aTy
-                otherKid = a0
+                otherKid = aid
             }
             // **与非 null 值比较**（`old == 1`）必须比较 **payload（字段 0）**，
             // 只比标签位会退化成「判空」（实测 HashMap 的 `put`/`remove` 旧值断言
@@ -7123,6 +7129,51 @@ class LlvmEmitter {
             }
         }
 
+        // 2.86) `JitExec.call0(entry)` / `JitExec.callI64(entry, arg0)`
+        //       JIT 原生执行：把 `entry` 当作函数指针直接调用。
+        //
+        //       发射的是**纯 IR**（`inttoptr` + 间接 `call`），不引用任何外部
+        //       符号，因此：
+        //         * 未使用该入口的程序，AOT 产物完全不变（分支按
+        //           `fname` + 接收者名 `JitExec` 精确命中，且置于 2.9 外部
+        //           对象兜底之前，避免落到 `call @callI64` 的未定义符号）；
+        //         * 不需要 `aura_syscalls.c` 增加任何 C 封装。
+        //
+        //       ABI：目标函数按平台 C ABI —— Windows x64 下第 1 个参数走 `rcx`，
+        //       返回值在 `rax`；本分支只负责「按 ABI 传参 + 取返回值」。
+        if ((fname == "call0" || fname == "callI64") && n >= 2) {
+            val rIdJ: Int = hirKidsAt(kids, 0)
+            if (hir.textOf(rIdJ) == "JitExec" && this.lookupVarTy("JitExec") == "") {
+                val eIdJ: Int = hirKidsAt(kids, 1)
+                val eTyJ: String = this.inferType(hir, eIdJ)
+                val evJ: String = this.coerceValue(this.emitExpr(hir, eIdJ), eTyJ, "i64")
+                val fpJ: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(fpJ)
+                this.fBody.sbAdd(" = inttoptr i64 ")
+                this.fBody.sbAdd(evJ)
+                this.fBody.sbAdd(" to i64 (i64)*\n")
+                val rJ: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(rJ)
+                if (fname == "callI64" && n >= 3) {
+                    val aIdJ: Int = hirKidsAt(kids, 2)
+                    val aTyJ: String = this.inferType(hir, aIdJ)
+                    val avJ: String = this.coerceValue(this.emitExpr(hir, aIdJ), aTyJ, "i64")
+                    this.fBody.sbAdd(" = call i64 ")
+                    this.fBody.sbAdd(fpJ)
+                    this.fBody.sbAdd("(i64 ")
+                    this.fBody.sbAdd(avJ)
+                    this.fBody.sbAdd(")\n")
+                } else {
+                    this.fBody.sbAdd(" = call i64 ")
+                    this.fBody.sbAdd(fpJ)
+                    this.fBody.sbAdd("()\n")
+                }
+                return rJ
+            }
+        }
+
         // 2.9) **外部对象成员调用**：`FileOps.open(path, flags)` / `Console.writeStdout(…)`
         //      这类调用的符号是**裸成员名**（C ABI，形参表不含 self），
         //      因此必须**跳过 kids[0] 的对象名**（对象名不是实参！）。
@@ -8148,6 +8199,12 @@ class LlvmEmitter {
             // 把 i64 句柄截断成 i32。
             if (fname == "alloc" && hirKidsCount(kids) >= 2
                 && hir.textOf(hirKidsAt(kids, 0)) == "Memory") {
+                return "i64"
+            }
+            // `JitExec.call0/callI64(...)` → 间接调用，返回值在 `rax`（i64）。
+            // 必须与 `emitCall` 的 2.86) 分支一致（否则被截断成 i32）。
+            if ((fname == "call0" || fname == "callI64") && hirKidsCount(kids) >= 2
+                && hir.textOf(hirKidsAt(kids, 0)) == "JitExec") {
                 return "i64"
             }
             if (fname == "read" || fname == "read16" || fname == "read32" || fname == "read64"

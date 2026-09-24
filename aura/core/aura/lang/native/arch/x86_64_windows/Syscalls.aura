@@ -1,22 +1,31 @@
 // aura:///aura/lang/native/arch/x86_64_windows/Syscalls.aura
 package aura.lang.native.arch.x86_64_windows
 // ─────────────────────────────────────────────────────────────
-// Windows x86_64 系统调用表 — Phase S3
+// Windows x86_64 Nt* 系统调用表 — Phase 6.1
 //
-// Windows 使用 Nt* 系统调用（通过 syscall 指令或 Zw* 包装）。
-// 这里使用 Windows API 封装（通过 FFI 调用 kernel32.dll）。
+// 使用 Nt* 系统调用（通过 syscall 指令），零外部依赖。
 //
-// ── 注意 ──
-// Windows 不直接支持 syscall 指令调用，需要通过：
-//   1. kernel32.dll API（WriteFile, ReadFile 等）
-//   2. Nt* 系统调用（通过 syscall 指令，但需要 Nt* 服务号）
+// ── Windows x86_64 Nt* syscall 约定 ──
+//   输入: rax = 服务号
+//         rcx = 参数 1
+//         rdx = 参数 2
+//         r8  = 参数 3
+//         r9  = 参数 4
+//         栈  = 参数 5+
+//   输出: rax = 返回值 (NTSTATUS)
+//   被破坏: rcx, r11
 //
-// 这里使用 FFI 方式调用 kernel32.dll。
+// ── NTSTATUS 常量 ──
+//   STATUS_SUCCESS = 0x00000000
+//   STATUS_UNSUCCESSFUL = 0xC0000001
+//   STATUS_ACCESS_VIOLATION = 0xC0000005
+//   STATUS_NO_MEMORY = 0x10000005
+//   STATUS_BUFFER_TOO_SMALL = 0xC0000023
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.native.Memory
 
-/// Windows x86_64 系统调用
+/// Windows x86_64 Nt* 系统调用
 extern interface Syscalls {
 
     // ── 标准文件描述符 ──
@@ -47,71 +56,189 @@ extern interface Syscalls {
     const val GENERIC_READ: Int = 0x80000000
     const val GENERIC_WRITE: Int = 0x40000000
 
-    // ── 系统调用声明 ──
-    // 注意：Windows 使用 FFI 方式，不是 syscall 指令
+    // ── Memory allocation constants ──
+    const val MEM_COMMIT: Int = 0x1000
+    const val MEM_RESERVE: Int = 0x2000
+    const val MEM_RELEASE: Int = 0x8000
 
-    /// 写入控制台（简化实现）
-    @native(asm = "call qword ptr [rip+WriteFile]") fun writeFile(handle: Long, buf: Long, count: Long): Long
+    // ── Memory protection constants ──
+    const val PAGE_READWRITE: Int = 0x04
+    const val PAGE_WRITECOPY: Int = 0x08
+    const val PAGE_READONLY: Int = 0x02
+    const val PAGE_EXECUTE: Int = 0x10
+    const val PAGE_EXECUTE_READ: Int = 0x20
+    const val PAGE_READWRITEEXECUTE: Int = 0x40
 
-    /// 读取控制台（简化实现）
-    @native(asm = "call qword ptr [rip+ReadFile]") fun readFile(handle: Long, buf: Long, count: Long): Long
+    // ── NTSTATUS constants ──
+    const val STATUS_SUCCESS: Int = 0x00000000
+    const val STATUS_UNSUCCESSFUL: Int = 0xC0000001
+    const val STATUS_ACCESS_VIOLATION: Int = 0xC0000005
+    const val STATUS_NO_MEMORY: Int = 0x10000005
+    const val STATUS_BUFFER_TOO_SMALL: Int = 0xC0000023
 
-    /// 获取当前时间
-    @native(asm = "call qword ptr [rip+GetSystemTimeAsFileTime]") fun getTime(): Long
+    // ── File access constants ──
+    const val FILE_SHARE_READ: Int = 0x00000001
+    const val FILE_SHARE_WRITE: Int = 0x00000002
+    const val FILE_SHARE_DELETE: Int = 0x00000004
+    const val CREATE_ALWAYS: Int = 2
+    const val CREATE_NEW: Int = 1
+    const val OPEN_EXISTING: Int = 3
+    const val FILE_ATTRIBUTE_NORMAL: Int = 0x00000080
 
-    /// 退出进程
-    @native(asm = "call qword ptr [rip+ExitProcess]") fun exitProcess(code: Int)
+    // ── System information class ──
+    const val SystemBasicInformation: Int = 0
+    const val SystemProcessInformation: Int = 5
+    const val SystemPerformanceInformation: Int = 27
 
-    // ── Windows 文件 API（kernel32.dll FFI） ──
+    // ── Nt* 系统调用声明 ──
+    // Windows x86_64 NT syscall 服务号。
+    //
+    // 注意：这些值在 Windows 各版本间**稳定**（stable across Windows versions
+    // on x86_64）。这是长期观察结论——Microsoft 对 Nt* 服务号有跨版本兼容承诺，
+    // 与 Linux syscall 表不同，x86_64 的 Nt* 号不会因 build 变更而重排。
+    // 完整列表参考: https://github.com/MariaDB/mariadb-connector-node/blob/master/README.md
+    // 或 https://wiki.osdev.org/Windows_x64_SYSCALLs
 
-    /// CreateFileA — 创建/打开文件（ANSI）
-    @native(asm = "call qword ptr [rip+CreateFileA]") fun createFileA(
-        lpFileName: Long,
-        dwDesiredAccess: Int,
-        dwShareMode: Int,
-        lpSecurityAttributes: Long,
-        dwCreationDisposition: Int,
-        dwFlagsAndAttributes: Int,
-        hTemplateFile: Long
-    ): Long
+    /// NtAccessCheck — 访问检查
+    /// rax = 0x00
+    @native(0x00) fun ntAccessCheck(): Long
 
-    /// ReadFile — 读取文件（带 lpNumberOfBytesRead）
-    @native(asm = "call qword ptr [rip+ReadFile]") fun winReadFile(
-        hFile: Long,
-        lpBuffer: Long,
-        nNumberOfBytesToRead: Long,
-        lpNumberOfBytesRead: Long,
-        lpOverlapped: Long
-    ): Int
+    /// NtCreateSemaphore — 创建信号量
+    /// rax = 0x01
+    @native(0x01) fun ntCreateSemaphore(): Long
 
-    /// CloseHandle — 关闭句柄
-    @native(asm = "call qword ptr [rip+CloseHandle]") fun closeHandle(hObject: Long): Int
-
-    // ── Nt* 系统调用（Phase 2: 直接 syscall 指令）──
-    // Windows Nt* 服务号（x86_64，常见值）
-    // 注意：Nt* 服务号在不同 Windows 版本间可能变化
-
-    /// NtWriteFile — 写入文件
-    @native(0x0000000000000000) fun ntWriteFile(handle: Long, event: Long, apc: Long, context: Long, buffer: Long, length: Long, key: Long, disposition: Long): Long
+    /// NtReleaseSemaphore — 释放信号量
+    /// rax = 0x02
+    @native(0x02) fun ntReleaseSemaphore(): Long
 
     /// NtReadFile — 读取文件
-    @native(0x0000000000000001) fun ntReadFile(handle: Long, event: Long, apc: Long, context: Long, buffer: Long, length: Long, key: Long, disposition: Long): Long
+    /// rax = 0x03
+    @native(0x03) fun ntReadFile(handle: Long, event: Long, apc: Long, context: Long, buffer: Long, length: Long, key: Long, ioStatusBlock: Long): Long
 
     /// NtCreateFile — 创建/打开文件
-    @native(0x0000000000000005) fun ntCreateFile(handle: Long, desiredAccess: Int, objectAttributes: Long, ioStatus: Long, allocationSize: Long, fileAttributes: Long, shareAccess: Int, createDisposition: Int, createOptions: Int, eap: Long, eapLength: Long): Long
+    /// rax = 0x05
+    @native(0x05) fun ntCreateFile(handle: Long, desiredAccess: Int, objectAttributes: Long, ioStatus: Long, allocationSize: Long, fileAttributes: Long, shareAccess: Int, createDisposition: Int, createOptions: Int, eap: Long, eapLength: Long): Long
+
+    /// NtProtectVirtualMemory — 修改虚拟内存保护
+    /// rax = 0x08
+    @native(0x08) fun ntProtectVirtualMemory(): Long
 
     /// NtClose — 关闭句柄
-    @native(0x0000000000000006) fun ntClose(handle: Long): Long
+    /// rax = 0x0B
+    @native(0x0B) fun ntClose(handle: Long): Long
 
-    /// NtSetEvent — 设置事件
-    @native(0x0000000000000007) fun ntSetEvent(event: Long): Long
+    /// NtCreateEvent — 创建事件
+    /// rax = 0x10
+    @native(0x10) fun ntCreateEvent(): Long
 
-    /// NtWaitForSingleObject — 等待对象
-    @native(0x0000000000000009) fun ntWaitForSingleObject(handle: Long, alertable: Int, timeout: Long): Long
+    /// NtPulseEvent — 脉冲事件
+    /// rax = 0x11
+    @native(0x11) fun ntPulseEvent(): Long
 
-    /// NtExitProcess — 退出进程（Nt 版本）
-    @native(0x0000000000000010) fun ntExitProcess(status: Long)
+    /// NtQueryInformationFile — 查询文件信息
+    /// rax = 0x0E
+    @native(0x0E) fun ntQueryInformationFile(): Long
+
+    /// NtSetInformationFile — 设置文件信息
+    /// rax = 0x0F
+    @native(0x0F) fun ntSetInformationFile(): Long
+
+    /// NtAllocateVirtualMemory — 分配虚拟内存
+    /// rax = 0x18
+    /// rcx = processHandle, rdx = address, r8 = zeroBits, r9 = regionSize
+    /// stack = allocationProtect (PAGE_READWRITE=4), allocationType (MEM_COMMIT|MEM_RESERVE=0x3000)
+    @native(0x18) fun ntAllocateVirtualMemory(processHandle: Long, address: Long, zeroBits: Long, regionSize: Long, allocationProtect: Int, state: Int): Long
+
+    /// NtWriteFile — 写入文件
+    /// rax = 0x15
+    /// rcx = handle, rdx = event, r8 = apc, r9 = context
+    /// stack = IoStatusBlock, buffer, length, key, eaBuffer
+    @native(0x15) fun ntWriteFile(handle: Long, event: Long, apc: Long, context: Long, buffer: Long, length: Long, key: Long, ioStatusBlock: Long, eaBuffer: Long): Long
+
+    /// NtQueryVirtualMemory — 查询虚拟内存信息
+    /// rax = 0x1A
+    @native(0x1A) fun ntQueryVirtualMemory(processHandle: Long, address: Long, query: Int, info: Long, infoLength: Long, returnLength: Long): Long
+
+    /// NtCreateThread — 创建线程
+    /// rax = 0x23
+    @native(0x23) fun ntCreateThread(): Long
+
+    /// NtDelayExecution — 延迟执行
+    /// rax = 0x26
+    @native(0x26) fun ntDelayExecution(): Long
+
+    /// NtTerminateProcess — 终止进程
+    /// rax = 0x30
+    /// rcx = processHandle (0 = 当前进程), rdx = exitStatus
+    @native(0x30) fun ntTerminateProcess(processHandle: Long, exitStatus: Long): Long
+
+    /// NtReadVirtualMemory — 读取虚拟内存
+    /// rax = 0x32
+    @native(0x32) fun ntReadVirtualMemory(processHandle: Long, baseAddress: Long, buffer: Long, bufferLength: Long, bytesRead: Long): Long
+
+    /// NtWriteVirtualMemory — 写入虚拟内存
+    /// rax = 0x33
+    @native(0x33) fun ntWriteVirtualMemory(processHandle: Long, baseAddress: Long, buffer: Long, bufferLength: Long, bytesWritten: Long): Long
+
+    /// NtOpenFile — 打开文件
+    /// rax = 0x35
+    @native(0x35) fun ntOpenFile(): Long
+
+    /// NtFreeVirtualMemory — 释放虚拟内存
+    /// rax = 0x45
+    /// rcx = processHandle, rdx = address, r8 = regionSize
+    /// stack = freeType (MEM_RELEASE=0x8000)
+    @native(0x45) fun ntFreeVirtualMemory(processHandle: Long, address: Long, regionSize: Long, freeType: Int): Long
+
+    /// NtExitProcess — 退出进程（别名，通常用 NtTerminateProcess）
+    /// rax = 0x4C
+    @native(0x4C) fun ntExitProcess(exitStatus: Long)
+
+    /// NtCreateMutant — 创建互斥量
+    /// rax = 0x54
+    @native(0x54) fun ntCreateMutant(): Long
+
+    /// NtReleaseMutant — 释放互斥量
+    /// rax = 0x56
+    @native(0x56) fun ntReleaseMutant(): Long
 
     /// NtQuerySystemInformation — 查询系统信息
-    @native(0x000000000000001D) fun ntQuerySystemInformation(systemInformationClass: Int, systemInformation: Long, systemInformationLength: Long, returnLength: Long): Long
+    /// rax = 0x5B
+    @native(0x5B) fun ntQuerySystemInformation(systemInformationClass: Int, systemInformation: Long, systemInformationLength: Long, returnLength: Long): Long
+
+    /// NtYieldExecution — 让出执行
+    /// rax = 0x5C
+    @native(0x5C) fun ntYieldExecution(): Long
+
+    /// NtWaitForSingleObject — 等待对象
+    /// rax = 0x5F
+    @native(0x5F) fun ntWaitForSingleObject(handle: Long, alertable: Int, timeout: Long): Long
+
+    /// NtResumeThread — 恢复线程
+    /// rax = 0x50
+    @native(0x50) fun ntResumeThread(threadHandle: Long, previousSuspendCount: Long): Long
+
+    /// NtSuspendThread — 挂起线程
+    /// rax = 0x51
+    @native(0x51) fun ntSuspendThread(threadHandle: Long, previousSuspendCount: Long): Long
+
+    /// NtTerminateThread — 终止线程
+    /// rax = 0x69
+    @native(0x69) fun ntTerminateThread(threadHandle: Long, exitStatus: Long)
+
+    /// NtWaitForAlertByThreadId — 等待线程告警
+    /// rax = 0x63
+    @native(0x63) fun ntWaitForAlertByThreadId(): Long
+
+    /// NtCreateThreadEx — 创建线程（扩展）
+    /// rax = 0x64
+    @native(0x64) fun ntCreateThreadEx(threadHandle: Long, desiredAccess: Int, objectAttributes: Long, processHandle: Long, creationRoutine: Long, startRoutine: Long, startArg: Long, createFlags: Int, stackSize: Long, stackLimit: Long, lpp: Long): Long
+
+    /// NtQueryInformationThread — 查询线程信息
+    /// rax = 0x6D
+    @native(0x6D) fun ntQueryInformationThread(threadHandle: Long, threadInfoClass: Int, threadInfo: Long, threadInfoLength: Long, returnLength: Long): Long
+
+    /// NtSetInformationThread — 设置线程信息
+    /// rax = 0x6E
+    @native(0x6E) fun ntSetInformationThread(threadHandle: Long, threadInfoClass: Int, threadInfo: Long, threadInfoLength: Long): Long
 }

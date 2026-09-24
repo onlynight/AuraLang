@@ -1,0 +1,24 @@
+// tests/photon/P4/06_gc_collect.aura
+// Phase 4.6: GC 收集测试
+//
+// 测试: GC 启用/禁用/收集
+
+import aura.lang.std.String
+import aura.lang.native.GC
+
+fun main() {
+    // 检查 GC 状态
+    println("GC enabled: " + toStr(GC.isEnabled()))
+    
+    // 禁用 GC
+    GC.setEnabled(false)
+    println("GC enabled after disable: " + toStr(GC.isEnabled()))
+    
+    // 启用 GC
+    GC.setEnabled(true)
+    println("GC enabled after enable: " + toStr(GC.isEnabled()))
+    
+    // 运行 GC
+    GC.collect()
+    println("GC count: " + toStr(GC.getGcCount()))
+}

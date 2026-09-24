@@ -140,6 +140,41 @@ class X86Encoder {
         this.writeInt(imm)
     }
 
+    /// 编码 IMUL r/m64, imm32（REX.W 0F AF /r id，3-操作数形式）。
+    fun emitImulRI(dst: String, imm: Int): Unit {
+        val d: Int = this.regNum(dst)
+        this.writeByte(this.rexByte(true, 0, d))
+        this.writeByte(0x0F)
+        this.writeByte(0xAF)
+        this.writeByte(0xC0 + (d & 7))
+        this.writeInt(imm)
+    }
+
+    /// 编码 CDQ（符号扩展 rax → rdx:rax，除法/取余前置操作）。
+    fun emitCdq(): Unit {
+        this.writeByte(0x99)
+    }
+
+    /// 编码 CQO（0x48 0x99）：把 rax 的符号位扩展到 rdx:rax（**64 位**除法前置）。
+    ///
+    /// 与 `emitCdq`（32 位 CDQ）的区别：CDQ 只写 edx（rdx 的高 32 位被清零），
+    /// 配合 64 位 `idiv r64` 时负数被除数会算错。
+    fun emitCqo(): Unit {
+        this.writeByte(0x48)
+        this.writeByte(0x99)
+    }
+
+    /// 编码 IDIV r/m64（0xF7 /F，有符号除法，商→rax，余数→rdx）。
+    /// 注意：IDIV 的源操作数隐含为 rdx:rax，dst/src 参数仅用于定位 r/m 字段。
+    fun emitIdiv(rmReg: String): Unit {
+        val rm: Int = this.regNum(rmReg)
+        this.writeByte(this.rexByte(true, 0, rm))
+        this.writeByte(0xF7)
+        // mod=11, reg=111(/7 = IDIV), rm=reg → 0xF8 + rm
+        // （旧实现用 0xC8 + rm，即 /1 —— 未定义指令，执行即非法指令异常）
+        this.writeByte(0xF8 + (rm & 7))
+    }
+
     /// 编码 MOV reg, [rip + disp32]（RIP 相对寻址）。
     fun emitMovRIP(dst: String, symbol: String): Unit {
         val d: Int = this.regNum(dst)
@@ -147,6 +182,68 @@ class X86Encoder {
         this.writeByte(0x8B)
         this.writeByte(0x05 + ((d & 7) << 3))  // 05 = mod=00, rm=101 (RIP)
         this.writeRelocPlaceholder(symbol)
+    }
+
+    /// 编码 MOV [rip + disp32], reg（RIP 相对存储）。
+    ///
+    /// 与 `emitMovRIP` 对称，用于写回 .data 段的全局可变槽位
+    /// （如字符串 bump 分配器的游标 `strcatBump`）。
+    fun emitStoreRIP(symbol: String, reg: String): Unit {
+        val r: Int = this.regNum(reg)
+        this.writeByte(this.rexByte(true, r, 0))
+        this.writeByte(0x89)
+        this.writeByte(0x05 + ((r & 7) << 3))  // 05 = mod=00, rm=101 (RIP)
+        this.writeRelocPlaceholder(symbol)
+    }
+
+    /// 编码 MOV reg, [base + index*8 + disp32]（REX.W 8B /r，SIB scale=8）。
+    ///
+    /// 用于堆列表元素读取（元素宽度 8 字节，头部 8 字节计数）。
+    /// mod=10 固定用 disp32 —— 这样 base=rbp/r13 时也不会与「mod=00 + rm=101
+    /// 表示 RIP 相对」冲突。
+    fun emitLoadIndexed8(dst: String, base: String, index: String, disp: Int): Unit {
+        val d: Int = this.regNum(dst)
+        val b: Int = this.regNum(base)
+        val x: Int = this.regNum(index)
+        var rex: Int = 0x48
+        if (d >= 8) { rex = rex + 4 }   // REX.R
+        if (x >= 8) { rex = rex + 2 }   // REX.X
+        if (b >= 8) { rex = rex + 1 }   // REX.B
+        this.writeByte(rex)
+        this.writeByte(0x8B)
+        this.writeByte(0x80 + ((d & 7) << 3) + 4)      // mod=10, reg=d, rm=100(SIB)
+        this.writeByte(0xC0 + ((x & 7) << 3) + (b & 7)) // scale=8, index, base
+        this.writeInt(disp)
+    }
+
+    /// 编码 MOV [base + index*8 + disp32], reg（REX.W 89 /r，SIB scale=8）。
+    fun emitStoreIndexed8(base: String, index: String, disp: Int, src: String): Unit {
+        val s: Int = this.regNum(src)
+        val b: Int = this.regNum(base)
+        val x: Int = this.regNum(index)
+        var rex: Int = 0x48
+        if (s >= 8) { rex = rex + 4 }
+        if (x >= 8) { rex = rex + 2 }
+        if (b >= 8) { rex = rex + 1 }
+        this.writeByte(rex)
+        this.writeByte(0x89)
+        this.writeByte(0x80 + ((s & 7) << 3) + 4)
+        this.writeByte(0xC0 + ((x & 7) << 3) + (b & 7))
+        this.writeInt(disp)
+    }
+
+    /// 编码 MOV [base + disp32], reg（REX.W 89 /r）。
+    fun emitStoreMemDisp32(base: String, disp: Int, src: String): Unit {
+        val s: Int = this.regNum(src)
+        val b: Int = this.regNum(base)
+        var rex: Int = 0x48
+        if (s >= 8) { rex = rex + 4 }
+        if (b >= 8) { rex = rex + 1 }
+        this.writeByte(rex)
+        this.writeByte(0x89)
+        // mod=10 (disp32)，rm = base（base=101 即 rbp/r13 在 mod=10 下合法）
+        this.writeByte(0x80 + ((s & 7) << 3) + (b & 7))
+        this.writeInt(disp)
     }
 
     /// 编码 LEA reg, [rip + disp32]（加载地址）。
@@ -233,13 +330,43 @@ class X86Encoder {
         this.emitShiftImm(reg, 7, imm)
     }
 
-    /// 编码 SETcc reg。
+    /// 编码 SETcc reg（写目标寄存器的**低 8 位**，高位保持不变）。
+    ///
+    /// ⚠️ 调用方必须紧跟着用 `emitMovzxRegReg8` 把低 8 位零扩展 —— 否则整寄存器
+    /// 的高 56 位是脏的，后续 `cmp reg, 0` 会得到错误结论。
+    /// 另外 r8-r15 需要 REX.B 前缀，且 ModRM 的 rm 只能用低 3 位
+    ///（旧实现直接 `0xC0 + d`，对 r8-r15 编出错误的寄存器）。
     fun emitSetcc(dst: String, cond: String): Unit {
         val d: Int = this.regNum(dst)
         val c: Int = this.condCode(cond)
+        // REX 前缀：
+        //   d >= 8  → REX.B（r8-r15b 只能通过 REX 访问）
+        //   d in 4..7 → 裸 REX 0x40（spl/bpl/sil/dil 必须带 REX；不带 REX 的
+        //             索引 4..7 表示 ah/ch/dh/bh）
+        // 旧实现只处理 d>=8，`setcc rsi` 被编成 `setcc %dh`，而紧随其后的
+        // `movzx rsi, sil`（带 REX）读的是 %sil —— 两者寄存器不一致，
+        // 比较结果恒为脏值（实测 `if n <= 1` 恒真，factorial 恒返回 1）。
+        if (d >= 8) {
+            this.writeByte(0x41)
+        } else if (d >= 4) {
+            this.writeByte(0x40)
+        }
         this.writeByte(0x0F)
         this.writeByte(0x90 + c)
-        this.writeByte(0xC0 + d)
+        this.writeByte(0xC0 + (d & 7))
+    }
+
+    /// 编码 MOVZX r64, r/m8（REX.W 0F B6 /r）：低 8 位零扩展到 64 位。
+    fun emitMovzxRegReg8(dst: String, src: String): Unit {
+        val d: Int = this.regNum(dst)
+        val s: Int = this.regNum(src)
+        var rex: Int = 0x48
+        if (d >= 8) { rex = rex + 4 }   // REX.R
+        if (s >= 8) { rex = rex + 1 }   // REX.B
+        this.writeByte(rex)
+        this.writeByte(0x0F)
+        this.writeByte(0xB6)
+        this.writeByte(0xC0 + ((d & 7) << 3) + (s & 7))
     }
 
     /// 编码 CALL rel32。
@@ -471,6 +598,15 @@ class X86Encoder {
         this.writeInt(offset)
     }
 
+    /// 编码 LEA reg, [rbp + disp32]（REX.W 8D /r）。
+    fun emitLeaStack(dst: String, offset: Int): Unit {
+        val r: Int = this.regNum(dst)
+        this.writeByte(this.rexByte(true, r, 5))
+        this.writeByte(0x8D)
+        this.writeByte(0x80 + ((r & 7) << 3) + 5)
+        this.writeInt(offset)
+    }
+
     /// 编码 INC reg（REX.W FF /0）。
     fun emitIncRR(reg: String): Unit {
         val r: Int = this.regNum(reg)
@@ -517,6 +653,191 @@ class X86Encoder {
             this.writeByte(0x38 + (r & 7))   // mod=00, reg=111(/7), rm=baseReg
         }
         this.writeByte(imm & 255)
+    }
+
+    /// 编码 MOV [r/m64], r8（字节寄存器存储到内存地址）。
+    ///
+    /// 例如：emitMovByteMemReg("rsi", "rdx")  →  mov [rsi], dl
+    ///
+    /// 用于 toStr 等函数将计算出的字符字节写入缓冲区。
+    fun emitMovByteMemReg(memReg: String, srcReg: String): Unit {
+        val m: Int = this.regNum(memReg)
+        val s: Int = this.regNum(srcReg)
+        val rex: Int = this.rexByte(false, s, m)
+        if (rex != 0x40) {
+            this.writeByte(rex)
+        }
+        this.writeByte(0x88)  // MOV r/m8, r8
+        if ((m & 7) == 5) {
+            this.writeByte(0x40 + (s << 3) + 5)  // mod=01, rm=101 (rbp/r13)
+            this.writeByte(0)
+        } else {
+            this.writeByte(0x00 + (s << 3) + m)  // mod=00, rm=memReg
+        }
+    }
+
+    /// 编码 MOVZX r64, byte [r/m64]（字节加载并零扩展到 64 位）。
+    ///
+    /// 例如：emitMovzxRegMemByte("rax", "rsi")  →  movzx rax, byte [rsi]
+    ///
+    /// 用于 toInt / toFloat 等函数从字符串中加载字符并零扩展。
+    fun emitMovzxRegMemByte(dstReg: String, srcMemReg: String): Unit {
+        val d: Int = this.regNum(dstReg)
+        val m: Int = this.regNum(srcMemReg)
+        val rex: Int = this.rexByte(true, d, m)
+        this.writeByte(rex)
+        this.writeByte(0x0F)
+        this.writeByte(0xB6)  // MOVZX r64, r/m8
+        if ((m & 7) == 5) {
+            this.writeByte(0x40 + (d << 3) + 5)  // mod=01, rm=101 (rbp/r13)
+            this.writeByte(0)
+        } else {
+            this.writeByte(0x00 + (d << 3) + m)  // mod=00, rm=srcMemReg
+        }
+    }
+
+    /// 别名：`dst = *srcMemReg`（字节加载，零扩展到 64 位）。
+    ///
+    /// PhotonRuntime 的 NtWriteFile 实现按此名调用（`"rax" = *"rsi"`）；
+    /// 语义与 `emitMovzxRegMemByte` 完全一致，故直接转发，避免两份编码。
+    fun emitMovByteRegMem(dstReg: String, srcMemReg: String): Unit {
+        this.emitMovzxRegMemByte(dstReg, srcMemReg)
+    }
+
+    // ── 内存比较（基址 + 索引 寻址）──
+    //
+    // 与 emitCmpByteMemImm8（仅支持「基址」）互补：这里支持 [base + index]
+    // 双寄存器寻址，供 PhotonRuntime 的 strcmp / NUL 扫描循环使用。
+
+    /// 编码「两个字节内存操作数比较」：`[baseA + idxA]` 与 `[baseB + idxB]`。
+    ///
+    /// 展开为：
+    ///   mov al, [baseA + idxA]     ; 8A /r, reg=000(al), rm=100(SIB)
+    ///   cmp al, [baseB + idxB]     ; 3A /r, reg=000(al), rm=100(SIB)
+    ///
+    /// 语义：两个字节**相等**时 ZF=1，可直接接 `emitJccLabel("ne"/"e", …)`。
+    /// 典型调用点：PhotonRuntime.emitStrcmp 的 `strcmp_loop`。
+    fun emitCmpMemMem(baseA: String, idxA: String, baseB: String, idxB: String): Unit {
+        val a: Int = this.regNum(baseA)
+        val ia: Int = this.regNum(idxA)
+        val rexA: Int = this.rexIndexed(false, a, ia)
+        if (rexA != 0x40) {
+            this.writeByte(rexA)
+        }
+        this.writeByte(0x8A)              // MOV r8, r/m8
+        this.writeMemIndexed(0, a, ia)
+
+        val b: Int = this.regNum(baseB)
+        val ib: Int = this.regNum(idxB)
+        val rexB: Int = this.rexIndexed(false, b, ib)
+        if (rexB != 0x40) {
+            this.writeByte(rexB)
+        }
+        this.writeByte(0x3A)              // CMP r8, r/m8
+        this.writeMemIndexed(0, b, ib)
+    }
+
+    /// 编码 TEST byte ptr [baseReg + idxReg], imm8（F6 /0 ib）。
+    ///
+    /// `test x, 0` 等价于「x 是否为 0」：结果为 0 时 ZF=1，
+    /// 常与 `emitJccLabel("z"/"ne", …)` 搭配（扫描 NUL 终止符）。
+    fun emitTestMemImm8(baseReg: String, idxReg: String, imm: Int): Unit {
+        val b: Int = this.regNum(baseReg)
+        val x: Int = this.regNum(idxReg)
+        val rex: Int = this.rexIndexed(false, b, x)
+        if (rex != 0x40) {
+            this.writeByte(rex)
+        }
+        this.writeByte(0xF6)              // TEST r/m8, imm8
+        this.writeMemIndexed(0, b, x)     // reg=000 (/0)
+        this.writeByte(imm & 255)
+    }
+
+    // ── 系统调用支持 (P2) ──
+    //
+    // P2 阶段引入：runtime 不再通过 IAT 调用 kernel32，而是直接执行 syscall 指令
+    // 进入内核态。以下三个方法是零依赖 runtime 的基础设施：
+    //
+    //   - emitSyscall()            → 0F 05，进入内核态执行系统调用
+    //   - emitMovGSSeg64(dst, imm) → 2E REX.W A1 disp32，从 gs:[imm] 读取 PEB
+    //   - emitMovMemDisp8(dst, base, disp8) → REX.W 8B /r mod=01 disp8，
+    //     读取 [base+disp8] 的 64 位值
+    //
+    // 典型用法（获取 stdout 句柄）：
+    //   emitMovGSSeg64("rax", 0x60)   ; rax = PEB
+    //   emitMovMemDisp8("rax","rax",0x20) ; rax = PEB.ProcessParameters
+    //   emitMovMemDisp8("rax","rax",0x30) ; rax = hStdOutput
+    //
+
+    /// 编码 SYSCALL（0F 05）。
+    ///
+    /// Windows x64 调用约定：
+    ///   rax = 服务号
+    ///   rcx/rdx/r8/r9 = 参数 1-4
+    ///   [rsp+0x20..] = 参数 5+
+    /// 返回：rax = NTSTATUS
+    ///
+    /// 注意：syscall 指令执行前 rsp 必须 16 字节对齐。
+    fun emitSyscall(): Unit {
+        this.writeByte(0x0F)
+        this.writeByte(0x05)
+    }
+
+    /// 编码 `mov dst, gs:[imm32]`（GS 段覆盖 + 64 位绝对地址加载）。
+    ///
+    /// 使用 `A1` (MOV rAX, moffs32) 在 64 位模式下已是 64 位操作，
+    /// 无需 REX.W 前缀。添加 REX.W 反而会导致解码器误解。
+    ///
+    /// 编码格式：65（GS 段前缀）+ A1 + disp32（共 6 字节）。
+    ///
+    /// 主要用于 Windows x64 读取 PEB：
+    ///   mov rax, gs:[0x60]   ; rax = PEB 基址
+    fun emitMovGSSeg64(dst: String, imm32: Int): Unit {
+        // `mov rax, GS:[0x60]`。
+        //
+        // 坑：A0/A1 是「绝对地址」moffs 形式（MOV rAX, moffs64）。用 A1 会
+        // 把 0x60 当成字面常量地址去取，而不是 `GS:[disp32]`——PEB 读到野
+        // 指针，随后 `[rax+0x30]` 直接访问违规。段限定的 disp32 必须走
+        // ModRM(mod=00, rm=100) + SIB(scale=00, index=100 none, base=101)。
+        val d: Int = this.regNum(dst)
+        this.writeByte(0x65)                        // GS 段前缀
+        this.writeByte(this.rexByte(true, d, 0))   // REX.W + REX.R
+        this.writeByte(0x8B)                        // MOV r/m64, r64
+        this.writeByte((0 << 6) + ((d & 7) << 3) + 4)  // mod=00, reg=dst, rm=100 (SIB)
+        this.writeByte(0x25)                        // SIB: scale=00, index=100(none), base=101(disp32)
+        this.writeInt(imm32)                        // disp32 (LE，符号扩展到 64 位)
+    }
+
+    /// 编码 `mov dst, [base + disp8]`（64 位内存加载，disp8 形式）。
+    ///
+    /// 编码格式：REX.W + 8B + ModRM(mod=01, reg=dst, rm=base) + disp8。
+    ///
+    /// 用于读取 PEB 链（PEB → ProcessParameters → hStdOutput）：
+    ///   emitMovMemDisp8("rax","rax",0x20)  ; mov rax, [rax+0x20]
+    ///   emitMovMemDisp8("rax","rax",0x30)  ; mov rax, [rax+0x30]
+    fun emitMovMemDisp8(dst: String, base: String, disp8: Int): Unit {
+        val d: Int = this.regNum(dst)
+        val b: Int = this.regNum(base)
+        this.writeByte(this.rexByte(true, d, b))   // REX.W + REX.R/B as needed
+        this.writeByte(0x8B)                        // MOV r/m64, r64
+        this.writeByte(0x40 + ((d & 7) << 3) + (b & 7))  // mod=01, reg=dst, rm=base
+        this.writeByte(disp8 & 255)                 // disp8 (signed, but 0x20/0x30 are positive)
+    }
+
+    /// 编码 `mov dst, [base + disp32]`（64 位内存加载，disp32 形式）。
+    ///
+    /// 用于偏移量超出 signed disp8 范围（>0x7F 或 <-0x80）的场景，
+    /// 例如 RTL_USER_PROCESS_PARAMETERS.StandardOutput 位于偏移 0xA0。
+    ///
+    /// 编码格式：REX.W + 8B + ModRM(mod=10, reg=dst, rm=base) + disp32。
+    /// mod=10 表示 [base + disp32] 寻址。
+    fun emitMovMemDisp32(dst: String, base: String, disp32: Int): Unit {
+        val d: Int = this.regNum(dst)
+        val b: Int = this.regNum(base)
+        this.writeByte(this.rexByte(true, d, b))   // REX.W + REX.R/B as needed
+        this.writeByte(0x8B)                        // MOV r/m64, r64
+        this.writeByte(0x80 + ((d & 7) << 3) + (b & 7))  // mod=10, reg=dst, rm=base
+        this.writeInt(disp32)                       // disp32 (little-endian, signed extend)
     }
 
     // ── 查询 ──
@@ -596,42 +917,88 @@ class X86Encoder {
         return rex
     }
 
+    /// 组合「基址 + 索引」寻址所需的 REX 前缀（含 REX.X）。
+    ///
+    /// reg 字段固定为 0（本组指令只用到 al），故 REX.R 恒为 0；
+    /// REX.X 由索引寄存器是否落在 r8-r15 决定。
+    private fun rexIndexed(w: Boolean, baseReg: Int, indexReg: Int): Int {
+        var rex: Int = this.rexByte(w, 0, baseReg)
+        if (indexReg >= 8) { rex = rex + 2 }
+        return rex
+    }
+
+    /// 写入 `mod=00 [base + index]` 形式的 ModRM(+SIB) 内存操作数。
+    ///
+    /// - `reg` 为 ModRM.reg 字段（操作码的 /r 或立即数组扩展位）。
+    /// - base 低 3 位为 101（rbp/r13）时，mod=00 会被 CPU 解释成 disp32，
+    ///   故退化为 mod=01 + disp8=0（与 `emitCmpByteMemImm8` 的处理一致）。
+    /// - index 低 3 位为 100（rsp/r12）按 x86 约定表示「无索引」。
+    private fun writeMemIndexed(reg: Int, baseReg: Int, indexReg: Int): Unit {
+        val regField: Int = (reg & 7) << 3
+        val base: Int = baseReg & 7
+        val index: Int = (indexReg & 7) << 3
+        if (base == 5) {
+            this.writeByte(0x40 + regField + 4)   // mod=01, rm=100(SIB)
+            this.writeByte(index + base)          // ss=00, index, base
+            this.writeByte(0)                     // disp8 = 0
+        } else {
+            this.writeByte(0x00 + regField + 4)   // mod=00, rm=100(SIB)
+            this.writeByte(index + base)          // ss=00, index, base
+        }
+    }
+
     /// 获取寄存器编号。
     private fun regNum(reg: String): Int {
-        if (reg == "rax") return 0
-        if (reg == "rcx") return 1
-        if (reg == "rdx") return 2
-        if (reg == "rbx") return 3
-        if (reg == "rsp") return 4
-        if (reg == "rbp") return 5
-        if (reg == "rsi") return 6
-        if (reg == "rdi") return 7
-        if (reg == "r8") return 8
-        if (reg == "r9") return 9
-        if (reg == "r10") return 10
-        if (reg == "r11") return 11
-        if (reg == "r12") return 12
-        if (reg == "r13") return 13
-        if (reg == "r14") return 14
-        if (reg == "r15") return 15
+        // 同一寄存器的 64/32/16/8 位别名都要映射到同一个 REX 字段值。
+        // 早先只认 64 位名字，"edx"/"eax" 等会静默落到 `return 0`（RAX），
+        // 把「写 rdx」编成「写 rax」——NtQueryInformationProcess 的
+        // ProcessInformationClass 因此恒为 31→被覆盖成别值。
+        if (reg == "rax" || reg == "eax" || reg == "ax" || reg == "al" || reg == "ah") return 0
+        if (reg == "rcx" || reg == "ecx" || reg == "cx" || reg == "cl" || reg == "ch") return 1
+        if (reg == "rdx" || reg == "edx" || reg == "dx" || reg == "dl" || reg == "dh") return 2
+        if (reg == "rbx" || reg == "ebx" || reg == "bx" || reg == "bl" || reg == "bh") return 3
+        if (reg == "rsp" || reg == "esp" || reg == "sp") return 4
+        if (reg == "rbp" || reg == "ebp" || reg == "bp") return 5
+        if (reg == "rsi" || reg == "esi" || reg == "si") return 6
+        if (reg == "rdi" || reg == "edi" || reg == "di") return 7
+        if (reg == "r8" || reg == "r8d" || reg == "r8w" || reg == "r8b") return 8
+        if (reg == "r9" || reg == "r9d" || reg == "r9w" || reg == "r9b") return 9
+        if (reg == "r10" || reg == "r10d" || reg == "r10w" || reg == "r10b") return 10
+        if (reg == "r11" || reg == "r11d" || reg == "r11w" || reg == "r11b") return 11
+        if (reg == "r12" || reg == "r12d" || reg == "r12w" || reg == "r12b") return 12
+        if (reg == "r13" || reg == "r13d" || reg == "r13w" || reg == "r13b") return 13
+        if (reg == "r14" || reg == "r14d" || reg == "r14w" || reg == "r14b") return 14
+        if (reg == "r15" || reg == "r15d" || reg == "r15w" || reg == "r15b") return 15
         return 0
     }
 
     /// 获取条件代码。
     private fun condCode(cond: String): Int {
-        if (cond == "eq" || cond == "e") return 4   // JZ
-        if (cond == "ne" || cond == "ne") return 5  // JNZ
-        if (cond == "lt" || cond == "l") return 2   // JL
-        if (cond == "gt" || cond == "g") return 7   // JG
-        if (cond == "le" || cond == "le") return 6  // JLE
-        if (cond == "ge" || cond == "ge") return 3  // JGE
-        if (cond == "bl" || cond == "b") return 0   // JB
-        if (cond == "be" || cond == "e") return 1   // JBE
-        if (cond == "bge" || cond == "nb") return 16 // JNB
-        if (cond == "nle" || cond == "a") return 17 // JA
-        if (cond == "o") return 20                   // JO
-        if (cond == "np") return 21                  // JP
-        return 4  // 默认 JZ
+        // x86 条件码（short Jcc 的 opcode 低 4 位 / 0F 8x 的低字节）：
+        //   0x0=JO 0x1=JNO 0x2=JB 0x3=JAE 0x4=JE 0x5=JNE 0x6=JBE 0x7=JA
+        //   0x8=JS 0x9=JNS 0xA=JP 0xB=JNP 0xC=JL 0xD=JGE 0xE=JLE 0xF=JG
+        //
+        // ⚠ 旧实现把有符号比较整体偏移了一格（lt→0x0A=JP、ge→0x0B=JNP、
+        //   le→0x0C=JL、gt→0x0D=JGE），并把 JA/JBE 写反 —— 实测
+        //   `cmp rax,0; jge` 被编成 `jnp`（奇偶标志），`if x > 3` 走错分支，
+        //   `idiv` 的 /7 也被写成 /1（非法指令）。
+        if (cond == "eq" || cond == "e" || cond == "z") return 4   // JE
+        if (cond == "ne" || cond == "nz") return 5                  // JNE
+        if (cond == "lt" || cond == "l" || cond == "nge") return 12  // JL
+        if (cond == "gt" || cond == "g" || cond == "nle") return 15  // JG
+        if (cond == "le" || cond == "ngt") return 14                 // JLE
+        if (cond == "ge" || cond == "nl") return 13                  // JGE
+        if (cond == "b" || cond == "bl" || cond == "c" || cond == "jb"
+            || cond == "ubl" || cond == "nae") return 2              // JB
+        if (cond == "a" || cond == "ja" || cond == "uog" || cond == "nbe") return 7  // JA
+        if (cond == "be" || cond == "jbe" || cond == "ule" || cond == "na") return 6  // JBE
+        if (cond == "ae" || cond == "jae" || cond == "nb" || cond == "jnae"
+            || cond == "nc" || cond == "uge") return 3               // JAE
+        if (cond == "o") return 0                                   // JO
+        if (cond == "no") return 1                                  // JNO
+        if (cond == "np") return 11                                 // JNP
+        if (cond == "p") return 10                                  // JP
+        return 4  // 默认 JE
     }
 
     /// 整数转两位十六进制字符串。

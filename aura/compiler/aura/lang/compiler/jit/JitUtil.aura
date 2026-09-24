@@ -19,7 +19,7 @@ package aura.lang.compiler.jit
 
 import aura.lang.std.String
 
-object JitUtilUtils {
+object JitUtil {
 
     /// JIT 后端版本（Phase 7）。
     fun jitBackendVersion(): String {

@@ -1,0 +1,367 @@
+{
+    "// 模块头": {
+        "prefix": "phirmod",
+        "body": [
+            "# module ${1:module_name} target ${2:x86_64-pc-windows-msvc} flags 0x${3:01}",
+            "# source ${4:source.aura}",
+            "",
+            "$0"
+        ],
+        "description": "PHIR 模块头"
+    },
+    "// 全局字符串常量": {
+        "prefix": "gstr",
+        "body": [
+            "@str.${1:name} = \"${2:value}\""
+        ],
+        "description": "全局字符串常量"
+    },
+    "// 全局变量": {
+        "prefix": "gvar",
+        "body": [
+            "@${1:name} = ${2:i32} ${3:0}"
+        ],
+        "description": "全局变量声明"
+    },
+    "// 原生函数声明": {
+        "prefix": "nfun",
+        "body": [
+            "native fun ${1:name}(${2:params}) -> ${3:return_type}"
+        ],
+        "description": "原生函数声明"
+    },
+    "// 函数定义": {
+        "prefix": "fun",
+        "body": [
+            "fun ${1:name}(${2:params}) -> ${3:return_type} {",
+            "    $0",
+            "}"
+        ],
+        "description": "函数定义"
+    },
+    "// 函数 + 栈槽": {
+        "prefix": "funss",
+        "body": [
+            "fun ${1:name}(${2:params}) -> ${3:return_type} {",
+            "    ss0 = ${4:i32} ${5:4}",
+            "    $0",
+            "}"
+        ],
+        "description": "带栈槽声明的函数"
+    },
+    "// 基本块": {
+        "prefix": "bb",
+        "body": [
+            "bb ${1:entry}(${2:params}):",
+            "    $0",
+            "    return ${3:result}"
+        ],
+        "description": "基本块定义"
+    },
+    "// 栈槽声明": {
+        "prefix": "ss",
+        "body": [
+            "ss${1:0} = ${2:i32} ${3:4}"
+        ],
+        "description": "栈槽声明"
+    },
+    "// 函数引用": {
+        "prefix": "fnref",
+        "body": [
+            "fn${1:0} = @${2:func_name}(${3:params}) -> ${4:return_type}"
+        ],
+        "description": "函数引用"
+    },
+    "// 签名声明": {
+        "prefix": "sig",
+        "body": [
+            "sig${1:0} = (${2:params}) -> ${3:return_type}"
+        ],
+        "description": "函数签名声明"
+    },
+    "// 全局值引用": {
+        "prefix": "gv",
+        "body": [
+            "gv${1:0} = @${2:global_name}"
+        ],
+        "description": "全局值引用"
+    },
+    "// 栈加载": {
+        "prefix": "ld",
+        "body": [
+            "v${1:0} = load.${2:i32} ${3:ss0}"
+        ],
+        "description": "栈加载"
+    },
+    "// 栈存储": {
+        "prefix": "st",
+        "body": [
+            "store ${1:i32} ${2:v0}, ${3:ss0}"
+        ],
+        "description": "栈存储"
+    },
+    "// 常量定义": {
+        "prefix": "const",
+        "body": [
+            "v${1:0} = const ${2:i32} ${3:0}"
+        ],
+        "description": "常量定义"
+    },
+    "// 二元运算": {
+        "prefix": "op",
+        "body": [
+            "v${1:0} = ${2:add} ${3:v0}, ${4:v1}"
+        ],
+        "description": "二元运算"
+    },
+    "// 条件比较": {
+        "prefix": "icmp",
+        "body": [
+            "v${1:0} = icmp ${2:ult} ${3:i32} ${4:v0}, ${5:v1}"
+        ],
+        "description": "整数比较"
+    },
+    "// 浮点比较": {
+        "prefix": "fcmp",
+        "body": [
+            "v${1:0} = fcmp ${2:ogt} ${3:f32} ${4:v0}, ${5:v1}"
+        ],
+        "description": "浮点比较"
+    },
+    "// 无条件跳转": {
+        "prefix": "br",
+        "body": [
+            "br ${1:block_name}"
+        ],
+        "description": "无条件跳转"
+    },
+    "// 条件跳转": {
+        "prefix": "brif",
+        "body": [
+            "br if ${1:v0}, ${2:block_true}, ${3:block_false}"
+        ],
+        "description": "条件跳转"
+    },
+    "// 函数调用": {
+        "prefix": "call",
+        "body": [
+            "v${1:0} = call @${2:func_name}(${3:params}) -> ${4:return_type}"
+        ],
+        "description": "函数调用"
+    },
+    "// 异常调用": {
+        "prefix": "invoke",
+        "body": [
+            "v${1:0} = call @${2:func_name}(${3:params}) -> ${4:return_type}",
+            "      [return: ${5:ok_block}, unwind: ${6:catch_block}]"
+        ],
+        "description": "异常调用 (invoke)"
+    },
+    "// 返回": {
+        "prefix": "ret",
+        "body": [
+            "return ${1:v0}"
+        ],
+        "description": "返回"
+    },
+    "// 返回无值": {
+        "prefix": "ret0",
+        "body": [
+            "return"
+        ],
+        "description": "返回（无值）"
+    },
+    "// 不可达": {
+        "prefix": "unreach",
+        "body": [
+            "unreachable"
+        ],
+        "description": "不可达"
+    },
+    "// 属性块": {
+        "prefix": "attr",
+        "body": [
+            "{ ${1:readonly} }"
+        ],
+        "description": "指令属性块"
+    },
+    "// 所有权修饰": {
+        "prefix": "own",
+        "body": [
+            "owned(${1:ptr})"
+        ],
+        "description": "所有权修饰"
+    },
+    "// 缩进 if": {
+        "prefix": "if",
+        "body": [
+            "if ${1:condition} {",
+            "    $0",
+            "}"
+        ],
+        "description": "缩进语法 if"
+    },
+    "// 缩进 else": {
+        "prefix": "else",
+        "body": [
+            "} else {",
+            "    $0"
+        ],
+        "description": "缩进语法 else"
+    },
+    "// 缩进 while": {
+        "prefix": "while",
+        "body": [
+            "while ${1:condition} {",
+            "    $0",
+            "}"
+        ],
+        "description": "缩进语法 while"
+    },
+    "// 调试作用域": {
+        "prefix": "scope",
+        "body": [
+            "scope ${1:1} {",
+            "    debug ${2:var_name} => ${3:v0};",
+            "    $0",
+            "}"
+        ],
+        "description": "调试作用域"
+    },
+    "// 调试映射": {
+        "prefix": "dbg",
+        "body": [
+            "debug ${1:var_name} => ${2:v0};"
+        ],
+        "description": "调试变量映射"
+    },
+    "// SIMD 加法": {
+        "prefix": "vadd",
+        "body": [
+            "v${1:0} = vadd ${2:i32x4} ${3:v0}, ${4:v1}"
+        ],
+        "description": "SIMD 加法"
+    },
+    "// SIMD 加载": {
+        "prefix": "vload",
+        "body": [
+            "v${1:0} = vload.${2:f32x4} ${3:v0}"
+        ],
+        "description": "SIMD 加载"
+    },
+    "// 原子加载": {
+        "prefix": "atomld",
+        "body": [
+            "v${1:0} = atom.load { ${2:seqcst} } ${3:v0}"
+        ],
+        "description": "原子加载"
+    },
+    "// 原子存储": {
+        "prefix": "atomst",
+        "body": [
+            "atom.store { ${1:seqcst} } ${2:v0}, ${3:ss0}"
+        ],
+        "description": "原子存储"
+    },
+    "// 原子 CAS": {
+        "prefix": "cas",
+        "body": [
+            "v${1:0} = atom.cas { ${2:seqcst} } ${3:ss0}, ${4:v0}, ${5:v1}"
+        ],
+        "description": "原子 CAS (Compare-And-Swap)"
+    },
+    "// 内存屏障": {
+        "prefix": "fence",
+        "body": [
+            "fence { ${1:seqcst} }"
+        ],
+        "description": "内存屏障"
+    },
+    "// 浮点提升": {
+        "prefix": "fpromote",
+        "body": [
+            "v${1:0} = fpromote.${2:f64} ${3:v0}"
+        ],
+        "description": "浮点提升"
+    },
+    "// 浮点降级": {
+        "prefix": "fdemote",
+        "body": [
+            "v${1:0} = fdemote.${2:f32} ${3:v0}"
+        ],
+        "description": "浮点降级"
+    },
+    "// 浮点转换": {
+        "prefix": "fcvt",
+        "body": [
+            "v${1:0} = fcvt_from_uint.${2:f64} ${3:v0}"
+        ],
+        "description": "浮点类型转换"
+    },
+    "// 复制操作": {
+        "prefix": "copy",
+        "body": [
+            "v${1:0} = copy ${2:v1}"
+        ],
+        "description": "复制操作数"
+    },
+    "// 移动操作": {
+        "prefix": "move",
+        "body": [
+            "v${1:0} = move ${2:v1}"
+        ],
+        "description": "移动操作数"
+    },
+    "// 对象创建": {
+        "prefix": "new",
+        "body": [
+            "v${1:0} = new ${2:Foo}(${3:params})"
+        ],
+        "description": "对象创建"
+    },
+    "// 字段访问": {
+        "prefix": "fld",
+        "body": [
+            "v${1:0} = getfield ${2:v1}.${3:field}"
+        ],
+        "description": "字段访问"
+    },
+    "// main 函数": {
+        "prefix": "main",
+        "body": [
+            "fun main() -> i32 {",
+            "    bb entry:",
+            "        v0 = const i32 0",
+            "        return v0",
+            "}"
+        ],
+        "description": "PHIR main 函数模板"
+    },
+    "// 循环模板": {
+        "prefix": "funloop",
+        "body": [
+            "fun ${1:name}(${2:count: i32}) -> ${3:i32} {",
+            "    ss0 = i32 4",
+            "",
+            "    bb entry(v0: i32):",
+            "        v1 = const i32 0",
+            "        store i32 v1, ss0",
+            "        br loop(v0)",
+            "",
+            "    bb loop(v2: i32):",
+            "        v3 = icmp sgt i32 v2, ${4:0}",
+            "        br if v3, body, done",
+            "",
+            "    bb body:",
+            "        $0",
+            "        v4 = add i32 v2, 1",
+            "        br loop(v4)",
+            "",
+            "    bb done:",
+            "        v5 = load.i32 ss0",
+            "        return v5",
+            "}"
+        ],
+        "description": "带循环的函数模板"
+    }
+}

@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[actor  {
+    private var :  = 
+
+    fun start() {
+        
+    }
+}]]></content>
+    <tabTrigger>actor</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Create an actor</description>
+</snippet>

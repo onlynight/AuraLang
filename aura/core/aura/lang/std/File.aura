@@ -8,64 +8,97 @@ import aura.lang.native.io.Stdio
 
 /// 文件资源实例（有状态）。
 ///
+/// 说明：构造参数用 `init(...)` 块表达（语言既有惯例），而不是
+/// `class File(path: String)` —— 后者是「主构造器参数」语法，AST 中
+/// 没有这个概念（构造器是 `ClassDecl.constructors`），写出来会直接报
+/// `parse error: Expected Arrow, got LBrace`。
+///
+/// 打开标志一律写字面量而不是 `FileOps.O_WRONLY` 等常量成员：
+/// **跨模块**的对象/接口常量成员在 AOT 下无法折叠（`FileOps` 是独立编译
+/// 单元，其 `const val` 不参与本编译单元的 HIR），会发射出未定义值
+/// `%FileOps` 导致链接失败。数值与 `aura/lang/native/file/FileOps.aura`
+/// 的声明保持一致（`O_RDONLY=0`、`O_WRONLY=1`、`O_CREAT=0x40`、
+/// `O_TRUNC=0x200`、`SEEK_SET=0`、`SEEK_END=2`）。
+///
 /// @since 0.2
-class File(path: String) {
-    
-    private val pathBuf: Long = Stdio.stringToBuffer(path)
-    
+class File {
+
+    /// 原始路径（供 `exists` 等需要字符串的 API 使用）。
+    private var pathStr: String = ""
+
+    /// 路径的 C 缓冲区（NUL 结尾，`init` 中填充）。
+    private var pathBuf: Long = 0
+
+    /// 绑定到指定路径。
+    init(path: String) {
+        this.pathStr = path
+        this.pathBuf = Stdio.stringToBuffer(path)
+    }
+
+    /// 读取整个文件为字符串；失败返回空串。
     fun readText(): String {
-        val fd: Int = FileOps.open(pathBuf, 0)
+        val fd: Int = FileOps.open(pathBuf, 0)  // O_RDONLY
         if (fd < 0) { return "" }
-        
-        val size: Long = FileOps.lseek(fd, 0, 2)
-        FileOps.lseek(fd, 0, 0)
-        
+
+        val size: Long = FileOps.lseek(fd, 0, 2)  // SEEK_END
+        FileOps.lseek(fd, 0, 0)                   // SEEK_SET
+
         if (size <= 0) {
             FileOps.close(fd)
             return ""
         }
-        
-        val buf: Long = Allocator.alloc(size)
+
+        val buf: Long = Allocator.malloc(size + 1)
         if (buf == 0) {
             FileOps.close(fd)
             return ""
         }
-        
+
         val read: Long = FileOps.read(fd, buf, size)
         FileOps.close(fd)
-        
+
         if (read <= 0) {
             Allocator.free(buf)
             return ""
         }
-        
-        return Stdio.bufferToString(buf, read)
+
+        val text: String = Stdio.bufferToString(buf, read)
+        Allocator.free(buf)
+        return text
     }
-    
+
+    /// 覆写整个文件。
     fun writeText(content: String): Unit {
-        val fd: Int = FileOps.open(pathBuf, 1 | 0x40 | 0x200)
+        val fd: Int = FileOps.open(pathBuf, 1 | 0x40 | 0x200)  // O_WRONLY|O_CREAT|O_TRUNC
         if (fd < 0) { return }
-        
+
         val buf: Long = Stdio.stringToBuffer(content)
         if (buf == 0) {
             FileOps.close(fd)
             return
         }
-        
+
         val len: Long = Stdio.strlen(buf)
         FileOps.write(fd, buf, len)
         Allocator.free(buf)
         FileOps.close(fd)
     }
-    
+
+    /// 文件是否存在。
     fun exists(): Boolean {
-        return Stdio.fileExists(path)
+        return Stdio.fileExists(pathStr)
     }
-    
+
+    /// 文件大小（字节）；不存在返回 -1。
     fun size(): Long {
-        return Stdio.fileSize(path)
+        val fd: Int = FileOps.open(pathBuf, 0)  // O_RDONLY
+        if (fd < 0) { return -1 }
+        val n: Long = FileOps.lseek(fd, 0, 2)  // SEEK_END
+        FileOps.close(fd)
+        return n
     }
-    
+
+    /// 删除文件。
     fun delete(): Unit {
         FileOps.unlink(pathBuf)
     }
