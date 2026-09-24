@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[; @ = @const_str ""]]></content>
+    <tabTrigger>strc</tabTrigger>
+    <scope>source.hat</scope>
+    <description>String constant</description>
+</snippet>

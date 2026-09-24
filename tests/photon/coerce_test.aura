@@ -1,0 +1,91 @@
+// tests/photon/coerce_test.aura
+// 验证 coerce_arg 修复：i8* → %struct.X* 不再错误 load
+//
+// 复现路径：
+//   1. MirFunction-like 结构体（多字段，含 String + Int）
+//   2. 结构体入 List
+//   3. 从 List 取出结构体后访问其字段
+//   4. 拼接字符串并写回字段
+
+class FuncInfo {
+    var name: String = ""
+    var kind: Int = 0
+    var blocks: String = ""
+    var entryBlock: Int = 0
+    var params: String = ""
+    var retTy: Int = 0
+    var isNative: Boolean = false
+
+    init() {
+        this.name = ""
+        this.kind = 0
+        this.blocks = ""
+        this.entryBlock = 0
+        this.params = ""
+        this.retTy = 0
+        this.isNative = false
+    }
+}
+
+class Program {
+    var funcs: List<FuncInfo> = arrayListOf<FuncInfo>()
+    var count: Int = 0
+
+    init() {
+        this.funcs = arrayListOf<FuncInfo>()
+        this.count = 0
+    }
+
+    fun addFunc(name: String, kind: Int): Int {
+        val f: FuncInfo = FuncInfo()
+        f.name = name
+        f.kind = kind
+        f.blocks = ""
+        this.funcs.add(f)
+        this.count = this.funcs.size
+        return this.count - 1
+    }
+
+    fun funcOf(id: Int): FuncInfo {
+        if (id < 0 || id >= this.funcs.size) {
+            return FuncInfo()
+        }
+        return this.funcs[id]
+    }
+
+    fun addBlockToFunc(fid: Int, bid: Int): Unit {
+        val f: FuncInfo = this.funcOf(fid)
+        if (f.blocks == "") {
+            f.blocks = toStr(bid)
+        } else {
+            f.blocks = f.blocks + "," + toStr(bid)
+        }
+    }
+}
+
+fun main() {
+    val prog: Program = Program()
+    prog.addFunc("main", 1)
+    prog.addFunc("helper", 0)
+
+    // 多个块登记到第一个函数
+    prog.addBlockToFunc(0, 0)
+    prog.addBlockToFunc(0, 1)
+    prog.addBlockToFunc(0, 2)
+
+    val f0: FuncInfo = prog.funcOf(0)
+    println("func0 blocks = " + f0.blocks)
+
+    // 验证第二个函数
+    val f1: FuncInfo = prog.funcOf(1)
+    prog.addBlockToFunc(1, 0)
+    prog.addBlockToFunc(1, 1)
+    val f1b: FuncInfo = prog.funcOf(1)
+    println("func1 blocks = " + f1b.blocks)
+
+    // 验证结构体字段完整性
+    val f2: FuncInfo = prog.funcOf(0)
+    println("func0 name=" + f2.name + " kind=" + f2.kind + " entry=" + f2.entryBlock + " isNative=" + toStr(f2.isNative))
+
+    println("ALL OK")
+}

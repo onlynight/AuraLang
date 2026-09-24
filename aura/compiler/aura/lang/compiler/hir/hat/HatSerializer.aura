@@ -1,0 +1,677 @@
+// aura:///aura/lang/compiler/hir/hat/HatSerializer.aura
+package aura.lang.compiler.hir.hat
+// ─────────────────────────────────────────────────────────────
+// HAT v2.0 序列化器 — SSA MIR → HAT 文本
+//
+// 将 SSA MIR 程序序列化为 HAT 格式文本。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.collection.ArrayList
+import "../../mir/SsaMir.aura"
+import "../../mir/TypeRegistry.aura"
+
+/// HAT 序列化器：将 SSA MIR 程序序列化为 HAT 文本。
+class HatSerializer {
+
+    /// 模块名。
+    private var moduleName: String = "main"
+
+    /// 目标三元组。
+    private var targetTriple: String = "x86_64-pc-windows-msvc"
+
+    /// 输出缓冲。
+    private var output: String = ""
+
+    /// 类型注册表。
+    private var types: TypeRegistry = TypeRegistry()
+
+    /// 当前函数的入口块 BlockID（入口块的 HAT 标签固定为 `entry`）。
+    private var curEntryBlock: Int = -1
+
+    /// 当前函数内已输出定义的常量 ID（换行包裹分隔，用于按需补发常量定义行）。
+    private var definedConsts: String = "\n"
+
+    init() {
+        this.moduleName = "main"
+        this.targetTriple = "x86_64-pc-windows-msvc"
+        this.output = ""
+        this.types = TypeRegistry()
+        this.curEntryBlock = -1
+        this.definedConsts = "\n"
+    }
+
+    // ── 主入口 ──
+
+    /// 从 SSA MIR 程序序列化为 HAT 文本。
+    fun serialize(mir: MirSsaProgram): String {
+        this.types = mir.types
+        this.output = ""
+
+        // 元数据头
+        this.output = this.output + "; module " + this.moduleName + " target " + this.targetTriple + "\n"
+        this.output = this.output + "; schema=HAT/2.0\n"
+        this.output = this.output + "\n"
+
+        // 函数定义
+        var fi: Int = 0
+        var funcCount: Int = mir.functionCount
+        while (fi < funcCount) {
+            val func: MirFunction = mir.functionOf(fi)
+            this.serializeFunction(mir, func)
+            this.output = this.output + "\n"
+            fi = fi + 1
+        }
+
+        return this.output
+    }
+
+    // ── 函数序列化 ──
+
+    /// 序列化函数定义。
+    private fun serializeFunction(mir: MirSsaProgram, func: MirFunction): Unit {
+        this.curEntryBlock = func.entryBlock
+        this.definedConsts = "\n"
+        // 函数签名
+        var retTy: String = this.typeName(mir, func.returnType)
+        this.output = this.output + "@fn " + func.name + "("
+
+        // 参数
+        var params: String = func.params
+        if (params != "") {
+            var pi: Int = 0
+            var first: Boolean = true
+            var pStart: Int = 0
+            var pLen: Int = params.length
+            while (pi <= pLen) {
+                if (pi == pLen || params.charCodeAt(pi) == 44) {
+                    if (pi > pStart) {
+                        val paramStr: String = HatParserUtils.safeSubstring(params, pStart, pi).trim()
+                        val paramVal: Int = HatSerializerUtils.strToInt(paramStr)
+                        if (paramVal >= 0) {
+                            val value: MirValue = mir.valueOf(paramVal)
+                            if (first) {
+                                first = false
+                            } else {
+                                this.output = this.output + ", "
+                            }
+                            this.output = this.output + "@" + value.aux + ": " + this.typeName(mir, value.type)
+                        }
+                    }
+                    pStart = pi + 1
+                }
+                pi = pi + 1
+            }
+        }
+
+        this.output = this.output + ") -> " + retTy + "\n"
+
+        // 基本块
+        var blocks: String = func.blocks
+        if (blocks != "") {
+            var bi: Int = 0
+            var first: Boolean = true
+            var bStart: Int = 0
+            var bLen: Int = blocks.length
+            while (bi <= bLen) {
+                if (bi == bLen || blocks.charCodeAt(bi) == 44) {
+                    if (bi > bStart) {
+                        val blockStr: String = HatParserUtils.safeSubstring(blocks, bStart, bi).trim()
+                        val blockId: Int = HatSerializerUtils.strToInt(blockStr)
+                        if (blockId >= 0) {
+                            if (first) {
+                                first = false
+                            } else {
+                                this.output = this.output + "\n"
+                            }
+                            this.serializeBlock(mir, blockId, blockId == func.entryBlock)
+                        }
+                    }
+                    bStart = bi + 1
+                }
+                bi = bi + 1
+            }
+        }
+    }
+
+    // ── 基本块序列化 ──
+
+    /// 序列化基本块。
+    private fun serializeBlock(mir: MirSsaProgram, blockId: Int, isEntry: Boolean): Unit {
+        val block: MirBlock = mir.blockOf(blockId)
+
+        // 块标签：优先使用 MIR 中记录的标签（HAT 解析会保留原始名），否则回退生成
+        var label: String = this.blockLabel(mir, blockId)
+        if (label == "" && isEntry) {
+            label = "entry"
+        }
+        this.output = this.output + "  bb " + label + ":\n"
+
+        // Phi 节点
+        var phis: String = block.phis
+        if (phis != "") {
+            var pi: Int = 0
+            var pStart: Int = 0
+            var pLen: Int = phis.length
+            while (pi <= pLen) {
+                if (pi == pLen || phis.charCodeAt(pi) == 44) {
+                    if (pi > pStart) {
+                        val phiStr: String = HatParserUtils.safeSubstring(phis, pStart, pi).trim()
+                        val phiId: Int = HatSerializerUtils.strToInt(phiStr)
+                        if (phiId >= 0) {
+                            this.serializePhi(mir, phiId)
+                        }
+                    }
+                    pStart = pi + 1
+                }
+                pi = pi + 1
+            }
+        }
+
+        // 普通指令
+        var instrs: String = block.instrs
+        if (instrs != "") {
+            var ii: Int = 0
+            var iStart: Int = 0
+            var iLen: Int = instrs.length
+            while (ii <= iLen) {
+                if (ii == iLen || instrs.charCodeAt(ii) == 44) {
+                    if (ii > iStart) {
+                        val instrStr: String = HatParserUtils.safeSubstring(instrs, iStart, ii).trim()
+                        val instrId: Int = HatSerializerUtils.strToInt(instrStr)
+                        if (instrId >= 0) {
+                            this.serializeInstr(mir, instrId)
+                        }
+                    }
+                    iStart = ii + 1
+                }
+                ii = ii + 1
+            }
+        }
+
+        // 终结指令
+        if (block.term >= 0) {
+            val term: MirValue = mir.valueOf(block.term)
+            this.serializeTerminator(mir, term)
+        }
+    }
+
+    // ── Phi 节点序列化 ──
+
+    /// 序列化 Phi 节点。
+    private fun serializePhi(mir: MirSsaProgram, phiId: Int): Unit {
+        val phi: MirValue = mir.valueOf(phiId)
+        var ty: String = this.typeName(mir, phi.type)
+        val operands: String = this.operandsText(mir, phi.args)
+        this.output = this.output + "    @" + this.targetName(phi) + " = @phi(" +
+            operands + ") : " + ty + "\n"
+    }
+
+    // ── 普通指令序列化 ──
+
+    /// 序列化普通指令。
+    private fun serializeInstr(mir: MirSsaProgram, instrId: Int): Unit {
+        val instr: MirValue = mir.valueOf(instrId)
+        var ty: String = this.typeName(mir, instr.type)
+        var op: String = this.opName(mir, instr.op)
+        val target: String = this.targetName(instr)
+
+        // 常量：`@t0 = @<const_op> <literal> : Type`（aux 存放字面量）
+        if (instr.op == "Const") {
+            this.ensureConstDefined(mir, instr)
+            return
+        }
+
+        var head: String = "    @" + target + " = @" + op
+
+        // 副操作码：比较子操作（`@icmp @i32_slt`）/ 被调函数名（`@call @println`）
+        if (instr.op == "ICmp" || instr.op == "FCmp" || instr.op == "Call") {
+            if (instr.aux != "") {
+                head = head + " @" + instr.aux
+            }
+        }
+
+        // 先算操作数（其中可能按需补发常量定义行），再整体写出本行
+        val operands: String = this.operandsText(mir, instr.args)
+        this.output = this.output + head + "(" + operands + ") : " + ty + "\n"
+    }
+
+    /// 生成操作数列表文本（`@a, @b, ...`）。
+    ///
+    /// 若某个操作数是常量值，则先确保它已输出定义行（常量在 MIR 中可能由
+    /// `addValue` 直接创建、并不在块指令列表里），再以 `@t<id>` 引用它。
+    private fun operandsText(mir: MirSsaProgram, args: String): String {
+        var ai: Int = 0
+        var aStart: Int = 0
+        var aLen: Int = args.length
+        var result: String = ""
+        var first: Boolean = true
+        while (ai <= aLen) {
+            if (ai == aLen || args.charCodeAt(ai) == 44) {
+                if (ai > aStart) {
+                    val argStr: String = HatParserUtils.safeSubstring(args, aStart, ai).trim()
+                    val argId: Int = HatSerializerUtils.strToInt(argStr)
+                    if (argId >= 0) {
+                        val arg: MirValue = mir.valueOf(argId)
+                        if (arg.op == "Const") {
+                            this.ensureConstDefined(mir, arg)
+                        }
+                        if (first) {
+                            first = false
+                            result = "@" + this.valueName(mir, arg)
+                        } else {
+                            result = result + ", @" + this.valueName(mir, arg)
+                        }
+                    }
+                }
+                aStart = ai + 1
+            }
+            ai = ai + 1
+        }
+        return result
+    }
+
+    /// 输出一条常量定义行。
+    private fun serializeConst(mir: MirSsaProgram, value: MirValue): Unit {
+        val ty: String = this.typeName(mir, value.type)
+        val constOp: String = this.constOpName(mir, value)
+        if (constOp == "null") {
+            this.output = this.output + "    @" + this.targetName(value) + " = @null : " + ty + "\n"
+        } else {
+            this.output = this.output + "    @" + this.targetName(value) + " = @" + constOp + " " +
+                this.constLiteral(mir, value) + " : " + ty + "\n"
+        }
+        this.definedConsts = this.definedConsts + HatSerializerUtils.toStr(value.id) + "|\n"
+    }
+
+    /// 按需补发常量定义行（每个常量在每个函数内只输出一次）。
+    private fun ensureConstDefined(mir: MirSsaProgram, value: MirValue): Unit {
+        val key: String = "\n" + HatSerializerUtils.toStr(value.id) + "|"
+        if (this.definedConsts.indexOf(key) >= 0) {
+            return
+        }
+        this.serializeConst(mir, value)
+    }
+
+    // ── 终结指令序列化 ──
+
+    /// 序列化终结指令。
+    private fun serializeTerminator(mir: MirSsaProgram, term: MirValue): Unit {
+        var op: String = term.op
+
+        if (op == "Br") {
+            // @br @label
+            var args: String = term.args
+            val targetId: Int = HatSerializerUtils.strToInt(args)
+            if (targetId >= 0) {
+                var label: String = this.blockLabel(mir, targetId)
+                this.output = this.output + "    @br @" + label + "\n"
+            }
+        } else if (op == "CondBr") {
+            // @br_if @cond => @then, @else
+            var args: String = term.args
+            val body: String = this.condBrArgsText(mir, args)
+            this.output = this.output + "    @br_if " + body + "\n"
+        } else if (op == "Ret") {
+            // @ret @val : Type  或  @ret () : Unit
+            var args: String = term.args
+            if (args == "") {
+                this.output = this.output + "    @ret () : Unit\n"
+            } else {
+                val valId: Int = HatSerializerUtils.strToInt(args)
+                if (valId >= 0) {
+                    val val: MirValue = mir.valueOf(valId)
+                    if (val.op == "Const") {
+                        this.ensureConstDefined(mir, val)
+                    }
+                    var ty: String = this.typeName(mir, term.type)
+                    this.output = this.output + "    @ret @" + this.valueName(mir, val) + " : " + ty + "\n"
+                } else {
+                    this.output = this.output + "    @ret () : Unit\n"
+                }
+            }
+        } else {
+            // 其他终结指令
+            this.output = this.output + "    @" + op + "\n"
+        }
+    }
+
+    /// 生成条件跳转的参数文本（`@cond => @then, @else`）。
+    private fun condBrArgsText(mir: MirSsaProgram, args: String): String {
+        // @cond => @then, @else
+        var parts: List<String> = args.split(",")
+        if (parts.size >= 3) {
+            val condId: Int = HatSerializerUtils.strToInt(parts[0])
+            val thenId: Int = HatSerializerUtils.strToInt(parts[1])
+            val elseId: Int = HatSerializerUtils.strToInt(parts[2])
+
+            var out: String = ""
+            if (condId >= 0) {
+                val cond: MirValue = mir.valueOf(condId)
+                if (cond.op == "Const") {
+                    this.ensureConstDefined(mir, cond)
+                }
+                out = out + "@" + this.valueName(mir, cond)
+            }
+            out = out + " => @"
+
+            if (thenId >= 0) {
+                out = out + this.blockLabel(mir, thenId)
+            }
+            out = out + ", @"
+            if (elseId >= 0) {
+                out = out + this.blockLabel(mir, elseId)
+            }
+            return out
+        }
+        return ""
+    }
+
+    // ── 辅助方法 ──
+
+    /// 获取值在「操作数位置」的引用名。
+    ///
+    /// 约定：`aux` 存放的是载荷（Const 的字面量 / Call 的被调名 / ICmp 的子操作），
+    /// **不是**值名。因此只有 Param 用 aux（参数名），其它值统一用 `t<id>`。
+    ///
+    /// 常量也必须以 `@t<id>` 引用（而不是内联字面量）：内联会产生
+    /// `@0` / `@1` 这类与「临时变量编号」歧义的写法，重新解析时会被当成别的值。
+    /// 常量定义行由 `ensureConstDefined` 按需补发。
+    private fun valueName(mir: MirSsaProgram, value: MirValue): String {
+        if (value.op == "Param") {
+            return value.aux
+        }
+        return "t" + HatSerializerUtils.toStr(value.id)
+    }
+
+    /// 获取指令结果在「赋值左侧」的名字。
+    private fun targetName(value: MirValue): String {
+        return "t" + HatSerializerUtils.toStr(value.id)
+    }
+
+    /// 基本块标签：优先使用 MIR 记录的标签，其次入口块 `entry`，最后 `bb<id>`。
+    private fun blockLabel(mir: MirSsaProgram, blockId: Int): String {
+        if (blockId < 0) {
+            return ""
+        }
+        val recorded: String = mir.blockOf(blockId).label
+        if (recorded != "") {
+            return recorded
+        }
+        if (blockId == this.curEntryBlock) {
+            return "entry"
+        }
+        return "bb" + HatSerializerUtils.toStr(blockId)
+    }
+
+    /// 常量字面量文本（Const 的 aux 即字面量）。
+    private fun constLiteral(mir: MirSsaProgram, value: MirValue): String {
+        if (value.aux == "null" || value.aux == "") {
+            return "null"
+        }
+        // 字符串常量需要引号包裹
+        if (this.typeName(mir, value.type) == "String") {
+            if (!value.aux.startsWith("\"")) {
+                return "\"" + value.aux + "\""
+            }
+        }
+        return value.aux
+    }
+
+    /// 根据常量类型名选择 HAT 常量操作码。
+    ///
+    /// 注意：HAT 解析产生的类型都是 `Basic` 种类（`fromTypeName` 只登记名字），
+    /// 因此这里必须按 `typeName` 的字符串判断，而不是 `kindOf`。
+    private fun constOpName(mir: MirSsaProgram, value: MirValue): String {
+        if (value.aux == "null") {
+            return "null"
+        }
+        val tn: String = this.typeName(mir, value.type)
+        if (value.aux == "") {
+            if (tn == "Unit") {
+                return "null"
+            }
+            return "i32_const"
+        }
+        if (tn == "Float") {
+            return "f64_const"
+        }
+        if (tn == "Bool") {
+            return "bool_const"
+        }
+        if (tn == "String") {
+            return "const_str"
+        }
+        return "i32_const"
+    }
+
+    /// 获取操作码名称。
+    private fun opName(mir: MirSsaProgram, op: String): String {
+        if (op == "Const") {
+            return "i32_const"
+        }
+        if (op == "Add") {
+            return "add"
+        }
+        if (op == "Sub") {
+            return "sub"
+        }
+        if (op == "Mul") {
+            return "mul"
+        }
+        if (op == "Div") {
+            return "div"
+        }
+        if (op == "Rem") {
+            return "rem"
+        }
+        if (op == "Neg") {
+            return "neg"
+        }
+        if (op == "And") {
+            return "and"
+        }
+        if (op == "Or") {
+            return "or"
+        }
+        if (op == "Xor") {
+            return "xor"
+        }
+        if (op == "Not") {
+            return "not"
+        }
+        if (op == "ICmp") {
+            return "icmp"
+        }
+        if (op == "FCmp") {
+            return "fcmp"
+        }
+        if (op == "Call") {
+            return "call"
+        }
+        if (op == "Alloc") {
+            return "alloc"
+        }
+        if (op == "Store") {
+            return "store"
+        }
+        if (op == "Load") {
+            return "load"
+        }
+        if (op == "AllocList") {
+            return "alloc_list"
+        }
+        if (op == "ListSet") {
+            return "list_set"
+        }
+        if (op == "ListGet") {
+            return "list_get"
+        }
+        if (op == "ListLen") {
+            return "list_len"
+        }
+        if (op == "New") {
+            return "new"
+        }
+        if (op == "GetField") {
+            return "field"
+        }
+        if (op == "SetField") {
+            return "field_set"
+        }
+        if (op == "StrConcat") {
+            return "str_concat"
+        }
+        if (op == "StrLen") {
+            return "str_len"
+        }
+        if (op == "StrSub") {
+            return "str_sub"
+        }
+        if (op == "StrChar") {
+            return "str_char"
+        }
+        if (op == "Band") {
+            return "band"
+        }
+        if (op == "Bor") {
+            return "bor"
+        }
+        if (op == "Bxor") {
+            return "bxor"
+        }
+        if (op == "Shl") {
+            return "shl"
+        }
+        if (op == "Shr") {
+            return "shr"
+        }
+        return op
+    }
+
+    /// 获取类型名称。
+    private fun typeName(mir: MirSsaProgram, typeId: Int): String {
+        if (typeId < 0) {
+            return "Int"
+        }
+        var kind: String = mir.types.kindOf(typeId)
+        var name: String = mir.types.nameOf(typeId)
+
+        if (kind == "Int") {
+            return "Int"
+        }
+        if (kind == "Float") {
+            return "Float"
+        }
+        if (kind == "Bool") {
+            return "Bool"
+        }
+        if (kind == "Unit") {
+            return "Unit"
+        }
+        if (kind == "String") {
+            return "String"
+        }
+        if (kind == "Basic" && name != "") {
+            return name
+        }
+        return kind
+    }
+
+    // ── 设置器 ──
+
+    /// 设置模块名。
+    fun setModuleName(name: String): Unit {
+        this.moduleName = name
+    }
+
+    /// 设置目标三元组。
+    fun setTargetTriple(triple: String): Unit {
+        this.targetTriple = triple
+    }
+
+    /// 获取输出。
+    fun getOutput(): String {
+        return this.output
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// HatSerializerUtils — 工具对象
+// ─────────────────────────────────────────────────────────────
+
+object HatSerializerUtils {
+
+    /// 字符串转整数。
+    fun strToInt(text: String): Int {
+        if (text == "") {
+            return 0
+        }
+        var total: Int = 0
+        var i: Int = 0
+        var neg: Boolean = false
+        var len: Int = text.length
+        if (len > 0 && text.charCodeAt(0) == 45) {
+            neg = true
+            i = 1
+        }
+        while (i < len) {
+            val c: Int = text.charCodeAt(i)
+            if (c >= 48 && c <= 57) {
+                total = total * 10 + (c - 48)
+            }
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
+    }
+
+    /// 整数转字符串。
+    fun toStr(n: Int): String {
+        if (n == 0) {
+            return "0"
+        }
+        var neg: Boolean = false
+        if (n < 0) {
+            neg = true
+            n = -n
+        }
+        var result: String = ""
+        while (n > 0) {
+            result = HatSerializerUtils.digitChar(n % 10) + result
+            n = n / 10
+        }
+        if (neg) {
+            result = "-" + result
+        }
+        return result
+    }
+
+    /// 把 0-9 的数字转换为单字符字符串。
+    private fun digitChar(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        return "9"
+    }
+
+    /// 空序列化器。
+    fun emptySerializer(): HatSerializer {
+        return HatSerializer()
+    }
+
+    /// 序列化 SSA MIR 为 HAT 文本。
+    fun serializeHat(mir: MirSsaProgram, module: String): String {
+        val serializer: HatSerializer = HatSerializer()
+        serializer.setModuleName(module)
+        return serializer.serialize(mir)
+    }
+}

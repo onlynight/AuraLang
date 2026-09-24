@@ -1,0 +1,23 @@
+[
+    {
+        "keys": ["ctrl+shift+f"],
+        "command": "format_hat",
+        "context": [
+            { "key": "syntax", "operator": "equal", "value": "text.plain" }
+        ]
+    },
+    {
+        "keys": ["ctrl+shift+i"],
+        "command": "hat_auto_indent",
+        "context": [
+            { "key": "selector", "operator": "equal", "value": "source.hat" }
+        ]
+    },
+    {
+        "keys": ["ctrl+b"],
+        "command": "run_hat",
+        "context": [
+            { "key": "selector", "operator": "equal", "value": "source.hat" }
+        ]
+    }
+]

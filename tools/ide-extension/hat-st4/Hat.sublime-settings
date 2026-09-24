@@ -1,0 +1,33 @@
+{
+    // ════════════════════════════════════════════════════════════════
+    // HAT Language - Sublime Text 4 Plugin Settings
+    // ════════════════════════════════════════════════════════════════
+    //
+    // Copy this file to:
+    //   Packages/User/Hat.sublime-settings
+    // and customize as needed.
+    // ════════════════════════════════════════════════════════════════
+
+    // ── Build ──────────────────────────────────────────────────────
+    "build_system": "Hat.sublime-build",
+    "build_command": "hat run",
+
+    // ── Format ─────────────────────────────────────────────────────
+    "auto_format_on_save": false,
+    "indent_size": 4,
+    "max_line_length": 120,
+
+    // ── Auto-Indent ────────────────────────────────────────────────
+    "auto_indent_enabled": true,
+    "auto_indent_use_spaces": true,
+
+    // ── Bracket Matching ───────────────────────────────────────────
+    "match_brackets": true,
+    "match_brackets_content": true,
+
+    // ── Diagnostics ────────────────────────────────────────────────
+    "show_diagnostics": true,
+
+    // ── Debug ──────────────────────────────────────────────────────
+    "debug": false
+}

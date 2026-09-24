@@ -8,6 +8,7 @@ package aura.lang.compiler.backend.photon
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.std.Env
 import "x86_64/X86Encoder.aura"
 import "MachineDag.aura"
 import "RegisterAllocator.aura"
@@ -419,7 +420,7 @@ class X86Emitter {
             val funcName: String = node.aux
             // 先按 Win64 约定装载实参寄存器，再发 CALL。
             this.emitCallArgs(node, dag)
-            if (funcName != "" && funcName != "$imm") {
+            if (funcName != "" && funcName != "@imm") {
                 this.enc.emitCallRel(funcName)
             }
             // ── 返回值落地（Win64：返回值固定放在 rax）──
@@ -447,6 +448,9 @@ class X86Emitter {
     ///
     /// 实参节点列表由指令选择阶段写在 Call 节点的 `args`（已剔除内存链 token）。
     private fun emitCallArgs(callNode: DagNode, dag: MachineDag): Unit {
+        if (Env.get("AURA_PHOTON_TRACE", "") == "1") {
+            println("    [X86] emitCallArgs callNode.args=" + callNode.args + " aux=" + callNode.aux)
+        }
         val argParts: List<String> = MachineDagUtils.splitArgs(callNode.args)
         val argRegs: List<String> = listOf("rcx", "rdx", "r8", "r9")
         // **逆序装载**：若后面的实参来源寄存器恰好是前面某个实参的目标寄存器

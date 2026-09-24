@@ -31,24 +31,24 @@ HAT v2.0 解决这三个问题：直接序列化 SSA 结构，显式标注类型
 ```
 ; module main target x86_64
 
-;@fn while_loop() -> Int
-;  bb entry:
-;    @i@0 = @i32_const 0 : Int
-;    @br @check
-;
-;  bb check:
-;    @i@1 = @phi(@i@0, @i@2) : Int       ← Phi 节点
-;    @t0 = @i32_const 10 : Int
-;    @t1 = @icmp @slt(@i@1, @t0) : Bool
-;    @br_if @t1 => @body, @exit
-;
-;  bb body:
-;    @t2 = @i32_const 1 : Int
-;    @i@2 = @add(@i@1, @t2) : Int
-;    @br @check
-;
-;  bb exit:
-;    @ret @i@1 : Int
+@fn while_loop() -> Int
+  bb entry:
+    @i@0 = @i32_const 0 : Int
+    @br @check
+
+  bb check:
+    @i@1 = @phi(@i@0, @i@2) : Int       ← Phi 节点
+    @t0 = @i32_const 10 : Int
+    @t1 = @icmp @slt(@i@1, @t0) : Bool
+    @br_if @t1 => @body, @exit
+
+  bb body:
+    @t2 = @i32_const 1 : Int
+    @i@2 = @add(@i@1, @t2) : Int
+    @br @check
+
+  bb exit:
+    @ret @i@1 : Int
 ```
 
 核心特性：
@@ -156,6 +156,17 @@ PHIR ──secondary──→ Photon 管线（HIR Arena → SSA MIR → LIR → 
 ; ④ 类型声明（零或多个，可选）
 ```
 
+> 上图中各行首的 `;` 是**文档注释**，不是文件内容。
+
+**`;` 的使用规则**（唯一权威定义）：`;` 只在两处出现——
+
+1. **元数据头三行**（§3.2）：`; module ...` / `; schema=...` / `; source=...`（LLVM IR 注释风格）；
+2. **行内 span 标注**（§3.8）：`@t0 = @i32_const 42 : Int ;@span L2:26-35`。
+
+除这两处外，**其余所有行都不带 `;` 前缀**：`@extern` / `@fn` / `@struct` / `@enum` 声明、`bb <label>:` 块头、以及块内指令都直接以内容开头（`bb` 用 2 空格缩进，指令用 4 空格缩进），基本块之间用**空行**分隔。
+
+解析器对行首 `;` 是宽容的（只剥掉一个前导 `;` 加后续空白，见 §7.3），因此历史遗留的 `;@fn` / `;  bb` 写法仍可解析，但**序列化器不再产出这种形式**。
+
 ### 3.2 元数据头
 
 第一行，格式固定：
@@ -178,10 +189,10 @@ PHIR ──secondary──→ Photon 管线（HIR Arena → SSA MIR → LIR → 
 
 ### 3.3 外部函数声明
 
-以 `;@extern` 开头：
+以 `@extern` 开头：
 
 ```
-;@extern <name>(<params>) -> <ret>
+@extern <name>(<params>) -> <ret>
 ```
 
 | 字段 | 说明 |
@@ -192,21 +203,21 @@ PHIR ──secondary──→ Photon 管线（HIR Arena → SSA MIR → LIR → 
 
 **示例**：
 ```
-;@extern println(@msg: Any) -> Unit
-;@extern toStr(@v: Any) -> String
-;@extern aura.lang.std.Math.abs(@x: Float) -> Float
+@extern println(@msg: Any) -> Unit
+@extern toStr(@v: Any) -> String
+@extern aura.lang.std.Math.abs(@x: Float) -> Float
 ```
 
 ### 3.4 函数定义
 
-以 `;@fn` 开头：
+以 `@fn` 开头：
 
 ```
-;@fn <name>(<params>) -> <ret>
-;  bb <label>:
-;    ...指令...
-;  bb <label>:
-;    ...指令...
+@fn <name>(<params>) -> <ret>
+  bb <label>:
+    ...指令...
+  bb <label>:
+    ...指令...
 ```
 
 **函数签名**：
@@ -223,22 +234,22 @@ PHIR ──secondary──→ Photon 管线（HIR Arena → SSA MIR → LIR → 
 
 ### 3.5 指令
 
-所有指令以 `;` 开头（前导空格），指令体以 `@` 开头：
+指令以 `@` 开头，前置缩进 4 空格（位于 `bb` 块内）：
 
 ```
-;    @<target> = @<op>(<args>) : <type>
+    @<target> = @<op>(<args>) : <type>
 ```
 
 或无返回值指令：
 
 ```
-;    @<op>(<args>)
+    @<op>(<args>)
 ```
 
 或带属性的操作：
 
 ```
-;    @<target> = @<op> { <attrs> } (<args>) : <type>
+    @<target> = @<op> { <attrs> } (<args>) : <type>
 ```
 
 **指令分类**：
@@ -360,7 +371,7 @@ Phi 节点是 SSA 形式的核心——在循环入口或分支汇合点，将�
 #### 调用指令
 
 ```
-;    @t = @call @<fn_name>(@args) : <ret_type>
+    @t = @call @<fn_name>(@args) : <ret_type>
 ```
 
 | 字段 | 说明 |
@@ -400,7 +411,7 @@ Phi 节点是 SSA 形式的核心——在循环入口或分支汇合点，将�
 可选的行内注释，用于调试：
 
 ```
-;    @t0 = @i32_const 42 : Int ;@span L2:26-35
+    @t0 = @i32_const 42 : Int ;@span L2:26-35
 ```
 
 格式：`;@span L<line>:<col>-<endCol>`
@@ -412,9 +423,9 @@ Phi 节点是 SSA 形式的核心——在循环入口或分支汇合点，将�
 用于结构体、枚举等类型定义：
 
 ```
-;@struct @Point { @x: Int, @y: Int }
-;@struct @Dog { @name: String, @age: Int }
-;@enum @Color { RED, GREEN, BLUE }
+@struct @Point { @x: Int, @y: Int }
+@struct @Dog { @name: String, @age: Int }
+@enum @Color { RED, GREEN, BLUE }
 ```
 
 ---
@@ -426,7 +437,7 @@ Phi 节点是 SSA 形式的核心——在循环入口或分支汇合点，将�
 | HIR 节点 | HAT 指令 | 说明 |
 |----------|----------|------|
 | `HirProgram` | 元数据头 | 仅元信息 |
-| `HirFunction` | `;@fn` | 函数签名 |
+| `HirFunction` | `@fn` | 函数签名 |
 | `HirParam` | 函数签名参数 | `@a: Int, @b: Int` |
 | `HirBlock` | BB 序列 | 每个 Block → 一个 BB |
 | `HirValDecl` | `@let` | `@x = @const 42 : Int` |
@@ -448,8 +459,8 @@ Phi 节点是 SSA 形式的核心——在循环入口或分支汇合点，将�
 | `HirNew` | `@new` | `@t = @new @Type { fields: [...] }` |
 | `HirLambda` | `@fn_ref` 或闭包分配 | 待扩展 |
 | `HirTry` | `@br_if` + 异常 BB | 待扩展 |
-| `HirStruct` | `;@struct` | 类型声明 |
-| `HirEnum` | `;@enum` | 类型声明 |
+| `HirStruct` | `@struct` | 类型声明 |
+| `HirEnum` | `@enum` | 类型声明 |
 
 ### 4.2 SSA 构造规则
 
@@ -529,14 +540,16 @@ fun main() {
 ; module main target x86_64
 ; schema=HAT/2.0
 
-;@extern println(@msg: Any) -> Unit
+@extern println(@msg: Any) -> Unit
 
-;@fn main() -> Unit
-;  bb entry:
-;    @t0 = @const_str "Hello, World!" : String
-;    @t1 = @call @println(@t0) : Unit
-;    @ret () : Unit
+@fn main() -> Unit
+  @t0 = @const_str "Hello, World!" : String
+  @call @println(@t0) : Unit
+  @ret () : Unit
 ```
+
+> **注意**：简单函数（无分支/循环）可以省略 `bb entry:`，解析器会自动创建隐式 entry 块。
+> 仅有控制流合并点（循环入口、分支汇合）才需要显式 BB + Phi 节点。
 
 ### 5.2 函数调用
 
@@ -556,21 +569,21 @@ fun main() {
 ; module main target x86_64
 ; schema=HAT/2.0
 
-;@extern println(@msg: Any) -> Unit
+@extern println(@msg: Any) -> Unit
 
-;@fn add(@a: Int, @b: Int) -> Int
-;  bb entry:
-;    @t0 = @add(@a, @b) : Int
-;    @ret @t0 : Int
+@fn add(@a: Int, @b: Int) -> Int
+  bb entry:
+    @t0 = @add(@a, @b) : Int
+    @ret @t0 : Int
 
-;@fn main() -> Unit
-;  bb entry:
-;    @t0 = @i32_const 3 : Int
-;    @t1 = @i32_const 4 : Int
-;    @t2 = @call @add(@t0, @t1) : Int
-;    @t3 = @i32_to_str(@t2) : String
-;    @t4 = @call @println(@t3) : Unit
-;    @ret () : Unit
+@fn main() -> Unit
+  bb entry:
+    @t0 = @i32_const 3 : Int
+    @t1 = @i32_const 4 : Int
+    @t2 = @call @add(@t0, @t1) : Int
+    @t3 = @i32_to_str(@t2) : String
+    @t4 = @call @println(@t3) : Unit
+    @ret () : Unit
 ```
 
 ### 5.3 条件分支
@@ -591,16 +604,16 @@ fun max(a: Int, b: Int): Int {
 ; module main target x86_64
 ; schema=HAT/2.0
 
-;@fn max(@a: Int, @b: Int) -> Int
-;  bb entry:
-;    @t0 = @icmp @i32_sgt(@a, @b) : Bool
-;    @br_if @t0 => @then, @else
-;
-;  bb then:
-;    @ret @a : Int
-;
-;  bb else:
-;    @ret @b : Int
+@fn max(@a: Int, @b: Int) -> Int
+  bb entry:
+    @t0 = @icmp @i32_sgt(@a, @b) : Bool
+    @br_if @t0 => @then, @else
+
+  bb then:
+    @ret @a : Int
+
+  bb else:
+    @ret @b : Int
 ```
 
 ### 5.4 While 循环（Phi 节点版本）
@@ -623,26 +636,26 @@ fun sum_to(n: Int): Int {
 ; module main target x86_64
 ; schema=HAT/2.0
 
-;@fn sum_to(@n: Int) -> Int
-;  bb entry:
-;    @sum = @i32_const 0 : Int
-;    @i@0 = @i32_const 1 : Int
-;    @br @check
-;
-;  bb check:
-;    @sum@1 = @phi(@sum, @sum@2) : Int       ← Phi: entry 或 body
-;    @i@1 = @phi(@i@0, @i@2) : Int           ← Phi: entry 或 body
-;    @t0 = @icmp @i32_sle(@i@1, @n) : Bool
-;    @br_if @t0 => @body, @exit
-;
-;  bb body:
-;    @sum@2 = @add(@sum@1, @i@1) : Int        // sum = sum + i
-;    @t1 = @i32_const 1 : Int
-;    @i@2 = @add(@i@1, @t1) : Int             // i = i + 1
-;    @br @check
-;
-;  bb exit:
-;    @ret @sum@1 : Int
+@fn sum_to(@n: Int) -> Int
+  bb entry:
+    @sum = @i32_const 0 : Int
+    @i@0 = @i32_const 1 : Int
+    @br @check
+
+  bb check:
+    @sum@1 = @phi(@sum, @sum@2) : Int       ← Phi: entry 或 body
+    @i@1 = @phi(@i@0, @i@2) : Int           ← Phi: entry 或 body
+    @t0 = @icmp @i32_sle(@i@1, @n) : Bool
+    @br_if @t0 => @body, @exit
+
+  bb body:
+    @sum@2 = @add(@sum@1, @i@1) : Int        // sum = sum + i
+    @t1 = @i32_const 1 : Int
+    @i@2 = @add(@i@1, @t1) : Int             // i = i + 1
+    @br @check
+
+  bb exit:
+    @ret @sum@1 : Int
 ```
 
 **注意**：Phi 节点是 BB 的第一条指令，将来自不同前驱 BB 的值合并为一个 SSA 值。
@@ -665,26 +678,26 @@ fun factorial(n: Int): Int {
 ; module main target x86_64
 ; schema=HAT/2.0
 
-;@fn factorial(@n: Int) -> Int
-;  bb entry:
-;    @result = @i32_const 1 : Int
-;    @i@0 = @i32_const 1 : Int
-;    @br @check
-;
-;  bb check:
-;    @result@1 = @phi(@result, @result@2) : Int  ← Phi: entry 或 body
-;    @i@1 = @phi(@i@0, @i@2) : Int               ← Phi: entry 或 body
-;    @t0 = @icmp @i32_sle(@i@1, @n) : Bool
-;    @br_if @t0 => @body, @exit
-;
-;  bb body:
-;    @result@2 = @mul(@result@1, @i@1) : Int       // result = result * i
-;    @t1 = @i32_const 1 : Int
-;    @i@2 = @add(@i@1, @t1) : Int                  // i = i + 1
-;    @br @check
-;
-;  bb exit:
-;    @ret @result@1 : Int
+@fn factorial(@n: Int) -> Int
+  bb entry:
+    @result = @i32_const 1 : Int
+    @i@0 = @i32_const 1 : Int
+    @br @check
+
+  bb check:
+    @result@1 = @phi(@result, @result@2) : Int  ← Phi: entry 或 body
+    @i@1 = @phi(@i@0, @i@2) : Int               ← Phi: entry 或 body
+    @t0 = @icmp @i32_sle(@i@1, @n) : Bool
+    @br_if @t0 => @body, @exit
+
+  bb body:
+    @result@2 = @mul(@result@1, @i@1) : Int       // result = result * i
+    @t1 = @i32_const 1 : Int
+    @i@2 = @add(@i@1, @t1) : Int                  // i = i + 1
+    @br @check
+
+  bb exit:
+    @ret @result@1 : Int
 ```
 
 ### 5.6 复杂示例（字符串拼接 + 数组）
@@ -709,36 +722,36 @@ fun main() {
 ; module main target x86_64
 ; schema=HAT/2.0
 
-;@extern println(@msg: Any) -> Unit
+@extern println(@msg: Any) -> Unit
 
-;@fn greet(@name: String) -> String
-;  bb entry:
-;    @t0 = @const_str "Hello, " : String
-;    @t1 = @str_concat(@t0, @name) : String
-;    @t2 = @const_str "!" : String
-;    @msg = @str_concat(@t1, @t2) : String
-;    @ret @msg : String
+@fn greet(@name: String) -> String
+  bb entry:
+    @t0 = @const_str "Hello, " : String
+    @t1 = @str_concat(@t0, @name) : String
+    @t2 = @const_str "!" : String
+    @msg = @str_concat(@t1, @t2) : String
+    @ret @msg : String
 
-;@fn main() -> Unit
-;  bb entry:
-;    @t0 = @i32_const 1 : Int
-;    @t1 = @i32_const 2 : Int
-;    @t2 = @i32_const 3 : Int
-;    @t3 = @i32_const 4 : Int
-;    @t4 = @i32_const 5 : Int
-;    @arr = @alloc_list { count: 5 } : !list
-;    @arr@1 = @list_set(@arr, 0, @t0) : !list
-;    @arr@2 = @list_set(@arr@1, 1, @t1) : !list
-;    @arr@3 = @list_set(@arr@2, 2, @t2) : !list
-;    @arr@4 = @list_set(@arr@3, 3, @t3) : !list
-;    @arr@5 = @list_set(@arr@4, 4, @t4) : !list
-;    @t5 = @const_str "World" : String
-;    @s = @call @greet(@t5) : String
-;    @t6 = @call @println(@s) : Unit
-;    @t7 = @list_get(@arr@5, 2) : Int
-;    @t8 = @i32_to_str(@t7) : String
-;    @t9 = @call @println(@t8) : Unit
-;    @ret () : Unit
+@fn main() -> Unit
+  bb entry:
+    @t0 = @i32_const 1 : Int
+    @t1 = @i32_const 2 : Int
+    @t2 = @i32_const 3 : Int
+    @t3 = @i32_const 4 : Int
+    @t4 = @i32_const 5 : Int
+    @arr = @alloc_list { count: 5 } : !list
+    @arr@1 = @list_set(@arr, 0, @t0) : !list
+    @arr@2 = @list_set(@arr@1, 1, @t1) : !list
+    @arr@3 = @list_set(@arr@2, 2, @t2) : !list
+    @arr@4 = @list_set(@arr@3, 3, @t3) : !list
+    @arr@5 = @list_set(@arr@4, 4, @t4) : !list
+    @t5 = @const_str "World" : String
+    @s = @call @greet(@t5) : String
+    @t6 = @call @println(@s) : Unit
+    @t7 = @list_get(@arr@5, 2) : Int
+    @t8 = @i32_to_str(@t7) : String
+    @t9 = @call @println(@t8) : Unit
+    @ret () : Unit
 ```
 
 ### 5.7 同一源码的 PHIR 对比
@@ -875,12 +888,12 @@ object HatUtils {
   │     → ; source=<path>
   │
   ├─ 3. 遍历剩余行
-  │     → ;@extern → 解析外部函数声明
-  │     → ;@fn → 解析函数定义
-  │     → ;@struct / ;@enum → 解析类型声明
+  │     → @extern → 解析外部函数声明
+  │     → @fn → 解析函数定义
+  │     → @struct / @enum → 解析类型声明
   │
   ├─ 4. 函数定义解析
-  │     → 解析签名: ;@fn name(@params) -> ret
+  │     → 解析签名: @fn name(@params) -> ret
   │     → 遍历 BB:
   │       → bb label:
   │       → 解析 Phi: @t = @phi(@a, @b) : Type
@@ -907,18 +920,18 @@ fun parseHat(text: String): MirSsaProgram {
         if (line.startsWith("; module")) {
             prog.parseHeader(line)
             i = i + 1
-        } else if (line.startsWith(";@extern")) {
+        } else if (line.startsWith("@extern")) {
             prog.addExtern(line)
             i = i + 1
-        } else if (line.startsWith(";@fn")) {
+        } else if (line.startsWith("@fn")) {
             i = this.parseFunction(lines, i, prog)
-        } else if (line.startsWith(";@struct")) {
+        } else if (line.startsWith("@struct")) {
             prog.addStruct(line)
             i = i + 1
-        } else if (line.startsWith(";@enum")) {
+        } else if (line.startsWith("@enum")) {
             prog.addEnum(line)
             i = i + 1
-        } else if (line.startsWith(";") || line == "") {
+        } else if (line == "") {
             i = i + 1
         } else {
             i = i + 1
@@ -940,7 +953,7 @@ fun parseFunction(lines: List<String>, i: Int, prog: MirSsaProgram): Int {
             func.addBlock(bb)
             i = i + 1
             i = this.parseBbBody(lines, i, func, bb)
-        } else if (line.startsWith(";") || line == "") {
+        } else if (line == "") {
             i = i + 1
         } else {
             break
@@ -954,7 +967,7 @@ fun parseFunction(lines: List<String>, i: Int, prog: MirSsaProgram): Int {
 fun parseBbBody(lines: List<String>, i: Int, func: MirFunction, bb: MirBlock): Int {
     while (i < lines.size) {
         val line: String = lines[i].trim()
-        if (line.startsWith("bb ") || line.startsWith(";") || line == "") {
+        if (line.startsWith("bb ") || line == "") {
             break
         }
 
@@ -1027,10 +1040,10 @@ object HatUtils {
   │     → ; schema=HAT/2.0
   │
   ├─ 2. 遍历外部函数
-  │     → ;@extern name(@params) -> ret
+  │     → @extern name(@params) -> ret
   │
   ├─ 3. 遍历函数定义
-  │     → ;@fn name(@params) -> ret
+  │     → @fn name(@params) -> ret
   │     → 遍历 BB：
   │       → bb label:
   │       → 遍历指令：
@@ -1063,7 +1076,7 @@ fun serializeFromSsa(mir: MirSsaProgram): String {
     var i: Int = 0
     while (i < mir.externCount) {
         val ext: MirExtern = mir.externAt(i)
-        out = out + ";@extern " + ext.toSignature() + "\n"
+        out = out + "@extern " + ext.toSignature() + "\n"
         i = i + 1
     }
     if (i > 0) { out = out + "\n" }
@@ -1072,7 +1085,7 @@ fun serializeFromSsa(mir: MirSsaProgram): String {
     i = 0
     while (i < mir.functionCount) {
         val func: MirFunction = mir.functionAt(i)
-        out = out + ";@fn " + func.toSignature() + "\n"
+        out = out + "@fn " + func.toSignature() + "\n"
         out = out + this.serializeFunctionBody(func)
         out = out + "\n"
         i = i + 1
@@ -1086,7 +1099,8 @@ fun serializeFunctionBody(func: MirFunction): String {
     var bi: Int = 0
     while (bi < func.blockCount) {
         val bb: MirBlock = func.blockAt(bi)
-        out = out + ";  bb " + bb.label + ":\n"
+        if (bi > 0) { out = out + "\n" }            // 基本块之间用空行分隔
+        out = out + "  bb " + bb.label + ":\n"
         out = out + this.serializeBlockInstructions(bb)
         bi = bi + 1
     }
@@ -1098,7 +1112,7 @@ fun serializeBlockInstructions(bb: MirBlock): String {
     var ii: Int = 0
     while (ii < bb.instrCount) {
         val ins: MirInstruction = bb.instrAt(ii)
-        out = out + ";    " + ins.toHatText() + "\n"
+        out = out + "    " + ins.toHatText() + "\n"
         ii = ii + 1
     }
     return out
@@ -1191,7 +1205,7 @@ fn hir_to_hat(hir: &HirProgram, module_name: &str, source_path: &str) -> String 
 
     // 外部函数
     for ext in &ssa.externs {
-        out.push_str(&format!(";@extern {}\n", ext.to_signature()));
+        out.push_str(&format!("@extern {}\n", ext.to_signature()));
     }
     if !ssa.externs.is_empty() {
         out.push('\n');
@@ -1199,11 +1213,11 @@ fn hir_to_hat(hir: &HirProgram, module_name: &str, source_path: &str) -> String 
 
     // 函数定义
     for func in &ssa.functions {
-        out.push_str(&format!(";@fn {}\n", func.to_signature()));
+        out.push_str(&format!("@fn {}\n", func.to_signature()));
         for bb in &func.blocks {
-            out.push_str(&format!(";  bb {}\n", bb.to_header()));
+            out.push_str(&format!("  bb {}\n", bb.to_header()));
             for instr in &bb.instructions {
-                out.push_str(&format!(";    {}\n", instr.to_hat_text()));
+                out.push_str(&format!("    {}\n", instr.to_hat_text()));
             }
         }
         out.push('\n');
@@ -1460,12 +1474,12 @@ HAT v2.0 的指令命名（`@op`）天然支持方言扩展：
 
 ```
 ; 当前（默认方言）
-;    @t = @add(@a, @b) : Int
+    @t = @add(@a, @b) : Int
 
 ; 未来（方言前缀）
-;    @t = @arith.add(@a, @b) : Int
-;    @t = @mem.alloc { size: 8 } : !stackslot
-;    @t = @mem.load @slot : Int
+    @t = @arith.add(@a, @b) : Int
+    @t = @mem.alloc { size: 8 } : !stackslot
+    @t = @mem.load @slot : Int
 ```
 
 ### 13.3 调试信息增强
@@ -1473,7 +1487,7 @@ HAT v2.0 的指令命名（`@op`）天然支持方言扩展：
 HAT v2.0 的 `;@span` 注释可扩展为完整的调试元数据：
 
 ```
-;    @t0 = @i32_const 42 : Int ;@span L2:26-35 ;@debug x, "val"
+    @t0 = @i32_const 42 : Int ;@span L2:26-35 ;@debug x, "val"
 ```
 
 ### 13.4 增量编译

@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[; @ = @f64_const ]]></content>
+    <tabTrigger>f64c</tabTrigger>
+    <scope>source.hat</scope>
+    <description>Floating point constant</description>
+</snippet>

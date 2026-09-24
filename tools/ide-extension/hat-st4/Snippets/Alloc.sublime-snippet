@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[; @ = @alloc ()]]></content>
+    <tabTrigger>alloc</tabTrigger>
+    <scope>source.hat</scope>
+    <description>Allocate memory</description>
+</snippet>

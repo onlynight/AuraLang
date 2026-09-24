@@ -8,6 +8,7 @@ package aura.lang.compiler.mir
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.std.Env
 import aura.lang.collection.ArrayList
 // 同包依赖：TypeRegistry 为字段依赖，MirUtils（mirSplit）为同包助手。
 // 同包符号需显式导入才进入编译单元（否则退化为未解析调用 #65535）。
@@ -102,6 +103,9 @@ class MirBlock {
     /// 块 ID。
     var id: Int = 0
 
+    /// 块标签（HAT 文本中的 `bb <label>`；空字符串表示未命名，序列化时按 BlockID 回退生成）。
+    var label: String = ""
+
     /// 块首 Phi 节点 ValueID（逗号分隔字符串）。
     var phis: String = ""
 
@@ -119,6 +123,7 @@ class MirBlock {
 
     init() {
         this.id = 0
+        this.label = ""
         this.phis = ""
         this.instrs = ""
         this.term = -1
@@ -237,25 +242,30 @@ class MirSsaProgram {
 
     /// 创建一个新的基本块，返回 BlockID。
     fun addBlock(): Int {
+        // 崩溃诊断：AURA_PHOTON_TRACE=1 时逐步打印
+        val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
+        if (traceOn) println("      [addBlock] before MirBlock()")
         val b: MirBlock = MirBlock()
+        if (traceOn) println("      [addBlock] before b.id=" + this.blockCount)
         b.id = this.blockCount
+        if (traceOn) println("      [addBlock] before this.blocks.add(b)")
         this.blocks.add(b)
+        if (traceOn) println("      [addBlock] before blockCount=" + this.blocks.size)
         this.blockCount = this.blocks.size
         // ★ 把新块登记到**当前函数**（2026-09-23 修复）
-        //
-        // 此前这里只维护全局 `blocks` / `blockCount`，**从不**写入
-        // `MirFunction.blocks` —— 该字段恒为空串。后果贯穿整条 photon 管线：
-        //   Phase B（Lowering）读到 `srcFunc.blocks == ""` → 降级出 **0 个 LIR 块**；
-        //   Phase C（InstructionSelection）→ `DAG nodes=0`；
-        //   Phase E → 机器码 **0 字节**、COFF 仅 68 字节、`.exe` 无法运行
-        //（即 P0 里那个「成功: true 但产物是空壳」的假成功）。
         if (this.currentFunc >= 0) {
+            if (traceOn) println("      [addBlock] before functionOf(" + this.currentFunc + ")")
             val f: MirFunction = this.functionOf(this.currentFunc)
-            if (f.blocks == "") {
-                f.blocks = toStr(b.id)
+            if (traceOn) println("      [addBlock] before f.blocks read, f.blocks='" + f.blocks + "'")
+            var s: String = toStr(b.id)
+            if (f.blocks != "") {
+                s = f.blocks + "," + s
             } else {
-                f.blocks = f.blocks + "," + toStr(b.id)
+                f.entryBlock = b.id
             }
+            if (traceOn) println("      [addBlock] before f.blocks=" + s)
+            f.blocks = s
+            if (traceOn) println("      [addBlock] after f.blocks set")
         }
         return b.id
     }

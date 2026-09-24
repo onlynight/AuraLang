@@ -1,0 +1,7 @@
+; HAT v2.0 — Hello World
+; module main target x86_64
+
+@fn main() -> Unit
+  @t0 = @const_str "Hello, World!" : String
+  @call @println(@t0) : Unit
+  @ret () : Unit

@@ -1334,5 +1334,21 @@ char *aura_strdup(const char *s) {
 }
 
 /* =============================================================================
+ * 进程退出（AOT 链接期符号 `aura_process_exit`）
+ * =============================================================================
+ *
+ * Aura 侧 `Process.exit(code)`（如 `PhotonDriver.aura` 的成功/失败分支）经
+ * `translate_to_legacy_c` 发射为 `aura_process_exit`。此前该符号**没有任何实现**
+ * ⇒ AOT 链接期报 `lld-link: error: undefined symbol: aura_process_exit`。
+ *
+ * AOT 产物链接 CRT，直接用 `exit()` 即可（Windows 下 CRT 会走 ExitProcess，
+ * 与 `NtTerminateProcess` 语义等价：终止当前进程并回传退出码）。
+ */
+int64_t aura_process_exit(int64_t code) {
+    exit((int)code);
+    return code; /* 不可达；仅为满足非 void 声明 */
+}
+
+/* =============================================================================
  * End of aura_syscalls.c
  * ============================================================================= */

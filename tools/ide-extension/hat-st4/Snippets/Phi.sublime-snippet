@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[; @ = @phi (@ -> , @ -> ) : ]]></content>
+    <tabTrigger>phi</tabTrigger>
+    <scope>source.hat</scope>
+    <description>Phi node</description>
+</snippet>

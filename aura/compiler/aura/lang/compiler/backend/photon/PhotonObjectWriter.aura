@@ -681,7 +681,7 @@ class PhotonObjectWriter {
             buf = buf + this.writeIntLe(0, 4)
             buf = buf + this.writeIntLe(0, 2)
             buf = buf + this.writeIntLe(0, 2)
-            buf = buf + this.writeIntLe(0xC0300040, 4) // CNT_INITIALIZED_DATA|MEM_READ|MEM_WRITE|ALIGN_4
+            buf = buf + this.writeIntLe(0xC0400040, 4) // CNT_INITIALIZED_DATA|MEM_READ|MEM_WRITE|ALIGN_4
         }
         return buf
     }
@@ -693,9 +693,9 @@ class PhotonObjectWriter {
         var r: Int = 0
         while (r < this.coffRelocCount) {
             val rf: List<String> = this.splitPipe(relocRecs[r])
-            buf = buf + this.writeIntLe(this.strToInt(rf[0]), 4)  // 节内偏移
-            buf = buf + this.writeIntLe(this.strToInt(rf[1]), 4)  // 符号索引
-            buf = buf + this.writeIntLe(this.strToInt(rf[2]), 2)  // 类型（REL32 = 4）
+            buf = buf + this.writeIntLe(this.strToInt(rf[0]), 4)  // 节内偏移 (VirtualAddress)
+            buf = buf + this.writeIntLe(this.strToInt(rf[1]), 4)  // 符号索引 (SymbolTableIndex)
+            buf = buf + this.writeIntLe(this.strToInt(rf[2]), 2)  // 类型 (Type: REL32 = 4)
             r = r + 1
         }
         return buf

@@ -457,7 +457,63 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 - 🟡 **性能仍不达「1 分钟自举」**：驱动本身跑在 VM 解释器上（实测 `aura run` ≈ 3–4 M ops/s，比原生慢 ~50–100×）。
   实测解析速率 **≈50 ms/函数**（线性，非平方）：2345 个函数仅解析就 ≈2 min，Phase A–E 量级相同 ⇒ 全量自举
   ≈10 min 级。要在 1 分钟内完成，必须让管线**原生执行**。
-- ❌ `aura build --aot <驱动>` 目前无法产出原生 exe：`llc` 在 AOT 生成的 LLVM IR 上报类型错
+- 🟡 **`aura build --aot <驱动>`：已推进到「最终链接」阶段（2026-09-24）**。此前卡在 LLVM IR
+  生成，现已修掉 8 类真实 codegen 缺陷（`rust/compiler/src/codegen/aot/emit.rs` 等）：
+  1. **混合类型比较生成非法 IR**：`icmp slt i8* %x, %int`（`l_ty.starts_with("i")` 把 `i8*` 当整型；
+     且指针/整数未统一）。现统一 `ptrtoint → i64` 并把字面量宽度对齐到 i64。
+  2. **幽灵命名空间首参**：`StringOps.strlen(msg)` 的 HIR 是 `strlen(StringOps, msg)`（裸名 +
+     幽灵首参），发射出 `sext i32 %StringOps` ⇒ `use of undefined value '%StringOps'`；现按
+     「大写开头 + 不在作用域」剔除首参。
+  3. **字符串方法符号与返回类型**：`String.substring` 等此前发成 `call void @String_substring`
+     （未声明 + 返回 void，链式调用接收者变 0）。现改派到 legacy C 符号 `aura_string_<m>`，
+     并**同时查 `runtime_signature` 与 `cffi_signature` 两张签名表**（后者才登记字符串族）。
+  4. **裸类型/单例名当值**：`return SyscallEmitter` ⇒ `sext i32 %SyscallEmitter`；现按
+     `known_structs` 判为 `null`（i8*）。
+  5. **重复 trampoline**：`program.functions` 有重复条目 ⇒ `invalid redefinition of function`；
+     现按符号去重。
+  6. **Windows 目标的内联 `syscall` 汇编**：汇编器报 `<inline asm>:1:26: invalid operand for
+     instruction`；现改为调用 `aura_syscall_dispatch(nr, a1…a6)`（C 层做 Nt* 分发，已在
+     `RUNTIME_FUNCTIONS` 登记声明）。
+  7. **`lock inc/dec`（缺内存操作数）与 `cpuid`（约束不配平）**：现分别改发平台无关的
+     `atomicrmw add/sub` 与结构化 `cpuid` 输出约束（与 Aura 侧 `aot/Emit.aura` 的既有做法一致）。
+  8. 前序阶段的 VM 侧修复（裸名原生注册、未链接兜底不再 dump 整个实参）。
+  **剩余阻塞（链接期，3 个未定义符号）**：`Memory_read` / `Memory_set` / `aura_process_exit`
+  —— `object Memory` 的 `read/set` 被 FFI 生成器当成 extern（`declare i8 @Memory_read(i64)`，
+  返回类型也不对），需要把它们当作**程序内 Aura 函数**编译进来，或映射到 C 运行时。
+- ✅ **链接期阻塞已全部清除 ⇒ 原生驱动已能构建（2026-09-24）**：`build/p3/PhotonDriver.exe`（712 KB）
+  产出成功。为此再修 4 处：
+  1. **调用点降级 `Memory.read*/write*/copy/set/alloc/free`** 为 `load/store/memcpy/memset/malloc/free`
+     （`object Memory` 的成员是**无 `@native` 注解的编译器内置**，此前调用点发 `call @Memory_read`，
+     而 FFI 生成器给的 extern 声明返回类型也不对 ⇒ 链接期 undefined symbol）。
+  2. **`aura_process_exit`**：`Process.exit(code)` → 该符号此前**没有任何实现**，已在
+     `aura/runtime/cffi/aura_syscalls.c` 补 C 实现（AOT 链接 CRT，直接 `exit()`）。
+  3. **`String.fromCharCode`**：缺实现 + 缺映射 ⇒ `use of undefined value '@String_fromCharCode'`；
+     已补 `aura_string_fromCharCode`（C）+ `string_method_symbol`/`RUNTIME_FUNCTIONS` 登记。
+  4. **`aura_env_get` 的 static 缓冲缺陷（重要）**：旧实现返回 `static char env_buf[512]`，
+     多次调用共用同一块内存 ⇒ Aura 侧 `val a = Env.get("A"); val b = Env.get("B")` 会得到
+     **同一个值**（实测 `a=CCC b=CCC c=CCC`）；自举驱动连续读 PHIR/OUT/MODULE 三个变量时
+     `phirPath` 读成模块名、报 `Failed to read .phir file: 01_hello_world`。现改为每次
+     `malloc` 独立返回。
+- ⏳ **原生驱动运行期新阻塞**：`PhotonDriver.exe` 启动与解析极快（**3 s 内进入 Phase A**，
+  对比 VM 版 8 s 启动 + ≥30 min 跑不完），但在 **Phase A（SSA 构建）访问违例 0xC0000005 崩溃**
+  （小输入 `build/p1/01/01.phir` 也复现）。
+  **已二分定位到语句级**（插桩 → 复现 → 拆除插桩）：
+  `mir/SsaMir.aura::MirSsaProgram.addBlock()` 里「把新块登记回当前函数」的这几行：
+  ```
+  this.blocks.add(b); this.blockCount = this.blocks.size
+  if (this.currentFunc >= 0) {
+      val f: MirFunction = this.functionOf(this.currentFunc)
+      if (f.blocks == "") { f.blocks = toStr(b.id) } else { f.blocks = f.blocks + "," + toStr(b.id) }
+  }
+  ```
+  实测打印显示 `f.blocks` **读到 "0"**（该字段默认 `""`、`addFunction` 里刚写过 `""`），
+  随后在拼接/写回处崩溃 ⇒ 怀疑 **AOT 下 `List<MirFunction>` 元素取出的对象字段布局/字段访问错位**
+  （`MirFunction` 字段较多，含多个 List/String 字段）。
+  已排除的最小复现（均正常）：对象入列表后读局部对象字段、列表元素字段读写、方法内 `this.list[i]` 字段写。
+  下一步建议：打印 `MirFunction` 在 AOT 下的结构体布局 vs 字段访问偏移，或把该函数改成
+  「先拼好字符串再一次性写回」以绕开读-改-写。
+  （复现命令：`set AURA_PHOTON_PHIR=build/p1/01/01.phir` 后直接运行该 exe；崩溃码 0xC0000005）
+- ❌ （历史记录）`aura build --aot <驱动>` 曾完全无法产出原生 exe：`llc` 在 AOT 生成的 LLVM IR 上报类型错
   （`module.ll:42240: icmp slt i8* %var, %int` —— String/Int 类型推断错位，与 9.4 原有的
   `use of undefined value '%a0'` 同属 AOT codegen 的类型标注缺陷）。这是「原生驱动」路线的唯一阻塞。
 - ✅ **引导脚本两处修复（2026-09-24）**：

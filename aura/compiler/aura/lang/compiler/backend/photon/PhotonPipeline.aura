@@ -47,6 +47,9 @@ import "x86_64/X86Encoder.aura"
 // HIR
 import "../../hir/Hir.aura"
 
+// HAT v2.0
+import "../../hir/hat/HatParser.aura"
+
 /// 新后端编译结果。
 class BackendResult {
     var success: Boolean = false
@@ -269,6 +272,7 @@ class PhotonPipeline {
         }
 
         // ── Phase E: 指令编码 → 目标文件 → 链接 ──
+        val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
         this.traceMark("phaseE")
         println("[Phase E] Instruction Encoding → Object → Link")
 
@@ -319,14 +323,10 @@ class PhotonPipeline {
         // 生成目标文件路径
         val objPath = this.outDir + "/" + this.moduleName + ".obj"
         result.objectFilePath = objPath
+        if (traceOn) println("    [pipe0] objPath=" + objPath + " coffHex.len=" + coffHex.length)
 
-        // 落盘为**二进制** COFF。
-        //
-        // `PhotonNativeWriter.writeObjectFile` 只用 `Memory.*` / `Allocator.malloc`
-        // / `FileOps.*` / `Stdio.stringToBuffer` 这些 native 原语 —— 它们在 VM
-        // 解释路径下同样可用，因此这里不必再依赖「外部脚本把 hex 转二进制」。
-        // 仅在其失败（如非法路径）时回退到旧的 hex 落盘，保证不阻断流程。
         val wroteObj: Boolean = PhotonNativeWriter.writeObjectFile(objPath, coffHex)
+        if (traceOn) println("    [pipe1] wroteObj=" + wroteObj)
         if (!wroteObj) {
             println("    ⚠ 二进制落盘失败，回退 hex 文本（需外部脚本转换）：" + objPath + ".hex")
             writer.writeObjectBinaryFile(objPath)
@@ -442,6 +442,249 @@ class PhotonPipeline {
 
         // Step 3: 调用 compileHir
         return this.compileHir(hir, this.outDir, this.moduleName)
+    }
+
+    // ── .hat 入口 (HAT v2.0) ──
+
+    /// 从 .hat 文本文件编译为可执行文件。
+    ///
+    /// 数据流：读取 .hat → 解析为 SSA MIR → LIR → MachineDag → RegAlloc → Encode → COFF → Link
+    /// 注意：HAT 路径跳过 HIR → SSA 转换，直接从 SSA MIR 开始管线。
+    fun compileHat(hatPath: String): BackendResult {
+        println("[photon] compileHat: " + hatPath)
+
+        // Step 1: 读取 .hat 文件
+        val hatText: String = FileSystem.readText(hatPath)
+        if (hatText == "" || hatText == null) {
+            val result = BackendResult()
+            result.errorMessage = "Failed to read .hat file: " + hatPath
+            return result
+        }
+        println("  .hat size: " + hatText.length + " chars")
+
+        // Step 2: 解析 .hat → SSA MIR
+        val parser = HatParserUtils.emptyParser()
+        val ssaMIR: MirSsaProgram = parser.parse(hatText)
+        this.traceMark("ssa functions=" + ssaMIR.functionCount + " values=" + ssaMIR.valueCount)
+        println("  SSA functions=" + ssaMIR.functionCount +
+                " values=" + ssaMIR.valueCount +
+                " blocks=" + ssaMIR.blockCount)
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            this.photonDumpSsa(ssaMIR)
+        }
+
+        // Step 3: 从 SSA MIR 继续管线（Phase B-E）
+        return this.compileFromSsa(ssaMIR)
+    }
+
+    /// 从 SSA MIR 继续管线（Phase B-E）。
+    ///
+    /// 数据流：SSA MIR → LIR → MachineDag → RegAlloc → Peephole → Encode → COFF → Link
+    private fun compileFromSsa(ssaMIR: MirSsaProgram): BackendResult {
+        this.traceMark("compileFromSsa")
+        println("[Phase B-E] SSA MIR → LIR → ... → Executable")
+
+        val result = BackendResult()
+
+        // ── Phase B: MIR → LIR ──
+        this.traceMark("phaseB")
+        println("[Phase B] MIR → LIR (Lowering)")
+        val lowering = Lowering()
+        val lir = lowering.lower(ssaMIR)
+        println("  LIR functions=" + lir.functionCount +
+                " values=" + lir.valueCount +
+                " blocks=" + lir.blockCount)
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            this.photonDumpLir(lir)
+        }
+        if (Env.get("AURA_PHOTON_STOP") == "B") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_B"
+            return result
+        }
+
+        // ── Phase C: LIR → Machine DAG ──
+        this.traceMark("phaseC")
+        println("[Phase C] LIR → Machine DAG (InstructionSelection)")
+        val selector = InstructionSelectorUtils.emptySelector()
+        val dag = selector.select(lir)
+        println("  DAG nodes=" + dag.nodeCount +
+                " instrs=" + dag.instrCount)
+        if (Env.get("AURA_PHOTON_STOP") == "C") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_C"
+            return result
+        }
+
+        // ── Phase D: 寄存器分配 + 窥孔 ──
+        this.traceMark("phaseD")
+        println("[Phase D] Register Allocation + Peephole")
+        val allocator = RegisterAllocatorUtils.emptyAllocator()
+        allocator.allocate(dag)
+        println("  spillSlots=" + allocator.getSpillSlots())
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            var di: Int = 0
+            while (di < dag.nodeCount) {
+                val dn: DagNode = dag.nodeOf(di)
+                println("    n" + di + " kind=" + dn.kind + " op=" + dn.op +
+                        " reg=" + dn.reg + " args=" + dn.args + " aux=" + dn.aux)
+                di = di + 1
+            }
+            var ii: Int = 0
+            while (ii < dag.instrCount) {
+                val ins: DagInstruction = dag.instrOf(ii)
+                println("    i" + ii + " tpl=[" + ins.template + "] nodes=" + ins.nodes +
+                        " out=" + ins.output + " cond=" + ins.cond)
+                ii = ii + 1
+            }
+        }
+
+        // 窥孔优化
+        val peephole = PeepholeOptimizerUtils.emptyOptimizer()
+        peephole.optimize(dag)
+        println("  peephole passes=" + peephole.getPassCount())
+        if (Env.get("AURA_PHOTON_STOP") == "D") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_D"
+            return result
+        }
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            var pi2: Int = 0
+            while (pi2 < dag.instrCount) {
+                val ins2: DagInstruction = dag.instrOf(pi2)
+                println("    P" + pi2 + " tpl=[" + ins2.template + "] nodes=" + ins2.nodes +
+                        " out=" + ins2.output + " cond=" + ins2.cond)
+                pi2 = pi2 + 1
+            }
+        }
+
+        // ── Phase E: 指令编码 → 目标文件 → 链接 ──
+        this.traceMark("phaseE")
+        println("[Phase E] Instruction Encoding → Object → Link")
+
+        // Step 4: 指令编码
+        println("  Step 4: X86Emitter — 指令编码")
+        val emitter = X86EmitterUtils.emptyEmitter()
+        emitter.setAllocator(allocator)
+        emitter.emitFunction(dag, moduleName)
+        val machineCodeHex: String = emitter.getOutputHex()
+        val relocRecords: String = emitter.getRelocRecords()
+        result.machineCodeHex = machineCodeHex
+        result.encodedByteCount = machineCodeHex.length / 2
+        println("    机器码: " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
+        println("    字节数: " + result.encodedByteCount)
+
+        // Step 5: 目标文件组装
+        println("  Step 5: PhotonObjectWriter — COFF 目标文件组装")
+        val writer = PhotonObjectWriterUtils.emptyBackend()
+
+        // 获取函数偏移表（多函数发射支持）。
+        val funcOffsets: String = emitter.getFuncOffsets()
+        println("    函数偏移: " + funcOffsets)
+
+        // 获取字符串常量列表。
+        val stringConsts: String = selector.stringConstants
+        if (stringConsts != "") {
+            println("    字符串常量: " + stringConsts)
+        }
+
+        // 设置 COFF 写入器的多函数数据。
+        writer.textSection = machineCodeHex
+        writer.relocs = relocRecords
+        writer.stringConsts = stringConsts
+        writer.functionOffsets = funcOffsets
+
+        // 从函数偏移表解析函数名列表。
+        val funcNames: List<String> = this.parseFuncNames(funcOffsets)
+        writer.functions = this.joinComma(funcNames)
+        println("    函数列表: " + writer.functions)
+
+        // 构建符号表和 COFF/ELF 文件（按 OS 分派）。
+        writer.buildSymbols(writer.functions, writer.stringConsts)
+        val coffHex: String = writer.emit()
+        result.coffHex = coffHex
+        result.coffSize = coffHex.length / 2
+        println("    COFF 大小: " + result.coffSize + " 字节")
+
+        // 生成目标文件路径
+        val objPath = this.outDir + "/" + this.moduleName + ".obj"
+        result.objectFilePath = objPath
+
+        // 落盘为**二进制** COFF。
+        val wroteObj: Boolean = PhotonNativeWriter.writeObjectFile(objPath, coffHex)
+        if (!wroteObj) {
+            println("    ⚠ 二进制落盘失败，回退 hex 文本（需外部脚本转换）：" + objPath + ".hex")
+            writer.writeObjectBinaryFile(objPath)
+        }
+
+        // Step 6: 系统链接
+        println("  Step 6: PhotonSystemLinker — 系统链接")
+
+        // 生成 runtime 目标文件（定义 println，供 main 引用）；Unix 共享库不需要 runtime 入口对象
+        var runtimeObjPath: String = ""
+        if (this.outputType != "so" && this.outputType != "dylib") {
+            runtimeObjPath = this.outDir + "/aura_runtime.obj"
+            val runtimeHex: String = PhotonRuntime.buildRuntimeObject()
+            var runtimeResult: Boolean =
+                PhotonNativeWriter.writeObjectFile(runtimeObjPath, runtimeHex)
+            if (!runtimeResult) {
+                runtimeResult = PhotonRuntimeUtils.writeRuntimeObjectHexFile(runtimeObjPath)
+            }
+            println("    runtime 对象: " + runtimeObjPath +
+                    (if (runtimeResult) " ✓" else " ⚠ 写入失败"))
+        } else {
+            println("    runtime 对象: 跳过（Unix 共享库输出不链接 runtime）")
+        }
+
+        // 设置链接器：main 对象 + 可选 runtime 对象
+        val linker = PhotonSystemLinkerUtils.defaultLinker()
+        linker.setOutputType(this.outputType)
+        if (runtimeObjPath == "") {
+            linker.objectFiles = objPath
+        } else {
+            linker.objectFiles = objPath + " " + runtimeObjPath
+        }
+        if (this.outputType == "exe") {
+            linker.addFlag("/SUBSYSTEM:CONSOLE")
+            linker.addFlag("/ENTRY:main")
+            linker.addFlag("/MACHINE:X64")
+            linker.addFlag("/NODEFAULTLIB")
+        }
+        linker.useDefaultLibs = false
+        linker.outputName = this.outDir + "/" + this.moduleName
+        val linkCmd = linker.buildCommand()
+        result.linkCommand = linkCmd
+
+        // 根据输出类型设置可执行文件路径
+        if (this.outputType == "exe") {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".exe"
+        } else if (this.outputType == "dll") {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".dll"
+        } else if (this.outputType == "lib") {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".lib"
+        } else if (this.outputType == "so") {
+            result.executablePath = this.outDir + "/lib" + this.moduleName + ".so"
+        } else if (this.outputType == "dylib") {
+            result.executablePath = this.outDir + "/lib" + this.moduleName + ".dylib"
+        } else {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".exe"
+        }
+        println("    链接命令: " + linkCmd)
+
+        // Step 6b: 执行链接（如果链接器可用）
+        val linkRc: Int = linker.runLinker(linkCmd)
+        if (linkRc == 0) {
+            println("    ✓ 链接成功: " + result.executablePath)
+        } else {
+            println("    ⚠ 链接失败 (rc=" + this.toStr(linkRc) + ")")
+        }
+
+        result.functionCount = lir.functionCount
+        result.success = true
+
+        println("")
+        println("══════════════════════════════════════════════")
+        println("Photon 管线完成 (HAT) — 目标文件已生成")
+        println("══════════════════════════════════════════════")
+
+        return result
     }
 
     /// 调试：转储 SSA MIR（设 AURA_PHOTON_DEBUG_HIR=1）。

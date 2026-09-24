@@ -1,0 +1,213 @@
+{
+  "name": "HAT Theme (Dark)",
+  "colors": {
+    "editor.background": "#1E1E2E",
+    "editor.foreground": "#CDD6F4",
+    "editorLineNumber.foreground": "#6C7086",
+    "editorLineNumber.activeForeground": "#BAC2DE",
+    "editor.selectionBackground": "#45475A55",
+    "editorCursor.foreground": "#F5E0DC",
+    "editorIndentGuide.background": "#313244",
+    "editorIndentGuide.activeBackground": "#585B70",
+    "editorWhitespace.foreground": "#45475A",
+    "editor.lineHighlightBackground": "#18182555",
+    "editorWidget.background": "#11111B",
+    "editorWidget.border": "#313244",
+    "minimap.background": "#1E1E2E",
+    "scrollbarSlider.background": "#31324450",
+    "scrollbarSlider.hoverBackground": "#31324480",
+    "scrollbarSlider.activeBackground": "#313244C0",
+    "editorGutter.background": "#1E1E2E",
+    "panel.border": "#313244",
+    "tab.activeBackground": "#11111B",
+    "tab.activeForeground": "#CDD6F4",
+    "tab.border": "#181825",
+    "tab.inactiveBackground": "#1E1E2E",
+    "tab.inactiveForeground": "#6C7086",
+    "sideBar.background": "#181825",
+    "sideBar.foreground": "#BAC2DE",
+    "activityBar.background": "#11111B",
+    "titleBar.activeForeground": "#CDD6F4",
+    "statusBar.background": "#181825",
+    "statusBar.foreground": "#BAC2DE",
+    "gitDecoration.modifiedResourceForeground": "#F9E2AF",
+    "gitDecoration.untrackedResourceForeground": "#A6E3A1",
+    "gitDecoration.deletedResourceForeground": "#F38BA8"
+  },
+  "tokenColors": [
+    {
+      "name": "Line sigil (; + indentation) — format marker, not a comment",
+      "scope": "punctuation.definition.meta.hat",
+      "settings": { "foreground": "#585B70" }
+    },
+    {
+      "name": "Comment (unused by HAT, kept for embedded snippets)",
+      "scope": ["comment"],
+      "settings": { "foreground": "#6C7086", "fontStyle": "italic" }
+    },
+    {
+      "name": "Declaration keyword: @fn / @extern / @struct / @enum",
+      "scope": "keyword.declaration.hat",
+      "settings": { "foreground": "#89B4FA", "fontStyle": "bold" }
+    },
+    {
+      "name": "Structural keyword: target triple / metadata key / bb",
+      "scope": [
+        "keyword.other.target.hat",
+        "keyword.other.meta.hat",
+        "keyword.other.bb.hat"
+      ],
+      "settings": { "foreground": "#89DCEB", "fontStyle": "bold" }
+    },
+    {
+      "name": "Instruction: call / phi / terminator",
+      "scope": [
+        "keyword.other.instruction.call.hat",
+        "keyword.other.instruction.phi.hat",
+        "keyword.other.instruction.terminator.hat"
+      ],
+      "settings": { "foreground": "#89B4FA", "fontStyle": "bold" }
+    },
+    {
+      "name": "Instruction: constant",
+      "scope": "keyword.other.instruction.constant.hat",
+      "settings": { "foreground": "#FAB387", "fontStyle": "bold" }
+    },
+    {
+      "name": "Instruction: conversion",
+      "scope": "keyword.other.instruction.conversion.hat",
+      "settings": { "foreground": "#89DCEB", "fontStyle": "bold" }
+    },
+    {
+      "name": "Instruction: comparison",
+      "scope": "keyword.other.instruction.comparison.hat",
+      "settings": { "foreground": "#A6E3A1", "fontStyle": "bold" }
+    },
+    {
+      "name": "Instruction: arithmetic / logical / bitwise",
+      "scope": [
+        "keyword.other.instruction.arithmetic.hat",
+        "keyword.other.instruction.logical.hat",
+        "keyword.other.instruction.bitwise.hat"
+      ],
+      "settings": { "foreground": "#CBA6F7", "fontStyle": "bold" }
+    },
+    {
+      "name": "Instruction: string",
+      "scope": "keyword.other.instruction.string.hat",
+      "settings": { "foreground": "#FAB387", "fontStyle": "bold" }
+    },
+    {
+      "name": "Instruction: memory / collection",
+      "scope": [
+        "keyword.other.instruction.memory.hat",
+        "keyword.other.instruction.collection.hat"
+      ],
+      "settings": { "foreground": "#89B4FA", "fontStyle": "bold" }
+    },
+    {
+      "name": "Instruction: object",
+      "scope": "keyword.other.instruction.object.hat",
+      "settings": { "foreground": "#CBA6F7", "fontStyle": "bold" }
+    },
+    {
+      "name": "Arrow: -> / =>",
+      "scope": "keyword.other.arrow.hat",
+      "settings": { "foreground": "#FAB387" }
+    },
+    {
+      "name": "Assignment",
+      "scope": "keyword.other.assignment.hat",
+      "settings": { "foreground": "#9399B2" }
+    },
+    {
+      "name": "Function name (definition / call target)",
+      "scope": [
+        "entity.name.function.hat",
+        "entity.name.function.call.hat",
+        "entity.name.function.extern.hat"
+      ],
+      "settings": { "foreground": "#F9E2AF", "fontStyle": "bold" }
+    },
+    {
+      "name": "Type name (struct / enum / user type)",
+      "scope": ["entity.name.type.hat", "storage.type.user.hat"],
+      "settings": { "foreground": "#F9E2AF", "fontStyle": "bold" }
+    },
+    {
+      "name": "Enum variant",
+      "scope": "variable.other.enummember.hat",
+      "settings": { "foreground": "#F9E2AF" }
+    },
+    {
+      "name": "Module name",
+      "scope": "entity.name.type.module.hat",
+      "settings": { "foreground": "#89B4FA" }
+    },
+    {
+      "name": "Metadata value (schema / source)",
+      "scope": "string.unquoted.hat",
+      "settings": { "foreground": "#F9E2AF" }
+    },
+    {
+      "name": "Span annotation",
+      "scope": "comment.block.span.hat",
+      "settings": { "foreground": "#6C7086", "fontStyle": "italic" }
+    },
+    {
+      "name": "Basic block label",
+      "scope": "entity.name.type.label.hat",
+      "settings": { "foreground": "#FAB387", "fontStyle": "bold" }
+    },
+    {
+      "name": "Function parameter",
+      "scope": "variable.parameter.hat",
+      "settings": { "foreground": "#A6E3A1" }
+    },
+    {
+      "name": "SSA value",
+      "scope": "variable.ssaval.hat",
+      "settings": { "foreground": "#89B4FA" }
+    },
+    {
+      "name": "SSA string literal",
+      "scope": "variable.ssaval.literal.hat",
+      "settings": { "foreground": "#A6E3A1" }
+    },
+    {
+      "name": "Field name",
+      "scope": "variable.field.hat",
+      "settings": { "foreground": "#CBA6F7" }
+    },
+    {
+      "name": "Attribute key (size / align / count)",
+      "scope": "variable.attribute.hat",
+      "settings": { "foreground": "#9399B2", "fontStyle": "italic" }
+    },
+    {
+      "name": "Type",
+      "scope": ["storage.type.basic.hat", "storage.type.special.hat"],
+      "settings": { "foreground": "#89DCEB", "fontStyle": "italic" }
+    },
+    {
+      "name": "Numeric literal",
+      "scope": ["constant.numeric.integer.hat", "constant.numeric.float.hat"],
+      "settings": { "foreground": "#FAB387" }
+    },
+    {
+      "name": "Language constant",
+      "scope": "constant.language.hat",
+      "settings": { "foreground": "#F38BA8", "fontStyle": "bold" }
+    },
+    {
+      "name": "String literal",
+      "scope": "string.quoted.double.hat",
+      "settings": { "foreground": "#A6E3A1" }
+    },
+    {
+      "name": "Punctuation",
+      "scope": ["punctuation.section.hat", "punctuation.separator.hat"],
+      "settings": { "foreground": "#9399B2" }
+    }
+  ]
+}

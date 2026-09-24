@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[; @store (, )]]></content>
+    <tabTrigger>store</tabTrigger>
+    <scope>source.hat</scope>
+    <description>Store to memory</description>
+</snippet>

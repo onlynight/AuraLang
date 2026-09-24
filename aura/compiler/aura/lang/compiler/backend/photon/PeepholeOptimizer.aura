@@ -170,21 +170,21 @@ class PeepholeOptimizer {
         while (i < instrs.size) {
             val instr: DagInstruction = instrs[i]
             // add with 0
-            if (instr.template == "add %dst, %src, $imm" && instr.mem == "0") {
+            if (instr.template == "add %dst, %src, @imm" && instr.mem == "0") {
                 instr.template = "nop"
                 instr.nodes = ""
                 this.optimized = this.optimized + 1
                 changed = true
             }
             // imul with 1
-            if (instr.template == "imul %dst, %src, $imm" && instr.mem == "1") {
+            if (instr.template == "imul %dst, %src, @imm" && instr.mem == "1") {
                 instr.template = "nop"
                 instr.nodes = ""
                 this.optimized = this.optimized + 1
                 changed = true
             }
             // sub with 0
-            if (instr.template == "sub %dst, %src, $imm" && instr.mem == "0") {
+            if (instr.template == "sub %dst, %src, @imm" && instr.mem == "0") {
                 instr.template = "nop"
                 instr.nodes = ""
                 this.optimized = this.optimized + 1
@@ -206,15 +206,15 @@ class PeepholeOptimizer {
             if (mem != "" && this.isPowerOfTwo(mem)) {
                 val shift: Int = this.log2(this.strToInt(mem))
                 // imul by 2^n → shl
-                if (instr.template == "imul %dst, %src, $imm" && shift >= 1 && shift <= 63) {
-                    instr.template = "shl %dst, $shift"
+                if (instr.template == "imul %dst, %src, @imm" && shift >= 1 && shift <= 63) {
+                    instr.template = "shl %dst, @shift"
                     instr.mem = toStr(shift)
                     this.optimized = this.optimized + 1
                     changed = true
                 }
                 // div by 2^n → shr
-                if (instr.template == "div %dst, $imm" && shift >= 1 && shift <= 63) {
-                    instr.template = "shr %dst, $shift"
+                if (instr.template == "div %dst, %src" && shift >= 1 && shift <= 63) {
+                    instr.template = "shr %dst, @shift"
                     instr.mem = toStr(shift)
                     this.optimized = this.optimized + 1
                     changed = true
@@ -321,7 +321,7 @@ class PeepholeOptimizer {
         while (i < instrs.size) {
             val instr: DagInstruction = instrs[i]
             // add r1, r2, 0
-            if (instr.template == "add %dst, %src, $imm" && instr.mem == "0") {
+            if (instr.template == "add %dst, %src, @imm" && instr.mem == "0") {
                 instr.template = "nop"
                 instr.nodes = ""
                 this.optimized = this.optimized + 1
@@ -342,10 +342,10 @@ class PeepholeOptimizer {
             val mid: DagInstruction = instrs[i + 1]
             val next: DagInstruction = instrs[i + 2]
             // cmp r1, imm; jcc target; cmp r1, imm; jcc target
-            if (instr.template == "cmp %src, $imm" && mid.template == "jcc $target"
-                && next.template == "cmp %src, $imm" && instr.mem == next.mem) {
+            if (instr.template == "cmp %src, @imm" && mid.template == "jcc @target"
+                && next.template == "cmp %src, @imm" && instr.mem == next.mem) {
                 // 合并：cmp; jcc target; jcc target
-                next.template = "jcc $target"
+                next.template = "jcc @target"
                 next.nodes = ""
                 next.mem = mid.cond
                 this.optimized = this.optimized + 1

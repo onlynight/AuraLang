@@ -1,0 +1,100 @@
+{
+  "name": "@aura-lang/dsh-highlight-hat",
+  "version": "0.1.0",
+  "description": "DSH Web GUI client plugin: HAT v3.0 SSA IR syntax highlighting. Reuses the VSCode extension's TextMate grammar verbatim and renders it with Shiki against DSH's live theme.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "hat",
+    "syntax-highlighting",
+    "shiki",
+    "textmate"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AuraLang/AuraLang.git",
+    "directory": "tools/dsh-plugins/hat-dsh-highlight"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./highlight": {
+      "types": "./lib/types/highlight/index.d.ts",
+      "default": "./lib/highlight.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-sidebar-documentpreview"
+      ],
+      "external": [
+        "react",
+        "react/jsx-runtime"
+      ],
+      "immediately": true
+    }
+  },
+  "files": [
+    "lib",
+    "grammar",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:clean": "node scripts/build.mjs --clean",
+    "sync:grammar": "node scripts/sync-grammar.mjs",
+    "bundle:grammar": "node scripts/bundle-grammar.mjs",
+    "check:grammar": "node scripts/diff-grammar.mjs",
+    "test": "node --test",
+    "pretest": "node scripts/build.mjs",
+    "prepublishOnly": "node scripts/build.mjs && node scripts/diff-grammar.mjs"
+  },
+  "dependencies": {
+    "@shikijs/core": "4.4.3",
+    "@shikijs/engine-javascript": "4.4.3",
+    "@shikijs/engine-oniguruma": "4.4.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "react": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar-documentpreview": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.5-rc.2",
+    "@types/react": "~18.3.1",
+    "esbuild": "^0.28.2",
+    "react": "^18.2.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

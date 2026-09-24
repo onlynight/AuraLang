@@ -126,18 +126,16 @@ class SsaBuilder {
             val childKind: String = src.kindOf(childId)
             if (childKind == "HirFunction") {
                 this.dbgFuncCount = this.dbgFuncCount + 1
-                // 逐函数探针（性能诊断用，AURA_PHOTON_TRACE=1 时才打印）。
-                // 默认关闭：真实工程有 2000+ 函数，逐函数 println 既刷屏又拖慢。
                 val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
-                if (this.dbgFuncCount >= 20 && traceOn) {
+                // 崩溃诊断：AURA_PHOTON_TRACE=1 时逐函数打印，定位精确崩溃点
+                if (traceOn) {
                     println("      [ssab] n=" + this.dbgFuncCount + " " + src.textOf(childId))
                 }
                 this.buildFunction(src, childId)
-                if (this.dbgFuncCount >= 20 && traceOn) {
+                if (traceOn) {
                     println("      [ssae] n=" + this.dbgFuncCount + " values=" + this.program.valueCount +
                             " exprs=" + this.dbgExprs +
-                            " tys=" + this.types.count + " tyCalls=" + this.types.dbgCalls +
-                            " tyScanned=" + this.types.dbgScanned)
+                            " tys=" + this.types.count)
                 }
             }
             i = i + 1
@@ -150,6 +148,7 @@ class SsaBuilder {
 
     /// 构建一个函数的 SSA MIR，返回 FunctionID。
     fun buildFunction(src: Hir, id: Int): Int {
+        val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
         val name: String = src.textOf(id)
         val retTy: String = src.tyOf(id)
 
@@ -165,15 +164,20 @@ class SsaBuilder {
 
         // 创建入口块
         val entryBlock: Int = this.program.addBlock()
+        if (traceOn) println("    [bf1] curBlock=" + entryBlock)
         this.curBlock = entryBlock
+        if (traceOn) println("    [bf2] after curBlock set")
 
         // 初始化内存链（函数入口的 memory 状态）
         val memTypeId: Int = this.types.intType(64)
+        if (traceOn) println("    [bf3] before addValue entry_mem")
         this.memHead = this.program.addValue("Const", memTypeId, "", "entry_mem", entryBlock)
+        if (traceOn) println("    [bf4] after addValue entry_mem")
 
         // 处理参数
         val kids: String = src.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (traceOn) println("    [bf5] kCount=" + kCount)
         var i: Int = 0
         while (i < kCount) {
             val childId: Int = HirUtils.hirKidsAt(kids, i)
@@ -182,6 +186,7 @@ class SsaBuilder {
                 val paramName: String = src.textOf(childId)
                 val paramTy: String = src.tyOf(childId)
                 val paramTypeId: Int = this.types.fromTypeName(paramTy)
+                if (traceOn) println("    [bf6] param=" + paramName)
 
                 // 创建参数值（作为入口块的指令）
                 val paramVal: Int = this.program.addValue("Param", paramTypeId, "", paramName, entryBlock)
@@ -198,21 +203,27 @@ class SsaBuilder {
 
                 // 更新函数参数列表
                 val f: MirFunction = this.program.functionOf(this.curFunc)
+                if (traceOn) println("    [bf7] before f.params=" + this.curParams)
                 f.params = this.curParams
+                if (traceOn) println("    [bf8] after f.params set")
             }
             i = i + 1
         }
 
         // 构建函数体
         i = 0
+        if (traceOn) println("    [bf9] before buildStmt loop")
         while (i < kCount) {
             val childId: Int = HirUtils.hirKidsAt(kids, i)
             val childKind: String = src.kindOf(childId)
             if (childKind != "HirParam") {
+                if (traceOn) println("    [bf10] buildStmt child=" + childId + " kind=" + childKind)
                 this.buildStmt(src, childId)
+                if (traceOn) println("    [bf11] after buildStmt child=" + childId)
             }
             i = i + 1
         }
+        if (traceOn) println("    [bf12] after buildStmt loop")
 
         // 如果没有终结指令，添加默认的 Ret
         val b: MirBlock = this.program.blockOf(this.curBlock)
@@ -300,6 +311,7 @@ class SsaBuilder {
     ///   else → build else body → Br(merge)
     ///   merge → Phi 插入（若有变量被两分支定义）
     fun buildIf(src: Hir, id: Int) {
+        val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
         val kids: String = src.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount < 2) {
@@ -308,15 +320,19 @@ class SsaBuilder {
 
         // 降级条件
         val condVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+        if (traceOn) println("      [if1] condVal=" + condVal)
 
         // 创建 then 块、else 块、merge 块
         val thenBlock: Int = this.program.addBlock()
         val elseBlock: Int = this.program.addBlock()
         val mergeBlock: Int = this.program.addBlock()
+        if (traceOn) println("      [if2] then=" + thenBlock + " else=" + elseBlock + " merge=" + mergeBlock)
 
         // 设置当前块的终结指令为 CondBr
+        if (traceOn) println("      [if3] before setTerminator CondBr")
         this.program.setTerminator(this.curBlock, "CondBr", 0,
             toStr(condVal) + "," + toStr(thenBlock) + "," + toStr(elseBlock), "")
+        if (traceOn) println("      [if4] after setTerminator CondBr")
 
         // 保存 varMap 快照（用于检测 then/else 中定义的变量）
         val varMapBefore: String = this.varMap
@@ -324,41 +340,53 @@ class SsaBuilder {
         // 构建 then 块
         this.curBlock = thenBlock
         this.buildBlock(src, HirUtils.hirKidsAt(kids, 1))
+        if (traceOn) println("      [if5] after buildBlock then")
 
         // 设置 then 块到 merge 块的跳转
         val thenBlockObj: MirBlock = this.program.blockOf(this.curBlock)
         if (thenBlockObj.term < 0) {
             this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock), "")
         }
+        if (traceOn) println("      [if6] after then->merge Br")
 
         // 保存 then 块中定义的变量
         val varMapAfterThen: String = this.varMap
+        if (traceOn) println("      [if7] varMapAfterThen saved")
 
         // 构建 else 块
         if (kCount > 2) {
+            if (traceOn) println("      [if8] before buildBlock else")
             this.curBlock = elseBlock
             this.buildBlock(src, HirUtils.hirKidsAt(kids, 2))
+            if (traceOn) println("      [if9] after buildBlock else")
             val elseBlockObj: MirBlock = this.program.blockOf(this.curBlock)
             if (elseBlockObj.term < 0) {
                 this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock), "")
             }
+            if (traceOn) println("      [if10] after else->merge Br")
         } else {
+            if (traceOn) println("      [if8b] no else, direct Br")
             // 无 else 分支：直接跳转到 merge
             this.curBlock = elseBlock
             this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock), "")
+            if (traceOn) println("      [if10b] after no-else Br")
         }
 
         // 保存 else 块中定义的变量
         val varMapAfterElse: String = this.varMap
+        if (traceOn) println("      [if11] varMapAfterElse saved")
 
         // 在 merge 块插入 Phi 节点（for variables defined in both branches）
+        if (traceOn) println("      [if12] before insertPhisAtMerge")
         this.insertPhisAtMerge(mergeBlock, varMapBefore, varMapAfterThen, varMapAfterElse)
+        if (traceOn) println("      [if13] after insertPhisAtMerge")
 
         // 恢复 varMap 到 merge 块的状态（合并 then/else 的定义）
         this.varMap = varMapAfterElse  // else 块的定义优先
 
         // 继续构建 merge 块
         this.curBlock = mergeBlock
+        if (traceOn) println("      [if14] curBlock=merge")
     }
 
     /// 在 merge 块插入 Phi 节点。
@@ -469,21 +497,30 @@ class SsaBuilder {
     /// 零分配：倒序按 `\n` 定位行，行内按 `|`（124）定位，只对命中项切片一次。
     private fun mapVidOf(map: String, name: String): Int {
         if (map == "" || name == "") { return -1 }
-        var end: Int = map.length
-        while (end > 0) {
-            var start: Int = end - 1
-            while (start >= 0 && map.charCodeAt(start) != 10) { start = start - 1 }
-            start = start + 1
-            if (end > start) {
-                var sep: Int = start
-                while (sep < end && map.charCodeAt(sep) != 124) { sep = sep + 1 }
-                if (sep < end && this.tokenRangeEquals(map, start, sep, name)) {
-                    return this.strToInt(map.substring(sep + 1, end))
+        // Forward scan: iterate through each line, keep last match (backward scan crashes in AOT)
+        val nlen: Int = name.length
+        val mlen: Int = map.length
+        var result: Int = -1
+        var i: Int = 0
+        while (i < mlen) {
+            if (map.charCodeAt(i) == 10) { i = i + 1; continue }
+            if (i + nlen < mlen) {
+                var match: Boolean = true
+                var k: Int = 0
+                while (k < nlen) {
+                    if (map.charCodeAt(i + k) != name.charCodeAt(k)) { match = false; break }
+                    k = k + 1
+                }
+                if (match && map.charCodeAt(i + nlen) == 124) {
+                    var j: Int = i + nlen + 1
+                    while (j < mlen && map.charCodeAt(j) != 10) { j = j + 1 }
+                    val sub: String = map.substring(i + nlen + 1, j)
+                    result = this.strToInt(sub)
                 }
             }
-            end = start - 1
+            i = i + 1
         }
-        return -1
+        return result
     }
 
     /// 检查扁平字符串（逗号分隔）中是否包含指定名称（零分配扫描，不拆分）。
@@ -717,25 +754,40 @@ class SsaBuilder {
 
     /// 构建块（HirBlock）。
     fun buildBlock(src: Hir, id: Int) {
+        val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
         this.dbgBlocks = this.dbgBlocks + 1
         val kids: String = src.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (traceOn) println("    [bb0] buildBlock id=" + id + " kCount=" + kCount)
         var i: Int = 0
         while (i < kCount) {
-            this.buildStmt(src, HirUtils.hirKidsAt(kids, i))
+            val childId: Int = HirUtils.hirKidsAt(kids, i)
+            val childKind: String = src.kindOf(childId)
+            if (traceOn) println("    [bb1] child=" + i + " id=" + childId + " kind=" + childKind)
+            this.buildStmt(src, childId)
+            if (traceOn) println("    [bb2] after child=" + i)
             i = i + 1
         }
+        if (traceOn) println("    [bb3] buildBlock done id=" + id)
     }
 
     /// 构建 return 语句。
     fun buildReturn(src: Hir, id: Int) {
+        val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
+        if (traceOn) println("      [ret0] buildReturn id=" + id)
         val kids: String = src.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (traceOn) println("      [ret1] kCount=" + kCount)
         if (kCount > 0) {
+            if (traceOn) println("      [ret2] before buildExpr")
             val retVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+            if (traceOn) println("      [ret3] retVal=" + retVal + " before setTerminator")
             this.program.setTerminator(this.curBlock, "Ret", 0, toStr(retVal), "")
+            if (traceOn) println("      [ret4] after setTerminator")
         } else {
+            if (traceOn) println("      [ret2b] no kids, before setTerminator")
             this.program.setTerminator(this.curBlock, "Ret", 0, "", "")
+            if (traceOn) println("      [ret4b] after setTerminator")
         }
     }
 
@@ -774,8 +826,10 @@ class SsaBuilder {
 
     /// 构建一个表达式，返回 SSA ValueID。
     fun buildExpr(src: Hir, id: Int): Int {
+        val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
         this.dbgExprs = this.dbgExprs + 1
         val kind: String = src.kindOf(id)
+        if (traceOn) println("        [expr] id=" + id + " kind=" + kind)
 
         if (kind == "HirLit") {
             return this.buildLit(src, id)
@@ -827,6 +881,7 @@ class SsaBuilder {
         }
 
         // 默认：返回零值常量
+        if (traceOn) println("        [expr] default branch for kind=" + kind)
         val ty: String = src.tyOf(id)
         val typeId: Int = this.types.fromTypeName(ty)
         if (this.types.isInt(typeId)) {
@@ -861,8 +916,14 @@ class SsaBuilder {
 
     /// 构建变量引用。
     fun buildVar(src: Hir, id: Int): Int {
+        val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
+        if (traceOn) println("          [var0] buildVar id=" + id)
         val name: String = src.textOf(id)
-        return this.varMapLookup(name)
+        if (traceOn) println("          [var1] name=" + name)
+        if (traceOn) println("          [var2] before varMapLookup")
+        val result: Int = this.varMapLookup(name)
+        if (traceOn) println("          [var3] result=" + result)
+        return result
     }
 
     /// 构建二元运算。
@@ -1129,11 +1190,16 @@ class SsaBuilder {
     ///
     /// 遍历所有 `name|vid\n` 行，按 `|` 拆分后匹配名称。
     private fun varMapLookup(name: String): Int {
-        // 从末尾向前搜索：最后一次赋值（最新版本）优先（零分配，见 mapVidOf）
+        val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
+        if (traceOn) println("            [vml0] varMapLookup name=" + name)
+        if (traceOn) println("            [vml1] varMap length=" + this.varMap.length)
         val vid: Int = this.mapVidOf(this.varMap, name)
-        if (vid >= 0) { return vid }
-        // 未找到：返回 0 值常量
-        return this.program.addValue("Const", this.types.intType(64), "", "0", this.curBlock)
+        if (traceOn) println("            [vml3] vid=" + vid)
+        if (vid >= 0) {
+            return vid
+        }
+        val result: Int = this.program.addValue("Const", this.types.intType(64), "", "0", this.curBlock)
+        return result
     }
 
     // ── 循环栈 ──

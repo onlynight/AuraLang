@@ -1,0 +1,87 @@
+// tests/photon/coerce_test3.aura
+// 精确复现 SsaMir.addBlock 模式：验证 coerce_arg 修复
+
+class Block {
+    var id: Int = 0
+}
+
+class Func {
+    var name: String = ""
+    var blocks: String = ""
+}
+
+class Program {
+    var funcs: List<Func> = arrayListOf<Func>()
+    var blockCount: Int = 0
+    var currentFunc: Int = -1
+
+    init() {
+        this.funcs = arrayListOf<Func>()
+        this.blockCount = 0
+        this.currentFunc = -1
+    }
+
+    fun addFunc(name: String): Int {
+        val f: Func = Func()
+        f.name = name
+        f.blocks = ""
+        this.funcs.add(f)
+        this.currentFunc = this.funcs.size - 1
+        return this.currentFunc
+    }
+
+    fun funcOf(id: Int): Func {
+        if (id < 0 || id >= this.funcs.size) {
+            return Func()
+        }
+        return this.funcs[id]
+    }
+
+    fun addBlock(): Int {
+        val b: Block = Block()
+        b.id = this.blockCount
+        this.blockCount = this.blockCount + 1
+        if (this.currentFunc >= 0) {
+            val f: Func = this.funcOf(this.currentFunc)
+            if (f.blocks == "") {
+                f.blocks = toStr(b.id)
+            } else {
+                f.blocks = f.blocks + "," + toStr(b.id)
+            }
+        }
+        return b.id
+    }
+}
+
+fun main() {
+    val prog: Program = Program()
+    
+    // 函数 0
+    prog.addFunc("main")
+    prog.addBlock()  // blocks = "0"
+    prog.addBlock()  // blocks = "0,1"
+    prog.addBlock()  // blocks = "0,1,2"
+    
+    // 函数 1
+    prog.addFunc("helper")
+    prog.addBlock()  // blocks = "3"
+    prog.addBlock()  // blocks = "3,4"
+    
+    // 函数 2
+    prog.addFunc("util")
+    prog.addBlock()  // blocks = "5"
+    
+    // 验证
+    var ok: Boolean = true
+    var i: Int = 0
+    while (i < 3) {
+        val fi: Func = prog.funcOf(i)
+        println("func" + toStr(i) + ".name=" + fi.name + " blocks=" + fi.blocks)
+        if (i == 0 && fi.blocks != "0,1,2") { ok = false; println("FAIL: func0.blocks") }
+        if (i == 1 && fi.blocks != "3,4") { ok = false; println("FAIL: func1.blocks") }
+        if (i == 2 && fi.blocks != "5") { ok = false; println("FAIL: func2.blocks") }
+        i = i + 1
+    }
+    
+    if (ok) { println("ALL OK") } else { println("FAILED") }
+}

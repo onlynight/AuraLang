@@ -76,10 +76,6 @@ class TypeRegistry {
         }
 
         val id: Int = this.kinds.size
-        if (id % 200 == 0) {
-            println("      [tyreg] id=" + id + " kind=" + kind + " name=" + name +
-                    " fields=" + fieldIds + " elem=" + toStr(elemId) + " len=" + toStr(arrayLen))
-        }
         this.kinds.add(kind)
         this.widths.add(width)
         this.names.add(name)

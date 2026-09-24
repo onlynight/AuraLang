@@ -1,0 +1,307 @@
+{
+  "name": "HAT v3.0",
+  "scopeName": "source.hat",
+  "comment": "HAT v2.0 SSA IR text format syntax highlighting — v3.0 (sigil + token architecture)",
+  "patterns": [
+    { "include": "#module-header" },
+    { "include": "#meta-key-value" },
+    { "include": "#decl-line" },
+    { "include": "#bb-label" },
+    { "include": "#tokens" },
+    { "include": "#meta-sigil" }
+  ],
+  "repository": {
+    "module-header": {
+      "comment": "Module header: ; module <name> target <triple>",
+      "match": "^[ \\t]*(?:;[ \\t]*)?module\\s+([\\w.]+)\\s+target\\s+([\\w.-]+)",
+      "captures": {
+        "1": { "name": "entity.name.type.module.hat" },
+        "2": { "name": "keyword.other.target.hat" }
+      }
+    },
+    "meta-key-value": {
+      "comment": "Module metadata: ; schema=HAT/2.0 / ; source=<path>",
+      "match": "^[ \\t]*(?:;[ \\t]*)?(schema|source)=([^\\s]+)",
+      "captures": {
+        "1": { "name": "keyword.other.meta.hat" },
+        "2": { "name": "string.unquoted.hat" }
+      }
+    },
+    "decl-line": {
+      "comment": "Declaration line: @fn / @extern / @struct / @enum",
+      "begin": "^[ \\t]*(?:;[ \\t]*)?(@fn|@extern|@struct|@enum)\\b",
+      "beginCaptures": {
+        "1": { "name": "keyword.declaration.hat" }
+      },
+      "end": "(?=$)",
+      "patterns": [
+        {
+          "comment": "Declared name: @fn <name>(...) / @extern <name>(...)",
+          "match": "[A-Za-z_][\\w.]*(?=\\s*\\()",
+          "name": "entity.name.function.hat"
+        },
+        {
+          "comment": "Declared type name: @struct @Point / @enum @Color",
+          "match": "@[A-Z][A-Za-z0-9_]*",
+          "name": "entity.name.type.hat"
+        },
+        {
+          "comment": "Signature parameter: @name: Type",
+          "match": "@[\\w]+(?=\\s*:)",
+          "name": "variable.parameter.hat"
+        },
+        {
+          "comment": "Signature arrow",
+          "match": "->",
+          "name": "keyword.other.arrow.hat"
+        },
+        { "include": "#tokens" },
+        {
+          "comment": "Enum variant: RED, GREEN, BLUE",
+          "match": "\\b[A-Z][A-Z0-9_]*\\b",
+          "name": "variable.other.enummember.hat"
+        }
+      ]
+    },
+    "bb-label": {
+      "comment": "Basic block label: ; bb <label>:",
+      "match": "^[ \\t]*(?:;[ \\t]*)?(bb)\\s+([\\w.]+)\\s*:",
+      "captures": {
+        "1": { "name": "keyword.other.bb.hat" },
+        "2": { "name": "entity.name.type.label.hat" }
+      }
+    },
+    "meta-sigil": {
+      "comment": "Line sigil: the leading ';' + indentation of every HAT line (not a comment)",
+      "match": "^;[ \\t]*",
+      "name": "punctuation.definition.meta.hat"
+    },
+    "tokens": {
+      "patterns": [
+        { "include": "#span-annotation" },
+        { "include": "#br-if-target" },
+        { "include": "#br-target" },
+        { "include": "#call-target" },
+        { "include": "#op-call" },
+        { "include": "#op-phi" },
+        { "include": "#op-terminator" },
+        { "include": "#op-const" },
+        { "include": "#op-convert" },
+        { "include": "#op-cmp-sub" },
+        { "include": "#op-cmp" },
+        { "include": "#op-arith" },
+        { "include": "#op-logical" },
+        { "include": "#op-bitwise" },
+        { "include": "#op-string" },
+        { "include": "#op-memory" },
+        { "include": "#op-collection" },
+        { "include": "#op-object" },
+        { "include": "#literal" },
+        { "include": "#type" },
+        { "include": "#attribute" },
+        { "include": "#field" },
+        { "include": "#value" },
+        { "include": "#punct" }
+      ]
+    },
+    "span-annotation": {
+      "comment": "Inline span annotation: @span L<line>:<col>-<endCol>",
+      "match": "@span\\s+(L\\d+:\\d+-\\d+)",
+      "captures": {
+        "1": { "name": "comment.block.span.hat" }
+      }
+    },
+    "br-if-target": {
+      "comment": "@br_if @cond => @then, @else — branch targets are labels, not SSA values",
+      "match": "(@br_if)(\\s+)(@[\\w.]+)(\\s*=>\\s*)(@[\\w.]+)(\\s*,\\s*)(@[\\w.]+)",
+      "captures": {
+        "1": { "name": "keyword.other.instruction.terminator.hat" },
+        "2": { "name": "punctuation.separator.hat" },
+        "3": { "name": "variable.ssaval.hat" },
+        "4": { "name": "keyword.other.arrow.hat" },
+        "5": { "name": "entity.name.type.label.hat" },
+        "6": { "name": "punctuation.separator.hat" },
+        "7": { "name": "entity.name.type.label.hat" }
+      }
+    },
+    "br-target": {
+      "comment": "@br @label — the branch target is a label, not an SSA value",
+      "match": "(@br)(\\s+)(@[\\w.]+)",
+      "captures": {
+        "1": { "name": "keyword.other.instruction.terminator.hat" },
+        "2": { "name": "punctuation.separator.hat" },
+        "3": { "name": "entity.name.type.label.hat" }
+      }
+    },
+    "call-target": {
+      "comment": "@call @fn_name — the callee is a function reference, not an SSA value",
+      "match": "(@call)(\\s+)(@[\\w.]+)",
+      "captures": {
+        "1": { "name": "keyword.other.instruction.call.hat" },
+        "2": { "name": "punctuation.separator.hat" },
+        "3": { "name": "entity.name.function.call.hat" }
+      }
+    },
+    "op-call": {
+      "comment": "Instruction: @call (bare form, no callee matched above)",
+      "match": "@call\\b",
+      "name": "keyword.other.instruction.call.hat"
+    },
+    "op-phi": {
+      "comment": "Instruction: @phi",
+      "match": "@phi\\b",
+      "name": "keyword.other.instruction.phi.hat"
+    },
+    "op-terminator": {
+      "comment": "Instruction: @br / @br_if / @ret",
+      "match": "@(br_if|br|ret)\\b",
+      "name": "keyword.other.instruction.terminator.hat"
+    },
+    "op-const": {
+      "comment": "Instruction: @i32_const / @f64_const / @const_str / @bool_const / @null",
+      "match": "@(i32_const|i64_const|f64_const|f32_const|const_str|bool_const|null)\\b",
+      "name": "keyword.other.instruction.constant.hat"
+    },
+    "op-convert": {
+      "comment": "Instruction: type conversions",
+      "match": "@(i32_to_f64|f64_to_i32|i32_to_str|f64_to_str|str_to_i32)\\b",
+      "name": "keyword.other.instruction.conversion.hat"
+    },
+    "op-cmp-sub": {
+      "comment": "Comparison sub-operator: @i32_slt / @f64_lt / @str_eq",
+      "match": "@(?:i32|f64|str)_(?:eq|ne|slt|sgt|sle|sge|ult|ugt|lt|le|gt|ge)\\b",
+      "name": "keyword.other.instruction.comparison.hat"
+    },
+    "op-cmp": {
+      "comment": "Instruction: @icmp / @fcmp",
+      "match": "@(icmp|fcmp)\\b",
+      "name": "keyword.other.instruction.comparison.hat"
+    },
+    "op-arith": {
+      "comment": "Instruction: arithmetic",
+      "match": "@(add|sub|mul|div|rem|neg)\\b",
+      "name": "keyword.other.instruction.arithmetic.hat"
+    },
+    "op-logical": {
+      "comment": "Instruction: logical",
+      "match": "@(and|or|xor|not)\\b",
+      "name": "keyword.other.instruction.logical.hat"
+    },
+    "op-bitwise": {
+      "comment": "Instruction: bitwise",
+      "match": "@(band|bor|bxor|shl|shr|ushr)\\b",
+      "name": "keyword.other.instruction.bitwise.hat"
+    },
+    "op-string": {
+      "comment": "Instruction: string ops",
+      "match": "@(str_concat|str_len|str_sub|str_char)\\b",
+      "name": "keyword.other.instruction.string.hat"
+    },
+    "op-memory": {
+      "comment": "Instruction: memory ops",
+      "match": "@(alloc|store|load)\\b",
+      "name": "keyword.other.instruction.memory.hat"
+    },
+    "op-collection": {
+      "comment": "Instruction: collection ops",
+      "match": "@(alloc_list|alloc_map|list_set|list_get|list_len|map_set|map_get)\\b",
+      "name": "keyword.other.instruction.collection.hat"
+    },
+    "op-object": {
+      "comment": "Instruction: object ops",
+      "match": "@(new|field_set|field)\\b",
+      "name": "keyword.other.instruction.object.hat"
+    },
+    "literal": {
+      "patterns": [
+        {
+          "comment": "String literal",
+          "match": "\"(?:[^\"\\\\]|\\\\.)*\"",
+          "name": "string.quoted.double.hat"
+        },
+        {
+          "comment": "Boolean literal",
+          "match": "\\b(true|false)\\b",
+          "name": "constant.language.hat"
+        },
+        {
+          "comment": "Float literal",
+          "match": "-?\\d+\\.\\d+(?:[eE][+-]?\\d+)?",
+          "name": "constant.numeric.float.hat"
+        },
+        {
+          "comment": "Integer literal",
+          "match": "-?\\b\\d+\\b",
+          "name": "constant.numeric.integer.hat"
+        }
+      ]
+    },
+    "type": {
+      "patterns": [
+        {
+          "comment": "Special type: !stackslot / !list / !map / !ptr / !fn",
+          "match": "!(?:stackslot|list|map|ptr|fn)\\b",
+          "name": "storage.type.special.hat"
+        },
+        {
+          "comment": "Basic type",
+          "match": "\\b(?:Int|Float|Bool|Unit|String|Any|Char|Void)\\b",
+          "name": "storage.type.basic.hat"
+        },
+        {
+          "comment": "User type: @Point / @Color",
+          "match": "@[A-Z][A-Za-z0-9_]*",
+          "name": "storage.type.user.hat"
+        }
+      ]
+    },
+    "attribute": {
+      "comment": "Attribute key inside { }: size / align / count",
+      "match": "\\b(?:size|align|count)\\b",
+      "name": "variable.attribute.hat"
+    },
+    "field": {
+      "comment": "Field access: .name",
+      "match": "\\.\\w+",
+      "name": "variable.field.hat"
+    },
+    "value": {
+      "patterns": [
+        {
+          "comment": "SSA string literal: @\"text\"",
+          "match": "@\"(?:[^\"\\\\]|\\\\.)*\"",
+          "name": "variable.ssaval.literal.hat"
+        },
+        {
+          "comment": "SSA value reference: @t0 / @name / @name@N",
+          "match": "@[A-Za-z_][\\w]*(?:@\\d+)?",
+          "name": "variable.ssaval.hat"
+        }
+      ]
+    },
+    "punct": {
+      "patterns": [
+        {
+          "comment": "Arrow: -> / =>",
+          "match": "=>|->",
+          "name": "keyword.other.arrow.hat"
+        },
+        {
+          "comment": "Assignment",
+          "match": "=",
+          "name": "keyword.other.assignment.hat"
+        },
+        {
+          "comment": "Brackets",
+          "match": "[()\\[\\]{}]",
+          "name": "punctuation.section.hat"
+        },
+        {
+          "comment": "Separator",
+          "match": "[,:]",
+          "name": "punctuation.separator.hat"
+        }
+      ]
+    }
+  }
+}
