@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # bootstrap-photon.ps1 - Photon backend bootstrap verification (P1)
 # ============================================================
 #
@@ -28,7 +28,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 
 # ---- toolchain ----

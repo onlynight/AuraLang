@@ -1,8 +1,8 @@
-# Simple test runner: counts OK/FAIL by exit code, collects unresolved calls
+﻿# Test runner: runs non-photon tests, counts OK/FAIL, collects unresolved calls
 param([string]$Label = "test")
 $RootDir = 'D:\Code\AuraLang'
 Set-Location $RootDir
-$exe = "rust\target\release\aura.exe"
+$exe = 'D:\Code\AuraLang\rust\target\release\aura.exe'
 
 $tests = Get-ChildItem tests -Recurse -Filter "*.aura" |
     Where-Object { $_.Name -notmatch 'Debug|Test_' } |
@@ -18,12 +18,11 @@ $totalUnresolved = 0
 foreach ($t in $tests) {
     $rel = $t.FullName.Substring($RootDir.Length + 1)
     
-    # Run test with cmd.exe to capture raw stderr
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = "cmd.exe"
-    $psi.Arguments = "/c `"$exe`" run `"$($t.FullName)`" 2>&1"
+    $psi.FileName = $exe
+    $psi.Arguments = "run `"$($t.FullName)`" 2>&1"
     $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $false
+    $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     
@@ -31,11 +30,14 @@ foreach ($t in $tests) {
     $proc.StartInfo = $psi
     $proc.Start() | Out-Null
     $out = $proc.StandardOutput.ReadToEnd()
+    $err = $proc.StandardError.ReadToEnd()
     $proc.WaitForExit()
     $code = $proc.ExitCode
     
+    $fullOut = $out + "`n" + $err
+    
     # Count unresolved function calls
-    $matches = [regex]::Matches($out, "未解析的函数调用 '([^']+)'")
+    $matches = [regex]::Matches($fullOut, "未解析的函数调用 '([^']+)'")
     foreach ($m in $matches) {
         $name = $m.Groups[1].Value
         if (-not $unresolved.ContainsKey($name)) { $unresolved[$name] = 0 }

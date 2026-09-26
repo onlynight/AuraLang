@@ -1,4 +1,4 @@
-# photon_try.ps1 — 带超时的 Photon 编译/运行辅助脚本（开发期临时工具，位于 build/）
+﻿# photon_try.ps1 — 带超时的 Photon 编译/运行辅助脚本（开发期临时工具，位于 build/）
 #
 # 用法:
 #   powershell -File build\photon_try.ps1 -Src tests\photon\P1\04_control_flow.aura -Out build\p1\04\04.phir
@@ -15,7 +15,7 @@ param(
     [switch]$Dbg
 )
 $ErrorActionPreference = 'Continue'
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
 if ($Dbg) { $env:AURA_PHOTON_DEBUG_HIR = '1' } else { $env:AURA_PHOTON_DEBUG_HIR = '' }

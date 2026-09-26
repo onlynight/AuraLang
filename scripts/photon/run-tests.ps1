@@ -1,8 +1,8 @@
-# Test runner: runs non-photon tests, counts OK/FAIL, collects unresolved calls
+﻿# Test runner using cmd.exe to capture output
 param([string]$Label = "test")
 $RootDir = 'D:\Code\AuraLang'
 Set-Location $RootDir
-$exe = 'D:\Code\AuraLang\rust\target\release\aura.exe'
+$exe = "rust\target\release\aura.exe"
 
 $tests = Get-ChildItem tests -Recurse -Filter "*.aura" |
     Where-Object { $_.Name -notmatch 'Debug|Test_' } |
@@ -17,34 +17,20 @@ $totalUnresolved = 0
 
 foreach ($t in $tests) {
     $rel = $t.FullName.Substring($RootDir.Length + 1)
-    
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $exe
-    $psi.Arguments = "run `"$($t.FullName)`" 2>&1"
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    
-    $proc = New-Object System.Diagnostics.Process
-    $proc.StartInfo = $psi
-    $proc.Start() | Out-Null
-    $out = $proc.StandardOutput.ReadToEnd()
-    $err = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
-    $code = $proc.ExitCode
-    
-    $fullOut = $out + "`n" + $err
-    
-    # Count unresolved function calls
-    $matches = [regex]::Matches($fullOut, "未解析的函数调用 '([^']+)'")
+    # Use cmd.exe to capture raw output
+    $cmdLine = "`"$exe`" run `"$($t.FullName)`" 2>&1"
+    $result = & cmd.exe /c $cmdLine
+    $code = $LASTEXITCODE
+    $out = $result -join "`n"
+
+    $matches = [regex]::Matches($out, "未解析的函数调用 '([^']+)'")
     foreach ($m in $matches) {
         $name = $m.Groups[1].Value
         if (-not $unresolved.ContainsKey($name)) { $unresolved[$name] = 0 }
         $unresolved[$name]++
         $totalUnresolved++
     }
-    
+
     if ($code -eq 0) { $passed++ } else { $failed++; $failedList += $rel }
 }
 

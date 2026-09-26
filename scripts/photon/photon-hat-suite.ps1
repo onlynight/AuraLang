@@ -1,4 +1,4 @@
-# photon-hat-suite.ps1 — HAT 格式端到端差分跑批（aura 源码 → .hat → Photon HAT 后端 → exe）
+﻿# photon-hat-suite.ps1 — HAT 格式端到端差分跑批（aura 源码 → .hat → Photon HAT 后端 → exe）
 #
 # 与 scripts\photon-suite.ps1（PHIR 路径）并列：同一批用例、同一判定标准，
 # 但后端输入是 **HAT IR 文本**而不是 .phir 伪源码。
@@ -26,7 +26,7 @@ param(
     [switch]$Verbose
 )
 $ErrorActionPreference = 'Continue'
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
 $env:AURA_PHOTON_DEBUG_HIR = ''

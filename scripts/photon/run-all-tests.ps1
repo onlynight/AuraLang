@@ -1,4 +1,4 @@
-# -------------------------------------------------------------
+﻿# -------------------------------------------------------------
 # Run all Aura tests with snapshot comparison
 #
 # Usage:
@@ -17,7 +17,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $RootDir
 
 # Find aura.exe

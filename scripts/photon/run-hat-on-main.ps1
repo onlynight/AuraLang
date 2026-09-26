@@ -1,4 +1,4 @@
-# run-hat-on-main.ps1 — 直接跑一次「Photon HAT 驱动编译 Main.aura」并采集指标
+﻿# run-hat-on-main.ps1 — 直接跑一次「Photon HAT 驱动编译 Main.aura」并采集指标
 param(
     [int]$BudgetSecs = 900,
     [int]$SampleSecs = 10,

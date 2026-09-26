@@ -1,4 +1,4 @@
-# ==============================================================
+﻿# ==============================================================
 # photon-e2e-verify.ps1 — Photon 端到端验证 (VM vs Photon 差分)
 #
 # 对给定 Aura 源文件：
@@ -20,7 +20,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 
 # ── 工具定位 ──

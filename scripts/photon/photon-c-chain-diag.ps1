@@ -1,4 +1,4 @@
-# photon-c-chain-diag.ps1 — 用「拼接链探测 + Phase C 探针」定位 Phase C 内存失控点
+﻿# photon-c-chain-diag.ps1 — 用「拼接链探测 + Phase C 探针」定位 Phase C 内存失控点
 #
 # 一次运行拿到两份证据：
 #   1) build/<out>/chain_report.txt — C 运行库在 `aura_string_concat` 上抓到的
@@ -16,7 +16,7 @@ param(
     [string]$Entry = 'aura\compiler\aura\lang\compiler\Main.aura'
 )
 $ErrorActionPreference = 'Continue'
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
 

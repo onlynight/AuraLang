@@ -1,4 +1,4 @@
-# -------------------------------------------------------------
+﻿# -------------------------------------------------------------
 # Photon E3 smoke test: build and run "hello world" - Windows
 #
 # Pipeline:
@@ -27,7 +27,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 
 # NOTE: PowerShell variable names are case-insensitive, so the `-Lld` parameter and

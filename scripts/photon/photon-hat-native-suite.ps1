@@ -1,4 +1,4 @@
-# photon-hat-native-suite.ps1 — HAT 独立链路端到端差分跑批
+﻿# photon-hat-native-suite.ps1 — HAT 独立链路端到端差分跑批
 #
 #   源码(.aura) ──[Aura 自举前端，原生]──► HIR ──► SSA MIR ──► .hat ──► HAT 后端 ──► exe
 #
@@ -38,7 +38,7 @@ param(
     [switch]$Verbose
 )
 $ErrorActionPreference = 'Continue'
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
 $env:AURA_PHOTON_DEBUG_HIR = ''

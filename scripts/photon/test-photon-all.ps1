@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # Photon P1-P4 Test Suite (Simplified)
 # ============================================================
 #
@@ -16,7 +16,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 
 $OutDir = Join-Path $Root 'build/photon-tests'
