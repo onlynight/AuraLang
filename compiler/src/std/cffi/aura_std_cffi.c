@@ -581,6 +581,67 @@ int64_t aura_mem_limit_bytes(void) {
 /// 默认代码页会把它当本地编码，中文会显示成乱码。
 static void aura_mem_dump_stats(void);
 
+/* ── 大拼接调用点归因 ──────────────────────────────────────────────
+ * `oom-attr` 只能给出「哪个 C 函数在分配」（`who=aura_string_concat+0x83`
+ * 1892 万次 / 7317MB），说不出**哪段 Aura 代码**在拼。运行时的「链探测」
+ * 在这里也帮不上忙：它要求「输入 == 上一次输出」，而 Aura 侧形如
+ * `s = s + toStr(x) + "|"` 的累加器每次拼接之间都夹了 `toStr()` 调用
+ * （自举 Main.aura 实测 `chain=0`），恰好绕过了它。
+ *
+ * 这里按 `aura_string_concat` 的**返回地址**（= AOT 生成代码里的调用点）
+ * 聚合「结果 > 4KB」的拼接，OOM 时按累计字节降序打印。拿到地址后用
+ * `llvm-objdump -d <exe>` 反查所属函数名即可精确定位。
+ */
+#define AURA_LC_SITES 1024
+static void *g_lc_ra[AURA_LC_SITES];
+static int64_t g_lc_calls[AURA_LC_SITES];
+static int64_t g_lc_bytes[AURA_LC_SITES];
+static int64_t g_lc_maxes[AURA_LC_SITES];
+static int g_lc_n = 0;
+
+static void aura_lc_note(int64_t out_len, void *ra) {
+    int i;
+    for (i = 0; i < g_lc_n; i++) {
+        if (g_lc_ra[i] == ra) {
+            g_lc_calls[i] += 1;
+            g_lc_bytes[i] += out_len;
+            if (out_len > g_lc_maxes[i]) g_lc_maxes[i] = out_len;
+            return;
+        }
+    }
+    if (g_lc_n < AURA_LC_SITES) {
+        g_lc_ra[g_lc_n] = ra;
+        g_lc_calls[g_lc_n] = 1;
+        g_lc_bytes[g_lc_n] = out_len;
+        g_lc_maxes[g_lc_n] = out_len;
+        g_lc_n += 1;
+    }
+}
+
+static void aura_lc_dump(FILE *f) {
+    int i, j, best;
+    int order[AURA_LC_SITES];
+    if (!f || g_lc_n <= 0) return;
+    for (i = 0; i < g_lc_n; i++) order[i] = i;
+    /* 选择排序（n <= 24）：按累计字节降序 */
+    for (i = 0; i < g_lc_n - 1; i++) {
+        best = i;
+        for (j = i + 1; j < g_lc_n; j++) {
+            if (g_lc_bytes[order[j]] > g_lc_bytes[order[best]]) best = j;
+        }
+        if (best != i) { int t = order[i]; order[i] = order[best]; order[best] = t; }
+    }
+    fprintf(f, "[aura] big-concat sites (result > 4KB; >=1MB shown):\n");
+    for (i = 0; i < g_lc_n; i++) {
+        int k = order[i];
+        if (g_lc_bytes[k] < (int64_t)(32 << 20)) continue;
+        fprintf(f, "   big-concat ra=%p calls=%lld bytes=%lldMB max=%lldB\n",
+                g_lc_ra[k], (long long)g_lc_calls[k],
+                (long long)(g_lc_bytes[k] / (1024 * 1024)),
+                (long long)g_lc_maxes[k]);
+    }
+}
+
 static void aura_mem_oom(int64_t need) {
     fflush(stdout);
     fprintf(stderr,
@@ -602,6 +663,14 @@ static void aura_mem_dump_stats(void) {
     if (!getenv("AURA_MEM_STATS")) {
         return;
     }
+    /* 按 **Aura 侧调用点返回地址** 归因：链探测（`aura_chain_note`）只在
+     * 「输入 == 上一次输出」这种教科书式 `s = s + x` 上触发；实测自举
+     * `Main.aura` 是 `chain=0`（每次拼接之间都夹了别的调用），但 `<=1M` 桶
+     * 有 4.3 万次 / 6.1 GB。此时唯一能定位「哪段 Aura 代码在拼」的就是这张
+     * 按返回地址聚合的表 —— 原来只在 TRIP（exit 71）时打印，OOM（exit 70）
+     * 反而看不到，这里补上。 */
+    aura_cs_dump(stderr, "OOM");
+    aura_lc_dump(stderr);
     fprintf(stderr,
         "[aura] mem stats: alloc_calls=%lld alloc_bytes=%lldMB realloc_calls=%lld "
         "realloc_net=%lldMB free_calls=%lld max_block=%lldMB bad_hdr=%lld\n",
@@ -1103,6 +1172,9 @@ const char *aura_string_concat(const char *a, int64_t alen, const char *b, int64
     // 必须返回新分配内存：同一表达式内的链式拼接（`a + b + c`）会把前一步的
     // 结果再当作输入，若返回共享 static 缓冲则前后互相覆盖。
     int64_t out_len = (int64_t)a_len + (int64_t)b_len;
+    if (out_len > 128) {
+        aura_lc_note(out_len, __builtin_return_address(0));
+    }
     char *out = (char *)aura_mem_alloc(out_len + 1);
     if (!out) return "";
     if (a && a_len > 0) {
