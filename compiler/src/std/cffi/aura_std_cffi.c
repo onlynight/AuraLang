@@ -119,6 +119,414 @@ typedef union AuraMemHdr {
 static int64_t g_aura_mem_limit = -1; /* -1 未初始化；0 = 不限制 */
 static int64_t g_aura_mem_used = 0;   /* 当前存活负载字节数 */
 
+/* 记账诊断：定位「计数虚增 / 单块异常大」的分配来源（见 aura_mem_oom 的
+ * 第二行统计输出）。默认零成本（只加计数与一次比较）。 */
+static int64_t g_aura_mem_alloc_calls = 0;
+static int64_t g_aura_mem_realloc_calls = 0;
+static int64_t g_aura_mem_free_calls = 0;
+static int64_t g_aura_mem_alloc_bytes = 0;   /* alloc 累计请求字节 */
+static int64_t g_aura_mem_realloc_net = 0;   /* realloc 累计净增字节 */
+static int64_t g_aura_mem_max_block = 0;     /* 单次最大请求（含 realloc 的 n） */
+static int64_t g_aura_mem_bad_hdr = 0;       /* 非法头的 free/realloc 次数 */
+/* 分配尺寸直方图（定位「哪个量级在吃内存」）。
+ * 桶：<=64 / <=256 / <=1K / <=8K / <=64K / <=1M / >1M */
+static int64_t g_aura_mem_bucket_calls[7];
+static int64_t g_aura_mem_bucket_bytes[7];
+static int64_t g_aura_mem_big_trace = 0;    /* 大块追踪已打印条数 */
+
+/* ── 分配归因（定位「哪个 C 函数在分配」）────────────────────────
+ *
+ * 尺寸直方图只能告诉我们「哪个量级」在吃内存，说不出**位置**。这里的桶按
+ * `ra0` = 直接调用 `aura_mem_alloc` / `aura_mem_realloc` 的 C 函数的返回地址
+ * 归因（字符串拼接 / 子串 / 装箱 / 列表扩容 …）。
+ *
+ * 只按 ra0 分桶，**不**带上层 ra1：Aura 编译产物的调用帧不是标准
+ * Windows x64 帧，`__builtin_return_address(1)` 读到的是脏栈槽（实测会出现
+ * 0x181CBC8E80、0x37007FF7202554AD 这类不可能的值），拿它做桶键会让几乎每次
+ * 分配都落到一个新桶，24 个桶瞬间填满、99% 的分配漏记。
+ *
+ * 内联体写在 `aura_mem_alloc` 里而不是抽成 static helper 传参 —— 后者会让
+ * `__builtin_return_address` 被常量折叠成 0x0（实测：整张表塌成一个 ra0=NULL
+ * 的桶）。默认零 I/O；报告在 `AURA_MEM_STATS=1` 时随 OOM 统计打印。
+ * ─────────────────────────────────────────────────────────── */
+#define AURA_FN_COUNT 263
+typedef struct { void *a; const char *n; } AuraFnEnt;
+
+/* ra0 → 函数名。AOT 产物被 strip（`llvm-nm` 报 no symbols），返回地址事后无从
+ * 解析；但归因代码与全部热点 C 函数在**同一翻译单元**，运行时取函数地址、按
+ * 地址排序、二分即可定位「ra0 落在哪个函数体内」。表定义在文件末尾（那里所有
+ * 函数才都已声明），见 `AURA_FN` 宏。`off` 异常大说明调用者不在表内。 */
+const char *aura_attr_who(void *ra);
+size_t aura_attr_off(void *ra);
+
+#define AURA_ATTR_MAX 64
+static void *g_attr_ra0[AURA_ATTR_MAX];
+static int64_t g_attr_calls[AURA_ATTR_MAX];
+static int64_t g_attr_bytes[AURA_ATTR_MAX];
+static int64_t g_attr_null_ra0 = 0;      /* ra0 取不到（= NULL）的分配次数 */
+static int64_t g_attr_nonnull_ra0 = 0;   /* ra0 取到的分配次数 */
+static int64_t g_attr_overflow = 0;      /* 桶满被丢弃的分配次数 */
+
+/* 归因登记（只按 ra0 分桶，见上方说明）。用宏而不是 static helper，避免
+ * `__builtin_return_address` 经传参被常量折叠成 0x0。 */
+#define AURA_ATTR_RECORD(ra, bytes) \
+    do { \
+        int _ak, _af = 0; \
+        for (_ak = 0; _ak < AURA_ATTR_MAX; _ak++) { \
+            if (g_attr_ra0[_ak] == (ra)) { \
+                g_attr_calls[_ak] += 1; \
+                g_attr_bytes[_ak] += (bytes); \
+                _af = 1; \
+                break; \
+            } \
+            if (g_attr_ra0[_ak] == NULL) { \
+                g_attr_ra0[_ak] = (ra); \
+                g_attr_calls[_ak] += 1; \
+                g_attr_bytes[_ak] += (bytes); \
+                _af = 1; \
+                break; \
+            } \
+        } \
+        if (!_af) { \
+            g_attr_overflow += 1; \
+        } \
+    } while (0)
+
+/* 打印分配归因表：先按字节降序、再按次数降序（各 10 行）。 */
+static void aura_attr_dump(FILE *f, const char *tag) {
+    int i, j, best;
+    if (!f) return;
+    fprintf(f, "   %s total_sites=%d overflow=%lld (桶满丢弃)\n",
+            tag, AURA_ATTR_MAX, (long long)g_attr_overflow);
+    for (i = 0; i < 10 && i < AURA_ATTR_MAX; i++) {
+        best = -1;
+        for (j = 0; j < AURA_ATTR_MAX; j++) {
+            if (g_attr_bytes[j] > 0 &&
+                (best < 0 || g_attr_bytes[j] > g_attr_bytes[best])) {
+                best = j;
+            }
+        }
+        if (best < 0) break;
+        fprintf(f, "   %s bytes ra0=%p who=%s+0x%zx calls=%lld bytes=%lldMB avg=%lldB\n",
+                tag, g_attr_ra0[best], aura_attr_who(g_attr_ra0[best]),
+                aura_attr_off(g_attr_ra0[best]),
+                (long long)g_attr_calls[best],
+                (long long)(g_attr_bytes[best] / (1024 * 1024)),
+                (long long)(g_attr_calls[best] > 0
+                            ? g_attr_bytes[best] / g_attr_calls[best] : 0));
+        g_attr_bytes[best] = 0;   /* 打印一次即清，避免与下一组重复 */
+    }
+    for (i = 0; i < 10 && i < AURA_ATTR_MAX; i++) {
+        best = -1;
+        for (j = 0; j < AURA_ATTR_MAX; j++) {
+            if (g_attr_calls[j] > 0 &&
+                (best < 0 || g_attr_calls[j] > g_attr_calls[best])) {
+                best = j;
+            }
+        }
+        if (best < 0) break;
+        fprintf(f, "   %s calls ra0=%p who=%s+0x%zx calls=%lld bytes=%lldMB avg=%lldB\n",
+                tag, g_attr_ra0[best], aura_attr_who(g_attr_ra0[best]),
+                aura_attr_off(g_attr_ra0[best]),
+                (long long)g_attr_calls[best],
+                (long long)(g_attr_bytes[best] / (1024 * 1024)),
+                (long long)(g_attr_calls[best] > 0
+                            ? g_attr_bytes[best] / g_attr_calls[best] : 0));
+        g_attr_calls[best] = 0;
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * 拼接链探测（定位「s = s + x」自指增长累加器）
+ *
+ * AOT 运行时**只分配不释放**：`s = s + x` 每次都 `aura_string_concat` 申请新块
+ * 并把前缀整体拷一遍，旧前缀永不释放 —— 循环里这样做内存按 O(n²) 增长。
+ * 实测 Phase C 所有 >=32KB 的大块分配 ra0 完全相同（= 本函数），尺寸从 32KB
+ * 爬到 ~1MB，即某处存在这样的累加器。这里在唯一的分配点上检测
+ * 「输入 == 上一次返回值」的自指链并留下可回溯的证据：
+ *
+ *   · 链长度 / 首个尺寸 / 峰值尺寸；
+ *   · 每个「2 的幂」步数处的尺寸（log 采样，48 个点覆盖 2^47 步）；
+ *   · 峰值时刻的**内容 head/tail**（可直接看出累加器装的是什么 IR）。
+ *
+ * 输出（默认零 I/O，只维护计数器）：
+ *   · `AURA_MEM_STATS=1`        每跨 32MiB 存活字节向报告文件追加一行快照；
+ *   · `AURA_CHAIN_TRIP_KB=<KB>` 链长超过阈值 → 写完整报告 + exit(71)，使
+ *                               Aura 侧定位探针正好停在出事的上下文；
+ *   · `AURA_CHAIN_REPORT=<path>` 报告文件（默认 ./chain_report.txt）。
+ *
+ * 报告走普通 fopen（不经过 aura_mem_*），避免递归触发闸门。
+ * ────────────────────────────────────────────────────────────── */
+
+#define AURA_CHAIN_LOGPTS 48      /* log2 采样点数 */
+#define AURA_CHAIN_SNAP_MB 8      /* 存活字节快照步长（MiB） */
+
+static const char *g_chain_last_out = NULL;
+static int64_t g_chain_calls = 0;
+static int64_t g_chain_first = -1;
+static int64_t g_chain_max = 0;
+static int64_t g_chain_max_calls = 0;
+static int64_t g_chain_pts_calls[AURA_CHAIN_LOGPTS];
+static int64_t g_chain_pts_size[AURA_CHAIN_LOGPTS];
+static char g_chain_head[256];
+static char g_chain_tail[256];
+static int64_t g_chain_head_calls = -1;
+static int g_chain_diag_on = -1;          /* -1 未初始化；1 = 开启文件输出 */
+static int64_t g_chain_trip_kb = 0;
+static int64_t g_chain_snap_mb = 0;
+static FILE *g_chain_report_f = NULL;
+static int g_chain_report_tried = 0;
+
+/* ── 按「调用者返回地址」归因 ──
+ *
+ * 上面的链探测要求「输入 == 上一次的输出」——只要两次拼接之间夹了**任何**其它
+ * 拼接调用，链就断掉并归零（实测：`s = s + a + b` 这种写法里，第二次拼接的
+ * `a` 确实是上一次的输出，但同一基本块里若还有别处的拼接，链照样被冲掉）。
+ * 于是链永远为 0，却仍能观察到尺寸单调爬升。这里改成按**调用点地址**分桶：
+ * 每个不同的 `aura_string_concat` 调用点各自累计调用次数与最大输出长度，
+ * 谁在吃内存一眼可辨。 */
+#define AURA_CSITES 24
+static void *g_cs_ra[AURA_CSITES];
+static int64_t g_cs_calls[AURA_CSITES];
+static int64_t g_cs_max[AURA_CSITES];
+static int64_t g_cs_bytes[AURA_CSITES];
+
+static int aura_cs_slot(void *ra) {
+    int i;
+    for (i = 0; i < AURA_CSITES; i++) {
+        if (g_cs_ra[i] == ra) return i;
+    }
+    for (i = 0; i < AURA_CSITES; i++) {
+        if (g_cs_ra[i] == NULL) return i;
+    }
+    return 0;   /* 桶满则复用 0 号 */
+}
+
+/* 打印按调用点归因的表（按累计字节降序，最多 12 行）。 */
+static void aura_cs_dump(FILE *f, const char *tag) {
+    int i, j, best;
+    if (!f) return;
+    for (i = 0; i < 12 && i < AURA_CSITES; i++) {
+        best = -1;
+        for (j = 0; j < AURA_CSITES; j++) {
+            if (g_cs_ra[j] && g_cs_bytes[j] > 0 &&
+                (best < 0 || g_cs_bytes[j] > g_cs_bytes[best])) {
+                best = j;
+            }
+        }
+        if (best < 0) break;
+        fprintf(f, "   %s site ra=%p calls=%lld bytes=%lldMB max=%lldB\n",
+                tag, g_cs_ra[best],
+                (long long)g_cs_calls[best],
+                (long long)(g_cs_bytes[best] / (1024 * 1024)),
+                (long long)g_cs_max[best]);
+        /* 打印一次后清掉，避免重复 */
+        g_cs_bytes[best] = 0;
+    }
+}
+
+static void aura_chain_capture_head(const char *s, int64_t n) {
+    size_t sn = (size_t)(n > 0 ? n : 0);
+    size_t hn = sn > 255 ? 255 : sn;
+    if (hn > 0) memcpy(g_chain_head, s, hn);
+    g_chain_head[hn] = '\0';
+    memcpy(g_chain_tail, sn > 0 ? s + (sn - hn) : (const char *)"", hn);
+    g_chain_tail[hn] = '\0';
+}
+
+static void aura_chain_dump(FILE *f, const char *tag) {
+    int i;
+    if (!f) return;
+    fprintf(f, "%s: chain=%lld first=%lld max=%lldB@step%d used=%lldMB "
+            "alloc_calls=%lld alloc_bytes=%lldMB free_calls=%lld "
+            "max_block=%lldB ra0=%p\n",
+            tag,
+            (long long)g_chain_calls, (long long)g_chain_first,
+            (long long)g_chain_max, (int)g_chain_max_calls,
+            (long long)(g_aura_mem_used / (1024 * 1024)),
+            (long long)g_aura_mem_alloc_calls,
+            (long long)(g_aura_mem_alloc_bytes / (1024 * 1024)),
+            (long long)g_aura_mem_free_calls,
+            (long long)g_aura_mem_max_block,
+            __builtin_return_address(0));
+    for (i = 0; i < AURA_CHAIN_LOGPTS; i++) {
+        if (g_chain_pts_size[i] > 0) {
+            fprintf(f, "   %s pt step=%lld size=%lldB\n", tag,
+                    (long long)g_chain_pts_calls[i],
+                    (long long)g_chain_pts_size[i]);
+        }
+    }
+    if (g_chain_head_calls >= 0) {
+        fprintf(f, "   %s head@step%d size=%lldB: [%.255s]\n", tag,
+                (int)g_chain_head_calls, (long long)g_chain_max,
+                g_chain_head);
+        fprintf(f, "   %s tail@step%d: [...%.255s]\n", tag,
+                (int)g_chain_head_calls, g_chain_tail);
+    }
+}
+
+/* 每次拼接后更新链统计（只维护计数器，零 I/O）。 */
+static void aura_chain_note(const char *a, int64_t out_len, const char *out) {
+    int idx;
+    int64_t c;
+    if (a == g_chain_last_out) {
+        g_chain_calls += 1;
+        if (g_chain_first < 0) g_chain_first = out_len;
+        if (out_len > g_chain_max) {
+            g_chain_max = out_len;
+            g_chain_max_calls = g_chain_calls;
+            g_chain_head_calls = g_chain_calls;
+            if (out && out_len > 0) aura_chain_capture_head(out, out_len);
+        }
+        c = g_chain_calls;
+        idx = 0;
+        while (idx < AURA_CHAIN_LOGPTS - 1 && (c >> (idx + 1)) > 0) idx += 1;
+        if (c == (int64_t)1 << idx) {
+            g_chain_pts_calls[idx] = c;
+            g_chain_pts_size[idx] = out_len;
+        }
+    } else {
+        g_chain_calls = 0;
+        g_chain_first = -1;
+        g_chain_max = 0;
+        g_chain_max_calls = 0;
+    }
+}
+
+/* 诊断开关初始化（惰性，一次）。 */
+static void aura_chain_init(void) {
+    const char *t;
+    if (g_chain_diag_on >= 0) return;
+    g_chain_diag_on = (getenv("AURA_MEM_STATS") != NULL) ? 1 : 0;
+    t = getenv("AURA_CHAIN_TRIP_KB");
+    if (t && t[0]) {
+        long long v = atoll(t);
+        if (v > 0) {
+            g_chain_trip_kb = (int64_t)v;
+            g_chain_diag_on = 1;
+        }
+    }
+}
+
+static FILE *aura_chain_report_file(void) {
+    const char *p;
+    if (g_chain_report_f) return g_chain_report_f;
+    if (g_chain_report_tried) return NULL;
+    g_chain_report_tried = 1;
+    p = getenv("AURA_CHAIN_REPORT");
+    if (!p || !p[0]) p = "chain_report.txt";
+    /* "w" 而不是 "a"：脚本按 `-TripKB` 反复跑，追加会把上一次运行遗留的
+     * 快照混进来（实测两次运行的行数一模一样，分不清哪份是真数据）。 */
+    g_chain_report_f = fopen(p, "w");
+    return g_chain_report_f;
+}
+
+/* 链阈值 / 周期快照。由 aura_string_concat 在返回前调用。 */
+static void aura_chain_post_check(int64_t out_len, void *cs_ra) {
+    int64_t mb;
+    FILE *f;
+    int slot, i;
+    if (g_chain_diag_on < 0) aura_chain_init();
+
+    /* 按调用点归因（无论诊断开关都统计，成本只是一次比较 + 三个加法）。 */
+    slot = aura_cs_slot(cs_ra);
+    g_cs_calls[slot] += 1;
+    g_cs_bytes[slot] += out_len;
+    if (out_len > g_cs_max[slot]) g_cs_max[slot] = out_len;
+
+    if (g_chain_diag_on <= 0) return;
+
+    if (g_chain_trip_kb > 0 && g_chain_calls > 0 &&
+        out_len >= g_chain_trip_kb * 1024) {
+        f = aura_chain_report_file();
+        fprintf(stderr,
+            "[aura] concat chain trip: chain=%lld steps, size=%lldB "
+            "(trip=%lldKB) -> %s\n",
+            (long long)g_chain_calls, (long long)out_len,
+            (long long)g_chain_trip_kb,
+            getenv("AURA_CHAIN_REPORT") ? getenv("AURA_CHAIN_REPORT")
+                                        : "chain_report.txt");
+        fflush(stderr);
+        aura_chain_dump(f, "TRIP");
+        aura_cs_dump(f, "TRIP");
+        fflush(f);
+        exit(71);
+    }
+
+    /* 周期快照：存活字节每跨一个步长。
+     * 注意条件是 `mb >= snap + step`（不是 `mb + step > snap`）——后者会在
+     * mb 长期不增长时**每次调用都触发**，把报告文件刷成几百 MB 的垃圾。 */
+    mb = g_aura_mem_used / (1024 * 1024);
+    if (mb >= g_chain_snap_mb + AURA_CHAIN_SNAP_MB) {
+        g_chain_snap_mb = mb;
+        f = aura_chain_report_file();
+        if (f) {
+            fprintf(f, "snap: used=%lldMB alloc_calls=%lld alloc_bytes=%lldMB "
+                    "free=%lld chain=%lld chain_max=%lldB max_block=%lldB\n",
+                    (long long)mb,
+                    (long long)g_aura_mem_alloc_calls,
+                    (long long)(g_aura_mem_alloc_bytes / (1024 * 1024)),
+                    (long long)g_aura_mem_free_calls,
+                    (long long)g_chain_calls,
+                    (long long)g_chain_max,
+                    (long long)g_aura_mem_max_block);
+            /* 调用点归因也随快照打印：跨阶段对比谁在增长。 */
+            for (i = 0; i < AURA_CSITES; i++) {
+                if (g_cs_ra[i]) {
+                    fprintf(f, "   site ra=%p calls=%lld bytes=%lldMB "
+                            "max=%lldB\n",
+                            g_cs_ra[i],
+                            (long long)g_cs_calls[i],
+                            (long long)(g_cs_bytes[i] / (1024 * 1024)),
+                            (long long)g_cs_max[i]);
+                }
+            }
+            fflush(f);
+        }
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * 记账稳健性：单块负载上限
+ *
+ * `aura_mem_realloc` / `aura_mem_free` 只能处理 `aura_mem_alloc` 产出的负载
+ * （其前 16 字节是 `AuraMemHdr`）。若传入**外来指针**（static 串缓存 /
+ * 字符串字面量 / 已释放或被越界写入的块），读到的 `h->h.size` 就是任意字节：
+ *   * `aura_mem_free` 里 `g_aura_mem_used -= size` 若 size 为负 → 计数虚增；
+ *   * `aura_mem_realloc` 里 `g_aura_mem_used += (n - old)` 同样会虚增。
+ *
+ * 注意：这不是 `Main.aura` 自举 OOM 的原因（实测关掉闸门后真实内存确实涨到
+ * 28 GB+，计数是**真实**增长），纯粹是防御性加固。
+ *
+ * 任何**真实**单块分配都远小于 1 GiB，因此把越界的 size 视为「非法头」：
+ * 记账按 0 计（不虚增），并把空闲/重分配请求降级为 no-op / 新分配。
+ * ────────────────────────────────────────────────────────────── */
+#define AURA_MEM_MAX_BLOCK ((int64_t)1 << 30)
+
+static int aura_mem_hdr_sane(int64_t size) {
+    return size >= 0 && size <= AURA_MEM_MAX_BLOCK;
+}
+
+/* 记一次分配尺寸到直方图。 */
+static void aura_mem_bucket(int64_t n) {
+    int i = 6;
+    if (n <= 64) {
+        i = 0;
+    } else if (n <= 256) {
+        i = 1;
+    } else if (n <= 1024) {
+        i = 2;
+    } else if (n <= 8192) {
+        i = 3;
+    } else if (n <= 65536) {
+        i = 4;
+    } else if (n <= (1 << 20)) {
+        i = 5;
+    }
+    g_aura_mem_bucket_calls[i] += 1;
+    g_aura_mem_bucket_bytes[i] += n;
+}
+
 static void aura_mem_init(void) {
     if (g_aura_mem_limit >= 0) {
         return;
@@ -148,6 +556,14 @@ int64_t aura_mem_used_bytes(void) {
     return g_aura_mem_used;
 }
 
+/// 累计分配次数（诊断用；单调递增，从不回退）。
+///
+/// 给编译器侧做**进度探针**：在长循环里周期性采样，OOM 时最后一行就知道
+/// 卡在第几个节点、已经分配了多少次 —— 比猜快得多。
+int64_t aura_mem_alloc_calls(void) {
+    return g_aura_mem_alloc_calls;
+}
+
 /// 当前存活分配 MiB（诊断用；返回 i32 便于 AOT 侧以默认 i32 调用约定直接调用）。
 int32_t aura_mem_used_mb(void) {
     return (int32_t)(g_aura_mem_used / (1024 * 1024));
@@ -163,6 +579,8 @@ int64_t aura_mem_limit_bytes(void) {
 ///
 /// 这里刻意用**纯 ASCII**：C 运行时的 stderr 直接写字节，Windows 控制台
 /// 默认代码页会把它当本地编码，中文会显示成乱码。
+static void aura_mem_dump_stats(void);
+
 static void aura_mem_oom(int64_t need) {
     fflush(stdout);
     fprintf(stderr,
@@ -174,7 +592,45 @@ static void aura_mem_oom(int64_t need) {
         (long long)((need / (1024 * 1024)) + 1),
         (long long)(g_aura_mem_limit / (1024 * 1024)));
     fflush(stderr);
+    aura_mem_dump_stats();
     exit(70);
+}
+
+/// 记账统计行（仅诊断；当 `AURA_MEM_STATS=1` 时打印在 OOM 消息之后）。
+static void aura_mem_dump_stats(void);
+static void aura_mem_dump_stats(void) {
+    if (!getenv("AURA_MEM_STATS")) {
+        return;
+    }
+    fprintf(stderr,
+        "[aura] mem stats: alloc_calls=%lld alloc_bytes=%lldMB realloc_calls=%lld "
+        "realloc_net=%lldMB free_calls=%lld max_block=%lldMB bad_hdr=%lld\n",
+        (long long)g_aura_mem_alloc_calls,
+        (long long)(g_aura_mem_alloc_bytes / (1024 * 1024)),
+        (long long)g_aura_mem_realloc_calls,
+        (long long)(g_aura_mem_realloc_net / (1024 * 1024)),
+        (long long)g_aura_mem_free_calls,
+        (long long)(g_aura_mem_max_block / (1024 * 1024)),
+        (long long)g_aura_mem_bad_hdr);
+    fprintf(stderr,
+        "[aura] mem buckets (calls/bytes MB): <=64:%lld/%lld <=256:%lld/%lld "
+        "<=1K:%lld/%lld <=8K:%lld/%lld <=64K:%lld/%lld <=1M:%lld/%lld >1M:%lld/%lld\n",
+        (long long)g_aura_mem_bucket_calls[0], (long long)(g_aura_mem_bucket_bytes[0] / (1024 * 1024)),
+        (long long)g_aura_mem_bucket_calls[1], (long long)(g_aura_mem_bucket_bytes[1] / (1024 * 1024)),
+        (long long)g_aura_mem_bucket_calls[2], (long long)(g_aura_mem_bucket_bytes[2] / (1024 * 1024)),
+        (long long)g_aura_mem_bucket_calls[3], (long long)(g_aura_mem_bucket_bytes[3] / (1024 * 1024)),
+        (long long)g_aura_mem_bucket_calls[4], (long long)(g_aura_mem_bucket_bytes[4] / (1024 * 1024)),
+        (long long)g_aura_mem_bucket_calls[5], (long long)(g_aura_mem_bucket_bytes[5] / (1024 * 1024)),
+        (long long)g_aura_mem_bucket_calls[6], (long long)(g_aura_mem_bucket_bytes[6] / (1024 * 1024)));
+    /* 拼接链统计（见 aura_chain_note 的说明）：OOM 时一并给出，便于
+     * 判断这次超限是否由 `s = s + x` 累加器造成。 */
+    aura_chain_dump(stderr, "oom-chain");
+    aura_cs_dump(stderr, "oom-site");
+    fprintf(stderr,
+        "[aura] attribution: ra0_ok=%lld ra0_null=%lld\n",
+        (long long)g_attr_nonnull_ra0, (long long)g_attr_null_ra0);
+    aura_attr_dump(stderr, "oom-attr");
+    fflush(stderr);
 }
 
 /// 统一分配入口（带上限检查）。
@@ -182,6 +638,36 @@ void *aura_mem_alloc(int64_t n) {
     aura_mem_init();
     if (n < 0) {
         n = 0;
+    }
+    g_aura_mem_alloc_calls += 1;
+    g_aura_mem_alloc_bytes += n;
+    aura_mem_bucket(n);
+    /* 归因：就地取值（原因见 `AURA_ATTR_RECORD` 上方说明）。 */
+    {
+        void *r0 = __builtin_return_address(0);
+        if (r0 == NULL) {
+            g_attr_null_ra0 += 1;
+        } else {
+            g_attr_nonnull_ra0 += 1;
+            AURA_ATTR_RECORD(r0, n);
+        }
+    }
+    /* 大块追踪：AURA_MEM_STATS=1 时把 >=256KB 的分配打到 stderr（前 200 次），
+     * 用于定位「谁在吃内存」。 */
+    if (n >= 262144 && getenv("AURA_MEM_STATS") && g_aura_mem_big_trace < 40) {
+        g_aura_mem_big_trace += 1;
+        /* 打印调用者返回地址（用 `llvm-nm --numeric-sort` 可解析到函数），
+         * 用于定位「谁在 O(n²) 地分配大块」。 */
+        fprintf(stderr, "[aura] big alloc #%lld: %lld bytes who=%s+0x%zx calls=%lld used=%lldMB\n",
+                (long long)g_aura_mem_big_trace, (long long)n,
+                aura_attr_who(__builtin_return_address(0)),
+                aura_attr_off(__builtin_return_address(0)),
+                (long long)g_aura_mem_alloc_calls,
+                (long long)(g_aura_mem_used / (1024 * 1024)));
+        fflush(stderr);
+    }
+    if (n > g_aura_mem_max_block) {
+        g_aura_mem_max_block = n;
     }
     if (g_aura_mem_limit > 0 && g_aura_mem_used + n > g_aura_mem_limit) {
         aura_mem_oom(n);
@@ -206,6 +692,34 @@ void *aura_mem_realloc(void *p, int64_t n) {
     }
     AuraMemHdr *h = (AuraMemHdr *)((char *)p - sizeof(AuraMemHdr));
     int64_t old = h->h.size;
+    g_aura_mem_realloc_calls += 1;
+    if (n > g_aura_mem_max_block) {
+        g_aura_mem_max_block = n;
+    }
+    /* 非法头（见 AURA_MEM_MAX_BLOCK 说明）：p 不是本运行时的负载。
+     * 绝不能拿 `old` 去记账（会虚增），也不能对陌生指针 realloc —— 改为
+     * 新分配 + 拷贝（长度以新旧较小值为准，避免越界读）。 */
+    if (!aura_mem_hdr_sane(old)) {
+        g_aura_mem_bad_hdr += 1;
+        char *np = (char *)aura_mem_alloc(n);
+        if (!np) {
+            return NULL;
+        }
+        if (p && n > 0) {
+            memcpy(np, p, (size_t)n);
+        }
+        return np;
+    }
+    g_aura_mem_realloc_net += (n - old);
+    /* 归因只记净增（与上面的记账口径一致），避免把「同一块的扩容」重复计成
+     * 全新分配 —— 那样列表/字符串缓冲区的增长会虚高一整个旧尺寸。 */
+    {
+        int64_t dn = (n > old) ? (n - old) : 0;
+        void *r0 = __builtin_return_address(0);
+        if (r0 != NULL) {
+            AURA_ATTR_RECORD(r0, dn);
+        }
+    }
     if (g_aura_mem_limit > 0 && g_aura_mem_used - old + n > g_aura_mem_limit) {
         aura_mem_oom(n - old);
     }
@@ -224,7 +738,15 @@ void aura_mem_free(void *p) {
         return;
     }
     AuraMemHdr *h = (AuraMemHdr *)((char *)p - sizeof(AuraMemHdr));
-    g_aura_mem_used -= h->h.size;
+    int64_t sz = h->h.size;
+    g_aura_mem_free_calls += 1;
+    /* 非法头：不是本运行时的负载 —— 既不记账（避免 `used -= 负数` 虚增），
+     * 也**不** free（对陌生指针 free 会污染堆）。 */
+    if (!aura_mem_hdr_sane(sz)) {
+        g_aura_mem_bad_hdr += 1;
+        return;
+    }
+    g_aura_mem_used -= sz;
     if (g_aura_mem_used < 0) {
         g_aura_mem_used = 0;
     }
@@ -553,7 +1075,9 @@ const char *aura_string_replace(const char *s, const char *from, const char *to)
 
     size_t i = 0;
     size_t j = 0;
-    while (i < strlen(s) && j < sizeof(buf) - 1) {
+    /* ⚠️ 长度必须提到循环外：`i < strlen(s)` 会让每次迭代都重扫整个源串（O(n²)）。 */
+    size_t slen = strlen(s);
+    while (i < slen && j < sizeof(buf) - 1) {
         if (strncmp(s + i, from, from_len) == 0) {
             for (size_t k = 0; k < to_len && j < sizeof(buf) - 1; k++) {
                 buf[j++] = to[k];
@@ -578,7 +1102,8 @@ const char *aura_string_concat(const char *a, int64_t alen, const char *b, int64
 
     // 必须返回新分配内存：同一表达式内的链式拼接（`a + b + c`）会把前一步的
     // 结果再当作输入，若返回共享 static 缓冲则前后互相覆盖。
-    char *out = (char *)aura_mem_alloc((int64_t)a_len + (int64_t)b_len + 1);
+    int64_t out_len = (int64_t)a_len + (int64_t)b_len;
+    char *out = (char *)aura_mem_alloc(out_len + 1);
     if (!out) return "";
     if (a && a_len > 0) {
         memcpy(out, a, a_len);
@@ -587,6 +1112,10 @@ const char *aura_string_concat(const char *a, int64_t alen, const char *b, int64
         memcpy(out + a_len, b, b_len);
     }
     out[a_len + b_len] = '\0';
+    g_chain_last_out = out;
+    aura_chain_note(a, out_len, out);
+    /* cs_ra = 本函数的调用者返回地址，即「是哪一句 Aura 代码在做拼接」。 */
+    aura_chain_post_check(out_len, __builtin_return_address(0));
     return out;
 }
 
@@ -1516,7 +2045,21 @@ const char *aura_lang_std_String_charAt(const char *s, int64_t idx) {
  * 否则 `while (i < s.length) { s[i] ... }` 这类惯用法是 O(n²)。
  */
 int64_t aura_lang_std_String_charCodeAt(const char *s, int64_t idx) {
-    if (!s || idx < 0) return -1;
+    /* 越界闸门：`idx < 0` 只挡住「正确的」负数（0xFFFFFFFFFFFFFFFF）。
+     *
+     * 自举驱动（Photon 后端 AOT）存在一处 int32→int64 的**零扩展**代码生成缺陷：
+     * `text.length - 1` 在 `text.length == 0` 时得 int32 `-1`（0xFFFFFFFF），
+     * 传给 `charCodeAt(int64_t)` 时被零扩展为 0xFFFFFFFF（4,294,967,295，正数）
+     * 而非符号扩展为 0xFFFFFFFFFFFFFFFF（-1）。于是 `idx < 0` 判定通过，
+     * 函数直接读 `s[0xFFFFFFFF]`——偏移远超任何合法字符串 → 跨页访问违例
+     * （VEH 现场：`s=0x7FF7F115A410`、`idx=0xFFFFFFFF`、`target=s+idx` 落在
+     *  相邻模块镜像 0x7FF8… 的未映射区，code 0xc0000005）。
+     *
+     * 此处用 int32 上界兜住所有「被零扩展的负数」：合法字符串下标不会超过
+     * int32 最大值（Aura 的 String.length 返回 Int），因此该判定零误报、
+     * 零开销（单条比较），把崩溃转化为正常的「越界 → -1」语义。
+     * 根因（代码生成零扩展）另行修复，此处仅为运行时兜底。 */
+    if (!s || idx < 0 || idx > 0x7FFFFFFF) return -1;
     unsigned char c = (unsigned char)s[idx];
     if (c == 0) return -1;
     return (int64_t)c;
@@ -2886,6 +3429,422 @@ int64_t aura_lang_concurrent_Thread_parallelism(void) {
 int64_t aura_lang_concurrent_Thread_availableCores(void) {
     return aura_thread_available_parallelism();
 }
+
+/* ──────────────────────────────────────────────────────────────
+ * ra0 → C 函数名解析（诊断用）
+ *
+ * AOT 产物被 strip：`llvm-nm build/hat-native/PhotonHatCompile.exe` 报
+ * "no symbols"，`dumpbin` 不存在，`cur.ll` 只有 Aura 侧 IR（无 C 函数体）——
+ * 返回地址事后无从解析。但归因代码与全部热点 C 函数在**同一翻译单元**，
+ * 所以运行时取函数地址即可：同一进程内地址可直接比较，ASLR 不影响。
+ *
+ * 表必须定义在文件**末尾**——那里所有函数才都已声明（`(void*)f` 需要原型）。
+ * 表在首次打印时按地址排序一次；`ra0` 是「call 指令下一条」，必然落在调用者
+ * 函数体内部，故取「地址 <= ra0 的最大项」即调用者。若调用者不在本表
+ * （例如 Aura 生成代码或别的 .c），偏移会异常大，用 `?!` 标出。
+ * ────────────────────────────────────────────────────────────── */
+#define AURA_FN(sym) { (void *)(sym), #sym }
+static AuraFnEnt g_fn_table[AURA_FN_COUNT] = {
+    AURA_FN(aura_abs),
+    AURA_FN(aura_arc_decrement),
+    AURA_FN(aura_arc_increment),
+    AURA_FN(aura_ch_pop),
+    AURA_FN(aura_ch_push),
+    AURA_FN(aura_char_cache),
+    AURA_FN(aura_clock),
+    AURA_FN(aura_collections_arrayListOf),
+    AURA_FN(aura_collections_arrayListSize),
+    AURA_FN(aura_collections_hashMapGet),
+    AURA_FN(aura_collections_hashMapOf),
+    AURA_FN(aura_collections_hashMapPut),
+    AURA_FN(aura_collections_hashMapRemove),
+    AURA_FN(aura_collections_hashSetAdd),
+    AURA_FN(aura_collections_hashSetContains),
+    AURA_FN(aura_collections_hashSetOf),
+    AURA_FN(aura_collections_hashSetRemove),
+    AURA_FN(aura_collections_linkedAddFirst),
+    AURA_FN(aura_collections_linkedAddLast),
+    AURA_FN(aura_collections_linkedHashMapFirstKey),
+    AURA_FN(aura_collections_linkedHashMapKeys),
+    AURA_FN(aura_collections_linkedHashMapLastKey),
+    AURA_FN(aura_collections_linkedHashMapOf),
+    AURA_FN(aura_collections_linkedListOf),
+    AURA_FN(aura_collections_linkedRemoveFirst),
+    AURA_FN(aura_collections_linkedRemoveLast),
+    AURA_FN(aura_collections_listContains),
+    AURA_FN(aura_collections_listIndexOf),
+    AURA_FN(aura_collections_listOf),
+    AURA_FN(aura_collections_pairOf),
+    AURA_FN(aura_concurrent_actorAlive),
+    AURA_FN(aura_concurrent_ask),
+    AURA_FN(aura_concurrent_channelRecv),
+    AURA_FN(aura_concurrent_channelSend),
+    AURA_FN(aura_concurrent_channelTryRecv),
+    AURA_FN(aura_concurrent_newChannel),
+    AURA_FN(aura_concurrent_select),
+    AURA_FN(aura_concurrent_send),
+    AURA_FN(aura_concurrent_spawn),
+    AURA_FN(aura_concurrent_spawnActor),
+    AURA_FN(aura_concurrent_supervise),
+    AURA_FN(aura_coroutine_yield),
+    AURA_FN(aura_dup_n),
+    AURA_FN(aura_dynlist_new),
+    AURA_FN(aura_dynlist_push),
+    AURA_FN(aura_encoding_base64Decode),
+    AURA_FN(aura_encoding_base64Encode),
+    AURA_FN(aura_env_get),
+    AURA_FN(aura_env_has),
+    AURA_FN(aura_env_platform),
+    AURA_FN(aura_free),
+    AURA_FN(aura_fs_exists),
+    AURA_FN(aura_fs_isDirectory),
+    AURA_FN(aura_fs_isFile),
+    AURA_FN(aura_fs_mkdirP),
+    AURA_FN(aura_fs_readText),
+    AURA_FN(aura_fs_writeText),
+    AURA_FN(aura_handle_equals),
+    AURA_FN(aura_io_fileExists),
+    AURA_FN(aura_io_fileRead),
+    AURA_FN(aura_io_fileWrite),
+    AURA_FN(aura_io_readAll),
+    AURA_FN(aura_io_readLine),
+    AURA_FN(aura_isOfType),
+    AURA_FN(aura_iter_box),
+    AURA_FN(aura_iter_fn),
+    AURA_FN(aura_iter_unbox),
+    AURA_FN(aura_lang_concurrent_Atomic_add),
+    AURA_FN(aura_lang_concurrent_Atomic_cas),
+    AURA_FN(aura_lang_concurrent_Atomic_destroy),
+    AURA_FN(aura_lang_concurrent_Atomic_load),
+    AURA_FN(aura_lang_concurrent_Atomic_new),
+    AURA_FN(aura_lang_concurrent_Atomic_store),
+    AURA_FN(aura_lang_concurrent_Atomic_sub),
+    AURA_FN(aura_lang_concurrent_Barrier_destroy),
+    AURA_FN(aura_lang_concurrent_Barrier_new),
+    AURA_FN(aura_lang_concurrent_Barrier_wait),
+    AURA_FN(aura_lang_concurrent_Channel_channelRecv),
+    AURA_FN(aura_lang_concurrent_Channel_channelSend),
+    AURA_FN(aura_lang_concurrent_Channel_newChannel),
+    AURA_FN(aura_lang_concurrent_Condvar_broadcast),
+    AURA_FN(aura_lang_concurrent_Condvar_destroy),
+    AURA_FN(aura_lang_concurrent_Condvar_new),
+    AURA_FN(aura_lang_concurrent_Condvar_signal),
+    AURA_FN(aura_lang_concurrent_Condvar_wait),
+    AURA_FN(aura_lang_concurrent_Coroutine_actorAlive),
+    AURA_FN(aura_lang_concurrent_Future_all),
+    AURA_FN(aura_lang_concurrent_Future_any),
+    AURA_FN(aura_lang_concurrent_Future_cancel),
+    AURA_FN(aura_lang_concurrent_Future_isDone),
+    AURA_FN(aura_lang_concurrent_Future_spawn),
+    AURA_FN(aura_lang_concurrent_FutureAwait),
+    AURA_FN(aura_lang_concurrent_Mutex_destroy),
+    AURA_FN(aura_lang_concurrent_Mutex_lock),
+    AURA_FN(aura_lang_concurrent_Mutex_new),
+    AURA_FN(aura_lang_concurrent_Mutex_tryLock),
+    AURA_FN(aura_lang_concurrent_Mutex_unlock),
+    AURA_FN(aura_lang_concurrent_RwLock_destroy),
+    AURA_FN(aura_lang_concurrent_RwLock_new),
+    AURA_FN(aura_lang_concurrent_RwLock_readLock),
+    AURA_FN(aura_lang_concurrent_RwLock_readUnlock),
+    AURA_FN(aura_lang_concurrent_RwLock_writeLock),
+    AURA_FN(aura_lang_concurrent_RwLock_writeUnlock),
+    AURA_FN(aura_lang_concurrent_Semaphore_acquire),
+    AURA_FN(aura_lang_concurrent_Semaphore_count),
+    AURA_FN(aura_lang_concurrent_Semaphore_destroy),
+    AURA_FN(aura_lang_concurrent_Semaphore_new),
+    AURA_FN(aura_lang_concurrent_Semaphore_release),
+    AURA_FN(aura_lang_concurrent_Semaphore_tryAcquire),
+    AURA_FN(aura_lang_concurrent_Thread_availableCores),
+    AURA_FN(aura_lang_concurrent_Thread_id),
+    AURA_FN(aura_lang_concurrent_Thread_join),
+    AURA_FN(aura_lang_concurrent_Thread_parallelism),
+    AURA_FN(aura_lang_concurrent_Thread_sleep),
+    AURA_FN(aura_lang_concurrent_Thread_spawn),
+    AURA_FN(aura_lang_std_Ascii_isAlpha),
+    AURA_FN(aura_lang_std_Ascii_isDigit),
+    AURA_FN(aura_lang_std_Ascii_toLower),
+    AURA_FN(aura_lang_std_Ascii_toUpper),
+    AURA_FN(aura_lang_std_Builtin_intToPtr),
+    AURA_FN(aura_lang_std_Builtin_ptrToInt),
+    AURA_FN(aura_lang_std_Collections_contains),
+    AURA_FN(aura_lang_std_Collections_count),
+    AURA_FN(aura_lang_std_Collections_emptyList),
+    AURA_FN(aura_lang_std_Collections_emptyMap),
+    AURA_FN(aura_lang_std_Collections_filter),
+    AURA_FN(aura_lang_std_Collections_getAt),
+    AURA_FN(aura_lang_std_Collections_getOrDefault),
+    AURA_FN(aura_lang_std_Collections_hashMapPut),
+    AURA_FN(aura_lang_std_Collections_indexOf),
+    AURA_FN(aura_lang_std_Collections_isEmpty),
+    AURA_FN(aura_lang_std_Collections_listAppend),
+    AURA_FN(aura_lang_std_Collections_listContains),
+    AURA_FN(aura_lang_std_Collections_listGet),
+    AURA_FN(aura_lang_std_Collections_listIndexOf),
+    AURA_FN(aura_lang_std_Collections_listOf),
+    AURA_FN(aura_lang_std_Collections_listPop),
+    AURA_FN(aura_lang_std_Collections_listSet),
+    AURA_FN(aura_lang_std_Collections_listSize),
+    AURA_FN(aura_lang_std_Collections_map),
+    AURA_FN(aura_lang_std_Collections_mapContains),
+    AURA_FN(aura_lang_std_Collections_mapContainsKey),
+    AURA_FN(aura_lang_std_Collections_mapContainsValue),
+    AURA_FN(aura_lang_std_Collections_mapGet),
+    AURA_FN(aura_lang_std_Collections_mapKeys),
+    AURA_FN(aura_lang_std_Collections_mapSet),
+    AURA_FN(aura_lang_std_Collections_mapSize),
+    AURA_FN(aura_lang_std_Collections_mapValues),
+    AURA_FN(aura_lang_std_Collections_mutableMapOf),
+    AURA_FN(aura_lang_std_Collections_pairOf),
+    AURA_FN(aura_lang_std_Collections_range),
+    AURA_FN(aura_lang_std_Collections_set),
+    AURA_FN(aura_lang_std_Collections_take),
+    AURA_FN(aura_lang_std_FileSystem_exists),
+    AURA_FN(aura_lang_std_FileSystem_mkdirP),
+    AURA_FN(aura_lang_std_FileSystem_readText),
+    AURA_FN(aura_lang_std_FileSystem_writeText),
+    AURA_FN(aura_lang_std_IO_fileExists),
+    AURA_FN(aura_lang_std_Process_arg),
+    AURA_FN(aura_lang_std_Process_argCount),
+    AURA_FN(aura_lang_std_Process_args),
+    AURA_FN(aura_lang_std_Process_run),
+    AURA_FN(aura_lang_std_String_charAt),
+    AURA_FN(aura_lang_std_String_charCodeAt),
+    AURA_FN(aura_lang_std_String_contains),
+    AURA_FN(aura_lang_std_String_countChar),
+    AURA_FN(aura_lang_std_String_endsWith),
+    AURA_FN(aura_lang_std_String_equals),
+    AURA_FN(aura_lang_std_String_indexOf),
+    AURA_FN(aura_lang_std_String_lastIndexOf),
+    AURA_FN(aura_lang_std_String_length),
+    AURA_FN(aura_lang_std_String_padStart),
+    AURA_FN(aura_lang_std_String_replace),
+    AURA_FN(aura_lang_std_String_replaceAll),
+    AURA_FN(aura_lang_std_String_split),
+    AURA_FN(aura_lang_std_String_startsWith),
+    AURA_FN(aura_lang_std_String_substring),
+    AURA_FN(aura_lang_std_String_substringAfter),
+    AURA_FN(aura_lang_std_String_substringBefore),
+    AURA_FN(aura_lang_std_String_toFloat),
+    AURA_FN(aura_lang_std_String_toInt),
+    AURA_FN(aura_lang_std_String_toLowerCase),
+    AURA_FN(aura_lang_std_String_toUpperCase),
+    AURA_FN(aura_lang_std_String_trim),
+    AURA_FN(aura_lang_std_StringBuilder_append),
+    AURA_FN(aura_lang_std_StringBuilder_appendChar),
+    AURA_FN(aura_lang_std_StringBuilder_appendInt),
+    AURA_FN(aura_lang_std_StringBuilder_create),
+    AURA_FN(aura_lang_std_StringBuilder_finish),
+    AURA_FN(aura_lang_std_StringBuilder_length),
+    AURA_FN(aura_lang_std_StringBuilder_reset),
+    AURA_FN(aura_malloc),
+    AURA_FN(aura_map_new),
+    AURA_FN(aura_mem_alloc),
+    AURA_FN(aura_mem_alloc_calls),
+    AURA_FN(aura_mem_bucket),
+    AURA_FN(aura_mem_dump_stats),
+    AURA_FN(aura_mem_free),
+    AURA_FN(aura_mem_hdr_sane),
+    AURA_FN(aura_mem_init),
+    AURA_FN(aura_mem_limit_bytes),
+    AURA_FN(aura_mem_oom),
+    AURA_FN(aura_mem_realloc),
+    AURA_FN(aura_mem_set_limit_mb),
+    AURA_FN(aura_mem_strdup),
+    AURA_FN(aura_mem_used_bytes),
+    AURA_FN(aura_mem_used_mb),
+    AURA_FN(aura_path_basename),
+    AURA_FN(aura_path_dirname),
+    AURA_FN(aura_path_join),
+    AURA_FN(aura_pow),
+    AURA_FN(aura_print),
+    AURA_FN(aura_println),
+    AURA_FN(aura_process_arg),
+    AURA_FN(aura_process_argCount),
+    AURA_FN(aura_process_args),
+    AURA_FN(aura_process_run),
+    AURA_FN(aura_puts),
+    AURA_FN(aura_random_init),
+    AURA_FN(aura_random_nextFloat),
+    AURA_FN(aura_random_nextInt),
+    AURA_FN(aura_sb_append_n),
+    AURA_FN(aura_sb_from_handle),
+    AURA_FN(aura_sb_reserve),
+    AURA_FN(aura_sqrt),
+    AURA_FN(aura_str_to_float),
+    AURA_FN(aura_str_to_int),
+    AURA_FN(aura_strdup),
+    AURA_FN(aura_string_charAt),
+    AURA_FN(aura_string_charCodeAt),
+    AURA_FN(aura_string_concat),
+    AURA_FN(aura_string_contains),
+    AURA_FN(aura_string_countChar),
+    AURA_FN(aura_string_data),
+    AURA_FN(aura_string_endsWith),
+    AURA_FN(aura_string_fromCharCode),
+    AURA_FN(aura_string_indexOf),
+    AURA_FN(aura_string_lastIndexOf),
+    AURA_FN(aura_string_length),
+    AURA_FN(aura_string_new),
+    AURA_FN(aura_string_padStart),
+    AURA_FN(aura_string_replace),
+    AURA_FN(aura_string_replaceAll),
+    AURA_FN(aura_string_split),
+    AURA_FN(aura_string_startsWith),
+    AURA_FN(aura_string_substring),
+    AURA_FN(aura_string_substringAfter),
+    AURA_FN(aura_string_substringBefore),
+    AURA_FN(aura_string_toLowerCase),
+    AURA_FN(aura_string_toUpperCase),
+    AURA_FN(aura_string_trim),
+    AURA_FN(aura_strlen),
+    AURA_FN(aura_substr_dup),
+    AURA_FN(aura_time_epoch),
+    AURA_FN(aura_time_epochMillis),
+    AURA_FN(aura_time_format),
+    AURA_FN(aura_to_float),
+    AURA_FN(aura_to_int),
+    AURA_FN(aura_to_int_any),
+    AURA_FN(aura_to_str),
+    AURA_FN(aura_to_str_any),
+    AURA_FN(aura_to_str_bool),
+    AURA_FN(aura_to_str_float)
+};
+
+static int aura_fn_cmp(const void *x, const void *y) {
+    size_t a = (size_t)(((const AuraFnEnt *)x)->a);
+    size_t b = (size_t)(((const AuraFnEnt *)y)->a);
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+/* 最近一次成功匹配到的表项下标（<0 = ra0 低于所有函数地址）。 */
+static int aura_attr_who_idx(void *ra) {
+    static int g_fn_sorted = 0;
+    int lo, hi, best = -1, mid;
+    if (!g_fn_sorted) {
+        qsort(g_fn_table, AURA_FN_COUNT, sizeof(AuraFnEnt), aura_fn_cmp);
+        g_fn_sorted = 1;
+    }
+    lo = 0;
+    hi = AURA_FN_COUNT - 1;
+    while (lo <= hi) {
+        mid = (lo + hi) / 2;
+        if ((size_t)g_fn_table[mid].a <= (size_t)ra) {
+            best = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return best;
+}
+
+const char *aura_attr_who(void *ra) {
+    int i = aura_attr_who_idx(ra);
+    return (i < 0) ? "(below-all)" : g_fn_table[i].n;
+}
+
+size_t aura_attr_off(void *ra) {
+    int i = aura_attr_who_idx(ra);
+    if (i < 0) return 0;
+    return (size_t)ra - (size_t)g_fn_table[i].a;
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+ * 崩溃现场转储（AURA_CRASH_DUMP=1 时安装顶层异常处理器）
+ *
+ * 背景：自举后端在 Phase E 稳定以 `0xC0000005`（访问违例）终止，但既非 OOM
+ * （RSS ~2.5 GB ≪ 8 GiB 闸门）也无 C 侧诊断输出。此前只有「进程退出码」这
+ * 一条线索，无法判断是空指针、越界读还是堆破坏。
+ *
+ * 做法：用 VEH（Vectored Exception Handler）在最外层捕获未处理异常，打印
+ *   - `code`            异常码（0xC0000005 / 0xC00000FD 栈溢出 / 0xC0000005 …）
+ *   - `addr`            出错的**指令**地址 → 经 `aura_attr_who` 归因到 C 函数
+ *   - `info0/info1`     访问类型（0 读 / 1 写）与**被访问的野地址**
+ *   - 24 帧调用栈       `CaptureStackBackTrace` + 同一张 fn 表归因
+ *
+ * 归因表只覆盖 `AURA_FN(...)` 登记的 C 运行时函数；AOT 编译出的 Aura 函数
+ * 不在此列，会显示 `(below-all)` 或落到最近的更早函数上——但**只要命中任意
+ * 一帧 C 运行时函数**，就能立刻把「是谁在读野指针」定位到函数级。
+ *
+ * `dbghelp.dll` 通过 `LoadLibrary` 延迟加载，不引入链接期依赖。
+ * 默认关闭（无环境变量则完全不安装），对正常路径零开销。
+ * ═════════════════════════════════════════════════════════════════════════ */
+#ifdef _WIN32
+
+static void aura_dump_stack_backtrace(void) {
+    typedef UINT (WINAPI *AuraCaptureFn)(DWORD, DWORD, PVOID *, PVOID *);
+    HMODULE h = LoadLibraryW(L"dbghelp.dll");
+    if (!h) {
+        fprintf(stderr, "[aura]   (dbghelp.dll unavailable; no backtrace)\n");
+        return;
+    }
+    AuraCaptureFn csb = (AuraCaptureFn)GetProcAddress(h, "CaptureStackBackTrace");
+    if (!csb) {
+        fprintf(stderr, "[aura]   (CaptureStackBackTrace unavailable)\n");
+        return;
+    }
+    PVOID frames[24];
+    UINT n = csb(0, 24, frames, NULL);
+    for (UINT i = 0; i < n; i++) {
+        fprintf(stderr, "  #%-2u %p %s+0x%zx\n", i, frames[i],
+                aura_attr_who(frames[i]), aura_attr_off(frames[i]));
+    }
+}
+
+static LONG WINAPI aura_crash_handler(EXCEPTION_POINTERS *ep) {
+    if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+    EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    /* 只处理「致命且无更好归属」的异常：访问违例 / 栈溢出 / 非法指令 /
+     * 数据执行保护。别的异常（如除零、用户 throw）交给默认处理。 */
+    LONG code = (LONG)er->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_STACK_OVERFLOW &&
+        code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_DATATYPE_MISALIGNMENT) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    fprintf(stderr,
+            "[aura] CRASH code=0x%08lx instr=%p (%s+0x%zx) "
+            "access=%llu target=%p\n",
+            (unsigned long)code, er->ExceptionAddress,
+            aura_attr_who(er->ExceptionAddress), aura_attr_off(er->ExceptionAddress),
+            (unsigned long long)(er->NumberParameters > 0
+                                     ? er->ExceptionInformation[0] : 0),
+            er->NumberParameters > 1 ? (void *)er->ExceptionInformation[1] : NULL);
+    /* x64 Windows 调用约定：rcx/rdx/r8/r9 承载前四个参数。崩溃现场寄存器
+     * 因此能直接还原「是哪个指针被解引用、下标是多少」——对定位悬垂指针
+     * 与越界下标最有用。 */
+    if (ep->ContextRecord) {
+        CONTEXT *cx = ep->ContextRecord;
+        fprintf(stderr,
+                "[aura]   rcx=%p rdx=%p r8=%p r9=%p "
+                "rax=%p rbx=%p rsi=%p rdi=%p rbp=%p rsp=%p rip=%p\n",
+                (void *)cx->Rcx, (void *)cx->Rdx, (void *)cx->R8, (void *)cx->R9,
+                (void *)cx->Rax, (void *)cx->Rbx, (void *)cx->Rsi, (void *)cx->Rdi,
+                (void *)cx->Rbp, (void *)cx->Rsp, (void *)cx->Rip);
+        fprintf(stderr,
+                "[aura]   r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\n",
+                (void *)cx->R10, (void *)cx->R11, (void *)cx->R12,
+                (void *)cx->R13, (void *)cx->R14, (void *)cx->R15);
+    }
+    fflush(stderr);
+    aura_dump_stack_backtrace();
+    fflush(stderr);
+    /* 不吞异常：只观测，随后让默认处理（终止进程 + WER）接管。 */
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+__attribute__((constructor)) static void aura_maybe_install_crash_handler(void) {
+    if (getenv("AURA_CRASH_DUMP")) {
+        AddVectoredExceptionHandler(1, aura_crash_handler);
+    }
+}
+
+#else /* !_WIN32 */
+/* POSIX 侧暂不实现：崩溃诊断目前只在 Windows 自举路径需要。 */
+#endif
+
+
 
 
 

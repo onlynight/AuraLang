@@ -4393,7 +4393,13 @@ fn emit_call(
                 let p = ctx.fresh_var();
                 let v = ctx.fresh_var();
                 let cur = blocks.last_mut();
-                cur.body.push(format!("{} = call i8* @malloc(i64 {})", p, n));
+                // ⚠ 必须走 `aura_malloc`（= `aura_mem_alloc`，带上限检查 + 记账），
+                // 不能直接 `@malloc`：后者绕开 `g_aura_mem_used` 统计与
+                // `AURA_MEM_LIMIT_MB` 闸门，AOT 运行时无 GC（`free_calls=0`）时
+                // `String.substring` 的每次切片都永久驻留却**不计入** `used`
+                // ⇒ 真实 RSS 远大于诊断报告的 `used`，且超限不会 exit(70)
+                // 而是留下一次不可解释的访问违例（0xC0000005）。
+                cur.body.push(format!("{} = call i8* @aura_malloc(i64 {})", p, n));
                 cur.body
                     .push(format!("{} = ptrtoint i8* {} to i64", v, p));
                 return Ok((v, "i64".to_string()));
@@ -4403,7 +4409,7 @@ fn emit_call(
                 let p = ctx.fresh_var();
                 let cur = blocks.last_mut();
                 cur.body.push(format!("{} = inttoptr i64 {} to i8*", p, addr));
-                cur.body.push(format!("call void @free(i8* {})", p));
+                cur.body.push(format!("call void @aura_free(i8* {})", p));
                 return Ok(("0".to_string(), "i32".to_string()));
             }
         }
