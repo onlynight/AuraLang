@@ -58,8 +58,15 @@ class RegisterAllocator {
     /// 并持续分配内存。键是整数节点 ID，直接下标即可。
     private var colors: List<String> = arrayListOf<String>()
 
-    /// 溢出节点列表（逗号分隔的 nodeId）。
-    private var spilled: String = ""
+    /// 溢出节点 id 列表（仅登记用；`isSpilled` 走 `colors` 里的 `spill_slot_*` 前缀）。
+    ///
+    /// ⚠️ 旧实现是**逗号分隔的字符串** `this.spilled = this.spilled + "," + id`：
+    /// 自举 `Main.aura` 会溢出 3 万+ 个节点，累计拷贝 ≈ N²/2 × 7B ≈ **10 GB**。
+    /// AOT 运行时无 GC（`free_calls=0`），这些中间串全部滞留 —— 实测运行时分配
+    /// 归因表：`aura_string_concat` 1891 万次 / 7302 MB（占总分配 92%），
+    /// 8 GiB 内存闸门正是在 Phase D 被打穿（退出码 70）。
+    /// 改用 List（均摊 O(1) 追加），字符串形态只在 `getSpilledNodes()` 里按需拼。
+    private var spilledNodes: List<Int> = arrayListOf<Int>()
 
     /// 调用栈（DFS 用，逗号分隔的 nodeId）。
     private var callStack: String = ""
@@ -73,11 +80,24 @@ class RegisterAllocator {
     /// 帧布局（栈偏移表："spillSlot|offset\n"）。
     private var frameLayout: String = ""
 
+    /// 栈帧大小（字节，16 字节对齐；0 = 未计算）。
+    ///
+    /// 由 `computeFrameLayout` 直接算出，**不再**从布局字符串里解析 ——
+    /// 布局字符串本身已不再常驻构建，见 `computeFrameLayout`。
+    private var frameSizeValue: Int = 0
+
     /// 最大活跃虚拟寄存器数（用于帧大小计算）。
     private var maxLiveRegs: Int = 0
 
     /// 标签 → 指令索引映射（"bb0|0\nbb1|3\n..."），用于控制流感知的 liveness 分析。
-    private var labelIndexMap: String = ""
+    /// 基本块入口的**指令索引列表**（下标即 `bb<j>` 里的 j）。
+    ///
+    /// ⚠️ 旧实现是 `labelIndexMap` 大字符串 `"bbN|index\n"`：`buildLabelIndexMap`
+    /// 里一条 4 段拼接链（`s + label + "|" + toStr(idx) + "\n"`）**每一步都整体
+    /// 拷贝一次正在长大的累加器**，自举 `Main.aura` 实测峰值 242,943 B / 13,821 次，
+    /// 四个步骤各占 1551 MB ⇒ **6.2 GB**（占总分配 78%），是 8 GiB 闸门的主因。
+    /// 改用 List：`bb<j>` 直接下标取，O(1) 且零分配。
+    private var labelIndexIdxs: List<Int> = arrayListOf<Int>()
 
     /// 节点活跃区间起始指令索引（**按节点 ID 下标**，-1 = 未出现；已做回边修正）。
     ///
@@ -92,7 +112,16 @@ class RegisterAllocator {
     private var spanLast: List<Int> = arrayListOf<Int>()
 
     /// 循环回边表（"targetIdx|jumpIdx\n"）。
-    private var backEdges: String = ""
+    /// 回边表（每条为 `"targetIdx|jumpIdx"`）。
+    ///
+    /// ⚠️ 旧实现是**逗号/换行分隔的大字符串** `this.backEdges = this.backEdges
+    /// + toStr(tgt) + "|" + toStr(i) + "\n"`：自举 `Main.aura` 会累积数万条回边，
+    /// 累计拷贝 ≈ N²/2 × 12B，且每次拼接之间都夹着 `toStr()` 调用 ——
+    /// 正好让运行时的「链探测」（要求输入等于上一次输出）失灵（`chain=0`），
+    /// 所以只能靠结构定位。实测它把 8 GiB 闸门打在 `alloc()` 的**第一步**
+    /// `buildBackEdges()` 里，位于第一个探针点之前 —— 这就是 `ra_probe.log`
+    /// 一直不存在的原因。改用 List，均摊 O(1)。
+    private var backEdges: List<String> = arrayListOf<String>()
 
     /// 标签名表（与 `labelInstrIdxs` 平行，下标对应）。
     private var labelNames: List<String> = arrayListOf<String>()
@@ -102,16 +131,16 @@ class RegisterAllocator {
 
     init() {
         this.colors = arrayListOf<String>()
-        this.spilled = ""
+        this.spilledNodes = arrayListOf<Int>()
         this.callStack = ""
         this.spillSlots = 0
         this.dag = null
         this.frameLayout = ""
         this.maxLiveRegs = 0
-        this.labelIndexMap = ""
+        this.labelIndexIdxs = arrayListOf<Int>()
         this.spanFirst = arrayListOf<Int>()
         this.spanLast = arrayListOf<Int>()
-        this.backEdges = ""
+        this.backEdges = arrayListOf<String>()
         this.labelNames = arrayListOf<String>()
         this.labelInstrIdxs = arrayListOf<Int>()
     }
@@ -123,15 +152,15 @@ class RegisterAllocator {
         this.raProbe("allocate enter nodes=" + toStr(d.nodeCount) +
                 " instrs=" + toStr(d.instrCount))
         this.colors = arrayListOf<String>()
-        this.spilled = ""
+        this.spilledNodes = arrayListOf<Int>()
         this.callStack = ""
         this.spillSlots = 0
         this.frameLayout = ""
         this.maxLiveRegs = 0
-        this.labelIndexMap = ""
+        this.labelIndexIdxs = arrayListOf<Int>()
         this.spanFirst = arrayListOf<Int>()
         this.spanLast = arrayListOf<Int>()
-        this.backEdges = ""
+        this.backEdges = arrayListOf<String>()
         this.labelNames = arrayListOf<String>()
         this.labelInstrIdxs = arrayListOf<Int>()
 
@@ -143,7 +172,7 @@ class RegisterAllocator {
         // 必须在着色前算好：着色逐节点进行，区间一算错就无法挽回
         //（见 buildBackEdges 的说明）。
         this.buildBackEdges()
-        this.raProbe("backEdges done edges=" + toStr(this.backEdges.length))
+        this.raProbe("backEdges done edges=" + toStr(this.backEdges.size))
         this.buildNodeSpans()
         this.raProbe("spans done first=" + toStr(this.spanFirst.size) +
                 " last=" + toStr(this.spanLast.size))
@@ -297,20 +326,68 @@ class RegisterAllocator {
         return ""
     }
 
+    /// 取逗号分隔串的第 `idx` 段（零 List 分配；越界返回 ""）。
+    ///
+    /// 替代热路径上的 `splitComma`：后者每次新建 `AuraDynList` 并为每个元素
+    /// `aura_substr_dup`。自举 Main.aura 实测 `dynlist_new` 122 万次、
+    /// `substr_dup` 225 万次都来自这里（无 GC ⇒ 全部滞留）。
+    private fun csvPartAt(csv: String, idx: Int): String {
+        if (csv == "" || idx < 0) {
+            return ""
+        }
+        var cur: Int = 0
+        var start: Int = 0
+        var i: Int = 0
+        val len: Int = csv.length
+        while (i <= len) {
+            if (i == len || csv.charCodeAt(i) == 44) {
+                if (cur == idx) {
+                    return csv.substring(start, i)
+                }
+                cur = cur + 1
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 逗号分隔串的段数（零分配）。
+    private fun csvCount(csv: String): Int {
+        if (csv == "") {
+            return 0
+        }
+        var n: Int = 1
+        var i: Int = 0
+        val len: Int = csv.length
+        while (i < len) {
+            if (csv.charCodeAt(i) == 44) {
+                n = n + 1
+            }
+            i = i + 1
+        }
+        return n
+    }
+
     /// 乐观重着色。
     private fun tryOptimisticRecolor(nodeId: Int, interference: String): Boolean {
-        val usedList: List<String> = this.splitComma(interference)
+        val n: Int = this.csvCount(interference)
         var i: Int = 0
-        while (i < usedList.size) {
-            val conflictColor: String = usedList[i]
-            val conflictingNode: Int = this.findConflictingNode(nodeId, conflictColor)
-            if (conflictingNode >= 0) {
-                this.spill(conflictingNode)
-                val used: String = this.getUsedColors(this.buildInterference(nodeId))
-                val free: String = this.getFreeColor(used)
-                if (free != "") {
-                    this.colorPut(nodeId, free)
-                    return true
+        while (i < n) {
+            val conflictColor: String = this.csvPartAt(interference, i)
+            if (conflictColor != "") {
+                val conflictingNode: Int = this.findConflictingNode(nodeId, conflictColor)
+                if (conflictingNode >= 0) {
+                    this.spill(conflictingNode)
+                    // ⚠️ 必须用**与主循环同一套**基于活跃区间的干扰集。
+                    // `buildInterference` 只看 args 颜色，会漏掉「区间重叠但非直接
+                    // 操作数」的活值 → 这里挑出的「空闲」颜色可能其实被占着。
+                    val used: String = this.getUsedColors(this.buildIntervalInterference(nodeId))
+                    val free: String = this.getFreeColor(used)
+                    if (free != "") {
+                        this.colorPut(nodeId, free)
+                        return true
+                    }
                 }
             }
             i = i + 1
@@ -319,16 +396,28 @@ class RegisterAllocator {
     }
 
     /// 查找使用指定颜色的冲突节点。
+    ///
+    /// 逐字符扫描 `node.args` 取整数，不 `splitComma`（热路径，见 `csvPartAt`）。
     private fun findConflictingNode(nodeId: Int, color: String): Int {
         val node: DagNode = this.dag.nodeOf(nodeId)
-        val args: List<String> = this.splitComma(node.args)
+        val s: String = node.args
+        val len: Int = s.length
         var i: Int = 0
-        while (i < args.size) {
-            val arg: Int = strToInt(args[i])
-            if (arg >= 0) {
-                val argColor: String = this.colorGet(arg)
-                if (argColor == color) {
-                    return arg
+        var acc: Int = -1
+        while (i <= len) {
+            // i == len 时给一个非数字哨兵，触发最后一次结算
+            val c: Int = if (i == len) { 44 } else { s.charCodeAt(i) }
+            if (c >= 48 && c <= 57) {
+                if (acc < 0) {
+                    acc = 0
+                }
+                acc = acc * 10 + (c - 48)
+            } else {
+                if (acc >= 0) {
+                    if (this.colorGet(acc) == color) {
+                        return acc
+                    }
+                    acc = -1
                 }
             }
             i = i + 1
@@ -337,12 +426,11 @@ class RegisterAllocator {
     }
 
     /// 溢出节点。
+    ///
+    /// `spillSlots` 保持「每次调用都 +1」的既有语义（`tryOptimisticRecolor`
+    /// 可能对同一节点重复 spill，帧布局依赖这个计数）。登记走 List，均摊 O(1)。
     private fun spill(nodeId: Int): Unit {
-        if (this.spilled == "") {
-            this.spilled = toStr(nodeId)
-        } else {
-            this.spilled = this.spilled + "," + toStr(nodeId)
-        }
+        this.spilledNodes.add(nodeId)
         this.spillSlots = this.spillSlots + 1
     }
 
@@ -417,7 +505,7 @@ class RegisterAllocator {
     /// 扫描指令序列，找到每个基本块的入口点（第一条指令和每条终止指令后的下一条指令），
     /// 按顺序映射为 "bb0", "bb1", "bb2", ...
     private fun buildLabelIndexMap(instrs: List<DagInstruction>): Unit {
-        this.labelIndexMap = ""
+        this.labelIndexIdxs = arrayListOf<Int>()
         val n: Int = instrs.size
 
         // 收集基本块入口点
@@ -433,14 +521,9 @@ class RegisterAllocator {
             i = i + 1
         }
 
-        // 构建映射字符串 "bbN|index\n"
-        var j: Int = 0
-        while (j < entryPoints.size) {
-            val label: String = "bb" + toStr(j)
-            val idx: Int = entryPoints[j]
-            this.labelIndexMap = this.labelIndexMap + label + "|" + toStr(idx) + "\n"
-            j = j + 1
-        }
+        // 直接存入口索引列表：`labelToIndex` 按 `bb<j>` 的下标 j 取值。
+        // （旧实现把 `"bbN|index\n"` 拼成大字符串，见 `labelToIndex` 的说明。）
+        this.labelIndexIdxs = entryPoints
     }
 
     /// 判断指令模板是否为终止指令。
@@ -498,27 +581,33 @@ class RegisterAllocator {
     }
 
     /// 将标签名映射到指令索引。
+    ///
+    /// 标签名是**确定的**合成形式 `bb<j>`（j = 该基本块入口在 `entryPoints`
+    /// 里的序号，见 `buildLabelIndexMap`），所以直接解析十进制后缀做下标即可
+    /// —— O(1)、零分配，**语义与旧的全表扫描完全等价**（非 `bb<数字>` 形式旧
+    /// 实现同样查不到，也返回 -1）。
+    ///
+    /// 旧实现：「构建侧」拼 `"bbN|idx\n"` 大字符串（4 段链、累计 6.2 GB），
+    /// 「查找侧」每个跳转都全表扫描 + 逐行 `substring`（`aura_substr_dup`
+    /// 161 万次）。`charCodeAt` 是内联访存，`substring` 在 AOT 下每次都要
+    /// `strlen` 整个串。
     private fun labelToIndex(label: String): Int {
-        if (this.labelIndexMap == "") { return -1 }
-        val targetKey: String = label + "|"
-        var lineStart: Int = 0
-        var pos: Int = 0
-        val len: Int = this.labelIndexMap.length
-        while (pos <= len) {
-            // ⚠️ `charAt(pos)` 在 AOT 下落到 C `aura_string_charAt`，会先
-            // `strlen` 整个 labelIndexMap（O(|map|)）—— 逐字符调用即 O(|map|²)。
-            // `charCodeAt` 是内联访存（NUL 即越界），零分配零 strlen。
-            if (pos == len || (this.labelIndexMap.charCodeAt(pos) as Int) == 10) {
-                val line: String = this.labelIndexMap.substring(lineStart, pos)
-                if (line.length > targetKey.length && line.startsWith(targetKey)) {
-                    val idxStr: String = line.substring(targetKey.length, line.length)
-                    return this.strToInt(idxStr)
-                }
-                lineStart = pos + 1
-            }
-            pos = pos + 1
+        val n: Int = this.labelIndexIdxs.size
+        if (n <= 0 || label.length <= 2) { return -1 }
+        // 前缀必须是 "bb"（'b' = 98）
+        if ((label.charCodeAt(0) as Int) != 98 || (label.charCodeAt(1) as Int) != 98) {
+            return -1
         }
-        return -1
+        var v: Int = 0
+        var i: Int = 2
+        while (i < label.length) {
+            val c: Int = label.charCodeAt(i) as Int
+            if (c < 48 || c > 57) { return -1 }
+            v = v * 10 + (c - 48)
+            i = i + 1
+        }
+        if (v >= n) { return -1 }
+        return this.labelIndexIdxs[v]
     }
 
     /// 联合所有后继指令的 live-in 集合。
@@ -703,36 +792,64 @@ class RegisterAllocator {
     /// 区间必须是**回边修正后**的（见 `buildBackEdges` / `buildNodeSpans`），
     /// 否则循环携带值会被线性区间错误地判为「短命」。
     private fun buildIntervalInterference(nodeId: Int): String {
-        var result: String = ""
-        var seenDelim: String = ""
+        // ⚠️ 用**带首尾逗号的累积串** `seen`（`,rbx,rsi,`）而不是「result + 每次重建
+        //    seenDelim」：旧写法每收下一个颜色都要 `seenDelim = "," + result + ","`,
+        //    在自举 Main.aura 的 7 万节点规模下是 `aura_string_concat` 的主要来源
+        //    （无 GC ⇒ 全部滞留，实测占总分配 92% / 7302 MB）。
+        //    带分隔符的形态本身即可直接喂给零分配的 `containsColor`。
+        // 必须**以逗号开头**：`containsColor` 用 `,rbx,` 形式做成员判定，缺前导
+        // 逗号会让第一个颜色永远判不出「已存在」而被重复加入（并让末尾的
+        // `substring(1, len-1)` 切掉首个颜色名的一个字符）。
+        var seen: String = ","
         val firstN: Int = this.nodeFirstIdx(nodeId)
         val lastN: Int = this.nodeLastIdx(nodeId)
         if (firstN < 0) {
             // 没有活跃区间信息：退化为「args 颜色」这一保守近似
             return this.buildInterference(nodeId)
         }
-        // 可用颜色收齐即停（见下方说明第 2 点）。
+        // ⚠️ 「收齐即停」的计数**只能统计可用颜色**（`availList`）。
+        // 干扰集里还有大量**易失寄存器颜色**（rax/rcx/rdx/r8-r11：常量轮转、参数
+        // 装载、Call 返回值）——它们不在可用颜色池里，若占满计数会让内层循环提前
+        // break，从而**漏掉真正的可用颜色冲突**，两个同时活着的值被分到同一个
+        // 非易失寄存器 → 生成代码静默算错。
         val availCount: Int = this.availList.size
-        var distinct: Int = 0
+        var availSeen: Int = 0
         var m: Int = 0
-        while (m < this.dag.nodeCount) {
-            if (distinct >= availCount) { break }
+        val total: Int = this.dag.nodeCount
+        while (m < total) {
+            if (availSeen >= availCount) { break }
             if (m != nodeId) {
                 val c: String = this.colorGet(m)
-                if (c != "" && !this.containsColor(seenDelim, c)) {
+                if (c != "" && !this.containsColor(seen, c)) {
                     val firstM: Int = this.nodeFirstIdx(m)
                     val lastM: Int = this.nodeLastIdx(m)
                     if (firstM >= 0 && firstN <= lastM && firstM <= lastN) {
-                        if (result != "") { result = result + "," }
-                        result = result + c
-                        seenDelim = "," + result + ","
-                        distinct = distinct + 1
+                        seen = seen + c + ","
+                        if (this.isAvailColor(c)) {
+                            availSeen = availSeen + 1
+                        }
                     }
                 }
             }
             m = m + 1
         }
-        return result
+        if (seen == ",") {
+            return ""
+        }
+        // 去掉首尾分隔符，保持「逗号分隔、无首尾分隔符」的既有返回契约
+        return seen.substring(1, seen.length - 1)
+    }
+
+    /// 是否为可用颜色池里的非易失寄存器（见 `availList`）。
+    private fun isAvailColor(c: String): Boolean {
+        var i: Int = 0
+        while (i < this.availList.size) {
+            if (this.availList[i] == c) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
     }
 
     // ── 回边（循环）感知的活跃区间 ──
@@ -746,7 +863,7 @@ class RegisterAllocator {
     /// 不相交 → 分配器把同一个 `rbx` 分给两者 → 循环体覆盖掉 Phi，
     /// 循环结束后打印 `1`（应为 100）。
     private fun buildBackEdges(): Unit {
-        this.backEdges = ""
+        this.backEdges = arrayListOf<String>()
         this.labelNames = arrayListOf<String>()
         this.labelInstrIdxs = arrayListOf<Int>()
         val instrs: List<DagInstruction> = this.dag.instrs
@@ -769,7 +886,7 @@ class RegisterAllocator {
                 if (parts.size >= 1 && parts[0] != "") {
                     val tgt: Int = this.labelInstrIndexOf(parts[0])
                     if (tgt >= 0 && tgt < i) {
-                        this.backEdges = this.backEdges + toStr(tgt) + "|" + toStr(i) + "\n"
+                        this.backEdges.add(toStr(tgt) + "|" + toStr(i))
                     }
                 }
             }
@@ -821,8 +938,8 @@ class RegisterAllocator {
 
         // ── 回边修正 ──
         // 回边表解析一次（旧实现在每个节点 × 每轮迭代里 split 一次）。
-        if (this.backEdges != "") {
-            val edges: List<String> = this.splitNewline(this.backEdges)
+        if (this.backEdges.size > 0) {
+            val edges: List<String> = this.backEdges
             val edgeT: List<Int> = arrayListOf<Int>()
             val edgeJ: List<Int> = arrayListOf<Int>()
             var e: Int = 0
@@ -923,8 +1040,9 @@ class RegisterAllocator {
     /// 根据溢出槽数量和调用约定计算帧大小和槽位偏移。
     /// Windows x64: 前 4 个参数在寄存器中，第 5 个参数在栈上（影子空间 32 字节）。
     private fun computeFrameLayout(): Unit {
+        this.frameSizeValue = 0
+        this.frameLayout = ""
         if (this.spillSlots == 0) {
-            this.frameLayout = ""
             return
         }
 
@@ -936,15 +1054,17 @@ class RegisterAllocator {
         if (frameSize % 16 != 0) {
             frameSize = frameSize + (16 - frameSize % 16)
         }
+        this.frameSizeValue = frameSize
 
-        // 构建帧布局表
-        this.frameLayout = "frameSize|" + toStr(frameSize)
-        var slot: Int = 0
-        while (slot < this.spillSlots) {
-            val offset: Int = shadowSpace + slot * 8
-            this.frameLayout = this.frameLayout + "\nslot" + toStr(slot) + "|-0x" + this.toHexString(offset)
-            slot = slot + 1
-        }
+        // ⚠️ 旧实现在这里把帧布局拼成 `"frameSize|N\nslotN|-0xNN\n…"` 大字符串：
+        // 一条 **4 段拼接链**（`s + "\nslot"` → `+ toStr(slot)` → `+ "|-0x"` →
+        // `+ toHexString(offset)`），**每一步都整体拷贝一次正在长大的累加器**。
+        // 自举 `Main.aura` 实测 13,821 个溢出槽、峰值 242,943 B，四个步骤各占
+        // **1551 MB ⇒ 合计 6.2 GB**（占总分配 78%），是 8 GiB 闸门的主因
+        //（大拼接站点探针正好报出 4 个相邻返回地址、`calls=13821`、`max=242943`）。
+        //
+        // 而布局信息本就是**纯函数**：槽 n 的偏移 = `32 + n*8`（见
+        // `getSpillOffset`），帧大小上面已算出 —— 不需要任何字符串。
     }
 
     /// 整数转十六进制字符串。
@@ -961,20 +1081,26 @@ class RegisterAllocator {
         return result
     }
 
-    /// 获取栈帧布局。
+    /// 获取栈帧布局（`"frameSize|N\nslot0|-0x20\n…"`，**按需**生成）。
+    ///
+    /// 该字符串不再常驻构建（见 `computeFrameLayout`）；本方法仅为兼容性 /
+    /// 诊断保留，当前**无任何调用方**（`X86Emitter` 用的是 `getFrameSize`）。
     fun getFrameLayout(): String {
-        return this.frameLayout
+        if (this.spillSlots == 0) { return "" }
+        var s: String = "frameSize|" + toStr(this.frameSizeValue)
+        var slot: Int = 0
+        while (slot < this.spillSlots) {
+            s = s + "\nslot" + toStr(slot) + "|-0x" + this.toHexString(32 + slot * 8)
+            slot = slot + 1
+        }
+        return s
     }
 
-    /// 获取栈帧大小（字节）。帧布局为 "frameSize|N\nslot0|-0x20\n…"。
+    /// 获取栈帧大小（字节）。
     fun getFrameSize(): Int {
-        if (this.frameLayout == "") { return 0x50 }  // 默认 80 字节
-        val firstLine: String = this.splitNewline(this.frameLayout)[0]
-        val sep: Int = firstLine.indexOf("|")
-        if (sep > 0) {
-            return strToInt(firstLine.substring(sep + 1))
-        }
-        return 0x50
+        // 无溢出槽时维持历史默认值 80（0x50）。
+        if (this.spillSlots == 0) { return 0x50 }
+        return this.frameSizeValue
     }
 
     /// 获取溢出槽数量。
@@ -982,32 +1108,23 @@ class RegisterAllocator {
         return this.spillSlots
     }
 
-    /// 获取指定节点的 spill slot 偏移。
+    /// 获取指定节点的 spill slot 偏移（自 `rbp` 向下的**正**偏移量）。
+    ///
+    /// 偏移是槽号的纯函数：`32 + slotNum * 8`（影子空间 32 + 每槽 8 字节），
+    /// 与 `computeFrameLayout` 的构建公式一致。
+    ///
+    /// ⚠️ 旧实现每次都 `splitNewline(frameLayout)`（把整张布局表拆成 13,821 个
+    /// `substring`）再逐行线性查找；而**命中那一行解析出来的值与末尾的兜底公式
+    /// 完全相同**（`"-0x20".substring(3)` → `hexToInt("20")` = 32 = `32 + 0*8`），
+    /// 所以整套字符串查找是纯冗余。此处按同一公式改写，O(1) 且零分配，
+    /// 对任意输入与原实现**逐位等价**。
     fun getSpillOffset(nodeId: Int): Int {
         val color: String = this.getColor(nodeId)
         if (color == "" || !color.startsWith("spill_slot_")) { return 0 }
+        // 无溢出槽时（旧实现 frameLayout 为空）返回 0。
+        if (this.spillSlots == 0) { return 0 }
         // 从 color 中提取 slot 编号
-        val slotStr: String = color.substring(11)
-        val slotNum: Int = strToInt(slotStr)
-        // 查找帧布局中的偏移
-        if (this.frameLayout == "") { return 0 }
-        val lines: List<String> = this.splitNewline(this.frameLayout)
-        var i: Int = 0
-        while (i < lines.size) {
-            val line: String = lines[i]
-            if (line.startsWith("slot" + toStr(slotNum) + "|")) {
-                val offsetPart: String = line.substring(line.indexOf("|") + 1)
-                // 格式: "-0x18"
-                if (offsetPart.startsWith("-0x")) {
-                    return this.hexToInt(offsetPart.substring(3))
-                }
-                if (offsetPart.startsWith("-")) {
-                    return -strToInt(offsetPart.substring(1))
-                }
-            }
-            i = i + 1
-        }
-        // 默认计算: shadowSpace(32) + slotNum * 8
+        val slotNum: Int = strToInt(color.substring(11))
         return 32 + slotNum * 8
     }
 
@@ -1126,7 +1243,18 @@ class RegisterAllocator {
     }
 
     fun getSpilledNodes(): String {
-        return this.spilled
+        // 冷路径：按需拼出逗号分隔列表（旧实现把这份串常驻累积，见 `spilledNodes`）。
+        var s: String = ""
+        var i: Int = 0
+        while (i < this.spilledNodes.size) {
+            if (s == "") {
+                s = toStr(this.spilledNodes[i])
+            } else {
+                s = s + "," + toStr(this.spilledNodes[i])
+            }
+            i = i + 1
+        }
+        return s
     }
 
     fun getAvailableRegisters(): String {

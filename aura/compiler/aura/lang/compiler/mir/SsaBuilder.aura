@@ -81,6 +81,72 @@ class SsaBuilder {
     /// 用于 SSA 变量重命名：每次赋值递增版本号，确保每个版本是独立的 SSA 值。
     private var varVersion: String = ""
 
+    // ── 类/结构体元数据（Photon 对象模型 A-1/A-3）──
+    //
+    // HIR 的 `HirClass`/`HirStruct` 形状：
+    //     HirClass(name, ty = 基类名, kids = [HirBlock(kids = [HirVarDecl/…, HirFunction/…])])
+    // 类体块里的 `HirVarDecl`/`HirValDecl` 是**字段**，`HirFunction` 是方法。
+    // 这里在建 SSA 之前做一次预扫描，得到三张表：
+    //   · classNames / classParents —— 类名与继承关系
+    //   · classFields —— `Class|field|index|auraTy|defaultNodeId`（index 为**最终布局序号**）
+    //   · funcOwner —— `funcNodeId|classNodeId`（方法 → 属主类）
+    // 字段字节偏移 = 16 + index * 8（对象头 [vtable:8][size:8]，见 PhotonRuntime）。
+
+    // ⚠️ 下面这些表**一律用扁平字符串 + indexOf/charCodeAt 扫描**，禁止
+    //    per-lookup 的 `split()`：自举 `Main.aura` 有 15 万 HIR 节点 / 2843 个
+    //    函数 / 2 万个调用点，任何「每次查询都整表 split」的实现都会退化为
+    //    O(N²) 分配（实测本文件初版直接触发框架内存闸门 abort）。
+    //    `indexOf` 走 C 侧 strstr，扫描是 C 速度且零分配。
+
+    /// 类名表（`\nName\n`）：`isClassName`。
+    private var classNamesCsv: String = ""
+
+    /// 类名（按 arena 顺序，供构造器合成等**冷路径**遍历用）。
+    private var classList: List<String> = arrayListOf<String>()
+
+    /// 继承关系（`\nChild|Parent\n`）。
+    private var classParents: String = ""
+
+    /// 字段表（`\nClass|field|index|auraTy|defaultNodeId\n`）。
+    private var classFields: String = ""
+
+    /// 方法节点 → 属主类名（下标 = HIR 节点 id）。
+    ///
+    /// ⚠️ 刻意**不用**扁平字符串：`funcOwners` 要登记 ~2800 个方法，逐条拼接
+    /// 会累积 ~120 MB 不可回收的中间串（自举 `Main.aura` 直接把框架内存闸门
+    /// 打爆）。下标数组是 O(N) 建立、O(1) 查询、且只占 ~1 MB。
+    private var ownerByNode: List<String> = arrayListOf<String>()
+
+    /// 类方法表（`\nClass|method\n`）：判定「某类是否声明某方法」。
+    private var classMethods: String = ""
+
+    /// 方法 → 唯一属主类（`\nmethod|Class\n`；重名时该行改写为 `\nmethod|\n`）。
+    private var methodOwners: String = ""
+
+    /// 方法 → **返回类型**（`\nmethod|retTy\n`；同名方法返回类型不一致置为歧义）。
+    ///
+    /// 用途：推断**未标注类型**的局部量的静态类型。
+    /// `Hir.aura` 的 `lowerCall` 把 HirCall 的 type 一律写空串，所以
+    /// `val peephole = PeepholeOptimizerUtils.emptyOptimizer()` 这种（本仓库的
+    /// **主要写法**）在 HIR 里拿不到类型 → `localTypeOf("peephole")` 为空 →
+    /// 接收者定型失败 → 调用点回落成裸名。
+    /// 自举 `Main.aura` 实测因此有 11 个裸方法名未定义（`optimize` / `lower` /
+    /// `emitFunction` / `link` / `setOutputType` / `getSize` / `emit` …）。
+    private var methodRetTypes: String = ""
+
+    /// 顶层自由函数名（`\nname\n`）。
+    ///
+    /// 调用点解析必须避开它们：`add(3, 4)` 这样的自由函数调用与
+    /// `p.add(3, 4)` 在 HIR 里都是 `HirCall(text="add")`，若只按「唯一属主」
+    /// 回退，会把 `add(3,4)` 误接到 `ArrayList_add`（实测 05_functions 崩溃）。
+    private var freeFuncs: String = ""
+
+    /// 当前函数所属类（空 = 自由函数）。
+    private var curClass: String = ""
+
+    /// 当前函数内「局部变量名 → 声明类型名」（每行 `name|TypeName`，倒序优先）。
+    private var localTypes: String = ""
+
     init() {
         this.program = MirSsaProgram()
         this.types = this.program.types
@@ -92,6 +158,17 @@ class SsaBuilder {
         this.varMap = ""
         this.varVersion = ""
         this.loopStack = ""
+        this.classNamesCsv = ""
+        this.classList = arrayListOf<String>()
+        this.classParents = ""
+        this.classFields = ""
+        this.classMethods = ""
+        this.methodOwners = ""
+        this.methodRetTypes = ""
+        this.freeFuncs = ""
+        this.ownerByNode = arrayListOf<String>()
+        this.curClass = ""
+        this.localTypes = ""
     }
 
     // ── 主入口 ──
@@ -104,6 +181,10 @@ class SsaBuilder {
         this.program = MirSsaProgram()
         this.types = this.program.types
         this.tmpCount = 0
+
+        // 类元数据必须在建函数之前就绪：方法与调用点都要用它解析字段/构造器。
+        this.buildClassIndex(src)
+        this.synthesizeCtors(src)
 
         this.buildAllFunctions(src)
 
@@ -178,7 +259,17 @@ class SsaBuilder {
             println("[ssa-fn] n=" + toStr(this.dbgFuncCount) + " " + src.textOf(id))
         }
         val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
-        val name: String = src.textOf(id)
+        // ── 类方法符号限定：`Class_method` ──
+        //
+        // Aura 类方法之间没有名字作用域隔离，裸名会让重名方法在 COFF 里互相覆盖
+        // （自举 `Main.aura`：2715 个 `@fn` 只有 2214 个唯一名，`init` 重复 85 次、
+        // `push` 9 次 …）。这里统一加类前缀；对应调用点在 `buildCall` 里改写。
+        val rawName: String = src.textOf(id)
+        val ownerCls: String = this.ownerClassNameOf(id)
+        var name: String = rawName
+        if (ownerCls != "" && rawName != "") {
+            name = ownerCls + "_" + rawName
+        }
         val retTy: String = src.tyOf(id)
 
         // 注册返回类型
@@ -203,6 +294,22 @@ class SsaBuilder {
         this.memHead = this.program.addValue("Const", memTypeId, "", "entry_mem", entryBlock)
         if (traceOn) println("    [bf4] after addValue entry_mem")
 
+        // ── 类方法：注入隐式 `this` 形参（接收者），且必须排在显式形参之前 ──
+        //
+        // HIR 的成员调用把接收者作为**第一个实参**传下来（Hat 里形如
+        // `@call @method(@recv, @mem)`），而方法自身此前声明 0 个形参 —— 形参表
+        // 与调用约定整体错位一位。补上 self 后，方法体里的字段访问才有基址。
+        this.curClass = ""
+        this.localTypes = ""
+        if (ownerCls != "") {
+            this.curClass = ownerCls
+            val selfVal: Int = this.program.addValue("Param", this.types.fromTypeName("Long"),
+                                                     "", "this", entryBlock)
+            this.curParams = toStr(selfVal)
+            this.varMapAdd("this", selfVal)
+            this.program.functionOf(this.curFunc).params = this.curParams
+        }
+
         // 处理参数
         val kids: String = src.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -215,6 +322,7 @@ class SsaBuilder {
                 val paramName: String = src.textOf(childId)
                 val paramTy: String = src.tyOf(childId)
                 val paramTypeId: Int = this.types.fromTypeName(paramTy)
+                this.localTypeAdd(paramName, paramTy)
                 if (traceOn) println("    [bf6] param=" + paramName)
 
                 // 创建参数值（作为入口块的指令）
@@ -310,6 +418,33 @@ class SsaBuilder {
         val varName: String = src.textOf(id)
         val kids: String = src.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
+        val declaredTy: String = src.tyOf(id)
+        this.localTypeAdd(varName, declaredTy)
+
+        // 未标注类型（本仓库主要写法：`val p = XxxUtils.emptyYyy()`）：
+        // 用初始化调用的**返回类型**推断静态类型，供后面的 `resolveMethodSymbol`
+        // 做接收者定型。`Hir.aura` 把 HirCall 的 type 一律写空串，所以这里必须
+        // 查 `methodRetTypes`（见其说明）。仅接受**唯一且合法**的类名，
+        // 拿不准就不登记 —— 宁可回落裸名也不要错误定型（会生成错误符号/偏移）。
+        if (declaredTy == "" && kCount > 0) {
+            val initNode: Int = HirUtils.hirKidsAt(kids, 0)
+            if (src.kindOf(initNode) == "HirCall") {
+                val callee: String = src.textOf(initNode)
+                if (this.isClassName(callee)) {
+                    // (1) **构造调用**：`val lowering = Lowering()` —— 被调名就是类名
+                    //（与 `buildCall` 的 `isClassName(funcName) → funcName + "__new"`
+                    // 同源约定）。这是本仓库第二主要写法。
+                    this.localTypeAdd(varName, callee)
+                } else {
+                    // (2) **工厂方法**：`val peephole = PeepholeOptimizerUtils.emptyOptimizer()`
+                    // → 用方法返回类型（见 `methodRetTypes` / `scanDeclMethodReturnTypes`）。
+                    val retTy: String = this.uniqueMethodReturnType(callee)
+                    if (retTy != "" && this.isClassName(retTy)) {
+                        this.localTypeAdd(varName, retTy)
+                    }
+                }
+            }
+        }
 
         // 降级初始化表达式
         var initVal: Int = -1
@@ -968,6 +1103,30 @@ class SsaBuilder {
         val lastKid: Int = HirUtils.hirKidsCount(kids) - 1
         val val: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, lastKid))
 
+        // ── 类字段写入：`this.x = v` / `p.x = v` ──
+        //
+        // 目标在 kids[0]（`HirMember`），此时 `src.textOf(id)` 为空 —— 旧路径会
+        // 把这个赋值当成「变量名为空」的 Store，等于整条丢掉。
+        if (kCount >= 2) {
+            val targetId: Int = HirUtils.hirKidsAt(kids, 0)
+            if (src.kindOf(targetId) == "HirMember") {
+                val fname: String = src.textOf(targetId)
+                val tk: String = src.kidsOf(targetId)
+                if (HirUtils.hirKidsCount(tk) >= 1) {
+                    val recvNode: Int = HirUtils.hirKidsAt(tk, 0)
+                    val owner: String = this.receiverClassOf(src, recvNode)
+                    if (owner != "") {
+                        val fIdx: Int = this.classFieldIndex(owner, fname)
+                        if (fIdx >= 0) {
+                            val recvVal: Int = this.buildExpr(src, recvNode)
+                            this.emitFieldSet(recvVal, fIdx, val)
+                            return
+                        }
+                    }
+                }
+            }
+        }
+
         // Phase A S2: 内存链 — 赋值是内存写入操作
         if (this.memHead >= 0) {
             val varTy: String = src.tyOf(id)
@@ -1083,10 +1242,29 @@ class SsaBuilder {
         if (traceOn) println("          [var0] buildVar id=" + id)
         val name: String = src.textOf(id)
         if (traceOn) println("          [var1] name=" + name)
-        if (traceOn) println("          [var2] before varMapLookup")
-        val result: Int = this.varMapLookup(name)
-        if (traceOn) println("          [var3] result=" + result)
-        return result
+
+        // 真正的局部变量/形参优先（`varMapLookup` 未命中时会静默返回常量 0，
+        // 因此这里必须先探测命中与否）。
+        val direct: Int = this.mapVidOf(this.varMap, name)
+        if (direct >= 0) {
+            return direct
+        }
+
+        // ── 类体内裸字段名（`x` 而非 `this.x`）──
+        // Aura 允许方法内直接写字段名；HIR 只留 `HirVar("x")`，这里按当前类的
+        // 字段布局把它改写为 `self.x` 的读取。
+        if (this.curClass != "") {
+            val fIdx: Int = this.classFieldIndex(this.curClass, name)
+            if (fIdx >= 0) {
+                val selfVal: Int = this.mapVidOf(this.varMap, "this")
+                if (selfVal >= 0) {
+                    return this.emitFieldGet(selfVal,
+                        this.classFieldTypeByName(this.curClass, name), fIdx)
+                }
+            }
+        }
+
+        return this.varMapLookup(name)
     }
 
     /// 构建二元运算。
@@ -1100,11 +1278,43 @@ class SsaBuilder {
 
         val left: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
         val right: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 1))
+        val typeId: Int = this.types.fromTypeName(src.tyOf(id))
+
+        // ── 字符串判等：`==` / `!=` 必须按**内容**比较 ──
+        //
+        // ⚠️ 旧实现一律走整数比较（`Eq` / `Ne`），对 String 等价于**指针比较**：
+        // 两个内容相同的空串只要不是同一个字面量指针就不相等。实测探针
+        //（`build/boot_probe.aura`，走完全相同的自举链路）：
+        //     val s: String = Env.get("AURA_ARGV_COUNT")   // 返回静态空串
+        //     println("len=" + toStr(s.length))            // 输出 0
+        //     if (s == "") { println("M4-empty") }         // ← 不执行（判为 false）
+        //
+        // 运行库已提供按内容比较的 `streq(rcx=a, rdx=b) -> rax = 1/0`
+        //（见 `PhotonRuntime.emitStreq`，注册名 `streq`），这里改为调用它。
+        // 随后把结果与 0 比较取回布尔：`==` ⇔ `eqVal != 0`，`!=` ⇔ `eqVal == 0`。
+        if (op == "==" || op == "!=") {
+            val lt: Int = this.program.valueOf(left).type
+            val rt: Int = this.program.valueOf(right).type
+            if (this.types.isString(lt) || this.types.isString(rt)) {
+                val i64: Int = this.types.intType(64)
+                val eqVal: Int = this.program.addValue("Call", i64,
+                    toStr(left) + "," + toStr(right), "streq", this.curBlock)
+                // 与 `buildListNew` 一致：调用后推进内存链
+                if (this.memHead >= 0) {
+                    this.memHead = this.program.addValue("MemToken", i64, toStr(eqVal),
+                        "mem_after_call", this.curBlock)
+                }
+                val zero: Int = this.program.addValue("Const", i64, "", "0", this.curBlock)
+                val cmpOp: String = if (op == "==") { "!=" } else { "==" }
+                return this.program.addValue(this.mapBinaryOp(cmpOp), typeId,
+                    toStr(eqVal) + "," + toStr(zero), "", this.curBlock)
+            }
+        }
+
         val args: String = toStr(left) + "," + toStr(right)
 
         // 映射运算符
         val mirOp: String = this.mapBinaryOp(op)
-        val typeId: Int = this.types.fromTypeName(src.tyOf(id))
 
         return this.program.addValue(mirOp, typeId, args, "", this.curBlock)
     }
@@ -1131,7 +1341,7 @@ class SsaBuilder {
     /// 构建函数调用。
     fun buildCall(src: Hir, id: Int): Int {
         this.dbgCalls = this.dbgCalls + 1
-        val funcName: String = src.textOf(id)
+        var funcName: String = src.textOf(id)
         val kids: String = src.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
@@ -1153,6 +1363,20 @@ class SsaBuilder {
         if (funcName == "__list_new") {
             return this.buildListNew(args, kCount)
         }
+
+        // ── 构造器调用：`Point(...)` → 合成函数 `Point__new` ──
+        //
+        // ⚠️ 刻意加 `__new` 后缀：`PhotonRuntime` 里硬编码了 47 个**编译器自身
+        // 类**的零初始化构造器（符号名就是裸类名）。若沿用裸类名，用户类/自举类
+        // 会与它们 `duplicate symbol`，且会静默拿到零初始化对象。加后缀后这批
+        // 旧桩彻底不可达，构造器体统一由 `synthesizeCtors` 生成。
+        if (this.isClassName(funcName)) {
+            funcName = funcName + "__new"
+        } else {
+            // 成员方法调用：把裸方法名解析为声明类的限定符号（A-2）。
+            funcName = this.resolveMethodSymbol(src, kids, kCount, funcName)
+        }
+
         if (this.memHead >= 0) {
             if (args == "") {
                 args = toStr(this.memHead)
@@ -1217,6 +1441,44 @@ class SsaBuilder {
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount < 1) {
             return -1
+        }
+
+        // ── 类字段读取：`this.x` / `p.x`（p 的声明类型是已知类）──
+        val recvNode: Int = HirUtils.hirKidsAt(kids, 0)
+
+        // ── 字符串 `s.length` / `s.size`（**属性式**，无括号）──
+        //
+        // ⚠️ 属性式访问走的是本方法，**不经过** `buildCall`，因此
+        // `InstructionSelection.mapStdlibFuncName` 里那条
+        // `recvTy == "String" && name == "length" → "strlen"` 映射**永远不会命中**。
+        // 后果：`.length` 落到下面的通用 `GetField`，后端发射不出任何加载指令，
+        // 读取的是一个**残留寄存器**（实测自举产物 `main` 的重定位表里**没有
+        // `strlen`**）。`cliEnvArgCount()` 的 `while (k < s.length)` 因此拿着
+        // 垃圾长度越界扫描 → `0xC0000005`（自举 `Main.exe` 启动崩溃的第二个根因）。
+        // 这里直接降级为运行库 `strlen(s)`（按 NUL 结尾计算，与 AOT 侧一致）。
+        if (fieldName == "length" || fieldName == "size") {
+            val recvTy: String = this.receiverTypeNameOf(src, recvNode)
+            if (recvTy == "String") {
+                val i64: Int = this.types.intType(64)
+                val sv: Int = this.buildExpr(src, recvNode)
+                val lenVal: Int = this.program.addValue("Call", i64, toStr(sv),
+                                                        "strlen", this.curBlock)
+                if (this.memHead >= 0) {
+                    this.memHead = this.program.addValue("MemToken", i64, toStr(lenVal),
+                                                         "mem_after_call", this.curBlock)
+                }
+                return lenVal
+            }
+        }
+
+        val owner: String = this.receiverClassOf(src, recvNode)
+        if (owner != "") {
+            val fIdx: Int = this.classFieldIndex(owner, fieldName)
+            if (fIdx >= 0) {
+                val recvVal: Int = this.buildExpr(src, recvNode)
+                return this.emitFieldGet(recvVal,
+                    this.classFieldTypeByName(owner, fieldName), fIdx)
+            }
         }
 
         val objVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
@@ -1305,6 +1567,24 @@ class SsaBuilder {
         if (op == "&" || op == "Ampersand") { return "And" }
         if (op == "|" || op == "Pipe") { return "Or" }
         if (op == "^" || op == "Caret") { return "Xor" }
+        // ── 逻辑与 / 逻辑或（**必须显式列出**，否则落到末尾默认 `Add`）──
+        //
+        // ⚠️ 这里漏掉 `&&` / `||` 的后果不是「算错一个布尔」，而是**崩溃**：
+        // 它们落进默认分支变成 `Add`，`InstructionSelection` 对 `Add` 会走
+        // **字符串拼接**（`strcat`）路径，于是 `b1 && b2` 被发射成
+        // `strcat(bool1, bool2)` —— 把 0/1 当指针传给 `strcat`，内部
+        // `strlen(0)` 直接访问违规。
+        //
+        // 实测自举 `Main.aura` 的 `main`：
+        //     if (cnt0 >= 3 && cliArg(1) == "run") { base = 2 }
+        // 编译成
+        //     de6f4: setne %dil ; de6fc: movq %rdi,%rdx ; de702: callq strcat
+        // ⇒ `Main.exe` 在打印完 `BOOT-1b` 后立刻 `0xC0000005`。
+        //
+        // 布尔在光子链路里就是 0/1 整数，按位与/或与逻辑与/或在这些取值上
+        // 完全等价（与 `&` / `|` 共用 `And` / `Or` 实现）。
+        if (op == "&&" || op == "AmpAmp" || op == "AndAnd") { return "And" }
+        if (op == "||" || op == "PipePipe" || op == "OrOr") { return "Or" }
         return "Add"
     }
 
@@ -1363,6 +1643,1001 @@ class SsaBuilder {
         }
         val result: Int = this.program.addValue("Const", this.types.intType(64), "", "0", this.curBlock)
         return result
+    }
+
+    // ═════════════════════════════════════════════════════════════
+    // 类 / 结构体（Photon 对象模型 A-1 / A-3）
+    //
+    // 设计约束：Photon 的 `Load`/`Store` 路径不可用（`Lowering.lowerLoad`
+    // 用 `addValueWithChain`，值不登记进 `LirBlock.instrs`，DAG 里加载/存储
+    // 指令全部消失）。因此字段访问与列表访问一样，统一走 **runtime 调用**：
+    //   · `__field_get(obj, index)` → rax = [obj + index*8 + 16]
+    //   · `__field_set(obj, index, val)` → [obj + index*8 + 16] = val
+    // 对象布局（与 `PhotonRuntime.emitClassConstructorWithVtable` 一致）：
+    //   [0x00] vtable 指针(8B)  [0x08] 对象大小(8B)  [0x10+i*8] 字段 i
+    // 索引而非字节偏移：复用编码器的 `emitLoadIndexed8`（SIB scale=8）。
+    // ═════════════════════════════════════════════════════════════
+
+    /// 取 `key` 之后到下一个 `\n` 之间的片段（未命中返回 ""）。
+    ///
+    /// 扁平表查找原语：`indexOf` 是 C 侧 `strstr`，再按字符码点扫到行尾，
+    /// 一次 `substring` 产出结果 —— 全程**零 split 分配**。
+    private fun flatFieldAfter(text: String, key: String): String {
+        if (text == "" || key == "") {
+            return ""
+        }
+        val pos: Int = text.indexOf(key)
+        if (pos < 0) {
+            return ""
+        }
+        val start: Int = pos + key.length
+        var i: Int = start
+        val len: Int = text.length
+        while (i < len) {
+            if (text.charCodeAt(i) == 10) {
+                break
+            }
+            i = i + 1
+        }
+        if (i <= start) {
+            return ""
+        }
+        return text.substring(start, i)
+    }
+
+    /// `text` 自 `pos` 起是否以 `key` 开头（逐码点比较，不分配）。
+    private fun flatStartsWith(text: String, pos: Int, key: String): Boolean {
+        if (pos < 0 || pos + key.length > text.length) {
+            return false
+        }
+        var i: Int = 0
+        while (i < key.length) {
+            if (text.charCodeAt(pos + i) != key.charCodeAt(i)) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// `text` 中出现 `key` 的次数（逐位置滑窗，不分配）。
+    private fun flatCount(text: String, key: String): Int {
+        if (text == "" || key == "") {
+            return 0
+        }
+        var n: Int = 0
+        var i: Int = 0
+        val last: Int = text.length - key.length
+        while (i <= last) {
+            if (this.flatStartsWith(text, i, key)) {
+                n = n + 1
+            }
+            i = i + 1
+        }
+        return n
+    }
+
+    /// 是否为内建**值类型**（`value class String` / `open class Any` 等）。
+    ///
+    /// 这些类型**不作为对象模型类登记**。原因：它们的成员访问已由
+    /// `InstructionSelection.mapStdlibFuncName` 按 `recvTy` 映射到 runtime
+    /// （`String.length → strlen`、`Any.equals → streq`、`String.charCodeAt →
+    /// charCodeAt` …）。若再按「类 + 字段偏移」处理，会产生 `String_charCodeAt`
+    /// 这类**真实函数体**——与 runtime 符号语义重复，且把 DAG 节点数从 ~63k
+    /// 推到 ~75k，Phase D（寄存器分配）在 8 GiB 内存闸门下直接退出码 70
+    ///（AOT 运行时无 GC，撤下的中间串全部滞留）。
+    private fun isBuiltinValueClass(name: String): Boolean {
+        if (name == "String" || name == "Any") { return true }
+        if (name == "Int" || name == "Long" || name == "Float" || name == "Double") { return true }
+        if (name == "Boolean" || name == "Byte" || name == "Short" || name == "Char") { return true }
+        if (name == "Unit" || name == "Basic") { return true }
+        return false
+    }
+
+    /// 是否为已知类/结构体名。
+    private fun isClassName(name: String): Boolean {
+        if (name == "" || this.classNamesCsv == "") {
+            return false
+        }
+        return this.classNamesCsv.indexOf("\n" + name + "\n") >= 0
+    }
+
+    /// 类的直接基类名（无继承返回 ""）。
+    private fun parentOfClass(cls: String): String {
+        if (cls == "") {
+            return ""
+        }
+        return this.flatFieldAfter(this.classParents, "\n" + cls + "|")
+    }
+
+    /// 类**自有**字段数（不含继承）。
+    private fun ownFieldCount(cls: String): Int {
+        if (cls == "" || this.classFields == "") {
+            return 0
+        }
+        return this.flatCount(this.classFields, "\n" + cls + "|")
+    }
+
+    /// 类字段布局的起始序号（= 祖先链上各代「自有字段数」之和）。
+    ///
+    /// 子类布局 = 父类字段前缀 + 自有字段，因此父类名必须**先**登记。
+    /// HIR arena 顺序不保证这一点，所以这里按需递归计算而不是靠扫描顺序。
+    private fun classBaseIndex(cls: String): Int {
+        val p: String = this.parentOfClass(cls)
+        if (p == "") {
+            return 0
+        }
+        return this.classBaseIndex(p) + this.ownFieldCount(p)
+    }
+
+    /// 类字段总层数（含继承）。
+    private fun classFieldTotal(cls: String): Int {
+        return this.classBaseIndex(cls) + this.ownFieldCount(cls)
+    }
+
+    /// 对象分配大小（字节）：头 16B + 每个字段 8B。
+    private fun classSizeOf(cls: String): Int {
+        return 16 + this.classFieldTotal(cls) * 8
+    }
+
+    /// 取 `|` 分隔文本的第 `idx` 段（越界返回 ""）。只用于**短**字段尾部。
+    private fun flatPart(text: String, idx: Int): String {
+        if (text == "") {
+            return ""
+        }
+        var cur: Int = 0
+        var start: Int = 0
+        var i: Int = 0
+        val len: Int = text.length
+        while (i <= len) {
+            if (i == len || text.charCodeAt(i) == 124) {
+                if (cur == idx) {
+                    return text.substring(start, i)
+                }
+                cur = cur + 1
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 按「类 + 字段名」取字段记录**尾部**（`index|auraTy|defaultNodeId`）。
+    ///
+    /// 未命中时沿继承链向上查找 —— 子类字段布局保留父类前缀，因此父类记录
+    /// 的序号对子类同样有效。
+    private fun fieldTailByName(cls: String, field: String): String {
+        if (cls == "" || field == "") {
+            return ""
+        }
+        val key: String = "\n" + cls + "|" + field + "|"
+        val pos: Int = this.classFields.indexOf(key)
+        if (pos >= 0) {
+            val start: Int = pos + key.length
+            var i: Int = start
+            val len: Int = this.classFields.length
+            while (i < len) {
+                if (this.classFields.charCodeAt(i) == 10) {
+                    break
+                }
+                i = i + 1
+            }
+            if (i > start) {
+                return this.classFields.substring(start, i)
+            }
+            return ""
+        }
+        val p: String = this.parentOfClass(cls)
+        if (p != "") {
+            return this.fieldTailByName(p, field)
+        }
+        return ""
+    }
+
+    /// 按布局序号取字段记录**尾部**（先本类，再沿继承链向上）。
+    private fun fieldTailOfIndex(cls: String, idx: Int): String {
+        val text: String = this.classFields
+        val len: Int = text.length
+        var i: Int = 0
+        while (i < len) {
+            if (text.charCodeAt(i) == 10) {
+                val start: Int = i + 1
+                var j: Int = start
+                while (j < len) {
+                    if (text.charCodeAt(j) == 10) {
+                        break
+                    }
+                    j = j + 1
+                }
+                val line: String = text.substring(start, j)
+                if (this.flatPart(line, 0) == cls
+                    && this.parseIntDef(this.flatPart(line, 2), -1) == idx) {
+                    return this.flatPart(line, 2) + "|" + this.flatPart(line, 3)
+                        + "|" + this.flatPart(line, 4)
+                }
+                i = j
+            } else {
+                i = i + 1
+            }
+        }
+        val p: String = this.parentOfClass(cls)
+        if (p != "") {
+            return this.fieldTailOfIndex(p, idx)
+        }
+        return ""
+    }
+
+    /// 字段在类（含继承链）中的布局序号；未命中返回 -1。
+    private fun classFieldIndex(cls: String, field: String): Int {
+        val tail: String = this.fieldTailByName(cls, field)
+        if (tail == "") {
+            return -1
+        }
+        return this.parseIntDef(this.flatPart(tail, 0), -1)
+    }
+
+    /// 字段声明类型名（沿继承链查找；未命中返回 ""）。
+    private fun classFieldTypeByName(cls: String, field: String): String {
+        return this.flatPart(this.fieldTailByName(cls, field), 1)
+    }
+
+    /// 按布局序号取字段声明类型（未命中返回 ""）。
+    private fun fieldTypeOfIndex(cls: String, idx: Int): String {
+        return this.flatPart(this.fieldTailOfIndex(cls, idx), 1)
+    }
+
+    /// 按布局序号取字段默认值表达式节点（无默认值返回 -1）。
+    private fun fieldDefaultOfIndex(cls: String, idx: Int): Int {
+        return this.parseIntDef(this.flatPart(this.fieldTailOfIndex(cls, idx), 2), -1)
+    }
+
+    /// 本类是否已登记该字段（去重，避免重复登记打乱序号）。
+    private fun rawFieldIndex(cls: String, field: String): Int {
+        if (cls == "" || field == "") {
+            return -1
+        }
+        val key: String = "\n" + cls + "|" + field + "|"
+        val pos: Int = this.classFields.indexOf(key)
+        if (pos < 0) {
+            return -1
+        }
+        val start: Int = pos + key.length
+        var i: Int = start
+        val len: Int = this.classFields.length
+        while (i < len) {
+            if (this.classFields.charCodeAt(i) == 10) {
+                break
+            }
+            i = i + 1
+        }
+        return this.parseIntDef(this.classFields.substring(start, i), -1)
+    }
+
+    /// 整数解析（失败/越界返回默认值）。`SsaMirUtils.strToInt` 对非法输入
+    /// 一律返回 0，无法区分「字段序号 0」与「解析失败」，故这里单独实现。
+    private fun parseIntDef(s: String, def: Int): Int {
+        val t: String = s.trim()
+        if (t == "") {
+            return def
+        }
+        var i: Int = 0
+        var neg: Boolean = false
+        if (t.charCodeAt(0) == 45) {
+            neg = true
+            i = 1
+        }
+        if (i >= t.length) {
+            return def
+        }
+        var n: Int = 0
+        while (i < t.length) {
+            val c: Int = t.charCodeAt(i)
+            if (c < 48 || c > 57) {
+                return def
+            }
+            n = n * 10 + (c - 48)
+            i = i + 1
+        }
+        if (neg) {
+            return -n
+        }
+        return n
+    }
+
+    /// 登记局部变量/形参的声明类型（倒序查找，后声明者优先）。
+    private fun localTypeAdd(name: String, ty: String) {
+        if (name == "" || ty == "") {
+            return
+        }
+        this.localTypes = this.localTypes + name + "|" + ty + "\n"
+    }
+
+    /// 局部变量声明类型名（未命中返回 ""）。
+    private fun localTypeOf(name: String): String {
+        if (this.localTypes == "") {
+            return ""
+        }
+        val lines: List<String> = this.splitStr(this.localTypes, "\n")
+        var i: Int = lines.size - 1
+        while (i >= 0) {
+            val parts: List<String> = this.splitStr(lines[i], "|")
+            if (parts.size >= 2 && parts[0] == name) {
+                return parts[1]
+            }
+            i = i - 1
+        }
+        return ""
+    }
+
+    /// 接收者表达式的静态类名（不可判定返回 ""）。
+    ///
+    /// 只用三种可靠来源：`this`（当前方法所属类）、「局部变量/形参的声明类型」、
+    /// 以及「`<recv>.<字段>` 的**字段声明类型**」。
+    /// Photon 链路没有 sema 信息，凭名字猜类会给出错误字段偏移 —— 那比不解析更糟
+    /// （静默读写到别的字段）。
+    private fun receiverClassOf(src: Hir, recvNode: Int): String {
+        val kind: String = src.kindOf(recvNode)
+
+        // ── `this.<字段>` / `<obj>.<字段>`：静态类型 = 字段的**声明类型** ──
+        //
+        // ⚠️ 旧实现只认 `HirVar`，于是 `this.dag.addInstr(...)` 的接收者
+        //（`HirMember("dag", [HirVar("this")])`）一律返回 ""，调用点退化到
+        // 「全局唯一属主」兜底；而 `addInstr` 被 `MirSsaProgram` / `MachineDag` /
+        // `LirProgram` 同时声明 ⇒ 属主歧义 ⇒ 保底回落成**裸名**。
+        // 自举 `Main.aura` 实测 29 个裸方法名未定义（`addInstr` / `optimize` /
+        // `addBlock` / `leaf` / `emit` …），lld-link 因此失败。
+        if (kind == "HirMember") {
+            val fname: String = src.textOf(recvNode)
+            val mk: String = src.kidsOf(recvNode)
+            if (fname != "" && HirUtils.hirKidsCount(mk) >= 1) {
+                val inner: Int = HirUtils.hirKidsAt(mk, 0)
+                val recvCls: String = this.receiverClassOf(src, inner)
+                if (recvCls != "") {
+                    val fty: String = this.fieldAuraTypeName(recvCls, fname)
+                    if (fty != "" && this.isClassName(fty)) {
+                        return fty
+                    }
+                }
+            }
+            return ""
+        }
+        if (kind != "HirVar") {
+            return ""
+        }
+        val n: String = src.textOf(recvNode)
+        if (n == "this") {
+            return this.curClass
+        }
+        val ty: String = this.localTypeOf(n)
+        if (ty != "" && this.isClassName(ty)) {
+            return ty
+        }
+        return ""
+    }
+
+    /// 字段的声明类型名（沿继承链查找；未命中返回 ""）。
+    private fun fieldAuraTypeName(cls: String, field: String): String {
+        var cur: String = cls
+        var depth: Int = 0
+        while (cur != "" && depth < 16) {
+            val ty: String = this.rawFieldAuraType(cur, field)
+            if (ty != "") {
+                return ty
+            }
+            cur = this.parentOfClass(cur)
+            depth = depth + 1
+        }
+        return ""
+    }
+
+    /// 类**自身**声明的字段类型（不含继承；"" 表示未命中）。
+    ///
+    /// `classFields` 每行格式：`Class|field|index|auraTy|defaultNodeId`
+    ///（见 `addField`），此处取 `key` 之后的第 1 段（0 基）即 `auraTy`。
+    private fun rawFieldAuraType(cls: String, field: String): String {
+        if (cls == "" || field == "" || this.classFields == "") {
+            return ""
+        }
+        val key: String = "\n" + cls + "|" + field + "|"
+        val pos: Int = this.classFields.indexOf(key)
+        if (pos < 0) {
+            return ""
+        }
+        val start: Int = pos + key.length
+        val len: Int = this.classFields.length
+        var i: Int = start
+        var seg: Int = 0
+        var segStart: Int = start
+        while (i <= len) {
+            // 结尾补一个换行哨兵，触发最后一次结算
+            val c: Int = if (i == len) { 10 } else { (this.classFields.charCodeAt(i) as Int) }
+            if (c == 124 || c == 10) {
+                if (seg == 1) {
+                    return this.classFields.substring(segStart, i)
+                }
+                seg = seg + 1
+                segStart = i + 1
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 方法节点 → 属主类名（自由函数返回 ""）。
+    private fun ownerClassNameOf(funcNode: Int): String {
+        if (funcNode < 0 || funcNode >= this.ownerByNode.size) {
+            return ""
+        }
+        return this.ownerByNode[funcNode]
+    }
+
+    /// 预扫描 HIR，建立「类名 / 继承 / 字段布局 / 方法属主 / 自由函数」五张表。
+    private fun buildClassIndex(src: Hir) {
+        val n: Int = src.count
+        // 属主数组先按 arena 大小铺满空串：registerClass 阶段按下标回填。
+        var pre: Int = 0
+        while (pre < n) {
+            this.ownerByNode.add("")
+            pre = pre + 1
+        }
+        var i: Int = 0
+        while (i < n) {
+            val k: String = src.kindOf(i)
+            if (k == "HirClass" || k == "HirStruct") {
+                this.registerClass(src, i)
+            }
+            i = i + 1
+        }
+
+        // ── 类型声明体的「方法返回类型」扫描 ──
+        //
+        // ⚠️ `Hir.aura:915` 一共产出**四种**类型声明 kind：
+        // `HirStruct` / `HirClass` / `HirObject` / `HirEnum`
+        //（AOT 参考实现 `Emit.aura:432` 也是四种一视同仁）。旧实现只扫前两种，
+        // 于是 `object` 单例的**工厂方法**返回类型缺失 —— 而本仓库的主要写法是
+        // `val peephole = PeepholeOptimizerUtils.emptyOptimizer()`（**不标注类型**），
+        // `Hir.aura:1781` 又把 HirCall 的 type 一律写空串 ⇒ 局部量无法定型
+        // ⇒ 调用点回落成裸名。自举 `Main.aura` 实测 11 个未定义符号
+        //（`optimize` / `lower` / `emitFunction` / `setOutputType` / `link` / …）。
+        //
+        // `HirExternObject` 一并扫（其成员多为 `@native`，无函数体，登记无害）。
+        i = 0
+        while (i < n) {
+            val dk: String = src.kindOf(i)
+            if (dk == "HirClass" || dk == "HirStruct" || dk == "HirObject"
+                || dk == "HirEnum" || dk == "HirExternObject") {
+                this.scanDeclMethodReturnTypes(src, i)
+            }
+            i = i + 1
+        }
+        // 第二遍：`funcOwner` 已就绪，可判定哪些 HirFunction 是顶层自由函数。
+        i = 0
+        while (i < n) {
+            if (src.kindOf(i) == "HirFunction") {
+                if (this.ownerClassNameOf(i) == "") {
+                    val fn: String = src.textOf(i)
+                    if (fn != "") {
+                        this.freeFuncs = this.freeFuncs + "\n" + fn + "\n"
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    /// 是否为顶层自由函数。
+    private fun isFreeFunc(name: String): Boolean {
+        if (name == "" || this.freeFuncs == "") {
+            return false
+        }
+        return this.freeFuncs.indexOf("\n" + name + "\n") >= 0
+    }
+
+    /// 登记单个类/结构体：继承关系 + 字段布局 + 方法属主。
+    private fun registerClass(src: Hir, id: Int) {
+        val name: String = src.textOf(id)
+        if (name == "" || this.isClassName(name) || this.isBuiltinValueClass(name)) {
+            return
+        }
+        this.classNamesCsv = this.classNamesCsv + "\n" + name + "\n"
+        this.classList.add(name)
+
+        val parent: String = src.tyOf(id)
+        if (parent != "" && parent != name) {
+            if (this.classParents == "") {
+                this.classParents = name + "|" + parent
+            } else {
+                this.classParents = this.classParents + "\n" + name + "|" + parent
+            }
+        }
+
+        // 字段序号起点 = 继承链上祖先的字段总数（父类字段占据前缀）
+        var idx: Int = this.classBaseIndex(name)
+        val kids: String = src.kidsOf(id)
+        val kn: Int = HirUtils.hirKidsCount(kids)
+        var j: Int = 0
+        while (j < kn) {
+            val child: Int = HirUtils.hirKidsAt(kids, j)
+            val ck: String = src.kindOf(child)
+            if (ck == "HirBlock") {
+                idx = this.registerClassBody(src, name, child, idx, id)
+            } else if (ck == "HirVarDecl" || ck == "HirValDecl") {
+                this.addField(src, name, child, idx)
+                idx = idx + 1
+            } else if (ck == "HirFunction") {
+                this.addMethodOwner(child, name)
+            }
+            j = j + 1
+        }
+    }
+
+    /// 登记类体块（字段 + 方法），返回下一个可用字段序号。
+    private fun registerClassBody(src: Hir, cls: String, blockId: Int,
+                                  startIdx: Int, classNode: Int): Int {
+        var idx: Int = startIdx
+        val kids: String = src.kidsOf(blockId)
+        val kn: Int = HirUtils.hirKidsCount(kids)
+        var j: Int = 0
+        while (j < kn) {
+            val child: Int = HirUtils.hirKidsAt(kids, j)
+            val ck: String = src.kindOf(child)
+            if (ck == "HirVarDecl" || ck == "HirValDecl") {
+                this.addField(src, cls, child, idx)
+                idx = idx + 1
+            } else if (ck == "HirFunction") {
+                this.addMethodOwner(child, cls)
+                this.addClassMethod(cls, src.textOf(child))
+                this.addMethodReturnType(src.textOf(child), src.tyOf(child))
+            } else if (ck == "HirBlock") {
+                // 嵌套块（极少见）：继续下钻
+                idx = this.registerClassBody(src, cls, child, idx, classNode)
+            }
+            j = j + 1
+        }
+        return idx
+    }
+
+    /// 登记一个字段：`Class|field|index|auraTy|defaultNodeId`。
+    private fun addField(src: Hir, cls: String, declNode: Int, index: Int) {
+        val fname: String = src.textOf(declNode)
+        if (fname == "" || this.rawFieldIndex(cls, fname) >= 0) {
+            return
+        }
+        val fty: String = src.tyOf(declNode)
+        val defId: Int = this.fieldDefaultNode(src, declNode)
+        this.classFields = this.classFields + "\n" + cls + "|" + fname + "|"
+            + toStr(index) + "|" + fty + "|" + toStr(defId) + "\n"
+    }
+
+    /// 字段默认值表达式节点（仅接受字面量；其余走零初始化）。
+    ///
+    /// 只认字面量是刻意的：默认值在「构造器合成」阶段求值，那里没有
+    /// `this`/局部变量上下文，复杂表达式会退化成读 null。
+    private fun fieldDefaultNode(src: Hir, declNode: Int): Int {
+        val kids: String = src.kidsOf(declNode)
+        if (HirUtils.hirKidsCount(kids) < 1) {
+            return -1
+        }
+        val kid: Int = HirUtils.hirKidsAt(kids, 0)
+        if (src.kindOf(kid) == "HirLit") {
+            return kid
+        }
+        return -1
+    }
+
+    /// 登记「方法 → 属主类」。
+    private fun addMethodOwner(funcNode: Int, cls: String) {
+        if (cls == "" || funcNode < 0 || funcNode >= this.ownerByNode.size) {
+            return
+        }
+        this.ownerByNode[funcNode] = cls
+    }
+
+    /// 登记类方法名（`Class|method`），并维护「唯一属主」表。
+    ///
+    /// `methodOwners` 里出现第二个不同属主时，把该行改写为 `\nmethod|\n`
+    /// （空属主 = 歧义），这样调用点的「唯一属主回退」只需一次 `indexOf`。
+    private fun addClassMethod(cls: String, method: String) {
+        if (cls == "" || method == "") {
+            return
+        }
+        if (this.classDeclaresMethod(cls, method)) {
+            return
+        }
+        this.classMethods = this.classMethods + "\n" + cls + "|" + method + "\n"
+
+        val key: String = "\n" + method + "|"
+        val pos: Int = this.methodOwners.indexOf(key)
+        if (pos < 0) {
+            this.methodOwners = this.methodOwners + key + cls + "\n"
+            return
+        }
+        // 已存在：不同属主 → 置为歧义（属主片段留空）
+        val start: Int = pos + key.length
+        var i: Int = start
+        val len: Int = this.methodOwners.length
+        while (i < len) {
+            if (this.methodOwners.charCodeAt(i) == 10) {
+                break
+            }
+            i = i + 1
+        }
+        val prevOwner: String = this.methodOwners.substring(start, i)
+        if (prevOwner != "" && prevOwner != cls) {
+            this.methodOwners = this.methodOwners.substring(0, start)
+                + this.methodOwners.substring(i, len)
+        }
+    }
+
+    /// 类自身（不含继承）是否声明了该方法。
+    private fun classDeclaresMethod(cls: String, method: String): Boolean {
+        if (cls == "" || method == "" || this.classMethods == "") {
+            return false
+        }
+        return this.classMethods.indexOf("\n" + cls + "|" + method + "\n") >= 0
+    }
+
+    /// 沿继承链找**声明**该方法的类（未命中返回 ""）。
+    ///
+    /// 返回「声明类」而不是「接收者类」：符号名由声明处决定（`Parent_m`），
+    /// 子类未 override 时调用点也要落到 `Parent_m`。虚分派由 A-6 的 vtable 负责。
+    private fun methodOwnerClass(cls: String, method: String): String {
+        var cur: String = cls
+        var depth: Int = 0
+        while (cur != "" && depth < 16) {
+            if (this.classDeclaresMethod(cur, method)) {
+                return cur
+            }
+            cur = this.parentOfClass(cur)
+            depth = depth + 1
+        }
+        return ""
+    }
+
+    /// 全局只有一个类声明该方法时返回该类，否则返回 ""（重名/未命中）。
+    private fun uniqueMethodOwner(method: String): String {
+        if (method == "") {
+            return ""
+        }
+        return this.flatFieldAfter(this.methodOwners, "\n" + method + "|")
+    }
+
+    /// 登记「方法 → 返回类型」（同名方法返回类型不一致时置为歧义）。
+    ///
+    /// 刻意**不在登记时**用 `isClassName` 过滤：本表在 `buildClassIndex` 预扫描
+    /// 期间建立，而 `classNamesCsv` 要到预扫描结束才完整 —— 中途过滤会把多数
+    /// 类名误判为「非类」而丢掉。类型合法性改在**使用点**判断。
+    private fun addMethodReturnType(method: String, ty: String) {
+        if (method == "" || ty == "") {
+            return
+        }
+        val key: String = "\n" + method + "|"
+        val pos: Int = this.methodRetTypes.indexOf(key)
+        if (pos < 0) {
+            this.methodRetTypes = this.methodRetTypes + key + ty + "\n"
+            return
+        }
+        val start: Int = pos + key.length
+        var i: Int = start
+        val len: Int = this.methodRetTypes.length
+        while (i < len) {
+            if (this.methodRetTypes.charCodeAt(i) == 10) {
+                break
+            }
+            i = i + 1
+        }
+        val prev: String = this.methodRetTypes.substring(start, i)
+        if (prev != ty) {
+            // 歧义：抹掉类型片段（留下 `\nmethod|\n`）
+            this.methodRetTypes = this.methodRetTypes.substring(0, start)
+                + this.methodRetTypes.substring(i, len)
+        }
+    }
+
+    /// 方法的唯一返回类型（歧义 / 未命中返回 ""）。
+    private fun uniqueMethodReturnType(method: String): String {
+        if (method == "") {
+            return ""
+        }
+        return this.flatFieldAfter(this.methodRetTypes, "\n" + method + "|")
+    }
+
+    /// 接收者表达式的**原始声明类型名**。
+    ///
+    /// 与 `receiverClassOf` 的区别：不要求是「已知类」，集合类型（`List<Int>` /
+    /// `HashMap<String,Int>`）也会原样返回 —— 集合成员要走运行库符号，不是类前缀。
+    private fun receiverTypeNameOf(src: Hir, recvNode: Int): String {
+        val kind: String = src.kindOf(recvNode)
+        if (kind == "HirMember") {
+            // 字段接收者：类型 = 字段声明类型（先定出「哪个类」，再查字段表）
+            val fname: String = src.textOf(recvNode)
+            val mk: String = src.kidsOf(recvNode)
+            if (fname != "" && HirUtils.hirKidsCount(mk) >= 1) {
+                val inner: Int = HirUtils.hirKidsAt(mk, 0)
+                val recvCls: String = this.receiverClassOf(src, inner)
+                if (recvCls != "") {
+                    return this.fieldAuraTypeName(recvCls, fname)
+                }
+            }
+            return ""
+        }
+        if (kind != "HirVar") {
+            return ""
+        }
+        val n: String = src.textOf(recvNode)
+        if (n == "this") {
+            return this.curClass
+        }
+        return this.localTypeOf(n)
+    }
+
+    /// 是否为集合族类型名。
+    private fun isCollectionTypeName(ty: String): Boolean {
+        if (ty == "") {
+            return false
+        }
+        return ty.startsWith("List") || ty.startsWith("ArrayList")
+            || ty.startsWith("LinkedList") || ty.startsWith("Deque")
+            || ty.startsWith("Map") || ty.startsWith("HashMap")
+            || ty.startsWith("LinkedHashMap") || ty.startsWith("TreeMap")
+            || ty.startsWith("Set") || ty.startsWith("HashSet")
+            || ty.startsWith("LinkedHashSet") || ty.startsWith("TreeSet")
+    }
+
+    /// 集合成员 → 运行库符号（接收者不是集合族 / 成员无映射时返回 ""）。
+    ///
+    /// 符号名与 `PhotonRuntime` 注册的名字**必须一致**
+    ///（`Collections.count` / `clear` / `getAt` / `contains` / `indexOf`）。
+    private fun collectionRuntimeSymbol(recvTy: String, bare: String): String {
+        if (bare == "" || !this.isCollectionTypeName(recvTy)) {
+            return ""
+        }
+        if (bare == "size" || bare == "getSize" || bare == "count" || bare == "length") {
+            return "Collections.count"
+        }
+        if (bare == "clear") {
+            return "Collections.clear"
+        }
+        if (bare == "get" || bare == "getAt") {
+            return "Collections.getAt"
+        }
+        if (bare == "contains") {
+            return "Collections.contains"
+        }
+        if (bare == "indexOf") {
+            return "Collections.indexOf"
+        }
+        return ""
+    }
+
+    /// 扫描一个**类型声明**体，登记其方法的**返回类型**（仅元数据）。
+    ///
+    /// 供未标注类型局部量的定型使用（见 `methodRetTypes`）。
+    ///
+    /// ⚠️ 刻意**不**登记属主类名：`object` 的方法在自举链路里发射成**裸符号**
+    ///（实测 `Main.hat` 有 `@fn emptyOptimizer`、没有 `@fn PeepholeOptimizerUtils_*`），
+    /// 把 object 当类登记会连带改掉**定义端**的符号名（调用端/定义端两张表
+    /// 必须成对改，属高风险）。只有 `HirClass` / `HirStruct` 需要属主前缀，
+    /// 由 `registerClass` 负责。
+    private fun scanDeclMethodReturnTypes(src: Hir, declNode: Int) {
+        val kids: String = src.kidsOf(declNode)
+        val kn: Int = HirUtils.hirKidsCount(kids)
+        var j: Int = 0
+        while (j < kn) {
+            val child: Int = HirUtils.hirKidsAt(kids, j)
+            val ck: String = src.kindOf(child)
+            if (ck == "HirFunction") {
+                this.addMethodReturnType(src.textOf(child), src.tyOf(child))
+            } else if (ck == "HirBlock") {
+                this.scanBlockMethodReturnTypes(src, child)
+            }
+            j = j + 1
+        }
+    }
+
+    /// 下钻块登记 `HirFunction` 的返回类型（含嵌套块）。
+    private fun scanBlockMethodReturnTypes(src: Hir, blockNode: Int) {
+        val kids: String = src.kidsOf(blockNode)
+        val kn: Int = HirUtils.hirKidsCount(kids)
+        var j: Int = 0
+        while (j < kn) {
+            val child: Int = HirUtils.hirKidsAt(kids, j)
+            val ck: String = src.kindOf(child)
+            if (ck == "HirFunction") {
+                this.addMethodReturnType(src.textOf(child), src.tyOf(child))
+            } else if (ck == "HirBlock") {
+                this.scanBlockMethodReturnTypes(src, child)
+            }
+            j = j + 1
+        }
+    }
+
+    /// 裸名是否属于 runtime 提供的符号（这些名字**不能**加类前缀）。
+    ///
+    /// 与 `InstructionSelection.isRuntimeSymbol` / `mapStdlibFuncName` 的目标集合
+    /// 保持一致：运行时函数是全局唯一的，类方法重名时以 runtime 为准。
+    private fun isRuntimeBareName(name: String): Boolean {
+        if (name == "println" || name == "print" || name == "puts") { return true }
+        if (name == "toStr" || name == "strcat" || name == "toInt") { return true }
+        if (name == "toFloat" || name == "toString" || name == "charCodeAt") { return true }
+        if (name == "strlen" || name == "streq" || name == "strcmp") { return true }
+        if (name == "exit" || name == "exitGroup") { return true }
+        if (name == "arrayListOf" || name == "transform" || name == "fromCharCode") { return true }
+        if (name == "ReadCStr" || name == "aura_mem_used_mb" || name == "__throw") { return true }
+        if (name.startsWith("__")) { return true }
+        if (name.startsWith("Memory_")) { return true }
+        if (name.startsWith("Collections.")) { return true }
+        if (name.startsWith("io_")) { return true }
+        if (name.startsWith("String")) { return true }
+        if (name == "get" || name == "set" || name == "size" || name == "count") { return true }
+        return false
+    }
+
+    /// 调用点的被调名解析：裸名 → `Class_method`（无法判定时原样返回）。
+    private fun resolveMethodSymbol(src: Hir, kids: String, kCount: Int, bare: String): String {
+        if (bare == "") {
+            return bare
+        }
+
+        // 0) **集合族接收者 → 运行库符号**（先于其它一切判定，且不依赖 `classMethods`）
+        //
+        // `Hir.aura` 层也维护了同一张表，但它在 AST 上**拿不到标识符的类型**
+        //（`ast.tyOf(ident)` 为空），所以 `tags.size` / `x.clear()` 这类调用
+        // 屡次漏映射、退化成裸名。这里在 SSA 侧做：`localTypes` 里有
+        // `tags: List<Int>`、字段表里有 `HashMap<..>` 这类**真实声明类型**。
+        //
+        // 自举 `Main.aura` 实测剩最后的 `size` / `getSize` / `clear`
+        // （HAT: `@call @size(@tags, @memtoken)`），运行库侧
+        // `Collections.count` / `Collections.clear` 已就位。
+        if (kCount >= 1) {
+            val recvTy: String = this.receiverTypeNameOf(src, HirUtils.hirKidsAt(kids, 0))
+            val rtSym: String = this.collectionRuntimeSymbol(recvTy, bare)
+            if (rtSym != "") {
+                return rtSym
+            }
+        }
+
+        if (this.classMethods == "") {
+            return bare
+        }
+        // 1) 接收者静态类型已知 → 沿继承链找声明类
+        if (kCount >= 1) {
+            val recvCls: String = this.receiverClassOf(src, HirUtils.hirKidsAt(kids, 0))
+            if (recvCls != "") {
+                val owner: String = this.methodOwnerClass(recvCls, bare)
+                if (owner != "") {
+                    return owner + "_" + bare
+                }
+            }
+        }
+        // 2) **隐式 `this`**：无接收者可判时（`hexDigit(hi)` 这种类内裸调用），
+        //    当前方法所属类若声明了该方法就用它 —— 私有 helper 的常规形态。
+        //
+        // ⚠️ 必须排在「唯一属主」之前：`hexDigit` 被 `X86Encoder` 与
+        //    `PhotonObjectWriter` **同时**声明，唯一属主判定会得到「歧义」→
+        //    回落到裸名 → lld-link `undefined symbol: hexDigit`。
+        if (this.curClass != "" && !this.isFreeFunc(bare)
+            && this.classDeclaresMethod(this.curClass, bare)) {
+            return this.curClass + "_" + bare
+        }
+        // 3) 全局唯一属主（且与 runtime 符号、顶层自由函数都不冲突）
+        if (!this.isRuntimeBareName(bare) && !this.isFreeFunc(bare)) {
+            val only: String = this.uniqueMethodOwner(bare)
+            if (only != "") {
+                return only + "_" + bare
+            }
+        }
+        // 3) 保底：维持裸名（runtime 函数 / object 方法 / 无法判定）
+        return bare
+    }
+
+    /// 零值常量（按声明类型选整型/浮点/指针）。
+    private fun zeroConstOf(ty: String): Int {
+        if (ty != "") {
+            val typeId: Int = this.types.fromTypeName(ty)
+            if (this.types.isInt(typeId)) {
+                return this.program.addValue("Const", typeId, "", "0", this.curBlock)
+            }
+            if (this.types.isFloat(typeId)) {
+                return this.program.addValue("Const", typeId, "", "0.0", this.curBlock)
+            }
+        }
+        return this.program.addValue("Const", this.types.intType(64), "", "0", this.curBlock)
+    }
+
+    /// 字段读取：`__field_get(obj, index)`。
+    private fun emitFieldGet(objVal: Int, ty: String, fieldIndex: Int): Int {
+        val idxVal: Int = this.program.addValue("Const", this.types.intType(64), "",
+                                                toStr(fieldIndex), this.curBlock)
+        val args: String = toStr(objVal) + "," + toStr(idxVal)
+        var useTy: String = ty
+        if (useTy == "") {
+            useTy = "Long"
+        }
+        val typeId: Int = this.types.fromTypeName(useTy)
+        val v: Int = this.program.addValue("Call", typeId, args, "__field_get", this.curBlock)
+        // ⚠️ 读取**不推进内存链**：字段读不改内存，额外的 MemToken 只是让 DAG
+        //    多一个节点。自举 Main.aura 的字段读有几万处，每个 MemToken 都会让
+        //    Phase D（寄存器分配）的 O(N²) 扫描多一格 —— 实测这一项就是 8 GiB
+        //    内存闸门被打穿的临界差额。写操作（emitFieldSet）仍推进内存链。
+        return v
+    }
+
+    /// 字段写入：`__field_set(obj, index, val)`。
+    private fun emitFieldSet(objVal: Int, fieldIndex: Int, valVal: Int): Int {
+        val idxVal: Int = this.program.addValue("Const", this.types.intType(64), "",
+                                                toStr(fieldIndex), this.curBlock)
+        val args: String = toStr(objVal) + "," + toStr(idxVal) + "," + toStr(valVal)
+        val v: Int = this.program.addValue("Call", this.types.fromTypeName("Long"),
+                                           args, "__field_set", this.curBlock)
+        if (this.memHead >= 0) {
+            val memTypeId: Int = this.types.intType(64)
+            this.memHead = this.program.addValue("MemToken", memTypeId, toStr(v),
+                                                 "mem_after_set", this.curBlock)
+        }
+        return v
+    }
+
+    /// 为每个类合成构造器 `<Class>__new`（0 形参，返回对象指针）。
+    ///
+    /// 形参表刻意留空：调用点会把构造实参 + 内存链 token 一起压进
+    /// rcx/rdx/r8/r9，被调方不读它们 —— 多传的实参无害；0 形参让
+    /// `applyCallingConvention`（按**实参个数**装寄存器）与 callee 侧完全解耦，
+    /// 不必先知道每个类的 `init` 重载元数。
+    private fun synthesizeCtors(src: Hir) {
+        val savedMem: Int = this.memHead
+        val savedBlock: Int = this.curBlock
+        val savedClass: String = this.curClass
+        val savedVarMap: String = this.varMap
+        val savedParams: String = this.curParams
+        val savedLocalTypes: String = this.localTypes
+
+        val lty: Int = this.types.fromTypeName("Long")
+        var ci: Int = 0
+        while (ci < this.classList.size) {
+            val cname: String = this.classList[ci]
+            val fid: Int = this.program.addFunction(cname + "__new", 0, lty, false)
+            val entry: Int = this.program.addBlock()
+            this.curBlock = entry
+            this.curClass = cname
+            this.memHead = -1
+            this.varMap = ""
+            this.curParams = ""
+            this.localTypes = ""
+
+            val sizeVal: Int = this.program.addValue("Const", this.types.intType(64), "",
+                                                     toStr(this.classSizeOf(cname)), this.curBlock)
+            val objVal: Int = this.program.addValue("Call", lty, toStr(sizeVal),
+                                                    "Memory_alloc", this.curBlock)
+
+            val total: Int = this.classFieldTotal(cname)
+            var fi: Int = 0
+            while (fi < total) {
+                val fty: String = this.fieldTypeOfIndex(cname, fi)
+                val defNode: Int = this.fieldDefaultOfIndex(cname, fi)
+                var dv: Int = -1
+                if (defNode >= 0) {
+                    dv = this.buildExpr(src, defNode)
+                } else {
+                    dv = this.zeroConstOf(fty)
+                }
+                this.emitFieldSet(objVal, fi, dv)
+                fi = fi + 1
+            }
+
+            this.program.setTerminator(this.curBlock, "Ret", 0, toStr(objVal), "")
+            this.program.functionOf(fid).entryBlock = entry
+            this.program.functionOf(fid).params = ""
+            this.program.endFunction()
+            ci = ci + 1
+        }
+
+        this.memHead = savedMem
+        this.curBlock = savedBlock
+        this.curClass = savedClass
+        this.varMap = savedVarMap
+        this.curParams = savedParams
+        this.localTypes = savedLocalTypes
     }
 
     // ── 循环栈 ──

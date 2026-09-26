@@ -89,6 +89,7 @@ class InstructionSelector {
 
     /// 把分块列表两两归并成整串（O(总长 · log 块数)）。
     private fun joinChunks(items: List<String>): String {
+
         var cur: List<String> = items
         while (cur.size > 1) {
             val next: List<String> = arrayListOf<String>()
@@ -105,6 +106,47 @@ class InstructionSelector {
         }
         if (cur.size == 0) {
             return ""
+        }
+        return cur[0]
+    }
+
+    /// 常量池的**可逆编码**：每条 `<十进制长度>|<载荷>`，首尾直接相接（无需分隔符）。
+    ///
+    /// ⚠️ 旧编码是「用 `,` 连接 + 靠引号平衡判断哪些逗号是分隔符」。只要某条载荷里
+    /// 出现**未转义且数量为奇数**的 `"`，引号状态机就会翻转，其后所有逗号都不再当
+    /// 分隔符 —— 整段尾部坍缩成**一条**。自举 `Main.aura` 实测：
+    ///     `strConstCount=8669` / `chunks=8669`（发射端自洽）
+    ///     写入端 `splitCommaQuoted` 只解析出 **5762** 条
+    /// ⇒ `@str.5762` 之后的常量**缺符号** ⇒ 引用它们的 5454 条重定位在
+    /// `composeRelocations` 被静默丢弃 ⇒ 那些 `lea`/`call` 位移保持占位值 0
+    /// ⇒ 指针指向代码字节 ⇒ `strlen` 越界 ⇒ `0xC0000005`。
+    ///（`main` 是最后发射的函数，其常量编号必然落在丢失区间 ⇒ 崩在第一条语句。）
+    ///
+    /// 长度前缀与内容完全无关，与 `PhotonObjectWriter.parseConstPool` 严格互逆。
+    private fun joinConstPool(items: List<String>): String {
+        if (items.size == 0) {
+            return ""
+        }
+        val parts: List<String> = arrayListOf<String>()
+        var i: Int = 0
+        while (i < items.size) {
+            parts.add(MachineDagUtils.toStr(items[i].length) + "|" + items[i])
+            i = i + 1
+        }
+        // 两两归并（纯拼接、无分隔符）避免 O(n²)
+        var cur: List<String> = parts
+        while (cur.size > 1) {
+            val next: List<String> = arrayListOf<String>()
+            var k: Int = 0
+            while (k < cur.size) {
+                if (k + 1 < cur.size) {
+                    next.add(cur[k] + cur[k + 1])
+                } else {
+                    next.add(cur[k])
+                }
+                k = k + 2
+            }
+            cur = next
         }
         return cur[0]
     }
@@ -259,7 +301,13 @@ class InstructionSelector {
                 " strChunks=" + MachineDagUtils.toStr(this.stringConstChunks.size))
 
         // 字符串常量表在**全部函数选完之后**一次性归并（见 `stringConstChunks`）。
-        this.stringConstants = this.joinChunks(this.stringConstChunks)
+        this.stringConstants = this.joinConstPool(this.stringConstChunks)
+        // 定性探针：`@str.N` 的下标空间（`strConstCount`）与常量表条目数必须相等。
+        // 若 count > chunks，则存在「递增了下标但没登记常量」的路径 —— 那些
+        // `@str.N` 会缺符号，引用它的重定位在 `composeRelocations` 被静默丢弃。
+        println("STRCONST count=" + MachineDagUtils.toStr(this.strConstCount) +
+                " chunks=" + MachineDagUtils.toStr(this.stringConstChunks.size) +
+                " joinedLen=" + MachineDagUtils.toStr(this.stringConstants.length))
         this.selProbe("after joinChunks strConsts=" +
                 MachineDagUtils.toStr(this.stringConstants.length))
 
@@ -1292,6 +1340,12 @@ class InstructionSelector {
     /// 是同一策略：按接收者类型把裸名补齐。
     private fun mapStdlibFuncName(name: String, recvTy: String): String {
         if (name == "String.length" || name == "String.size") { return "strlen" }
+        // `Env.get(name[, default])`（`Hir.aura` 已阻止它被集合重写）：
+        // 落到运行库的 `Collections.getAt` —— 其实现是「查不到 = 空串」，
+        // 正是环境变量的期望语义（找不到 → ""）。**不能**让它落到
+        // `__list_get`：那是集合下标取值，null 容器会返回空指针并导致
+        // `streq(0, "")` 解引用地址 0（自举 Main.exe 启动崩溃的根因）。
+        if (name == "Env.get") { return "Collections.getAt" }
         if (name == "String.charCodeAt" || name == "charCodeAt") { return "charCodeAt" }
         if (name == "Any.toString") { return "toString" }
         if (name == "Any.equals") { return "streq" }

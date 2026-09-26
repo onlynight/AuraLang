@@ -602,13 +602,37 @@ class X86Encoder {
     // ── 栈帧 prologue/epilogue ──
 
     /// 编码函数 prologue（push rbp; mov rbp,rsp; sub rsp,N）。
+    ///
+    /// ⚠️ 大帧**必须逐页下探**（guard-page probe）。Windows 的栈是懒提交的，靠
+    /// **守卫页**逐页触发增长：一次性 `sub rsp, 528KB` 会**一步跨过守卫页**且
+    /// 中间不触碰任何页 ⇒ 之后第一次写栈落在「未提交、又不是守卫页」的地址上
+    /// ⇒ 系统不会去提交它 ⇒ **`0xC0000005`（而非常见的栈溢出 `0xC00000FD`）**。
+    /// 这一现象与 `/STACK` 的**保留量无关**（加大保留量解决不了提交问题），
+    /// 实测：自举 `Main.exe` 的 `main` 帧是 `0x830b8`（528KB，源于
+    /// `RegisterAllocator.getFrameSize` 的模块级帧），崩在 `BOOT-1` 之前；
+    /// 改用 `/STACK:0x40000000,0x40000000`（预留=提交）后 `BOOT-1` 立即能打印。
+    ///
+    /// 现在改为每 4KB 一步并 `cmp byte [rsp], 0` 触碰该页，保证每一步都经过
+    /// 守卫页（读即可触发提交，不需要写）。`emitCmpByteMemImm8` 是「仅基址」
+    /// 寻址，rsp 走正常路径（只有 rbp/r13 需要 mod=01 退化处理）。
     fun emitPrologue(stackSize: Int): Unit {
         this.emitPush("rbp")
         this.writeByte(0x48)
         this.writeByte(0x89)
         this.writeByte(0xE5)  // mov rbp, rsp
         if (stackSize > 0) {
-            this.emitSubRI("rsp", stackSize)
+            if (stackSize <= 4096) {
+                this.emitSubRI("rsp", stackSize)
+            } else {
+                var remaining: Int = stackSize
+                while (remaining > 0) {
+                    val step: Int = if (remaining > 4096) { 4096 } else { remaining }
+                    this.emitSubRI("rsp", step)
+                    // 触碰刚落到的这一页（读足以让系统提交该页 / 推进守卫页）
+                    this.emitCmpByteMemImm8("rsp", 0)
+                    remaining = remaining - step
+                }
+            }
         }
     }
 

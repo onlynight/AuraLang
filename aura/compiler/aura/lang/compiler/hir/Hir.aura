@@ -1542,6 +1542,39 @@ class HirLowerer {
             || t.startsWith("TreeMap") || t.startsWith("Deque")
     }
 
+    /// 接收者类型是否为 Map/Set 族。
+    ///
+    /// `receiverNotForCollections` 会把它们判为「不走集合语义」（因为
+    /// `get`/`set`/`contains` 对 Map 走的是另一套实现），但**长度与清空**
+    ///（`count` / `getSize` / `size` / `clear`）对 List/Map/Set 是同一套运行时
+    /// 实现 —— 该分支的原有注释已写明「对 List 与 Map 都成立，因此不需要区分
+    /// 接收者」。自举 `Main.aura` 实测：`getSize` / `clear` 因被这里排除而退化
+    /// 成裸名（lld-link: undefined symbol）。
+    private fun isCollectionMapOrSetTy(ty: String): Boolean {
+        if (ty == "") {
+            return false
+        }
+        return ty.startsWith("Map") || ty.startsWith("HashMap")
+            || ty.startsWith("LinkedHashMap") || ty.startsWith("TreeMap")
+            || ty.startsWith("Set") || ty.startsWith("HashSet")
+            || ty.startsWith("LinkedHashSet") || ty.startsWith("TreeSet")
+    }
+
+    /// `Env.get(...)` 的接收者是否为 std 的 `Env` 对象。
+    ///
+    /// 见 `lowerCall` 里该分支的说明：不拦下就会被当成集合取值。
+    private fun isEnvReceiver(ast: Ast, calleeId: Int): Boolean {
+        val ck: String = ast.kidsOf(calleeId)
+        if (HirUtils.hirKidsCount(ck) < 1) {
+            return false
+        }
+        val r: Int = HirUtils.hirKidsAt(ck, 0)
+        if (ast.kindOf(r) != "Ident") {
+            return false
+        }
+        return ast.textOf(r) == "Env"
+    }
+
     /// 降级函数调用表达式。
     fun lowerCall(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
@@ -1553,6 +1586,32 @@ class HirLowerer {
             val calleeId: Int = HirUtils.hirKidsAt(kids, 0)
             if (ast.kindOf(calleeId) == "Member" || ast.kindOf(calleeId) == "SafeAccess") {
                 val memberName: String = ast.textOf(calleeId)
+
+                // ── `Env.get(name[, default])`：**不是**集合取值，必须先拦下 ──
+                //
+                // 否则它会被下面的集合重写变成 `Collections.getAt(Env, name)`，
+                // 再被 `InstructionSelection.mapStdlibFuncName` 映射为
+                // `__list_get(null, name)`；而 `emitListGet` 的 **null 分支返回 0**
+                // ⇒ `Env.get` 返回空指针 ⇒ 紧随的 `s == ""` 里 `streq(0, "")`
+                // 解引用地址 0 ⇒ **自举 `Main.exe` 启动即 0xC0000005**
+                //（`main` 第一条语句就是 `cliArgCount()` → `Env.get`）。
+                //
+                // 保留限定名 `Env.get`，由 `mapStdlibFuncName` 映射到运行库的
+                // `Collections.getAt`（其实现语义正是「查不到 = 空串」）。
+                if (memberName == "get" && this.isEnvReceiver(ast, calleeId)) {
+                    var envKids: String = HirUtils.hirNoKids()
+                    var ei: Int = 1
+                    while (ei < kCount) {
+                        val eArg: Int = HirUtils.hirKidsAt(kids, ei)
+                        val eHir: Int = this.lowerExpr(ast, eArg)
+                        if (eHir >= 0) {
+                            envKids = HirUtils.hirKidsAdd(envKids, eHir)
+                        }
+                        ei = ei + 1
+                    }
+                    return this.hir.add("HirCall", "Env.get", "", sp, envKids)
+                }
+
                 if (memberName == "get" || memberName == "getAt") {
                     val calleeKids: String = ast.kidsOf(calleeId)
                     val calleeKCount: Int = HirUtils.hirKidsCount(calleeKids)
@@ -1657,13 +1716,17 @@ class HirLowerer {
                 // 运行库侧的名字来自 Rust native 注册表（`std_collections.rs`）：
                 //   aura.lang.std.Collections.count / isEmpty
                 // 对 List 与 Map 都成立（内部按对象长度取值），因此不需要区分接收者。
-                if (memberName == "count" || memberName == "getSize" || memberName == "isEmpty") {
+                if (memberName == "count" || memberName == "getSize" || memberName == "size"
+                    || memberName == "isEmpty" || memberName == "clear") {
                     val calleeKids: String = ast.kidsOf(calleeId)
                     if (HirUtils.hirKidsCount(calleeKids) >= 1) {
                         val recvId: Int = HirUtils.hirKidsAt(calleeKids, 0)
                         val recvTy: String = ast.tyOf(recvId)
-                        // String 有同名成员（`s.count()` 之类），必须排除
-                        if (recvTy != "String" && !this.receiverNotForCollections(recvId)) {
+                        // String 有同名成员（`s.count()` / `s.size`），必须排除；
+                        // Map/Set 族要放行（见 `isCollectionMapOrSetTy`）。
+                        if (recvTy != "String"
+                            && (!this.receiverNotForCollections(recvId)
+                                || this.isCollectionMapOrSetTy(recvTy))) {
                             var hirKids: String = HirUtils.hirNoKids()
                             val recvHirId: Int = this.lowerExpr(ast, recvId)
                             if (recvHirId >= 0) {
@@ -1672,6 +1735,8 @@ class HirLowerer {
                             var qname: String = "Collections.count"
                             if (memberName == "isEmpty") {
                                 qname = "Collections.isEmpty"
+                            } else if (memberName == "clear") {
+                                qname = "Collections.clear"
                             }
                             return this.hir.add("HirCall", qname, "", sp, hirKids)
                         }

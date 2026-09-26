@@ -320,8 +320,8 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 |------|------|------|------|
 | 1 | Main.aura CLI 分发器 | `Main.aura` | ✅ `runCli()`/`cliUsage()`/`photonBuildExeFile()` |
 | 2 | 原生驱动构建 | `PhotonHatCompile.aura` | ✅ `PhotonHatCompile.exe`（1,165,824 B，AOT 自举重建） |
-| 3 | 引导脚本 | `photon-hat-bootstrap.ps1` | 🟡 小输入可运行，Main.aura 自举需补 runtime 对象模型 |
-| 4 | Rust CLI 降级 | `main.rs` | 🟡 仍承担前端，待完全自举；`aura build -b photon` 仍走 VM 驱动（超时阻塞） |
+| 3 | 引导脚本 | `photon-hat-bootstrap.ps1` | 🟡 小输入可运行，Main.aura 自举需补 runtime 对象模型（见 §12.2/§12.3） |
+| 4 | Rust CLI 降级 | `main.rs` | ✅ **完成（2026-09-26，见 §12.1）**：`cmd_build_photon` 已无任何前端逻辑，只调原生驱动；`.phir` 不再生成 |
 
 ### P4 阶段：高级运行时（未来）
 
@@ -380,7 +380,7 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 | **Bootstrap Step 5 (COFF 确定性)** | ✅ PASS 2/2 | COFF deterministic + TimeDateStamp=0 |
 | **自举验证 (P1 Step 4c)** | ❌ FAIL | Main.exe 运行时崩溃（0xC0000005 ACCESS_VIOLATION）；根因：对象构造器仅设置 vtable=0 + size，未初始化字段；字段访问返回 null → 空指针解引用 |
 | **对象模型 (Phase 1-4)** | 🟡 部分完成 | vtable 数据符号已声明（47 个）；构造器设置 vtable=0 + size；`heapArena` 已扩展至 1 MB；但 vtable 条目未初始化（全零）、字段未初始化（全零） |
-| **CLI 自举化 (P3)** | ✅ 构建侧已通 | `aura build -b photon` 走原生驱动路径（~0.7s/用例），不存在时回退 VM 路径 |
+| **CLI 自举化 (P3)** | ✅ 构建侧已通 + Rust 前端已降级 | `aura build -b photon` 只做编排后调原生驱动（~0.7s/用例）；Rust 侧前端代码已删除（2026-09-26，§12.1） |
 | **Rust CLI 参数解析** | ✅ 修复真实 bug | `first_positional` 把 `--output`/`--aot` 等标志误当带值选项，吃掉输入文件 |
 | **Photon CLI 导入** | ✅ 已修复 | 包导入 `aura.lang.cli.X` 改相对 `import "X.aura"`；`Args.get` 改手写 substring 切分 |
 | **HAT IR 序列化（主路径）** | ✅ 已实现 | `main.rs::hir_to_hat()` 产出 SSA 结构化 IR 文本；`HatParser.aura` 解析 ~120 行，跳过 HIR→SSA 转换 |
@@ -1129,7 +1129,7 @@ cmd_build_photon → build/hat-native/PhotonHatCompile.exe (原生, ~100× 快)
 | **P0 真实管线** | ✅ 15/15 | HAT 原生差分 | 通过 commit `b2f7157` + 原生驱动修复后全绿 |
 | **P1 自举验证** | 🟡 10/11 | bootstrap 全量 | Step 1-3, 4a/4b, 5 全 PASS；仅 4c（self-bootstrap）FAIL |
 | **P2 自包含运行时** | ✅ 19/19 零依赖 | `llvm-readobj` | 导入表为空 |
-| **P3 CLI 自举化** | ✅ 构建侧已通 | `aura build -b photon` | Main.aura → 1.6 MB exe（79s）；运行侧待补齐对象模型 |
+| **P3 CLI 自举化** | 🟡 构建侧已通 / Rust 前端已降级 | `aura build -b photon` | 第 4 步「Rust CLI 降级」✅ 完成（§12.1）；Main.aura → 1.6 MB exe（79s）；运行侧待补齐对象模型（§12.3） |
 | **P4 GC/ARC/线程/异常** | ❌ 0/7 | — | 待做：生成物侧 mmap 堆、原子操作、异常表 |
 
 ### 11.8 对象模型状态（崩溃根因分析）
@@ -1148,7 +1148,136 @@ Main.exe（1,657,344 B）启动时崩溃（0xC0000005），根因分析：
 
 **崩溃链路**：`main()` → 创建 `Parser()` → 构造器分配 128B 内存（vtable=0, size=128, 其余字段全零）→ 调用 `parser.parse(source)` → 访问 `parser.errors`（null）→ 解引用 null → 0xC0000005
 
-**修复方向**：
+**修复方向**（⚠️ 2026-09-26 复核后已被 §12 推翻，见下）：
 1. 为每个类的构造器添加字段初始化代码（设置字段默认值）
 2. 为 vtable 数据符号填充方法地址（需代码生成器输出 vtable 初始化数据）
 3. 实现虚方法分派（通过 vtable 间接调用）
+
+---
+
+## 12. 2026-09-26 第二轮：P3 第 4 步（Rust CLI 降级）完成 + 对象模型真实缺口定性
+
+> **本轮范围**：用户确认 P3 待实现项 = A（对象模型）+ B（Rust CLI 降级）。
+> **本轮结论**：**B 已完成并回归通过**；**A 的真实工作量远大于本文档 §11.8 的描述**，
+> 必须按 §12.3 的分阶段方案实施（跨多轮）。同时修正 §9.2 / §11.8 中与代码不符的记录。
+
+### 12.1 B：Rust CLI 降级（✅ 完成）
+
+**改动**：
+- `rust/cli/src/main.rs::cmd_build_photon` 重写为**纯编排**：只做「参数解析 → 计算模块名/产物目录 →
+  调原生 `PhotonHatCompile.exe` → 解析 `===COFF-MAIN===`/`===COFF-RUNTIME===`/`===LINK===` 协议后处理」。
+  删除 Rust 侧 Lex/Parse/Sema/HIR→`.phir` 全部前端代码（约 720 行死代码：`hir_to_phir` / `stmt_to_phir` /
+  `expr_to_phir` / `hir_to_aura_json` / `*_to_json` / `hir_type_name_helper` / `escape_json` /
+  `find_aura_exe` / `extract_marker`）。
+- 删除 `photon_postprocess`（仅服务 VM 驱动路径）。原生驱动缺失时**直接报错退出**，不再静默回退 VM 路径
+  —— 该回退需要 Rust 生成的 `.phir` 作输入，与降级目标自相矛盾。
+- `scripts/photon/bootstrap-photon.ps1` Step 4a：可复现性检验由比较 Rust 产出的 `.phir` 改为比较
+  **Aura 自举前端产出的 `.hat`**（更强：`.hat` 才是后端真正消费的 IR）。
+
+**证据**：
+```
+cargo build -p cli --features llvm --release                    → Finished
+aura build -b photon tests\photon\P1\02_simple_vars.aura ...    → 链接成功，产物退出码 0
+  build\b-verify\：02_simple_vars.hat (324311 B) / .obj / aura_runtime.obj / .exe
+photon-hat-native-suite.ps1 -Phase P1,P2,P3                     → TOTAL: PASS=15 FAIL=0
+bootstrap-photon.ps1 -Step 4,5                                  → 4a HAT byte-identical ✅ / 4b ✅ / 5a ✅ / 5b ✅
+                                                                  仅 4c FAIL（Main.exe 崩溃，属 A 的范围）
+```
+
+### 12.2 A：对象模型真实缺口（⚠️ 修正 §9.2/§11.8）
+
+以最小复现 `build/class_probe.aura` 实测（`aura build -b photon build/class_probe.aura`）：
+
+```aura
+class Point { var x: Int = 3; var y: Int = 4
+              fun sum(): Int { return this.x + this.y } }
+fun main() { val p: Point = Point(); println(p.sum()) }
+```
+
+产出 HAT（`build/class_probe/class_probe.hat`）：
+```
+@fn sum() -> Int                      ; ← 没有 self 形参
+  @t1 = @i32_const 0 : Int            ; ← `this` 未绑定 → 常量 0
+  @t2 = @field(@t1, @t0) : Basic      ; ← 字段名/偏移丢失
+  @t4 = @i32_const 0 : Int            ; ← 第二个字段同样是 0
+  @t5 = @field(@t4, @t3) : Basic
+  @t7 = @add(@t2, @t5) : Basic
+@fn main() -> Basic
+  @t10 = @call @Point(@t9) : Basic    ; ← 类构造器未定义 → lld-link: undefined symbol: Point
+  @t12 = @call @sum(@t10, @t11) : Basic
+```
+`sum` 的机器码是 `mov rbx,0; mov rbx,0; add rsi,rbx` —— 两个字段都编译成常量 0；
+`main` 链接期报 `undefined symbol: Point`。
+
+据此，§11.8 的三条「修复方向」**不成立**，实际缺口如下：
+
+| # | 缺口 | 位置 | 证据 |
+|---|------|------|------|
+| A1 | **Photon 后端完全没有字段支持** | `Lowering.aura` / `InstructionSelection.aura` | 全仓库对 `GetField`/`SetField` 0 命中；HAT `@field` 解析成 SSA `GetField` 后无人消费 |
+| A2 | **HAT 未携带字段信息** | `HatSerializer.aura::opName` | `GetField` 的 `aux`（字段名）未写出，HAT 里只剩 `@field(@obj,@mem)` 位置参数 |
+| A3 | **Aura 自举前端无类意识** | `hir/Hir.aura::lowerMember` / `lowerCall` | `this` 落到 SSA 时成常量 0；字段名不参与降低 |
+| A4 | **类方法无 self、且用裸名发射** | `mir/SsaBuilder.aura::buildAllFunctions` | `Main.hat` 2715 个 `@fn` 仅 2214 唯一（`init`×85、`push`×9…），符号在 COFF 层互相覆盖 |
+| A5 | **用户类构造器不存在** | `PhotonRuntime.aura` | 运行时只硬编码了 47 个**编译器自身**的类名（`Parser`/`Hir`/…），用户类无名可用 |
+| A6 | **无虚方法分派** | `x86_64/X86Encoder.aura` | 全仓库对 `emitVirtualCall`/`emitLoadVtable` **0 命中**；§9.2 记录的这四个函数不存在 |
+
+> 即：Photon 链路当前对 `class` 的支持是**零**，不存在「只差字段初始化」。AOT 侧
+> （`aot/Emit.aura::registerStruct` ~1500 行）已有等价实现可作移植参照：字段表
+> `structLines`（`Class|field|type|default|…`）、继承布局 `inheritFields`/`fParents`、
+> 方法符号 `Class_method`（`sanitizeLlvm`）、对象 index 0 固定为 vptr、
+> `obj` 单例全局、`planVtables` 按方法名全局编号槽位。
+
+### 12.3 A 的分阶段实施计划（可独立验证）
+
+| 阶段 | 内容 | 触及文件 | 验收 |
+|------|------|----------|------|
+| **A-1** | 单类字段读写 + `this` 绑定 + 构造器 | `SsaBuilder.aura`（类元数据预扫描：`HirClass`/`HirStruct` → `HirBlock` → `HirVarDecl` 字段序号；方法→属主类映射；`buildFunction` 注入 `self`；`buildMember`/裸字段 → `GetField(aux=字节偏移)`；合成 `<Class>` 构造器 SSA）、`Lowering.aura`（`GetField`/`SetField` → `Load`/`Store` + `computeAddressMode`）、`InstructionSelection.aura`（复用 pattern 10/11）、`PhotonRuntime.aura`（导出 `__obj_alloc` 别名 + 删除与之冲突的硬编码构造器） | `class_probe.aura` 输出 `7`；HAT 15/15 不回退 |
+| **A-2** | 方法限定名 + 调用点解析 | `SsaBuilder.aura`（函数符号改 `Class_method`；调用点按「接收者声明类型 / `this` / 名字全局唯一」三级回退解析）、`InstructionSelection.aura::mapStdlibFuncName` | `Main.hat` 函数名唯一；`init`×85 消除 |
+| **A-3** | 继承 + 虚方法分派 | `SsaBuilder.aura`（`HirClass.ty` 继承链、`super`）、`PhotonRuntime.aura`（vtable 数据符号填充）、`X86Encoder.aura`（`emitLoadVtable`/`emitVirtualCall`）、`Lowering.aura`/`InstructionSelection.aura`（间接调用） | `super.m()` 用例；Main.exe 可启动 |
+| **A-4** | 运行时能力补齐 | `PhotonRuntime.aura`（`FileSystem.readText/writeText/exists`、`Env.get` 真实实现、`Process.*`、字符串族 `substring/indexOf/startsWith/split/trim/charCodeAt`） | `Main.exe --selftest` |
+
+**回归基线（每阶段必跑）**：
+```powershell
+powershell -File scripts\photon\photon-hat-native-suite.ps1 -Phase P1,P2,P3
+powershell -Command "& '.\scripts\photon\bootstrap-photon.ps1' -Step 4,5"
+```
+
+### 12.4 A-1/A-2 落地结果与 Phase D 内存瓶颈（2026-09-26 第二轮）
+
+**已落地**：
+| 项 | 状态 | 证据 |
+|---|---|---|
+| A-1 单类字段 + `this` + 构造器 | ✅ | `build/class_probe.aura` → `sum = 7`；`class_probe2.aura`（`this.n = this.n+1`）→ `n = 3` |
+| A-2 方法限定名 + 调用点解析 | ✅ | `build/class_probe3.aura`（两类同名 `get`）→ `a=1 b=12`；`Main.hat` 唯一函数名 2214 → 2714 |
+| A-5 用户类构造器 | ✅ | 统一 `Class__new`；运行时 47 个零初始化桩不可达 |
+| 顺带修复 | ✅ | **20 个 runtime 函数栈不配平**（`emitPrologue` 后裸 `emitRet()`，含 `Memory_alloc`/`arrayListOf`/`Collections.*`/`fork`…），全部改 `emitEpilogue()` |
+| 回归 | ✅ | `photon-hat-native-suite.ps1 -Phase P1,P2,P3` → **15/15** |
+
+**Phase D 内存瓶颈（当前唯一阻塞，未解决）**：
+- 闸门在 AOT 运行时 `aura_mem_*` 记账，默认 **8192 MiB**；中止时驱动 RSS 仅 ~1–2.4 GB ⇒ 是**分配churn**（无 GC，撤下的中间串全部滞留），不是真实驻留。
+- 中止点已定位：`InstructionSelection` 全部跑完（`nodes=71886 instrs=94452`）并打完
+  `[Phase D] Register Allocation + Peephole`，字符串常量表归并正常（**`strConsts=70018` 是串长度 70 KB，不是常量个数**），随后在 **Phase D 内部**（Peephole / 着色）被闸门打穿。
+- 本轮已做的削减：DAG 节点 75,359 → **71,886**（`String`/`Any` 等内建值类型不再按类登记；字段读取不再生成多余 `MemToken`），**仍不足以过闸**。
+- 方向（按性价比）：
+  1. `RegisterAllocator.buildIntervalInterference` 对**每个节点**全量扫描 `0..nodeCount`（O(N²)）；改为按活跃区间排序 + 扫描线，或维护「活跃节点集」增量更新。
+  2. `PeepholeOptimizer` 的逐指令字符串拼接若仍在热路径，改分块归并（同 `joinChunks` 的做法）。
+  3. 降低单位成本：`__field_get/__field_set` 目前每个字段访问要额外产生 1 个 index `Const` —— 可把序号编进符号名（`__field_get3`）省掉该常量与一个实参。
+
+**探针用法**（定位 Phase D）：
+```powershell
+$env:AURA_SEL_PROBE="1"; $env:AURA_SEL_PROBE_PATH="<dir>\ra-probe.log"
+$env:AURA_HAT_AURA="<repo>\aura\compiler\aura\lang\compiler\Main.aura"
+$env:AURA_HAT_OUT="<dir>"; $env:AURA_HAT_MODULE="Main"
+.\build\hat-native\PhotonHatCompile.exe
+```
+
+### 12.5 复现命令（本轮）
+
+```powershell
+# A 的最小复现（链接期 undefined symbol: Point；sum 的字段读编译成常量 0）
+.\rust\target\release\aura.exe build -b photon build\class_probe.aura --output build\class_probe\probe.phir
+
+# Main.exe 崩溃复现（Step 4c）
+& .\build\bootstrap\step3\Main.exe build -b photon tests\photon\P1\02_simple_vars.aura --output build\bootstrap\step3\self.phir
+$LASTEXITCODE      # → -1073741819 = 0xC0000005
+```
+

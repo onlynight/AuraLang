@@ -685,15 +685,26 @@ llvm-objdump -d build\hat-bootstrap\aura-compiler.exe | Select-String "mov.*\[rc
 
 ### 9.1 已完成
 
+> **⚠️ 2026-09-26 复核：下表中 Phase 3 / Phase 4 的「✅ 完成」不成立。**
+> 全仓库对 `emitVirtualCall` / `emitLoadVtable` / `emitLoadVtableMethod` /
+> `emitVirtualCallWithScratch` **0 命中**（`X86Encoder.aura` 中没有这些函数），
+> `PhotonRuntime` 的 47 个 `<Class>Vtable` 只是**零初始化的 8 字节数据符号**，
+> 没有任何代码写入方法地址。真正的缺口与实施计划见
+> `implementation-deviation-analysis.md` §12.2 / §12.3。
+
 | 阶段 | 任务 | 状态 | 修改文件 |
 |------|------|------|----------|
 | Phase 1 | heapArena 扩展 16KB → 1MB | ✅ 完成 | `PhotonRuntime.aura` (3 处 dataSymbolName + 3 处边界检查) |
-| Phase 2 | 基础类构造器 | ✅ 完成 | `PhotonRuntime.aura` (emitClassConstructor + emitClassConstructorWithVtable) |
-| Phase 3 | Vtable 生成 | ✅ 完成 | `PhotonRuntime.aura` (47 个 Vtable 数据符号) + `X86Encoder.aura` (emitVirtualCall/emitLoadVtable) |
-| Phase 4 | 方法调用支持 | ✅ 完成 | `X86Encoder.aura` (emitVirtualCall/emitVirtualCallWithScratch) |
+| Phase 2 | 基础类构造器 | 🟡 部分 | `PhotonRuntime.aura` 仅有「零初始化分配 + 写 size」的构造器桩，字段不初始化 |
+| Phase 3 | Vtable 生成 | ❌ 未实现 | 仅声明了 47 个 8B 零填充数据符号；无条目填充代码 |
+| Phase 4 | 方法调用支持 | ❌ 未实现 | `X86Encoder.aura` 无 `emitVirtualCall` / `emitLoadVtable` |
 | 分析 | 任务必要性复核 | ✅ 完成 | 本文档 §0 |
 
 ### 9.2 关键修改
+
+> **⚠️ 2026-09-26 复核**：下面 Phase 3 / Phase 4 列出的
+> `X86Encoder.emitLoadVtable` / `emitLoadVtableMethod` / `emitVirtualCall` /
+> `emitVirtualCallWithScratch` **在代码中不存在**，本轮相关记录作废（保留原文仅作历史）。
 
 **Phase 1 — heapArena 扩展**：
 - `dataSymbolName`: `heapArena:16384` → `heapArena:1048576`

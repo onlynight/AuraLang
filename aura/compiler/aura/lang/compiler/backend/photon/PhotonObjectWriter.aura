@@ -99,6 +99,9 @@ class PhotonObjectWriter {
     var coffSymCount: Int = 0
     var coffRelocOffset: Int = 0
     var coffRelocCount: Int = 0
+
+    /// 上一次 `composeRelocations()` 中因**符号缺表**被静默丢弃的重定位条数（诊断用）。
+    var relocDropped: Int = 0
     var coffStrTabSize: Int = 0
     var coffStrTabHex: String = ""
 
@@ -223,6 +226,29 @@ class PhotonObjectWriter {
         if (entries == "") {
             return ""
         }
+        // ── 紧凑形式：整串无 `;` 分隔、每 3 个字段一条记录 ──
+        //
+        // ⚠️ 必须与 `parseRelocEntries` 用**同一套**判据先分流。旧实现直接
+        // `splitSemi` → 紧凑串只得到 **1 个元素** → 落到下面 `fields.size >= 3`
+        // 分支后**只重定位第一条记录，其余全部静默丢弃**。
+        //
+        // 实测后果（自举 `Main.aura`）：`main` 开头两条字符串常量物化
+        //（`leaq %rsi/@str.N`、`leaq %rcx/@str.N`）的 REL32 记录丢失 →
+        // 位移保持占位值 0 → 指针指向**下一条指令（代码段）** →
+        // `println` 对其做 `strlen` 越界 → `0xC0000005`，且**零输出**
+        //（崩在 `main` 的第一条语句上）。
+        if (this.splitSemi(entries).size <= 1) {
+            val f: List<String> = this.splitPipe(entries)
+            var packed: String = ""
+            var k: Int = 0
+            while (k + 2 < f.size) {
+                if (packed != "") { packed = packed + ";" }
+                packed = packed + this.toStr(this.strToInt(f[k]) + baseOffset)
+                    + "|" + f[k + 1] + "|" + f[k + 2]
+                k = k + 3
+            }
+            return packed
+        }
         val parts: List<String> = this.splitSemi(entries)
         var out: String = ""
         var i: Int = 0
@@ -320,21 +346,38 @@ class PhotonObjectWriter {
 
         // 2) 字符串常量符号：值 = 该字符串在 .rdata 内的字节偏移
         //    （必须逐个累加，否则 @str.1/@str.2 会全部指向 .rdata 起点）
-        val parts: List<String> = this.splitCommaQuoted(stringConsts)
+        val parts: List<String> = this.parseConstPool(stringConsts)
         var rdataOff: Int = 0
         var i: Int = 0
         while (i < parts.size) {
-            if (parts[i] != "") {
-                recs.add("@str." + this.toStr(i) + "|" + this.toStr(rdataOff) + "|2|0|3")
-                // 偏移按**去引号后**的载荷长度累加，必须与 `stringConstsToHex`
-                // 实际写入的字节数一致（两处都用 `unquote`），否则 @str.N 错位。
-                rdataOff = rdataOff + this.unquote(parts[i]).length + 1  // 内容 + NUL 终止符
-            }
+            // ⚠️ **必须为每个下标无条件生成符号**（旧实现在 `parts[i] == ""` 时跳过）。
+            //
+            // 重定位引用的是常量的**下标**（`@str.<i>`），而 `stringConstsToHex`
+            // 对**每个**条目（含空串）都写入「载荷 + NUL」。旧实现跳过空条目的
+            // 符号、下标却照常递增 ⇒ `@str.i` 缺表 ⇒ `composeRelocations` 里
+            // `indexOfName` 返回 -1 ⇒ **重定位被静默丢弃**（见该函数 556-560 行）
+            // ⇒ 发射出的 `lea` 位移保持占位值 0 ⇒ 指针指向**紧随其后的代码字节**
+            // ⇒ `println` 对其 `strlen` 越界 ⇒ `0xC0000005`。
+            //
+            // 实测（自举 `Main.aura`）：`xeProbe` 显示编码器侧 `main` 贡献了 62 条
+            // 重定位，而 `Main.obj` 里 `main` 头两条字符串常量物化（`main+0x16`、
+            // `main+0x1d`）没有重定位记录 —— 正好是被丢的那两条。
+            //
+            // 偏移按**去引号后**的载荷长度累加（与 `stringConstsToHex` 同步，
+            // 两处都用 `unquote`），空串同样占 1 个 NUL 字节。
+            recs.add("@str." + this.toStr(i) + "|" + this.toStr(rdataOff) + "|2|0|3")
+            rdataOff = rdataOff + this.unquote(parts[i]).length + 1  // 内容 + NUL 终止符
             i = i + 1
         }
 
         this.objwProbe("sym2 strConsts done recs=" + this.toStr(recs.size) +
                 " rdataOff=" + this.toStr(rdataOff))
+        // 定性探针：符号循环累加出的总长 `rdataOff` 必须等于 `.rdata` 的实际字节数
+        // `rdataSize`（在 `buildCoffFile` 里算）。若不等，说明「累加口径」与
+        // 「实际写入口径」不一致，偏移会随条目递增而漂移 ⇒ 越靠后的 `@str.N`
+        // 指到节外/错位（`main` 的常量是全表倒数第 18 个，正好命中）。
+        println("RDATA-CHK rdataOff=" + this.toStr(rdataOff) +
+                " entries=" + this.toStr(parts.size))
 
         // 2b) .data 节符号：值为节内偏移，section 按实际节顺序计算。
         //     有 .rdata 时 .data 为第 3 节，否则为第 2 节。
@@ -506,6 +549,7 @@ class PhotonObjectWriter {
             return this.coffRelocCache
         }
         val out: List<String> = arrayListOf<String>()
+        this.relocDropped = 0
         val symRecs: List<String> = this.splitDoubleSemi(this.symbols)
 
         // 符号名只切分一次：`symbolIndexOf` 的线性扫描在每个重定位条目上各跑
@@ -520,6 +564,8 @@ class PhotonObjectWriter {
 
         // 按 `;;` 分隔函数组，每个组内的条目属于同一个函数
         val groups: List<String> = this.splitDoubleSemi(this.relocs)
+        this.objwProbe("RELCHK begin groups=" + toStr(groups.size) +
+                " syms=" + toStr(symNames.size))
         var fi: Int = 0
         while (fi < groups.size) {
             val group: String = groups[fi]
@@ -530,9 +576,23 @@ class PhotonObjectWriter {
                 while (i < entries.size) {
                     val fields: List<String> = this.splitPipe(entries[i])
                     if (fields.size >= 3) {
+                        val absoluteOffset: Int = this.strToInt(fields[0])
                         val idx: Int = this.indexOfName(symNames, fields[1])
+                        if (absoluteOffset >= 905000 && absoluteOffset <= 907400) {
+                            this.objwProbe("RELCHK off=" + toStr(absoluteOffset) +
+                                    " sym=" + fields[1] + " idx=" + toStr(idx))
+                        }
+                        if (idx < 0) {
+                            // 符号缺表 → 该重定位被静默丢弃（发射出的 `lea`/`call`
+                            // 位移保持占位值 0 ⇒ 解引用即崩溃）。前 12 条走 stdout，
+                            // 以便区分是用户对象还是 runtime 对象丢的。
+                            this.relocDropped = this.relocDropped + 1
+                            if (this.relocDropped <= 12) {
+                                println("RELCHK-DROP off=" + toStr(absoluteOffset) +
+                                        " sym=[" + fields[1] + "]")
+                            }
+                        }
                         if (idx >= 0) {
-                            val absoluteOffset: Int = this.strToInt(fields[0])
                             out.add(this.toStr(absoluteOffset) + "|" + this.toStr(idx) + "|" + this.toStr(this.coffRelocType(fields[2])))
                         }
                     }
@@ -683,6 +743,8 @@ class PhotonObjectWriter {
                 this.toStr(this.rdataSection.length))
         this.rdataSize = this.hexByteCount(this.rdataSection)
         this.objwProbe("coff 1d rdataSize=" + this.toStr(this.rdataSize))
+        println("RDATA-CHK rdataSize=" + this.toStr(this.rdataSize) +
+                " chars=" + this.toStr(this.rdataSection.length))
         this.dataSection = this.normalizeHex(this.dataSection)
         // 把 .data 补齐到 `dataSymbolName` 声明的总大小。
         //
@@ -708,6 +770,17 @@ class PhotonObjectWriter {
         val relocRecs: List<String> = this.composeRelocations()
         this.coffRelocCount = relocRecs.size
         this.objwProbe("coff3 relocCount=" + this.toStr(this.coffRelocCount))
+        // 最终态定性探针：`symbols` / `relocs` 是否完整、丢了多少条。
+        //
+        // ⚠️ 走 stdout 而不是探针文件：一次编译会构建**两个**对象（用户对象在前、
+        // runtime 对象在后），两者各自 `buildCoffFile`；探针文件是覆盖写，只能看到
+        // 后者的数字。用 `funcs=` 区分是哪一个（用户对象 ~2849，runtime ~132）。
+        println("RELCHK-FINAL funcs=" + toStr(this.splitComma(this.functions).size) +
+                " strConsts=" + toStr(this.parseConstPool(this.stringConsts).size) +
+                " groups=" + toStr(this.splitDoubleSemi(this.relocs).size) +
+                " syms=" + toStr(this.splitDoubleSemi(this.symbols).size) +
+                " kept=" + toStr(this.coffRelocCount) +
+                " dropped=" + toStr(this.relocDropped))
 
         // ── 3. 长符号名 → 字符串表 ──
         // ⚠ `coffStrTabHex = coffStrTabHex + ...` 是 O(条目数²)：符号数上万、
@@ -1283,7 +1356,7 @@ class PhotonObjectWriter {
         if (consts == "") {
             return ""
         }
-        val parts: List<String> = this.splitCommaQuoted(consts)
+        val parts: List<String> = this.parseConstPool(consts)
         this.objwProbe("s2h split ok parts=" + this.toStr(parts.size))
         // ⚠ 逐常量 `out = out + ...` 是 O(常量数²)：自举时字符串常量数
         // 上万、.rdata 达数百 KB，每次拼接都整段拷贝。改用列表累积。
@@ -1539,6 +1612,45 @@ class PhotonObjectWriter {
         }
         if (neg) { result = "-" + result }
         return result
+    }
+
+    /// 解析常量池：`<十进制长度>|<载荷>` 首尾相接（`joinConstPool` 的逆运算）。
+    ///
+    /// ⚠️ 必须用它、**不要**用 `splitCommaQuoted`：后者靠「引号平衡」判断哪些逗号
+    /// 是分隔符，只要某条载荷含未转义且数量为奇数的 `"` 就会翻转状态机，把整段尾部
+    /// 坍缩成一条。自举 `Main.aura` 实测 `8669 → 5762` 条，导致 `@str.5762` 之后的
+    /// 常量缺符号、5454 条重定位被静默丢弃、发射出的 `lea` 位移保持 0 ⇒ 崩溃。
+    /// 长度前缀与内容无关，解析结果严格等于发射端的条目数。
+    private fun parseConstPool(text: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") {
+            return out
+        }
+        val len: Int = text.length
+        var i: Int = 0
+        while (i < len) {
+            var n: Int = 0
+            var sawDigit: Boolean = false
+            while (i < len && (text.charCodeAt(i) as Int) != 124) {
+                val c: Int = text.charCodeAt(i) as Int
+                if (c < 48 || c > 57) {
+                    return out
+                }
+                n = n * 10 + (c - 48)
+                sawDigit = true
+                i = i + 1
+            }
+            if (!sawDigit || i >= len) {
+                return out
+            }
+            i = i + 1
+            if (i + n > len) {
+                n = len - i
+            }
+            out.add(text.substring(i, i + n))
+            i = i + n
+        }
+        return out
     }
 
     /// 按逗号切分，**不切分双引号内的逗号**（字符串常量表专用）。

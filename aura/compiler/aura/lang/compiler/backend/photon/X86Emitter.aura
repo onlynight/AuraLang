@@ -36,6 +36,18 @@ class X86Emitter {
     /// 寄存器分配器引用（用于 spill 节点检测）。
     private var allocator: RegisterAllocator = null
 
+    /// 预扫结果：函数名序列（按指令顺序、首次出现的顺序）。
+    ///
+    /// 与 `emitFunction` 主循环的「函数边界」顺序**完全一致**，因此主循环只需
+    /// 一个下标递增即可取到当前函数的帧信息，无需按名字查找。
+    private var funcNames: List<String> = arrayListOf<String>()
+
+    /// 预扫结果：每个函数实际用到的**最大溢出槽号**（`-1` = 未用任何槽）。
+    private var funcMaxSlots: List<Int> = arrayListOf<Int>()
+
+    /// 主循环用的下标（对应 `funcNames` / `funcMaxSlots`）。
+    private var fnIdx: Int = 0
+
     /// 字符串常量表（逗号分隔）。
     private var strConsts: String = ""
 
@@ -62,6 +74,9 @@ class X86Emitter {
         this.outputHex = ""
         this.relocRecords = ""
         this.frameSize = 0x50
+        this.funcNames = arrayListOf<String>()
+        this.funcMaxSlots = arrayListOf<Int>()
+        this.fnIdx = 0
         this.strConsts = ""
         this.funcOffsets = ""
         this.isMainFunc = false
@@ -97,6 +112,63 @@ class X86Emitter {
         FileSystem.writeText(this.probePath, this.probeBuf)
     }
 
+    /// 预扫：每个函数实际用到的**最大溢出槽号**。
+    ///
+    /// ⚠️ 为什么必须按函数收敛帧大小：`spill_slot_<n>` 是**模块级全局编号**，
+    /// 但每个函数只触碰自己的槽。旧实现直接把分配器的**模块级**帧
+    ///（`32 + 总溢出槽×8`）套到**每一个**函数上 —— 自举 `Main.aura` 有 66,900+
+    /// 个溢出槽，于是每个函数的 `sub rsp, 0x830b8`（528 KB）。
+    /// 后果不只是浪费：一条 `sub rsp` 会**一步跨过守卫页**，之后第一次写栈
+    /// 落在未提交页上 ⇒ `0xC0000005`（详见 `X86Encoder.emitPrologue`），
+    /// 而且 528 KB × 2 层就超出 1 MB 的默认栈 ⇒ 任何两层调用都栈溢出。
+    ///
+    /// 帧大小 = `32 + (最大槽号+1)*8`（16 字节对齐）；该函数未用任何槽时
+    /// 退回历史默认 `0x50`。顺序与主循环的函数边界检测一致，
+    /// 因此主循环按下标取用（见 `funcNames` / `fnIdx`）。
+    private fun scanFunctionMaxSlots(dag: MachineDag): Unit {
+        this.funcNames = arrayListOf<String>()
+        this.funcMaxSlots = arrayListOf<Int>()
+        if (this.allocator == null) {
+            return
+        }
+        var curFn: String = ""
+        var curMax: Int = -1
+        var i: Int = 0
+        while (i < dag.instrCount) {
+            val instr: DagInstruction = dag.instrOf(i)
+            val fn: String = instr.funcName
+            if (fn != curFn) {
+                if (curFn != "") {
+                    this.funcNames.add(curFn)
+                    this.funcMaxSlots.add(curMax)
+                }
+                curFn = fn
+                curMax = -1
+            }
+            // 该指令用到的节点里取最大溢出槽
+            val ns: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+            var j: Int = 0
+            while (j < ns.size) {
+                val nid: Int = MachineDagUtils.strToInt(ns[j])
+                if (nid >= 0) {
+                    val c: String = this.allocator.getColor(nid)
+                    if (c != "" && c.startsWith("spill_slot_")) {
+                        val slot: Int = MachineDagUtils.strToInt(c.substring(11))
+                        if (slot > curMax) {
+                            curMax = slot
+                        }
+                    }
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        if (curFn != "") {
+            this.funcNames.add(curFn)
+            this.funcMaxSlots.add(curMax)
+        }
+    }
+
     /// 发射整个 MachineDag 为机器码（支持多函数：每个函数独立 prologue/epilogue）。
     fun emitFunction(dag: MachineDag, funcName: String): Unit {
         this.probePath = this.readProbePath()
@@ -107,6 +179,9 @@ class X86Emitter {
         this.funcOffsets = ""
         this.isMainFunc = (funcName == "main")
         this.savedRegs = ""
+        // 预扫每个函数的实际最大溢出槽（帧大小按函数收敛，见 `scanFunctionMaxSlots`）。
+        this.scanFunctionMaxSlots(dag)
+        this.fnIdx = 0
 
         var i: Int = 0
         var currentFunc: String = ""
@@ -121,6 +196,13 @@ class X86Emitter {
                 // 如果之前有函数，发射 epilogue。
                 if (!needPrologue && currentFunc != "") {
                     this.emitEpilogueWithRestore()
+                }
+                // `main` 的收尾统计：`main` 不是最后一个函数，探针尾部留不住它，
+                // 因此只对 `main` 单独打点（进入下一个函数前，`currentFunc` 仍是它）。
+                if (this.enc.byteCount() > 900000) {
+                    this.xeProbe("TAIL-END " + currentFunc + " relocs=" +
+                            toStr(this.enc.getRelocations().size) +
+                            " bytes=" + toStr(this.enc.byteCount()))
                 }
                 // 记录当前函数的起始偏移。
                 val offset: Int = this.enc.byteCount()
@@ -140,11 +222,36 @@ class X86Emitter {
                 }
                 // 发射当前函数的 prologue。若保存了奇数个寄存器，多留 8 字节
                 // 保持 16 字节栈对齐（call 前 rsp % 16 == 0）。
+                //
+                // 帧大小**按函数**取（见 `scanFunctionMaxSlots`）：旧实现用分配器的
+                // 模块级帧（自举 `Main.aura` = 528 KB）套给每个函数，既会一步跨过
+                // 守卫页导致 `0xC0000005`，两层调用又会撑爆默认 1 MB 栈。
                 var frame: Int = this.frameSize
+                if (this.fnIdx < this.funcNames.size
+                    && this.funcNames[this.fnIdx] == instrFunc) {
+                    val ms: Int = this.funcMaxSlots[this.fnIdx]
+                    if (ms >= 0) {
+                        var fsz: Int = 32 + (ms + 1) * 8
+                        if (fsz % 16 != 0) { fsz = fsz + (16 - fsz % 16) }
+                        frame = fsz
+                    } else {
+                        // 该函数没有溢出槽 → 不需要为溢出区留空间
+                        frame = 0x50
+                    }
+                    this.fnIdx = this.fnIdx + 1
+                }
                 if (srParts.size % 2 == 1) { frame = frame + 8 }
                 this.enc.emitPrologue(frame)
                 currentFunc = instrFunc
                 needPrologue = false
+                // 函数级重定位探针：区分「发射时就没进表」与「进表后被
+                // `resolveLabels` 冲掉」。`xeProbe` 有界截断（尾部 2.5KB），
+                // 而 `main` 是最后一个函数，正好会留在尾部。
+                if (this.enc.byteCount() > 900000) {
+                    this.xeProbe("TAIL-START " + instrFunc + " relocs=" +
+                            toStr(this.enc.getRelocations().size) +
+                            " bytes=" + toStr(this.enc.byteCount()))
+                }
             }
 
             this.emitInstr(instr, dag)
@@ -168,7 +275,8 @@ class X86Emitter {
         this.xeProbe("loop done bytes=" + toStr(this.enc.byteCount()) +
                 " relocs=" + toStr(this.enc.getRelocations().size))
         this.enc.resolveLabels()
-        this.xeProbe("resolveLabels done bytes=" + toStr(this.enc.byteCount()))
+        this.xeProbe("resolveLabels done bytes=" + toStr(this.enc.byteCount()) +
+                " relocs=" + toStr(this.enc.getRelocations().size))
 
         // 获取最终 hex 和重定位。
         this.outputHex = this.enc.toHex()
@@ -525,7 +633,26 @@ class X86Emitter {
                 continue
             }
 
-            // ── 字符串常量 / 普通寄存器值：从节点寄存器搬到参数寄存器 ──
+            // ── 字符串常量：直接 `lea argReg, @str.N`（重物化，不读颜色寄存器）──
+            //
+            // 与上面的整数常量同理，且**更必要**：串常量的物化指令
+            //（`lea %color, @str.N`）与其它常量共用同一批可着色寄存器，两个常量
+            // 连着发射时后者会覆写前者 —— 实测 `02_simple_vars` 的机器码：
+            //     movq $0x1, %rbx        ; 常量 A → rbx
+            //     leaq @str.2, %rbx      ; 常量 B → rbx   ← A 被覆写
+            //     leaq @str.3, %rsi
+            //     movq %rsi, %rdx ; movq %rbx, %rcx ; callq strcat
+            // 只要被覆写者此刻仍在使用点，两个实参就读成同一个值：
+            // `"z = " + toStr(true)` 输出 `truetrue`（strcat 收到 "true","true"）。
+            // 直接在参数寄存器里物化，就彻底不依赖「常量一直待在它的颜色寄存器里」
+            // 这个分配器无法保证的前提；顺带少占一个非易失寄存器。
+            if (srcNode.kind == "Const" && srcNode.aux.startsWith("@str.")) {
+                this.enc.emitLeaRIP(argRegs[i], srcNode.aux)
+                i = i - 1
+                continue
+            }
+
+            // ── 普通寄存器值：从节点寄存器搬到参数寄存器 ──
             val srcReg: String = this.regOfNode(srcNode)
             // 栈引用先装回临时寄存器（r10），再搬进参数寄存器
             val realReg: String = this.resolveToReg(srcReg, "r10")

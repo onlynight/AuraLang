@@ -314,7 +314,9 @@ object PhotonRuntime {
         enc.emitLabel("strcmp_loop")
         enc.emitCmpMemMem("rcx", "r8", "rdx", "r8")
         enc.emitJccLabel("ne", "strcmp_done")
-        enc.emitTestMemImm8("rcx", "r8", 0)
+        // 同 `emitStreq`：不能用 `test mem, 0`（恒 ZF=1），改为 zero-extend + test reg。
+        enc.emitMovzxRegReg8("rax", "rax")
+        enc.emitTestRR("rax", "rax")
         enc.emitJccLabel("z", "strcmp_done")
         enc.emitIncRR("r8")
         enc.emitJmpLabel("strcmp_loop")
@@ -355,7 +357,13 @@ object PhotonRuntime {
         enc.emitLabel("streq_loop")
         enc.emitCmpMemMem("rcx", "r8", "rdx", "r8")
         enc.emitJccLabel("ne", "streq_not_equal")
-        enc.emitTestMemImm8("rcx", "r8", 0)
+        // ⚠️ 这里**不能**用 `test byte [rcx+r8], 0` —— `test x, 0` 恒有 ZF=1
+        //（`x & 0 == 0`），于是「字符串结束」判定永远成立、循环只比第一个字节。
+        // 正确做法：把刚取到的 a 字节零扩展进 rax 再 `test rax, rax`
+        //（`emitCmpMemMem` 的第一步就是 `mov al, [rcx+r8]`，故 al 即该字节；
+        //  movzx 会把高 32 位清零，使 `test rax, rax` 有意义）。
+        enc.emitMovzxRegReg8("rax", "rax")
+        enc.emitTestRR("rax", "rax")
         enc.emitJccLabel("z", "streq_equal")
         enc.emitIncRR("r8")
         enc.emitJmpLabel("streq_loop")
@@ -715,6 +723,34 @@ object PhotonRuntime {
         enc.emitRet()
         // null 路径：返0
         enc.emitLabel("list_get_null")
+        enc.emitMovRI("eax", 0)
+        enc.emitRet()
+    }
+
+    /// 编码 `__field_get(rcx = obj, rdx = fieldIndex) rax = value`
+    ///
+    /// 对象布局（与 `emitClassConstructorWithVtable` 一致）：
+    ///   [0x00] vtable 指针  [0x08] 对象大小  [0x10 + i*8] 字段 i
+    /// 传「字段序号」而不是字节偏移：编码器的 `emitLoadIndexed8` 固定 SIB
+    /// scale=8，序号直接可用。obj 为 0 时返回 0（对象模型完成前的兜底）。
+    fun emitFieldGet(enc: X86Encoder): Unit {
+        enc.emitCmpRI("rcx", 0)
+        enc.emitJccLabel("eq", "field_get_null")
+        enc.emitLoadIndexed8("rax", "rcx", "rdx", 16)
+        enc.emitRet()
+        enc.emitLabel("field_get_null")
+        enc.emitMovRI("eax", 0)
+        enc.emitRet()
+    }
+
+    /// 编码 `__field_set(rcx = obj, rdx = fieldIndex, r8 = value) rax = obj`
+    fun emitFieldSet(enc: X86Encoder): Unit {
+        enc.emitCmpRI("rcx", 0)
+        enc.emitJccLabel("eq", "field_set_null")
+        enc.emitStoreIndexed8("rcx", "rdx", 16, "r8")
+        enc.emitMovRR("rax", "rcx")
+        enc.emitRet()
+        enc.emitLabel("field_set_null")
         enc.emitMovRI("eax", 0)
         enc.emitRet()
     }
@@ -1098,6 +1134,47 @@ object PhotonRuntime {
     fun emitStubMinus1(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRI("eax", -1)
+        enc.emitEpilogue()
+    }
+
+    /// stub: Collections.getAt 返回**静态空串**（`@str.0`）。
+    ///
+    /// `Env.get` 被映射到 `Collections.getAt`，但 runtime 没有真正的键值存储。
+    ///
+    /// ⚠️ 旧实现 `mov rax, rdx`（「返回第二个参数」）在**单实参**调用点上取的是
+    /// **未定义的 `rdx`**。`Env.get("AURA_ARGV_COUNT")` 恰好就是单参调用：
+    /// 它返回一个垃圾指针，紧接着 `cliEnvArgCount()` 做 `s.length` / `charCodeAt`
+    /// ⇒ 对垃圾指针越界读 ⇒ **自举 `Main.exe` 零参数也直接崩**
+    ///（`0xC0000005`，且零输出 —— 因为 `main` 第一条语句就是
+    /// `cliArgCount()` → `cliEnvArgCount()` → `Env.get`）。
+    ///
+    /// 返回 `@str.0` 保证「查不到 = 空串」且指针永远有效（与同文件的
+    /// `emitCliArg` 用同一个静态空串串常量）。
+    ///
+    /// 真正的环境变量读取需要访问 PEB
+    ///（`gs:[0x60]` → ProcessParameters(+0x20) → Environment(+0x80)，NUL 分隔、
+    /// 双 NUL 结尾），而编码器目前**没有段前缀（0x65）支持** —— 属后续工作项。
+    /// 因此 `AURA_ARGV_COUNT` / `AURA_ARG_*` 这条 CLI 通道在自举产物里暂时不生效。
+    fun emitCollectionsGetAt(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitLeaRIP("rax", "@str.0")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `cliArgCount() rax = Int` — 返回命令行参数个数（当前固定 0）
+    ///
+    /// 无 CRT 环境下 OS 直接调用 entry point（无 argc/argv 参数），
+    /// 因此暂返回 0。后续可改为从 PEB/TEB 读取命令行并解析。
+    fun emitCliArgCount(enc: X86Encoder): Unit {
+        enc.emitMovRI("eax", 0)
+        enc.emitRet()
+    }
+
+    /// 编码 `cliArg(index: Int) rax = char*` — 返回指定索引的参数（当前返回空串）
+    ///
+    /// 无 CRT 环境下无法解析命令行，返回指向静态空串的指针。
+    fun emitCliArg(enc: X86Encoder): Unit {
+        enc.emitLeaRIP("rax", "@str.0")
         enc.emitRet()
     }
 
@@ -1118,7 +1195,7 @@ object PhotonRuntime {
         // rcx = addr, rdx = val
         // store byte [rcx], dl
         enc.emitMovByteMemReg("rcx", "rdx")
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// 编码 `Memory_read(rcx=addr) rax = byte`：读addr 指向的字节
@@ -1127,14 +1204,14 @@ object PhotonRuntime {
         // rcx = addr
         // movzx eax, byte ptr [rcx]
         enc.emitMovzxRegMemByte("eax", "rcx")
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// 编码 `Memory_write16(rcx=addr, rdx=val) 无返回值`：写16 位值
     fun emitMemoryWrite16(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitStoreMemDisp32("rcx", 0, "rdx")
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// 编码 `Memory_read16(rcx=addr) rax = i16`：读16 位值
@@ -1142,49 +1219,49 @@ object PhotonRuntime {
         enc.emitPrologue(0)
         enc.emitLoadIndexed8("rax", "rcx", "rsp", 0)
         // 简化：直接加载 64 位（高位由调用者处理）
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// 编码 `Memory_write32(rcx=addr, rdx=val) 无返回值`：写32 位值
     fun emitMemoryWrite32(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitStoreMemDisp32("rcx", 0, "rdx")
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// 编码 `Memory_read32(rcx=addr) rax = i32`：读32 位值
     fun emitMemoryRead32(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitLoadIndexed8("rax", "rcx", "rsp", 0)
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// 编码 `Memory_write64(rcx=addr, rdx=val) 无返回值`：写64 位值
     fun emitMemoryWrite64(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitStoreMemDisp32("rcx", 0, "rdx")
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// 编码 `Memory_read64(rcx=addr) rax = i64`：读64 位值
     fun emitMemoryRead64(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitLoadIndexed8("rax", "rcx", "rsp", 0)
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// 编码 `Memory_alloc(rcx=n) rax = ptr`：调runtime_emitObjectAlloc 分配内存
     fun emitMemoryAlloc(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
-        // rcx = n (已设
+        // rcx = n (已设置)
         enc.emitCallRel("runtime_emitObjectAlloc")
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// 编码 `Memory_free(rcx=addr)`：bump 分配器无需释放（no-op）
     fun emitMemoryFree(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     // ── Step 4: Stdlib 函数实现 ──
@@ -1204,7 +1281,7 @@ object PhotonRuntime {
         enc.emitPrologue(0)
         enc.emitXorRR("rcx", "rcx")
         enc.emitCallRel("__list_alloc")
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// 编码 `Collections.indexOf(rcx=list, rdx=elem) rax = index or -1`
@@ -1259,10 +1336,46 @@ object PhotonRuntime {
         enc.emitCmpRI("rax", -1)
         enc.emitJccLabel("ne", "cc_found")
         enc.emitMovRI("eax", 0)
-        enc.emitRet()
+        enc.emitEpilogue()
         enc.emitLabel("cc_found")
         enc.emitMovRI("eax", 1)
-        enc.emitRet()
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `Collections.count(rcx = list) rax = 元素个数`
+    ///
+    /// list layout: [count:8][e0:8][e1:8]...（见 `emitCollectionIndexOf`）。
+    /// 前端把 `count()` / `getSize()` / `size` 三种写法都映射到这里
+    ///（见 `Hir.aura` 的集合成员映射表）。
+    fun emitCollectionCount(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        // rax = [rcx + 0] = count。index 传 `"rsp"` 即 x86 的「无索引」
+        //（index 字段 = 100b），等价于 `mov rax, [rcx]`。
+        enc.emitLoadIndexed8("rax", "rcx", "rsp", 0)
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `Collections.clear(rcx = list) rax = 0`
+    ///
+    /// 简化实现：只把头部计数清零（AOT 运行时无 GC，元素空间不回收）。
+    fun emitCollectionClear(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitXorRR("rax", "rax")
+        enc.emitStoreIndexed8("rcx", "rsp", 0, "rax")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `Collections.hashMapPut(rcx = map, rdx = key, r8 = value) rax = value`
+    ///
+    /// ⚠️ **stub**：与同文件的 `Collections.mapContainsKey`（恒返回 0）、
+    /// `Collections.getAt`（恒返回键名）同级 —— Photon runtime 目前**没有**真正的
+    /// hash map 存储，Map 语义尚不成立。这里只保证链接成功且不破坏 Win64 调用
+    /// 约定（把 value 原样回传），把「Map 无实际存储」这一已知缺口显式留在代码
+    /// 注释里，而不是让它以「缺失符号」的形式在链接期暴露。
+    fun emitCollectionHashMapPut(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitMovRR("rax", "r8")
+        enc.emitEpilogue()
     }
 
     /// 编码 `Collections.remove(rcx=list, rdx=index) rax = removed elem`
@@ -1332,28 +1445,28 @@ object PhotonRuntime {
     fun emitCollectionMapContainsKey(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRI("eax", 0)
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// stub: transform 返回入参
     fun emitTransform(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRR("rax", "rcx")
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// stub: fromCharCode 返回 0
     fun emitFromCharCode(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRI("eax", 0)
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// stub: ReadCStr 返回 0
     fun emitReadCStr(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRI("eax", 0)
-        enc.emitRet()
+        enc.emitEpilogue()
     }
 
     /// 编码 `aura_mem_used_mb() rax = MB`。返heapBump / 1024 / 1024
@@ -1613,7 +1726,7 @@ object PhotonRuntime {
     // ── 目标文件产出 ──
 
     /// 所有运行时函数名列表（逗号分隔）
-    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,io_open,io_close,io_read,io_write,io_access,Collections.listRemove"
+    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,io_open,io_close,io_read,io_write,io_access,Collections.listRemove,Collections.count,Collections.clear,Collections.hashMapPut,Collections.indexOf,Collections.contains,Collections.mapContainsKey,Collections.getAt"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
     fun buildRuntimeObject(): String {
@@ -1738,6 +1851,15 @@ object PhotonRuntime {
             "__list_get",
             PhotonObjectWriterUtils.joinRelocRecords(enc13.getRelocations())
         )
+
+        // 对象字段读写（Photon 对象模型 A-1）：字段访问走 runtime 调用，
+        // 与列表访问同一策略（Load/Store 路径当前不可用，见 emitFieldGet 说明）。
+        val encFg = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitFieldGet(encFg)
+        writer.appendFunction(encFg.toHex(), "__field_get", PhotonObjectWriterUtils.joinRelocRecords(encFg.getRelocations()))
+        val encFs = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitFieldSet(encFs)
+        writer.appendFunction(encFs.toHex(), "__field_set", PhotonObjectWriterUtils.joinRelocRecords(encFs.getRelocations()))
 
         // ── Step 4: 对象分配+ 类构造器 ──
         val encOA = X86EncoderUtils.emptyEncoder()
@@ -1939,6 +2061,7 @@ object PhotonRuntime {
         val encMf = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitMemoryFree(encMf)
         writer.appendFunction(encMf.toHex(), "Memory_free", PhotonObjectWriterUtils.joinRelocRecords(encMf.getRelocations()))
+        // CLI 参数函数由 Main.aura 定义（使用 Env.get 通道），runtime 不提供
         for (symName in listOf("fork", "execve", "wait4")) {
             println("[rt] encoding stub " + symName)
             val encS = X86EncoderUtils.emptyEncoder()
@@ -1966,6 +2089,18 @@ object PhotonRuntime {
         val encCmk = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionMapContainsKey(encCmk)
         writer.appendFunction(encCmk.toHex(), "Collections.mapContainsKey", PhotonObjectWriterUtils.joinRelocRecords(encCmk.getRelocations()))
+        val encCga = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionsGetAt(encCga)
+        writer.appendFunction(encCga.toHex(), "Collections.getAt", PhotonObjectWriterUtils.joinRelocRecords(encCga.getRelocations()))
+        val encCcnt = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionCount(encCcnt)
+        writer.appendFunction(encCcnt.toHex(), "Collections.count", PhotonObjectWriterUtils.joinRelocRecords(encCcnt.getRelocations()))
+        val encCclr = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionClear(encCclr)
+        writer.appendFunction(encCclr.toHex(), "Collections.clear", PhotonObjectWriterUtils.joinRelocRecords(encCclr.getRelocations()))
+        val encChp = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionHashMapPut(encChp)
+        writer.appendFunction(encChp.toHex(), "Collections.hashMapPut", PhotonObjectWriterUtils.joinRelocRecords(encChp.getRelocations()))
         val encTr = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitTransform(encTr)
         writer.appendFunction(encTr.toHex(), "transform", PhotonObjectWriterUtils.joinRelocRecords(encTr.getRelocations()))
@@ -1988,6 +2123,18 @@ object PhotonRuntime {
         println("[rt] dataSection set, dataChars=" + writer.dataSection.length + " textChars=" + writer.textSection.length)
 
         // 构建符号表（包含所有函数和 .data 符号        println("[rt] before buildSymbols")
+        // runtime 对象自带**一个空串常量** `@str.0`。
+        //
+        // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
+        // 里有一条 `lea rax, @str.0`。runtime 对象的 `stringConsts` 原本为空 ⇒
+        // 符号表里没有 `@str.0` ⇒ `composeRelocations` 查不到符号名就把该重定位
+        // **静默丢弃**（实测 runtime 侧 `dropped=1 sym=[@str.0]`）⇒ 指令位移保持
+        // 占位值 0 ⇒ 该「空串」指针实际指向**紧随其后的代码字节** ⇒ 自举
+        // `Main.exe` 在 `main` 的 `cliArgCount()` → `Env.get` 里对它做
+        // `strlen`/`charCodeAt` 越界 ⇒ `0xC0000005`（`BOOT-1` 之后立刻崩）。
+        //
+        // 常量池编码是「`<十进制长度>|<载荷>` 首尾相接」，空载荷即 `0|`。
+        writer.stringConsts = "0|"
         writer.buildSymbols(writer.functions, writer.stringConsts)
         return writer.emit()
     }
@@ -2070,6 +2217,12 @@ object PhotonRuntime {
         val enc13 = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitListGet(enc13)
         writer.appendFunction(enc13.toHex(), "__list_get", PhotonObjectWriterUtils.joinRelocRecords(enc13.getRelocations()))
+        val encFg = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitFieldGet(encFg)
+        writer.appendFunction(encFg.toHex(), "__field_get", PhotonObjectWriterUtils.joinRelocRecords(encFg.getRelocations()))
+        val encFs = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitFieldSet(encFs)
+        writer.appendFunction(encFs.toHex(), "__field_set", PhotonObjectWriterUtils.joinRelocRecords(encFs.getRelocations()))
 
         // ── Step 4: 对象分配+ 类构造器 ──
         val encOA = X86EncoderUtils.emptyEncoder()
@@ -2266,6 +2419,13 @@ object PhotonRuntime {
         val encMf = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitMemoryFree(encMf)
         writer.appendFunction(encMf.toHex(), "Memory_free", PhotonObjectWriterUtils.joinRelocRecords(encMf.getRelocations()))
+        // CLI 参数函数
+        val encArgCount = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCliArgCount(encArgCount)
+        writer.appendFunction(encArgCount.toHex(), "cliArgCount", PhotonObjectWriterUtils.joinRelocRecords(encArgCount.getRelocations()))
+        val encArg = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCliArg(encArg)
+        writer.appendFunction(encArg.toHex(), "cliArg", PhotonObjectWriterUtils.joinRelocRecords(encArg.getRelocations()))
         for (symName in listOf("fork", "execve", "wait4")) {
             val encS = X86EncoderUtils.emptyEncoder()
             PhotonRuntime.emitStubMinus1(encS)
@@ -2286,6 +2446,18 @@ object PhotonRuntime {
         val encCmk = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionMapContainsKey(encCmk)
         writer.appendFunction(encCmk.toHex(), "Collections.mapContainsKey", PhotonObjectWriterUtils.joinRelocRecords(encCmk.getRelocations()))
+        val encCga = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionsGetAt(encCga)
+        writer.appendFunction(encCga.toHex(), "Collections.getAt", PhotonObjectWriterUtils.joinRelocRecords(encCga.getRelocations()))
+        val encCcnt = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionCount(encCcnt)
+        writer.appendFunction(encCcnt.toHex(), "Collections.count", PhotonObjectWriterUtils.joinRelocRecords(encCcnt.getRelocations()))
+        val encCclr = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionClear(encCclr)
+        writer.appendFunction(encCclr.toHex(), "Collections.clear", PhotonObjectWriterUtils.joinRelocRecords(encCclr.getRelocations()))
+        val encChp = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionHashMapPut(encChp)
+        writer.appendFunction(encChp.toHex(), "Collections.hashMapPut", PhotonObjectWriterUtils.joinRelocRecords(encChp.getRelocations()))
         val encTr = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitTransform(encTr)
         writer.appendFunction(encTr.toHex(), "transform", PhotonObjectWriterUtils.joinRelocRecords(encTr.getRelocations()))
@@ -2301,6 +2473,18 @@ object PhotonRuntime {
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         writer.dataSymbolName = "toStrBuffer:32,heapArena:1048576,heapBump:8,objBump:8"
+        // runtime 对象自带**一个空串常量** `@str.0`。
+        //
+        // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
+        // 里有一条 `lea rax, @str.0`。runtime 对象的 `stringConsts` 原本为空 ⇒
+        // 符号表里没有 `@str.0` ⇒ `composeRelocations` 查不到符号名就把该重定位
+        // **静默丢弃**（实测 runtime 侧 `dropped=1 sym=[@str.0]`）⇒ 指令位移保持
+        // 占位值 0 ⇒ 该「空串」指针实际指向**紧随其后的代码字节** ⇒ 自举
+        // `Main.exe` 在 `main` 的 `cliArgCount()` → `Env.get` 里对它做
+        // `strlen`/`charCodeAt` 越界 ⇒ `0xC0000005`（`BOOT-1` 之后立刻崩）。
+        //
+        // 常量池编码是「`<十进制长度>|<载荷>` 首尾相接」，空载荷即 `0|`。
+        writer.stringConsts = "0|"
         writer.buildSymbols(writer.functions, writer.stringConsts)
         writer.emit()
         return writer.writeObjectHexFile(path)
@@ -2389,6 +2573,12 @@ object PhotonRuntimeUtils {
         val enc13 = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitListGet(enc13)
         writer.appendFunction(enc13.toHex(), "__list_get", PhotonObjectWriterUtils.joinRelocRecords(enc13.getRelocations()))
+        val encFg = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitFieldGet(encFg)
+        writer.appendFunction(encFg.toHex(), "__field_get", PhotonObjectWriterUtils.joinRelocRecords(encFg.getRelocations()))
+        val encFs = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitFieldSet(encFs)
+        writer.appendFunction(encFs.toHex(), "__field_set", PhotonObjectWriterUtils.joinRelocRecords(encFs.getRelocations()))
 
         // ── Step 4: 对象分配+ 类构造器 ──
         val encOA = X86EncoderUtils.emptyEncoder()
@@ -2585,6 +2775,13 @@ object PhotonRuntimeUtils {
         val encMf = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitMemoryFree(encMf)
         writer.appendFunction(encMf.toHex(), "Memory_free", PhotonObjectWriterUtils.joinRelocRecords(encMf.getRelocations()))
+        // CLI 参数函数
+        val encArgCount = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCliArgCount(encArgCount)
+        writer.appendFunction(encArgCount.toHex(), "cliArgCount", PhotonObjectWriterUtils.joinRelocRecords(encArgCount.getRelocations()))
+        val encArg = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCliArg(encArg)
+        writer.appendFunction(encArg.toHex(), "cliArg", PhotonObjectWriterUtils.joinRelocRecords(encArg.getRelocations()))
         for (symName in listOf("fork", "execve", "wait4")) {
             val encS = X86EncoderUtils.emptyEncoder()
             PhotonRuntime.emitStubMinus1(encS)
@@ -2605,6 +2802,18 @@ object PhotonRuntimeUtils {
         val encCmk = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionMapContainsKey(encCmk)
         writer.appendFunction(encCmk.toHex(), "Collections.mapContainsKey", PhotonObjectWriterUtils.joinRelocRecords(encCmk.getRelocations()))
+        val encCga = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionsGetAt(encCga)
+        writer.appendFunction(encCga.toHex(), "Collections.getAt", PhotonObjectWriterUtils.joinRelocRecords(encCga.getRelocations()))
+        val encCcnt = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionCount(encCcnt)
+        writer.appendFunction(encCcnt.toHex(), "Collections.count", PhotonObjectWriterUtils.joinRelocRecords(encCcnt.getRelocations()))
+        val encCclr = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionClear(encCclr)
+        writer.appendFunction(encCclr.toHex(), "Collections.clear", PhotonObjectWriterUtils.joinRelocRecords(encCclr.getRelocations()))
+        val encChp = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionHashMapPut(encChp)
+        writer.appendFunction(encChp.toHex(), "Collections.hashMapPut", PhotonObjectWriterUtils.joinRelocRecords(encChp.getRelocations()))
         val encTr = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitTransform(encTr)
         writer.appendFunction(encTr.toHex(), "transform", PhotonObjectWriterUtils.joinRelocRecords(encTr.getRelocations()))
@@ -2620,6 +2829,18 @@ object PhotonRuntimeUtils {
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         writer.dataSymbolName = "toStrBuffer:32,heapArena:1048576,heapBump:8,objBump:8"
+        // runtime 对象自带**一个空串常量** `@str.0`。
+        //
+        // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
+        // 里有一条 `lea rax, @str.0`。runtime 对象的 `stringConsts` 原本为空 ⇒
+        // 符号表里没有 `@str.0` ⇒ `composeRelocations` 查不到符号名就把该重定位
+        // **静默丢弃**（实测 runtime 侧 `dropped=1 sym=[@str.0]`）⇒ 指令位移保持
+        // 占位值 0 ⇒ 该「空串」指针实际指向**紧随其后的代码字节** ⇒ 自举
+        // `Main.exe` 在 `main` 的 `cliArgCount()` → `Env.get` 里对它做
+        // `strlen`/`charCodeAt` 越界 ⇒ `0xC0000005`（`BOOT-1` 之后立刻崩）。
+        //
+        // 常量池编码是「`<十进制长度>|<载荷>` 首尾相接」，空载荷即 `0|`。
+        writer.stringConsts = "0|"
         writer.buildSymbols(writer.functions, writer.stringConsts)
         writer.emit()
         return writer.writeObjectHexFile(path)
