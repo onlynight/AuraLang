@@ -438,69 +438,107 @@ fn cmd_build_photon(args: &[String]) {
         println!("  .phir 输出: {} ({} 字符)", phir_path, phir_text.len());
     }
 
-    // ── Phase 1: 调用 Photon 后端（通过外部驱动）──
+    // ── Phase 1: 调用 Photon 后端（优先原生驱动，回退 VM 驱动）──
     println!("\n[Phase 1] 调用 Photon 后端...");
-    
-    // 查找 aura.exe 路径
-    let aura_exe = std::env::current_exe()
-        .unwrap_or_default()
-        .parent()
-        .map(|p| p.join("aura.exe"))
-        .unwrap_or_default();
-    
-    if aura_exe.exists() {
-        // 构建驱动参数
-        let driver_path = "aura/compiler/aura/lang/compiler/backend/photon/PhotonDriver.aura";
-        
-        // 输出目录 = .phir 文件所在目录（确保与 --output 一致）
-        let out_dir = std::path::Path::new(&phir_path)
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "build/photon_test".to_string());
 
-        let mut cmd = std::process::Command::new(&aura_exe);
-        cmd.args(["run", driver_path]);
-        cmd.env("AURA_PHOTON_PHIR", &phir_path);
-        cmd.env("AURA_PHOTON_OUT", &out_dir);
-        cmd.env("AURA_PHOTON_MODULE", &module_name);
-        
-        println!("  调用驱动: {}", driver_path);
-        println!("  .phir 文件: {}", phir_path);
+    // 输出目录 = .phir 文件所在目录（确保与 --output 一致）
+    let out_dir = std::path::Path::new(&phir_path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "build/photon_test".to_string());
+
+    // 确保输出目录存在
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("Warning: failed to create output directory {}: {}", out_dir, e);
+    }
+
+    // 查找原生驱动：build/hat-native/PhotonHatCompile.exe
+    let native_driver = std::path::Path::new("build/hat-native/PhotonHatCompile.exe");
+    let use_native = native_driver.exists();
+
+    if use_native {
+        // ── 原生驱动路径（快速，~1s/用例）──────────────────────────
+        println!("  调用原生驱动: {}", native_driver.display());
         println!("  输出目录: {}", out_dir);
         println!("  模块名: {}", module_name);
-        
+
+        let mut cmd = std::process::Command::new(native_driver);
+        cmd.env("AURA_HAT_AURA", &input);
+        cmd.env("AURA_HAT_OUT", &out_dir);
+        cmd.env("AURA_HAT_MODULE", &module_name);
+        // 跳过前端（复用 .phir 已生成的 HIR，但原生驱动仍需 .aura 源码做前端）
+        // AURA_HAT_SKIP_FRONT 不设置，让驱动做完整前端
+
         let output = cmd.output();
         match output {
             Ok(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                
+
                 if !stderr.is_empty() {
-                    // 只显示非调试信息
                     for line in stderr.lines() {
                         if !line.contains("[debug]") && !line.contains("semantic warning") {
                             eprintln!("{}", line);
                         }
                     }
                 }
-                
+
                 println!("{}", stdout);
 
-                // ── Photon 后处理：hex → 二进制 .obj → 链接 → 运行 ──────────
-                //
-                // 为什么要放在 CLI：**VM（字节码）解释路径下 Aura 侧的
-                // `FileOps.*` 写入不可用**（实测 `FileOps.open` 恒返回 0，
-                // 于是只能落下 hex 文本），而 lld-link 需要的是**二进制** COFF。
-                // Rust CLI 具备完整文件系统能力，由它补上这一步，
-                // 使 `aura build -b photon` 真正产出可执行文件。
-                photon_postprocess(&stdout, &module_name, &out_dir);
+                // 原生驱动输出 ===COFF-MAIN===/===COFF-RUNTIME===/===LINK=== 协议
+                photon_postprocess_native(&stdout, &module_name, &out_dir);
             }
             Err(e) => {
-                eprintln!("Error: failed to run Photon driver: {}", e);
+                eprintln!("Error: failed to run native driver: {}", e);
             }
         }
     } else {
-        eprintln!("Warning: aura.exe not found, skipping Photon backend");
+        // ── VM 驱动路径（回退，~3min+ 超时风险）─────────────────────
+        let aura_exe = std::env::current_exe()
+            .unwrap_or_default()
+            .parent()
+            .map(|p| p.join("aura.exe"))
+            .unwrap_or_default();
+
+        if aura_exe.exists() {
+            let driver_path = "aura/compiler/aura/lang/compiler/backend/photon/PhotonDriver.aura";
+
+            let mut cmd = std::process::Command::new(&aura_exe);
+            cmd.args(["run", driver_path]);
+            cmd.env("AURA_PHOTON_PHIR", &phir_path);
+            cmd.env("AURA_PHOTON_OUT", &out_dir);
+            cmd.env("AURA_PHOTON_MODULE", &module_name);
+
+            println!("  调用 VM 驱动: {}", driver_path);
+            println!("  .phir 文件: {}", phir_path);
+            println!("  输出目录: {}", out_dir);
+            println!("  模块名: {}", module_name);
+            eprintln!("  ⚠ 警告: 原生驱动未找到，回退 VM 路径（≥3min 超时风险）");
+
+            let output = cmd.output();
+            match output {
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+
+                    if !stderr.is_empty() {
+                        for line in stderr.lines() {
+                            if !line.contains("[debug]") && !line.contains("semantic warning") {
+                                eprintln!("{}", line);
+                            }
+                        }
+                    }
+
+                    println!("{}", stdout);
+                    photon_postprocess(&stdout, &module_name, &out_dir);
+                }
+                Err(e) => {
+                    eprintln!("Error: failed to run Photon driver: {}", e);
+                }
+            }
+        } else {
+            eprintln!("Warning: aura.exe not found, skipping Photon backend");
+        }
     }
 
     println!("\nPhoton 后端管线 (S1 阶段):");
@@ -593,6 +631,107 @@ fn photon_postprocess(driver_stdout: &str, module_name: &str, out_dir: &str) {
                 s.code()
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "信号终止".to_string())
+            ),
+            Err(e) => eprintln!("  [post] 运行产物失败: {}", e),
+        }
+    } else {
+        println!("  [post] 未生成可执行文件: {}", exe_path);
+    }
+}
+
+/// 原生驱动后处理：解析 ===COFF-MAIN===/===COFF-RUNTIME===/===LINK=== 协议，
+/// 将 hex 转为二进制 .obj、执行链接、运行产物。
+///
+/// 与 `photon_postprocess`（VM 驱动路径）的区别：
+///   - VM 驱动：hex 写入磁盘 `.obj.hex` 文件，stdout 含 "链接命令: ..."
+///   - 原生驱动：hex 在 stdout 的 ===COFF-MAIN===/===COFF-RUNTIME=== 标记后，
+///     链接命令在 ===LINK=== 标记后
+fn photon_postprocess_native(driver_stdout: &str, module_name: &str, out_dir: &str) {
+    let mut coff_main: Option<String> = None;
+    let mut coff_rt: Option<String> = None;
+    let mut link_cmd: Option<String> = None;
+    let mut mode: Option<&str> = None;
+
+    for line in driver_stdout.lines() {
+        let t = line.trim();
+        if t == "===COFF-MAIN===" { mode = Some("main"); continue; }
+        if t == "===COFF-RUNTIME===" { mode = Some("rt"); continue; }
+        if t == "===LINK===" { mode = Some("link"); continue; }
+        if t == "===RESULT===" || t.starts_with("===RESULT===") { mode = None; continue; }
+        if t.starts_with("===ERR===") { mode = None; continue; }
+        if t.is_empty() { continue; }
+
+        match mode {
+            Some("main") if !t.starts_with("===") => {
+                if coff_main.is_none() { coff_main = Some(t.to_string()); }
+            }
+            Some("rt") if !t.starts_with("===") => {
+                if coff_rt.is_none() { coff_rt = Some(t.to_string()); }
+            }
+            Some("link") if !t.starts_with("===") => {
+                if link_cmd.is_none() { link_cmd = Some(t.to_string()); }
+            }
+            _ => {}
+        }
+    }
+
+    // 1) hex → 二进制 .obj
+    let hex_to_bytes = |hex: &str| -> Vec<u8> {
+        let hex_clean: String = hex.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let cs: Vec<char> = hex_clean.chars().collect();
+        let mut bytes = Vec::with_capacity(cs.len() / 2);
+        for i in (0..cs.len()).step_by(2) {
+            if i + 1 < cs.len() {
+                let hi = cs[i].to_digit(16).unwrap_or(0) as u8;
+                let lo = cs[i + 1].to_digit(16).unwrap_or(0) as u8;
+                bytes.push((hi << 4) | lo);
+            }
+        }
+        bytes
+    };
+
+    if let Some(hex) = &coff_main {
+        let bin_path = format!("{}/{}.obj", out_dir, module_name);
+        let bytes = hex_to_bytes(hex);
+        match std::fs::write(&bin_path, &bytes) {
+            Ok(_) => println!("  [post] {} → {} ({} 字节)", hex, bin_path, bytes.len()),
+            Err(e) => eprintln!("  [post] 写入 {} 失败: {}", bin_path, e),
+        }
+    } else {
+        eprintln!("  [post] ⚠ 未取到 ===COFF-MAIN=== hex");
+    }
+
+    if let Some(hex) = &coff_rt {
+        let bin_path = format!("{}/aura_runtime.obj", out_dir);
+        let bytes = hex_to_bytes(hex);
+        match std::fs::write(&bin_path, &bytes) {
+            Ok(_) => println!("  [post] {} → {} ({} 字节)", hex, bin_path, bytes.len()),
+            Err(e) => eprintln!("  [post] 写入 {} 失败: {}", bin_path, e),
+        }
+    } else {
+        eprintln!("  [post] ⚠ 未取到 ===COFF-RUNTIME=== hex");
+    }
+
+    // 2) 执行链接
+    if let Some(link_line) = &link_cmd {
+        println!("  [post] 执行链接: {}", link_line);
+        match std::process::Command::new("cmd").args(["/C", link_line]).status() {
+            Ok(s) if s.success() => println!("  [post] ✓ 链接成功"),
+            Ok(s) => println!("  [post] ⚠ 链接失败 (exit={:?})", s.code()),
+            Err(e) => eprintln!("  [post] 链接器启动失败: {}", e),
+        }
+    } else {
+        println!("  [post] 未取到 ===LINK=== 命令，跳过链接");
+    }
+
+    // 3) 运行产物
+    let exe_path = format!("{}/{}.exe", out_dir, module_name);
+    if std::path::Path::new(&exe_path).exists() {
+        match std::process::Command::new(&exe_path).status() {
+            Ok(s) => println!(
+                "  [post] 运行 {} → 退出码 {}",
+                exe_path,
+                s.code().map(|c| c.to_string()).unwrap_or_else(|| "信号终止".to_string())
             ),
             Err(e) => eprintln!("  [post] 运行产物失败: {}", e),
         }
