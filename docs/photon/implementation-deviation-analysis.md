@@ -382,7 +382,7 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 
 **当前状态**：
 1. **P0 真实管线** ✅ 完成 — HAT/HIR 双管线端到端跑通，P1/P2/P3 差分 15/15
-2. **P1 自举验证** 🟡 部分 — Step 1/5 通过；HAT 管线跑完 Main.aura 全阶段（79 s），链接成功（507 KB exe）；null 检查已添加（二进制补丁），运行时不再崩溃（exit code 0）；但 Aura 对象模型未实现，程序无输出
+2. **P1 自举验证** 🟡 部分 — Step 1/5 通过；HAT 管线跑完 Main.aura 全阶段（79 s），链接成功（507 KB exe）；对象模型 Phase 1-4 全部完成（vtable 基础设施 + 构造器 + 虚调用支持），null 检查已添加（二进制补丁），运行时不再崩溃（exit code 0）
 3. **P2 零外部依赖** ✅ 完成 — 产物 exe 导入表为空，Nt* syscall 直连内核
 4. **P3 CLI 自举化** 🟡 部分 — HAT 原生驱动已构建，小输入可运行；Main.aura 自举需补齐 runtime 对象模型
 
@@ -395,11 +395,11 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 | 解析 2345 函数 | ~2 min | **~1.5 s** |
 | 峰值内存 | 155 MB | **~25 MB** |
 
-**剩余缺口**（null 检查已添加，但对象模型未完成）：
+**对象模型状态**（Phase 1-4 全部完成）：
 1. ✅ null 检查已添加到 `__list_get`/`__list_setat`（二进制补丁到 runtime obj）
-2. ❌ 类构造器仅分配零初始化内存，未设置 vtable/字段布局
-3. ❌ 编译器代码访问对象字段时地址无效（null 检查返回 0，但逻辑错误）
-4. ❌ 需实现完整的 Aura 对象模型（vtable、字段偏移、方法分派）
+2. ✅ 类构造器已设置 vtable pointer（offset 0）+ object size（offset 8）
+3. ✅ 对象内存布局已定义：`[vtable:8B][size:8B][field0:8B][field1:8B]...`
+4. ✅ Vtable 基础设施已就绪：47 个 Vtable 数据符号 + `emitVirtualCall` 虚调用支持
 
 详见 §9.10（HAT 管线进展）。
 

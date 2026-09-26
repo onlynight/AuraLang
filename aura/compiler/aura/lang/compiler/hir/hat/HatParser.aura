@@ -624,7 +624,15 @@ class HatParser {
     /// 解析返回指令。
     private fun parseRet(line: String): Unit {
         // @ret @val : Type  或  @ret () : Unit
-        var rest: String = line.substring(4).trim()
+        //
+        // ⚠️ 必须用**显式 2 参 substring** 并拆成两步赋值：
+        //   - `line.substring(4)`（1 参，走默认 `to`）在 rust AOT 下，当接收者是
+        //     类方法形参且绑定到 `val` 时会得到空串（VM 正常），导致 `@ret @t3`
+        //     被解析成空操作数 → 函数永远返回 0。
+        //   - `line.substring(4, line.length).trim()` 链式 + `var` 亦复现。
+        // 所以这里显式取 2 参、再单独 trim 并存入 `var`。
+        val restSlice: String = line.substring(4, line.length)
+        var rest: String = restSlice.trim()
 
         if (rest.startsWith("()")) {
             // 无返回值

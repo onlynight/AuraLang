@@ -775,7 +775,8 @@ fun cliArgCount(): Int {
     if (envN >= 0) {
         return envN
     }
-    return cliArgCount()
+    // No env channel; return 0 (standalone exe with no env args)
+    return 0
 }
 
 /// 取第 i 个命令行参数（i=0 为可执行文件名）。
@@ -787,7 +788,8 @@ fun cliArg(i: Int): String {
         }
         return Env.get("AURA_ARG_" + toStr(i))
     }
-    return cliArg(i)
+    // No env channel; return empty string
+    return ""
 }
 
 /// 编译器入口：有命令行参数时编译指定源文件，否则仅打印用法。

@@ -656,9 +656,15 @@ class InstructionSelector {
                             val predB: Int = LirUtils.strToInt(preds[ri])
                             var pick: Int = -1
                             // (a) 精确定义块匹配
+                            //
+                            // ⚠️ `used[ai]` 必须先取出到 Int 局部再比较：rust AOT 下
+                            // 直接把「List<Int> 下标表达式」写进比较（`used[ai] == 0`）
+                            // 会被判为假（VM 正常），导致 PHI 入边一条都匹配不上 →
+                            // 前驱块末尾的 phi-MOV 全部丢失 → 循环变量永不更新（死循环）。
                             var ai: Int = 0
                             while (ai < incoming.size) {
-                                if (used[ai] == 0) {
+                                val usedAi: Int = used[ai]
+                                if (usedAi == 0) {
                                     val iv: Int = LirUtils.strToInt(incoming[ai])
                                     if (iv >= 0 && src.valueOf(iv).block == predB) {
                                         pick = ai
@@ -671,7 +677,8 @@ class InstructionSelector {
                             if (pick < 0) {
                                 var aj: Int = 0
                                 while (aj < incoming.size) {
-                                    if (used[aj] == 0) {
+                                    val usedAj: Int = used[aj]
+                                    if (usedAj == 0) {
                                         pick = aj
                                         break
                                     }

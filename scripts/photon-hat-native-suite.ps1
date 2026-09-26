@@ -11,10 +11,9 @@
 # AotModuleLinker 不可用（跨对象 arena 共享失真，std 模块一条都加载不了），
 # 而原生实测 28 模块 / 1 万 HIR 节点仅 1s。
 #
-# 后端默认走 **VM**（`PhotonHatBuild.aura` 读 .hat → SSA → LIR → X86 → COFF）：
-# 原生后端目前在 Phase D（寄存器分配）崩溃 0xC0000005（自举编译的 AOT 缺陷，
-# 与 PHIR 链路历史上 Phase A 崩溃同源），而 VM 后端的 .hat→exe 已 15/15 验证。
-# 用 `-NativeAll` 可切到「前端+后端都在原生」的完整形态（当前会在 Phase D 失败）。
+# 后端默认走 **原生**（前端+后端都在原生，`-NativeAll` 默认 $true）：
+# VM 后端因 Aura 源文件编码问题（UTF-8 替换字符）导致解析失败，暂不可用。
+# 用 `-NativeAll:$false` 可切回「VM 后端读 .hat 产出 COFF」的形态（当前会失败）。
 #
 # 每个用例：
 #   1) VM 跑一遍得到基准 stdout（`aura run <src>`，仅作参照，不参与 HAT 链路）
@@ -25,7 +24,7 @@
 # 用法:
 #   powershell -File scripts\photon-hat-native-suite.ps1 -Phase P1
 #   powershell -File scripts\photon-hat-native-suite.ps1 -Phase P1,P2,P3
-#   powershell -File scripts\photon-hat-native-suite.ps1 -Phase P1 -NativeAll
+#   powershell -File scripts\photon-hat-native-suite.ps1 -Phase P1 -NativeAll:$false
 param(
     [string]$Phase = "P1,P2,P3",
     [string[]]$Files = @(),
@@ -33,7 +32,7 @@ param(
     [string]$OutRoot = "build\hat-native-suite",
     [string]$Driver = "",
     [switch]$Rebuild,
-    [switch]$NativeAll,
+    [bool]$NativeAll = $true,
     # 打开阶段进度/心跳（[hat-front] / [Phase A-E] / [isa] / [hat-parse]）。
     # 默认关：驱动 stdout 只保留 ===...=== 协议标记，本脚本逐行解析 COFF hex。
     [switch]$Verbose

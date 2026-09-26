@@ -1,25 +1,25 @@
 // aura:///aura/lang/compiler/backend/photon/PhotonRuntime.aura
 package aura.lang.compiler.backend.photon
 // ─────────────────────────────────────────────────────────────
-// Photon 最�?runtime（Phase E3�?//
-// 提供 `println(ptr)` —�?目前唯一用真实机器码实现的运行时函数�?// 作为「Aura 用户代码 �?调用 runtime �?直连 kernel32」这条链路的验证载体�?//
-// 之所以现在能实现：编码器已支�?*函数内局部标签与跳转**
+// Photon 最runtime（Phase E3//
+// 提供 `println(ptr)` —目前唯一用真实机器码实现的运行时函数// 作为「Aura 用户代码 调用 runtime 直连 kernel32」这条链路的验证载体//
+// 之所以现在能实现：编码器已支*函数内局部标签与跳转**
 // （见 X86Encoder.emitLabel / emitJmpLabel / emitJccLabel），
-// 因而可以写出扫�?NUL �?strlen 循环�?//
+// 因而可以写出扫NUL strlen 循环//
 // ── 调用约定（Windows x64）──
 //
-//   println(rcx = char*)  �? 无返回�?//
+//   println(rcx = char*)   无返回//
 // ── 栈帧布局（sub rsp, 0x50）──
 //
-//   [rsp, rsp+0x20)   影子空间（shadow space）—�?被调函数可任意改写，禁止放局部变量！
-//   [rbp-0x30]        �?5 个参数的入栈槽（= rsp+0x20，调用时须为 NULL�?//   [rbp-0x28]        hStdOut
+//   [rsp, rsp+0x20)   影子空间（shadow space）—被调函数可任意改写，禁止放局部变量！
+//   [rbp-0x30]        5 个参数的入栈槽（= rsp+0x20，调用时须为 NULL//   [rbp-0x28]        hStdOut
 //   [rbp-0x20]        入参指针
-//   [rbp-0x18]        字符串长度（strlen 结果�?//   [rbp-0x10]        栈上构造的换行符（0x0D 0x0A�?//
+//   [rbp-0x18]        字符串长度（strlen 结果//   [rbp-0x10]        栈上构造的换行符（0x0D 0x0A//
 // ⚠️ 踩坑记录：最初用 `sub rsp,0x30` 并把 hStdOut/ptr/len 放在
 // [rbp-0x18]/[rbp-0x20]/[rbp-0x28]，结果这些槽位正好落在被调函数的
-// **影子空间**�?—�?WriteFile 溢出 rcx/rdx/r8/r9 时把它们全写�?// （[rbp-0x28]←rdx、[rbp-0x20]←r8、[rbp-0x18]←r9），
-// 表现为「第一�?WriteFile 正常、第二次静默失败」�?// 结论：局部变量必须放�?[rsp+0x20, rbp) 区间，即影子空间**之上**�?//
-// 对齐：`push rbp` �?rbp �?0 (mod 16)，`sub rsp,0x50`�?0 �?16 的倍数�?// �?rsp �?0 (mod 16)，满�?call 前的 16 字节对齐要求�?// ─────────────────────────────────────────────────────────────
+// **影子空间**—WriteFile 溢出 rcx/rdx/r8/r9 时把它们全写// （[rbp-0x28]←rdx、[rbp-0x20]←r8、[rbp-0x18]←r9），
+// 表现为「第一WriteFile 正常、第二次静默失败」// 结论：局部变量必须放[rsp+0x20, rbp) 区间，即影子空间**之上**//
+// 对齐：`push rbp` rbp 0 (mod 16)，`sub rsp,0x50`0 16 的倍数// rsp 0 (mod 16)，满call 前的 16 字节对齐要求// ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
 
@@ -29,44 +29,71 @@ import "SyscallEmitter.aura"
 
 object PhotonRuntime {
 
-    /// 帧大小：0xB8 = 184 字节�?    ///
+    /// 帧大小：0xB8 = 184 字节
+    ///
     /// 布局（rsp = rbp - 0xB8）：
-    ///   [rbp-0xB8, rbp-0x98)  影子空间 shadow space�?2 字节）—�?syscall 前必须为�?    ///   [rbp-0x98, rbp-0x90)  8 字节对齐填充（rsp+0x20，不可用�?    ///   [rbp-0x90, rbp-0x58)  NtWriteFile 栈参数（arg5..arg10�?    ///     -0x90 = IoStatusBlock ptr   �? rsp+0x28�?    ///     -0x88 = Buffer              �? rsp+0x30�?    ///     -0x80 = Length              �? rsp+0x38�?    ///     -0x78 = ByteOffset          �? rsp+0x40�?    ///     -0x70 = Key                 �? rsp+0x48�?    ///     -0x68 = EaLength            �? rsp+0x50�?    ///   [rbp-0x58, rbp)       局部变量（必须落在 rsp+0x60 之上，避开参数与影子空间）
-    ///     -0x58 = IoStatusBlock 存储�?6 字节�?    ///     -0x40 = 入参指针
+    ///   [rbp-0xB8, rbp-0x98)  影子空间 shadow space2 字节）—syscall 前必须为
+    ///   [rbp-0x98, rbp-0x90)  8 字节对齐填充（rsp+0x20，不可用
+    ///   [rbp-0x90, rbp-0x58)  NtWriteFile 栈参数（arg5..arg10
+    ///     -0x90 = IoStatusBlock ptr    rsp+0x28
+    ///     -0x88 = Buffer               rsp+0x30
+    ///     -0x80 = Length               rsp+0x38
+    ///     -0x78 = ByteOffset           rsp+0x40
+    ///     -0x70 = Key                  rsp+0x48
+    ///     -0x68 = EaLength             rsp+0x50
+    ///   [rbp-0x58, rbp)       局部变量（必须落在 rsp+0x60 之上，避开参数与影子空间）
+    ///     -0x58 = IoStatusBlock 存储6 字节
+    ///     -0x40 = 入参指针
     ///     -0x38 = strlen 结果
     ///     -0x30 = hStdOutput
-    ///     -0x28 = 换行符缓冲区�? 字节�?    ///
-    /// 对齐推导：函数入�?rsp �?8 (mod 16)；`push rbp` �?rsp �?0�?    /// `mov rbp, rsp` �?rbp �?0；`sub rsp, 0xB8`�?84 % 16 == 8）后
-    /// rsp �?8 (mod 16) —�?正是 Windows x64 ABI �?syscall 的要求�?    ///
+    ///     -0x28 = 换行符缓冲区 字节
+    ///
+    /// 对齐推导：函数入rsp 8 (mod 16)；`push rbp` rsp 0
+    /// `mov rbp, rsp` rbp 0；`sub rsp, 0xB8`84 % 16 == 8）后
+    /// rsp 8 (mod 16) —正是 Windows x64 ABI syscall 的要求
+    ///
     /// ⚠️ 历史踩坑（两连错）：
-    ///   1. 早先 arg5 放在 rsp+0x20，落�?*影子空间**内，NtWriteFile 读到 IoStatusBlock=0�?    ///   2. 改为 rsp+0x40 仍然错——x64 ABI �?arg5 起于 **rsp+0x28**（影子空间之�?8 字节），
-    ///      不是 rsp+0x20 也不�?rsp+0x40。权威参照：mcountryman/min-sized-rust-windows
-    ///      �?`mainCRTStartup` 裸汇编注释表 `arg5 IoStatusBlock @ rsp+0x28`，该程序可运行�?    val FRAME_SIZE: Int = 0xB8
+    ///   1. 早先 arg5 放在 rsp+0x20，落*影子空间**内，NtWriteFile 读到 IoStatusBlock=0
+    ///   2. 改为 rsp+0x40 仍然错——x64 ABI arg5 起于 **rsp+0x28**（影子空间之8 字节），
+    ///      不是 rsp+0x20 也不rsp+0x40。权威参照：mcountryman/min-sized-rust-windows
+    ///      `mainCRTStartup` 裸汇编注释表 `arg5 IoStatusBlock @ rsp+0x28`，该程序可运行
+    val FRAME_SIZE: Int = 0xB8
 
-    /// NtWriteFile 栈参数偏移（相对 rbp）�?    ///
-    /// 推导：rsp = rbp - 0xB8，故 rsp+0x28 = rbp - 0x90，依�?+8 排列�?    /// ⚠️ arg5 起于 rsp+0x28（影子空间之�?8 字节），不是 rsp+0x20 也不�?rsp+0x40�?    val OFF_ARG5: Int = -0x90   // rsp+0x28 = IoStatusBlock ptr
+    /// NtWriteFile 栈参数偏移（相对 rbp）
+    ///
+    /// 推导：rsp = rbp - 0xB8，故 rsp+0x28 = rbp - 0x90，依+8 排列
+    /// ⚠️ arg5 起于 rsp+0x28（影子空间之8 字节），不是 rsp+0x20 也不rsp+0x40
+    val OFF_ARG5: Int = -0x90   // rsp+0x28 = IoStatusBlock ptr
     val OFF_ARG6: Int = -0x88   // rsp+0x30 = Buffer
     val OFF_ARG7: Int = -0x80   // rsp+0x38 = Length
     val OFF_ARG8: Int = -0x78   // rsp+0x40 = ByteOffset
     val OFF_ARG9: Int = -0x70   // rsp+0x48 = Key
     val OFF_ARG10: Int = -0x68  // rsp+0x50 = EaLength
 
-    /// IoStatusBlock 存储区起始（16 字节，位�?rsp+0x60 之上，不与参数重叠）�?    val OFF_IOBLOCK: Int = -0x58
+    /// IoStatusBlock 存储区起始（16 字节，位rsp+0x60 之上，不与参数重叠）
+    val OFF_IOBLOCK: Int = -0x58
 
-    /// 入参指针保存槽�?    val OFF_INPUT_PTR: Int = -0x40
+    /// 入参指针保存槽
+    val OFF_INPUT_PTR: Int = -0x40
 
-    /// 字符串长度保存槽�?    val OFF_LEN: Int = -0x38
+    /// 字符串长度保存槽
+    val OFF_LEN: Int = -0x38
 
-    /// hStdOutput 保存槽�?    val OFF_HSTDOUT: Int = -0x30
+    /// hStdOutput 保存槽
+    val OFF_HSTDOUT: Int = -0x30
 
-    /// 换行符缓冲区�? 字节�?x0D 0x0A）�?    val OFF_NEWLINE: Int = -0x28
+    /// 换行符缓冲区 字节x0D 0x0A）
+    val OFF_NEWLINE: Int = -0x28
 
-    /// STANDARD_PROCESS_INFORMATION 缓冲区（24 字节：hStdInput, hStdOutput, hStdError）�?    ///
-    /// 位于 [rbp-0x20, rbp-0x00)，不与参数（arg5..arg10）和局部变量冲突�?    val OFF_INFOBUF: Int = -0x20
+    /// STANDARD_PROCESS_INFORMATION 缓冲区（24 字节：hStdInput, hStdOutput, hStdError）
+    ///
+    /// 位于 [rbp-0x20, rbp-0x00)，不与参数（arg5..arg10）和局部变量冲突
+    val OFF_INFOBUF: Int = -0x20
 
     // ── println 实现 ──
 
-    /// 编码 `println(rcx = char*)`�?    ///
+    /// 编码 `println(rcx = char*)`
+    ///
     /// ```asm
     /// println:
     ///   push rbp; mov rbp, rsp; sub rsp, 0x50
@@ -119,16 +146,23 @@ object PhotonRuntime {
         enc.emitLabel("pl_strlen_done")
         enc.emitStackStore(PhotonRuntime.OFF_LEN, "rax")
 
-        // 获取 hStdOutput：PEB 走链（Windows 11 x64 正确偏移）�?        //
-        //   rax = gs:[0x60]          ; PEB（Windows x64 TEB �?PEB 指针的固定偏移）
-        //   rax = [rax + 0x20]       ; PEB.ProcessParameters（RTL_USER_PROCESS_PARAMETERS*�?        //   rax = [rax + 0x28]       ; RTL_USER_PROCESS_PARAMETERS.hStdOutput
+        // 获取 hStdOutput：PEB 走链（Windows 11 x64 正确偏移）
         //
-        // 偏移依据：Windows 10/11 x64 PEB.ProcessParameters 位于 +0x20�?        // PROCESS_PARAMETERS.hOutput 位于 +0x28�?        enc.emitMovGSSeg64("rax", 0x60)              // rax = PEB
-        enc.emitMovMemDisp8("rax", "rax", 0x20)      // rax = ProcessParameters (PEB+0x20)
-        enc.emitMovMemDisp8("rax", "rax", 0x28)      // rax = hStdOutput (ProcessParameters+0x28)
+        //   rax = gs:[0x60]          ; PEB（Windows x64 TEB PEB 指针的固定偏移）
+        //   rax = [rax + 0x20]       ; PEB.ProcessParameters（RTL_USER_PROCESS_PARAMETERS*
+        //   rax = [rax + 0x28]       ; RTL_USER_PROCESS_PARAMETERS.hStdOutput
+        //
+        // 偏移依据：Windows 10/11 x64 PEB.ProcessParameters 位于 +0x20
+        // PROCESS_PARAMETERS.hOutput 位于 +0x28
+        enc.emitMovGSSeg64("rax", 0x60)
+              // rax = PEB
+        enc.emitMovMemDisp8("rax", "rax", 0x20)
+      // rax = ProcessParameters (PEB+0x20)
+        enc.emitMovMemDisp8("rax", "rax", 0x28)
+      // rax = hStdOutput (ProcessParameters+0x28)
         enc.emitStackStore(PhotonRuntime.OFF_HSTDOUT, "rax")
 
-        // ── 第一�?NtWriteFile：写入字符串 ──
+        // ── 第一NtWriteFile：写入字符串 ──
         //
         // 栈参数（x64 ABI：arg5 起于 rsp+0x20）：
         //   [rbp-0x98] = IoStatusBlock ptr   (rsp+0x20)
@@ -147,16 +181,19 @@ object PhotonRuntime {
         enc.emitStackStore(PhotonRuntime.OFF_ARG8, "rax")
         enc.emitStackStore(PhotonRuntime.OFF_ARG9, "rax")
         // EaLength 必须显式清零：NtWriteFile 的第 10 个参数，若栈上残留非 0
-        // 值，内核会尝试从 EaBuffer 复制扩展属性并导致访问违规�?        enc.emitStackStore(PhotonRuntime.OFF_ARG10, "rax")
+        // 值，内核会尝试从 EaBuffer 复制扩展属性并导致访问违规
+        enc.emitStackStore(PhotonRuntime.OFF_ARG10, "rax")
 
-        // 寄存器设�?+ syscall
-        // ⚠️ Windows x64 syscall �?*�?1 个参数必须放�?r10**�?        // `syscall` 指令会把返回地址写进 rcx，因此内核从 r10 读取 arg1
-        // （ntdll �?stub 正是 `mov r10, rcx` 后再 `syscall`）�?        enc.emitStackLoad("r10", PhotonRuntime.OFF_HSTDOUT)
+        // 寄存器设+ syscall
+        // ⚠️ Windows x64 syscall *1 个参数必须放r10**
+        // `syscall` 指令会把返回地址写进 rcx，因此内核从 r10 读取 arg1
+        // （ntdll stub 正是 `mov r10, rcx` 后再 `syscall`）
+        enc.emitStackLoad("r10", PhotonRuntime.OFF_HSTDOUT)
         enc.emitXorRR("rdx", "rdx")
         enc.emitXorRR("r8", "r8")
         enc.emitXorRR("r9", "r9")
-        SyscallEmitter.emitSyscall(enc, 0x08)  // NtWriteFile（本�?ntdll 实测 0x08�?
-        // ── 第二�?NtWriteFile：写�?CRLF ──
+        SyscallEmitter.emitSyscall(enc, 0x08)  // NtWriteFile（本ntdll 实测 0x08
+        // ── 第二NtWriteFile：写CRLF ──
         enc.emitStoreByteMemImm8(PhotonRuntime.OFF_NEWLINE, 0x0D)
         enc.emitStoreByteMemImm8(PhotonRuntime.OFF_NEWLINE + 1, 0x0A)
 
@@ -170,25 +207,29 @@ object PhotonRuntime {
         enc.emitStackStore(PhotonRuntime.OFF_ARG8, "rax")
         enc.emitStackStore(PhotonRuntime.OFF_ARG9, "rax")
         // EaLength 必须显式清零：NtWriteFile 的第 10 个参数，若栈上残留非 0
-        // 值，内核会尝试从 EaBuffer 复制扩展属性并导致访问违规�?        enc.emitStackStore(PhotonRuntime.OFF_ARG10, "rax")
+        // 值，内核会尝试从 EaBuffer 复制扩展属性并导致访问违规
+        enc.emitStackStore(PhotonRuntime.OFF_ARG10, "rax")
 
-        // ⚠️ Windows x64 syscall �?*�?1 个参数必须放�?r10**�?        // `syscall` 指令会把返回地址写进 rcx，因此内核从 r10 读取 arg1
-        // （ntdll �?stub 正是 `mov r10, rcx` 后再 `syscall`）�?        enc.emitStackLoad("r10", PhotonRuntime.OFF_HSTDOUT)
+        // ⚠️ Windows x64 syscall *1 个参数必须放r10**
+        // `syscall` 指令会把返回地址写进 rcx，因此内核从 r10 读取 arg1
+        // （ntdll stub 正是 `mov r10, rcx` 后再 `syscall`）
+        enc.emitStackLoad("r10", PhotonRuntime.OFF_HSTDOUT)
         enc.emitXorRR("rdx", "rdx")
         enc.emitXorRR("r8", "r8")
         enc.emitXorRR("r9", "r9")
-        SyscallEmitter.emitSyscall(enc, 0x08)  // NtWriteFile（本�?ntdll 实测 0x08�?
+        SyscallEmitter.emitSyscall(enc, 0x08)  // NtWriteFile（本ntdll 实测 0x08
         enc.emitEpilogue()
     }
 
     // ── 用户代码：main ──
 
-    /// 编码 `main`：调�?runtime �?`println` 打印文本，返�?0�?    ///
+    /// 编码 `main`：调runtime `println` 打印文本，返0
+    ///
     /// ```asm
     /// main:
     ///   push rbp; mov rbp, rsp; sub rsp, 0x30
     ///   lea  rcx, [rip + @str.0]
-    ///   call println                  ; 跨对象：�?runtime.obj 提供
+    ///   call println                  ; 跨对象：runtime.obj 提供
     ///   xor  eax, eax
     ///   leave; ret
     /// ```
@@ -198,11 +239,16 @@ object PhotonRuntime {
         enc.emitCallRel("println")
         enc.emitXorRR("eax", "eax")
         enc.emitMovRR("rcx", "eax")  // exit code = 0
-        enc.emitCallRel("exit")      // 显式终止进程（无 CRT�?        enc.emitEpilogue()           // 不可�?    }
+        enc.emitCallRel("exit")
+      // 显式终止进程（无 CRT）
+        enc.emitEpilogue()
+           // 不可达，仅保持函数完整性
+    }
 
-    // ── 字符串操�?──
+    // ── 字符串操──
 
-    /// 编码 `strlen(rcx = char*) �?rax = Int`�?    ///
+    /// 编码 `strlen(rcx = char*) rax = Int`
+    ///
     /// ```asm
     /// strlen:
     ///   push rbp; mov rbp, rsp
@@ -231,7 +277,8 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// 编码 `charCodeAt(rcx = char*, rdx = index) �?rax = Int`�?    ///
+    /// 编码 `charCodeAt(rcx = char*, rdx = index) rax = Int`
+    ///
     /// ```asm
     /// charCodeAt:
     ///   push rbp; mov rbp, rsp
@@ -244,7 +291,8 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// 编码 `strcmp(rcx = char*, rdx = char*) �?rax = Int`�?    ///
+    /// 编码 `strcmp(rcx = char*, rdx = char*) rax = Int`
+    ///
     /// ```asm
     /// strcmp:
     ///   push rbp; mov rbp, rsp
@@ -275,10 +323,13 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    // ── 字符串相等比�?──
+    // ── 字符串相等比──
 
-    /// 编码 `streq(rcx = char*, rdx = char*) �?rax = 1/0`（内容相等）�?    ///
-    /// 为什么不�?`strcmp`：`emitStrcmp` 返回的是「首个不同字节的下标�?    ///（相等时返回长度），无法用于判等。`streq` 返回严格�?0/1�?    ///
+    /// 编码 `streq(rcx = char*, rdx = char*) rax = 1/0`（内容相等）
+    ///
+    /// 为什么不`strcmp`：`emitStrcmp` 返回的是「首个不同字节的下标
+    ///（相等时返回长度），无法用于判等。`streq` 返回严格0/1
+    ///
     /// ```asm
     /// streq:
     ///   push rbp; mov rbp, rsp
@@ -318,18 +369,25 @@ object PhotonRuntime {
 
     // ── 异常处理支持 ──
 
-    /// 编码 `throwException(rcx = Exception*) �?never returns`�?    ///
-    /// 简化实现：直接终止程序（NtTerminateProcess syscall）�?    /// 完整实现需要异常表遍历�?    fun emitThrowException(enc: X86Encoder): Unit {
+    /// 编码 `throwException(rcx = Exception*) -> never returns`
+    /// 简化实现：直接终止程序（NtTerminateProcess syscall）
+    /// 完整实现需要异常表遍历
+    fun emitThrowException(enc: X86Encoder): Unit {
         enc.emitPrologue(0x20)
         // NtTerminateProcess(0, 1)
-        enc.emitXorRR("r10", "r10")  // processHandle = 0 (当前进程) �?arg1 必须�?r10
-        enc.emitMovRI32("rdx", 1)    // exitStatus = 1 (异常)
-        SyscallEmitter.emitSyscall(enc, 0x2C)  // NtTerminateProcess（本�?ntdll 实测 0x2C�?        enc.emitEpilogue()  // 不可达，仅为函数完整�?    }
+        enc.emitXorRR("r10", "r10")  // processHandle = 0 (当前进程), arg1 必须在 r10
+        enc.emitMovRI32("rdx", 1)
+    // exitStatus = 1 (异常)
+        SyscallEmitter.emitSyscall(enc, 0x2C)  // NtTerminateProcess (实测 0x2C)
+        enc.emitEpilogue()  // 不可达，仅为函数完整
+    }
 
     // ── exit 实现 ──
 
-    /// 编码 `exit(rcx = Int) �?never returns`�?    ///
-    /// 使用 NtTerminateProcess syscall 终止进程�?    ///
+    /// 编码 `exit(rcx = Int) never returns`
+    ///
+    /// 使用 NtTerminateProcess syscall 终止进程
+    ///
     /// ```asm
     /// exit:
     ///   push rbp; mov rbp, rsp; sub rsp, 0x20
@@ -338,30 +396,46 @@ object PhotonRuntime {
     ///   mov  rdx, [rbp-0x10]       ; exitStatus
     ///   mov  eax, 0x30             ; NtTerminateProcess
     ///   syscall
-    ///   ret                        ; 不可�?    /// ```
+    ///   ret                        ; 不可
+    /// ```
     fun emitExit(enc: X86Encoder): Unit {
         enc.emitPrologue(0x20)
-        // 保存退出码（rcx 将被覆盖�?processHandle�?        enc.emitStackStore(-0x10, "rcx")
+        // 保存退出码（rcx 将被覆盖processHandle
+        enc.emitStackStore(-0x10, "rcx")
         // NtTerminateProcess(NtCurrentProcess(), exitStatus)
         //
-        // ⚠️ 当前进程�?*伪句柄是 -1�?xFFFFFFFFFFFFFFFF�?*，不�?0�?        // `NtTerminateProcess(0, �?` 会以 STATUS_INVALID_HANDLE 直接返回�?        // 进程不会终止 —�?`call exit` 于是返回，执行流继续落到 main 之后�?        // `int3` 填充字节上，进程�?0x80000003（STATUS_BREAKPOINT）结�?        //（实�?01/02 退出码恒为 -2147483645�?3 还额外打印出一行垃圾）�?        // arg1 �?r10（Win64 syscall 约定）�?        enc.emitMovRI("r10", -1)
+        // ⚠️ 当前进程*伪句柄是 -1xFFFFFFFFFFFFFFFF*，不0
+        // `NtTerminateProcess(0, ` 会以 STATUS_INVALID_HANDLE 直接返回
+        // 进程不会终止 —`call exit` 于是返回，执行流继续落到 main 之后
+        // `int3` 填充字节上，进程0x80000003（STATUS_BREAKPOINT）结
+        //（实01/02 退出码恒为 -21474836453 还额外打印出一行垃圾）
+        // arg1 r10（Win64 syscall 约定）
+        enc.emitMovRI("r10", -1)
         enc.emitStackLoad("rdx", -0x10)  // exitStatus
-        SyscallEmitter.emitSyscall(enc, 0x2C)  // NtTerminateProcess（本�?ntdll 实测 0x2C�?        enc.emitEpilogue()  // 不可达，仅为函数完整�?    }
+        SyscallEmitter.emitSyscall(enc, 0x2C)  // NtTerminateProcess (实测 0x2C)
+        enc.emitEpilogue()  // 不可达，仅为函数完整
+    }
 
     // ── toStr 实现 ──
 
-    /// 编码 `toStr(rcx = Int) �?rax = char*`�?    ///
-    /// 使用 .data 段的静态缓冲区�?2 字节）存储转换结果�?    /// 算法：处�?0、处理负数、除 10 取余、逆序写入�?    fun emitToStr(enc: X86Encoder): Unit {
+    /// 编码 `toStr(rcx = Int) rax = char*`
+    ///
+    /// 使用 .data 段的静态缓冲区2 字节）存储转换结果
+    /// 算法：处0、处理负数、除 10 取余、逆序写入
+    fun emitToStr(enc: X86Encoder): Unit {
         enc.emitPrologue(0x40)
 
-        // Windows x64 ABI：rbx / rsi 是非易失寄存器，必须保存 + 恢复�?        // 旧实现直接用它们当「缓冲区基址 / 写指针」却不保�?—�?调用方的
-        // 跨调用活值（例如字符串常量的地址）会被这个函数悄悄改掉�?        enc.emitStackStore(-0x30, "rbx")
+        // Windows x64 ABI：rbx / rsi 是非易失寄存器，必须保存 + 恢复
+        // 旧实现直接用它们当「缓冲区基址 / 写指针」却不保—调用方的
+        // 跨调用活值（例如字符串常量的地址）会被这个函数悄悄改掉
+        enc.emitStackStore(-0x30, "rbx")
         enc.emitStackStore(-0x38, "rsi")
 
         // 加载缓冲区地址
         enc.emitLeaRIP("rbx", "toStrBuffer")
 
-        // 保存输入�?        enc.emitStackStore(-0x20, "rcx")
+        // 保存输入
+        enc.emitStackStore(-0x20, "rcx")
 
         // 处理负数
         enc.emitStackLoad("rax", -0x20)
@@ -374,29 +448,33 @@ object PhotonRuntime {
         enc.emitXorRR("rdx", "rdx")
         enc.emitSubRR("rdx", "rax")  // rdx = -rax
         enc.emitMovRR("rax", "rdx")
-        enc.emitStackStore(-0x20, "rax")  // 保存绝对�?
+        enc.emitStackStore(-0x20, "rax")  // 保存绝对
         enc.emitJmpLabel("tos_start")
 
         enc.emitLabel("tos_nonneg")
         enc.emitMovRI32("eax", 0)
-        enc.emitStackStore(-0x28, "rax")  // 无负号标�?
+        enc.emitStackStore(-0x28, "rax")  // 无负号标
         enc.emitLabel("tos_start")
-        // 初始化写指针：指向缓冲区末尾�?1�?        enc.emitMovRR("rsi", "rbx")
+        // 初始化写指针：指向缓冲区末尾1
+        enc.emitMovRR("rsi", "rbx")
         enc.emitAddRI("rsi", 31)  // rsi = &buffer[31]
         enc.emitXorRR("rax", "rax")  // rax = 0
         enc.emitMovByteMemReg("rsi", "rax")  // [rsi] = 0（NUL 终止符）
 
-        // 加载绝对�?        enc.emitStackLoad("rax", -0x20)
+        // 加载绝对
+        enc.emitStackLoad("rax", -0x20)
 
         // ── 特例：值为 0 ──
-        // 循环是「先判零再写字符」，0 会直接跳�?tos_done 且写指针仍停�?        // 缓冲区末尾的 NUL �?�?返回空串。实�?`toStr(0)` 打印空行�?        enc.emitCmpRI("rax", 0)
+        // 循环是「先判零再写字符」，0 会直接跳tos_done 且写指针仍停
+        // 缓冲区末尾的 NUL 返回空串。实`toStr(0)` 打印空行
+        enc.emitCmpRI("rax", 0)
         enc.emitJccLabel("ne", "tos_loop")
         enc.emitSubRI("rsi", 1)
         enc.emitMovRI32("eax", '0')
         enc.emitMovByteMemReg("rsi", "rax")
         enc.emitJmpLabel("tos_return")
 
-        // 循环：除�?10，存余数
+        // 循环：除10，存余数
         enc.emitLabel("tos_loop")
         enc.emitCmpRI("rax", 0)
         enc.emitJccLabel("eq", "tos_done")
@@ -404,7 +482,7 @@ object PhotonRuntime {
         // rax = rax / 10
         enc.emitMovRI32("r10", 10)
         enc.emitXorRR("rdx", "rdx")
-        enc.emitIdiv("r10")  // rax = �? rdx = 余数
+        enc.emitIdiv("r10")  // rax =  rdx = 余数
 
         // 递减写指针并存储数字字符
         enc.emitSubRI("rsi", 1)
@@ -424,42 +502,54 @@ object PhotonRuntime {
         enc.emitMovByteMemReg("rsi", "rax")  // [rsi] = '-'
 
         enc.emitLabel("tos_return")
-        enc.emitMovRR("rax", "rsi")  // 返回字符串指�?        // 恢复非易失寄存器（rax 已持有返回值，不受影响�?        enc.emitStackLoad("rsi", -0x38)
+        enc.emitMovRR("rax", "rsi")  // 返回字符串指
+        // 恢复非易失寄存器（rax 已持有返回值，不受影响
+        enc.emitStackLoad("rsi", -0x38)
         enc.emitStackLoad("rbx", -0x30)
         enc.emitEpilogue()
     }
 
     // ── strcat 实现 ──
 
-    /// 编码 `strcat(rcx = s1, rdx = s2) �?rax = 拼接结果`�?    ///
-    /// 结果�?.data 段的**bump 分配 arena** 里切一块新内存（每次调用返�?    /// 不同地址），因此拼接结果�?*不可�?*�?—�?后续拼接不会覆写它�?    ///
+    /// 编码 `strcat(rcx = s1, rdx = s2) rax = 拼接结果`
+    ///
+    /// 结果.data 段的**bump 分配 arena** 里切一块新内存（每次调用返
+    /// 不同地址），因此拼接结果*不可*—后续拼接不会覆写它
+    ///
     /// ```asm
     ///   len1 = strlen(s1); len2 = strlen(s2)
     ///   need = len1 + len2 + 1
     ///   base = [strcatBump]; new = base + need
-    ///   if (new > ARENA_LIMIT) { base = 0; new = need }   ; 回绕，避免越�?    ///   [strcatBump] = new
+    ///   if (new > ARENA_LIMIT) { base = 0; new = need }   ; 回绕，避免越
+    ///   [strcatBump] = new
     ///   dst = strcatArena + base
     ///   dst[0..len1) = s1; dst[len1..len1+len2] = s2; 末尾 NUL
     ///   rax = dst
     /// ```
     ///
-    /// ⚠️ 旧实现返�?*同一�?*静态缓冲区：链式拼接时源与目标别名
-    ///（`"B: " + s3` �?s3 就是该缓冲区），边读边写导致源永�?NUL �?写越界；
-    /// 即使不崩溃，`s3` 也会被下一次拼接覆�?—�?实测
-    /// `P2/04_string_ops` �?`s3.length()` 得到 16 而不�?11，判等随之失败�?    fun emitStrcat(enc: X86Encoder): Unit {
-        // 0x120 = 288 字节：保存寄存器 + s1/s2/len1/len2/newBump�?        // 16 字节对齐�?x120 % 16 == 0）�?        enc.emitPrologue(0x120)
+    /// ⚠️ 旧实现返*同一*静态缓冲区：链式拼接时源与目标别名
+    ///（`"B: " + s3` s3 就是该缓冲区），边读边写导致源永NUL 写越界；
+    /// 即使不崩溃，`s3` 也会被下一次拼接覆—实测
+    /// `P2/04_string_ops` `s3.length()` 得到 16 而不11，判等随之失败
+    fun emitStrcat(enc: X86Encoder): Unit {
+        // 0x120 = 288 字节：保存寄存器 + s1/s2/len1/len2/newBump
+        // 16 字节对齐x120 % 16 == 0）
+        enc.emitPrologue(0x120)
 
-        // 保存 callee-saved r12 / rbx / rsi / rdi（Win64 非易失寄存器�?        enc.emitStackStore(-0x88, "r12")
+        // 保存 callee-saved r12 / rbx / rsi / rdi（Win64 非易失寄存器
+        enc.emitStackStore(-0x88, "r12")
         enc.emitStackStore(-0x98, "rbx")
         enc.emitStackStore(-0xA8, "rsi")
         enc.emitStackStore(-0xB0, "rdi")
 
-        // 保存两个字符串指�?        enc.emitStackStore(-0x90, "rcx")  // s1
+        // 保存两个字符串指
+        enc.emitStackStore(-0x90, "rcx")  // s1
         enc.emitStackStore(-0xC0, "rdx")  // s2
 
         // 计算 s1 长度
         enc.emitStackLoad("rax", -0x90)   // rax = s1
-        enc.emitXorRR("rdx", "rdx")        // rdx = 0 (用于检�?NUL)
+        enc.emitXorRR("rdx", "rdx")
+        // rdx = 0 (用于检NUL)
         enc.emitLabel("strcat_len1_loop")
         enc.emitCmpByteMemImm8("rax", 0)
         enc.emitJccLabel("eq", "strcat_len1_done")
@@ -471,7 +561,8 @@ object PhotonRuntime {
 
         // 计算 s2 长度
         enc.emitStackLoad("rax", -0xC0)   // rax = s2
-        enc.emitXorRR("rdx", "rdx")        // rdx = 0
+        enc.emitXorRR("rdx", "rdx")
+        // rdx = 0
         enc.emitLabel("strcat_len2_loop")
         enc.emitCmpByteMemImm8("rax", 0)
         enc.emitJccLabel("eq", "strcat_len2_done")
@@ -479,21 +570,30 @@ object PhotonRuntime {
         enc.emitIncRR("rdx")
         enc.emitJmpLabel("strcat_len2_loop")
         enc.emitLabel("strcat_len2_done")
-        enc.emitStackStore(-0xB8, "rdx")  // len2 = rdx（供复制阶段定长使用�?
-        // ── 分配阶段：从 bump arena 切一�?*�?*内存当目�?──
+        enc.emitStackStore(-0xB8, "rdx")  // len2 = rdx（供复制阶段定长使用
+        // ── 分配阶段：从 bump arena 切一**内存当目──
         //
-        // need = len1 + len2 + 1（含结尾 NUL�?        enc.emitMovRR("rcx", "rdx")          // rcx = len2
-        enc.emitStackLoad("rax", -0xA0)      // len1
+        // need = len1 + len2 + 1（含结尾 NUL
+        enc.emitMovRR("rcx", "rdx")
+          // rcx = len2
+        enc.emitStackLoad("rax", -0xA0)
+      // len1
         enc.emitAddRR("rcx", "rax")
-        enc.emitIncRR("rcx")                 // rcx = need
+        enc.emitIncRR("rcx")
+                 // rcx = need
 
-        // base = [heapBump]；new = base + need；越界则回绕�?0 重新开�?        enc.emitMovRIP("rax", "heapBump")    // rax = base
+        // base = [heapBump]；new = base + need；越界则回绕0 重新开
+        enc.emitMovRIP("rax", "heapBump")
+    // rax = base
         enc.emitMovRR("rbx", "rax")
-        enc.emitAddRR("rbx", "rcx")          // rbx = new
+        enc.emitAddRR("rbx", "rcx")
+          // rbx = new
         enc.emitCmpRI("rbx", 1048000)
         enc.emitJccLabel("le", "strcat_alloc_ok")
-        enc.emitXorRR("rax", "rax")          // base = 0
-        enc.emitMovRR("rbx", "rcx")          // new = need
+        enc.emitXorRR("rax", "rax")
+          // base = 0
+        enc.emitMovRR("rbx", "rcx")
+          // new = need
         enc.emitLabel("strcat_alloc_ok")
         enc.emitStoreRIP("heapBump", "rbx")
 
@@ -501,7 +601,8 @@ object PhotonRuntime {
         enc.emitLeaRIP("r12", "heapArena")
         enc.emitAddRR("r12", "rax")
 
-        // �?s1 �?dst（计�?= len1 + 1，含 NUL�?        enc.emitStackLoad("rsi", -0x90)
+        // s1 dst（计= len1 + 1，含 NUL
+        enc.emitStackLoad("rsi", -0x90)
         enc.emitMovRR("rdi", "r12")
         enc.emitStackLoad("rcx", -0xA0)   // len1
         enc.emitIncRR("rcx")
@@ -516,11 +617,13 @@ object PhotonRuntime {
         enc.emitJmpLabel("strcat_c1_loop")
         enc.emitLabel("strcat_c1_done")
 
-        // �?目标指针回到 dst + len1（覆盖上一步写下的 NUL�?        enc.emitMovRR("rdi", "r12")
+        // 目标指针回到 dst + len1（覆盖上一步写下的 NUL
+        enc.emitMovRR("rdi", "r12")
         enc.emitStackLoad("rcx", -0xA0)   // len1
         enc.emitAddRR("rdi", "rcx")
 
-        // �?s2 �?dst + len1（计�?= len2 + 1，含 NUL�?        enc.emitStackLoad("rsi", -0xC0)
+        // s2 dst + len1（计= len2 + 1，含 NUL
+        enc.emitStackLoad("rsi", -0xC0)
         enc.emitStackLoad("rcx", -0xB8)   // len2
         enc.emitIncRR("rcx")
         enc.emitLabel("strcat_c2_loop")
@@ -534,7 +637,8 @@ object PhotonRuntime {
         enc.emitJmpLabel("strcat_c2_loop")
 
         enc.emitLabel("strcat_done")
-        enc.emitMovRR("rax", "r12")  // 返回新分配的字符串指�?        // 恢复 callee-saved r12 / rbx / rsi / rdi（rax 已持有返回值）
+        enc.emitMovRR("rax", "r12")  // 返回新分配的字符串指
+        // 恢复 callee-saved r12 / rbx / rsi / rdi（rax 已持有返回值）
         enc.emitStackLoad("rdi", -0xB0)
         enc.emitStackLoad("rsi", -0xA8)
         enc.emitStackLoad("rbx", -0x98)
@@ -542,23 +646,33 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    // ── 堆列表实现（数组/列表字面�?+ 索引读写）──
+    // ── 堆列表实现（数组/列表字面+ 索引读写）──
     //
-    // 内存布局�? 字节槽）�?    //
+    // 内存布局 字节槽）
+    //
     //   [0]      count（元素个数，64 位）
     //   [8]      元素 0
     //   [16]     元素 1
-    //   �?       元素 i 位于 [8 + i*8]
+    //          元素 i 位于 [8 + i*8]
     //
-    // 对象�?`heapArena` �?bump 游标分配（与 `strcat` 共用同一个堆）�?    // 元素统一�?64 位槽存放 —�?Photon 目前只有 Int/Bool/Float/String 指针
-    // 这几种标量，都在 8 字节以内（字符串存的是指针）�?    //
-    // 为什么在 Photon 侧用 runtime 函数而不�?Load/Gep：那条路径当前是空的
-    //（`Lowering.lowerLoad/lowerStore` �?`addValueWithChain`，值不登记�?    // `LirBlock.instrs`，DAG 里根本没有加�?存储指令）�?
-    /// 编码 `__list_alloc(rcx = count) �?rax = list`�?    fun emitListAlloc(enc: X86Encoder): Unit {
+    // 对象`heapArena` bump 游标分配（与 `strcat` 共用同一个堆）
+    // 元素统一64 位槽存放 —Photon 目前只有 Int/Bool/Float/String 指针
+    // 这几种标量，都在 8 字节以内（字符串存的是指针）
+    //
+    // 为什么在 Photon 侧用 runtime 函数而不Load/Gep：那条路径当前是空的
+    //（`Lowering.lowerLoad/lowerStore` `addValueWithChain`，值不登记
+    // `LirBlock.instrs`，DAG 里根本没有加存储指令）
+    /// 编码 `__list_alloc(rcx = count) rax = list`
+    fun emitListAlloc(enc: X86Encoder): Unit {
         enc.emitPrologue(0x20)
-        enc.emitMovRR("r8", "rcx")     // r8 = count
-        enc.emitShlRI("rcx", 3)        // count * 8
-        enc.emitAddRI("rcx", 8)        // + 计数�?        // bump 分配（rax = base，rdx = new�?        enc.emitMovRIP("rax", "heapBump")
+        enc.emitMovRR("r8", "rcx")
+     // r8 = count
+        enc.emitShlRI("rcx", 3)
+        // count * 8
+        enc.emitAddRI("rcx", 8)
+        // + 计数
+        // bump 分配（rax = base，rdx = new
+        enc.emitMovRIP("rax", "heapBump")
         enc.emitMovRR("rdx", "rax")
         enc.emitAddRR("rdx", "rcx")
         enc.emitCmpRI("rdx", 1048000)
@@ -568,49 +682,62 @@ object PhotonRuntime {
         enc.emitLabel("list_alloc_ok")
         enc.emitStoreRIP("heapBump", "rdx")
         enc.emitLeaRIP("r9", "heapArena")
-        enc.emitAddRR("rax", "r9")               // rax = list 指针
+        enc.emitAddRR("rax", "r9")
+               // rax = list 指针
         enc.emitStoreMemDisp32("rax", 0, "r8")   // [list] = count
         enc.emitEpilogue()
     }
 
-    /// 编码 `__list_setat(rcx = list, rdx = idx, r8 = val) �?rax = list`�?    /// 添加 null 检查防止崩溃�?    fun emitListSetAt(enc: X86Encoder): Unit {
-        // 检�?list 指针是否�?null
+    /// 编码 `__list_setat(rcx = list, rdx = idx, r8 = val) rax = list`
+    /// 添加 null 检查防止崩溃
+    fun emitListSetAt(enc: X86Encoder): Unit {
+        // 检list 指针是否null
         enc.emitCmpRI("rcx", 0)
         enc.emitJccLabel("eq", "list_set_null")
-        // 正常路径：存�?[rcx + rdx*8 + 8] = r8
+        // 正常路径：存[rcx + rdx*8 + 8] = r8
         enc.emitStoreIndexed8("rcx", "rdx", 8, "r8")
         enc.emitMovRR("rax", "rcx")
         enc.emitRet()
-        // null 路径：返�?0
+        // null 路径：返0
         enc.emitLabel("list_set_null")
         enc.emitMovRI("eax", 0)
         enc.emitRet()
     }
 
-    /// 编码 `__list_get(rcx = list, rdx = idx) �?rax = value`�?    /// 添加 null 检查防止崩溃（对象模型未完全实现时 list 可能�?null）�?    fun emitListGet(enc: X86Encoder): Unit {
-        // 检�?list 指针是否�?null
+    /// 编码 `__list_get(rcx = list, rdx = idx) rax = value`
+    /// 添加 null 检查防止崩溃（对象模型未完全实现时 list 可能null）
+    fun emitListGet(enc: X86Encoder): Unit {
+        // 检list 指针是否null
         enc.emitCmpRI("rcx", 0)
         enc.emitJccLabel("eq", "list_get_null")
-        // 正常路径：加�?[rcx + rdx*8 + 8]
+        // 正常路径：加[rcx + rdx*8 + 8]
         enc.emitLoadIndexed8("rax", "rcx", "rdx", 8)
         enc.emitRet()
-        // null 路径：返�?0
+        // null 路径：返0
         enc.emitLabel("list_get_null")
         enc.emitMovRI("eax", 0)
         enc.emitRet()
     }
 
-    /// 编码 stub 函数：`mov eax, 0; ret`�?    ///
-    /// 用于自举编译阶段链接器未定义符号的占位实现——编译器引用�?    /// 尚未�?runtime 中实现的 stdlib / POSIX / 类构造器符号。stub 返回 0�?    /// 保证链接器不�?undefined symbol；运行时不会调用到这些符�?    /// （Step 3 目标是「可链接」，不是「可运行」）�?    fun emitStub(enc: X86Encoder): Unit {
+    /// 编码 stub 函数：`mov eax, 0; ret`
+    ///
+    /// 用于自举编译阶段链接器未定义符号的占位实现——编译器引用
+    /// 尚未runtime 中实现的 stdlib / POSIX / 类构造器符号。stub 返回 0
+    /// 保证链接器不undefined symbol；运行时不会调用到这些符
+    /// （Step 3 目标是「可链接」，不是「可运行」）
+    fun emitStub(enc: X86Encoder): Unit {
         enc.emitMovRI("eax", 0)
         enc.emitRet()
     }
 
-    // ── Step 4: 对象分配�?+ 类构造器 ──
+    // ── Step 4: 对象分配+ 类构造器 ──
 
-    /// 编码 `emitObjectAlloc(size: i64) �?rax = obj*`�?    ///
-    /// �?`.data` 段的 `objBump` 游标分配 size 字节�?B 对齐），
-    /// 零初始化后返回对象指针。与 `strcat`/`__list_alloc` 共用 `heapArena`�?    /// 但使用独立的 bump 游标 `objBump`�?    ///
+    /// 编码 `emitObjectAlloc(size: i64) rax = obj*`
+    ///
+    /// `.data` 段的 `objBump` 游标分配 size 字节B 对齐），
+    /// 零初始化后返回对象指针。与 `strcat`/`__list_alloc` 共用 `heapArena`
+    /// 但使用独立的 bump 游标 `objBump`
+    ///
     /// ```asm
     /// emitObjectAlloc:
     ///   push rbp; mov rbp, rsp; sub rsp, 0x50
@@ -636,7 +763,8 @@ object PhotonRuntime {
     ///   cmp  rcx, 0
     ///   je   zero_done
     ///   mov  rsi, [rbp-0x28]
-    ///   mov  [rsi], rdx         ; �?8 字节�?    ///   add  rsi, 8
+    ///   mov  [rsi], rdx         ; 8 字节
+    ///   add  rsi, 8
     ///   mov  [rbp-0x28], rsi
     ///   sub  rcx, 1
     ///   jmp  zero_loop
@@ -661,7 +789,8 @@ object PhotonRuntime {
         enc.emitStackLoad("rdx", -0x10)
         enc.emitAddRR("rdx", "r12")
 
-        // 边界检�?        enc.emitCmpRI("rdx", 1048000)
+        // 边界检
+        enc.emitCmpRI("rdx", 1048000)
         enc.emitJccLabel("le", "oa_alloc_ok")
 
         // 回绕
@@ -679,7 +808,8 @@ object PhotonRuntime {
 
         // 保存返回地址（不被修改）
         enc.emitStackStore(-0x20, "rsi")
-        // 初始化写指针（将在循环中递增�?        enc.emitStackStore(-0x28, "rsi")
+        // 初始化写指针（将在循环中递增
+        enc.emitStackStore(-0x28, "rsi")
 
         // 零初始化：每次写 8 字节
         enc.emitStackLoad("rcx", -0x10)
@@ -710,23 +840,27 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// 生成类构造器代码：分配对�?�?设置 vtable pointer (offset 0) + object size (offset 8) �?返回指针�?    ///
-    /// 对象内存布局�?    ///   [0x00] vtable pointer (8B)  �?初始化为 0（无虚方法）
-    ///   [0x08] object size   (8B)  �?记录分配大小
-    ///   [0x10] field 0       (8B)  �?�?emitObjectAlloc 零初始化
-    ///   [0x18] field 1       (8B)  �?�?emitObjectAlloc 零初始化
+    /// 生成类构造器代码：分配对设置 vtable pointer (offset 0) + object size (offset 8) 返回指针
+    ///
+    /// 对象内存布局
+    ///   [0x00] vtable pointer (8B)  初始化为 0（无虚方法）
+    ///   [0x08] object size   (8B)  记录分配大小
+    ///   [0x10] field 0       (8B)  emitObjectAlloc 零初始化
+    ///   [0x18] field 1       (8B)  emitObjectAlloc 零初始化
     ///   ...
     ///
     /// 栈帧布局（sub rsp, 0x30 = 48B）：
-    ///   [rbp-0x30, rbp-0x10)  影子空间 shadow space�?2B，调�?emitObjectAlloc 前必须为空）
-    ///   [rbp-0x08]            size 保存槽（避开影子空间�?    ///
-    fun emitClassConstructor(enc: X86Encoder, size: Int): Unit {
+    ///   [rbp-0x30, rbp-0x10)  影子空间 shadow space2B，调emitObjectAlloc 前必须为空）
+    ///   [rbp-0x08]            size 保存槽（避开影子空间
+    ///
+    fun emitClassConstructorWithVtable(enc: X86Encoder, size: Int, name: String): Unit {
         enc.emitPrologue(0x30)  // push rbp; mov rbp, rsp; sub rsp, 0x30
 
-        // 保存 size 到栈上（call �?rcx 会被 runtime_emitObjectAlloc 覆盖�?        enc.emitMovRI("rcx", size)
+        // 保存 size 到栈上（call 后 rcx 会被 runtime_emitObjectAlloc 覆盖）
+        enc.emitMovRI("rcx", size)
         enc.emitStackStore(-0x8, "rcx")  // [rbp-0x8] = size
 
-        // 重新加载 size �?rcx（runtime_emitObjectAlloc 的参数）
+        // 重新加载 size 到 rcx（runtime_emitObjectAlloc 的参数）
         enc.emitStackLoad("rcx", -0x8)
         enc.emitCallRel("runtime_emitObjectAlloc")
 
@@ -735,15 +869,24 @@ object PhotonRuntime {
         enc.emitXorRR("rdx", "rdx")
         enc.emitStoreMemDisp32("rax", 0, "rdx")
 
-        // 设置 object size = size（offset 8�?        enc.emitStackLoad("rcx", -0x8)
+        // 设置 object size = size（offset 8）
+        enc.emitStackLoad("rcx", -0x8)
         enc.emitStoreMemDisp32("rax", 8, "rcx")
 
-        // 返回对象指针（rax 已有�?        enc.emitEpilogue()  // leave; ret
+        // 返回对象指针（rax 已持有）
+        enc.emitEpilogue()  // leave; ret
+    }
+
+    /// 兼容入口：不指定 vtable 名称
+    fun emitClassConstructor(enc: X86Encoder, size: Int): Unit {
+        emitClassConstructorWithVtable(enc, size, "")
     }
 
     // ── Step 4: POSIX 函数实现 ──
 
-    /// 编码 `open(rcx=path, rdx=flags) �?rax = handle or -1`�?    /// 使用 NtCreateFile syscall（服务号 0x05），ASCII→UTF-16 转换�?    fun emitOpen(enc: X86Encoder): Unit {
+    /// 编码 `open(rcx=path, rdx=flags) rax = handle or -1`
+    /// 使用 NtCreateFile syscall（服务号 0x05），ASCII→UTF-16 转换
+    fun emitOpen(enc: X86Encoder): Unit {
         enc.emitPrologue(0x160)
         enc.emitStackStore(-0x20, "rcx")
         enc.emitStackStore(-0x28, "rdx")
@@ -819,7 +962,8 @@ object PhotonRuntime {
         enc.emitStoreMemDisp32("rdx", 0, "rax")
         enc.emitStoreMemDisp32("rdx", 8, "rax")
 
-        // 6. 栈参�?        enc.emitXorRR("rax", "rax")
+        // 6. 栈参
+        enc.emitXorRR("rax", "rax")
         enc.emitStackStore(-0x118, "rax")
         enc.emitStackStore(-0x110, "rax")
         enc.emitStackStore(-0x108, "rax")
@@ -851,7 +995,8 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// 编码 `close(rcx=fd) �?rax = 0`。NtClose�?x0B）�?    fun emitClose(enc: X86Encoder): Unit {
+    /// 编码 `close(rcx=fd) rax = 0`。NtClosex0B）
+    fun emitClose(enc: X86Encoder): Unit {
         enc.emitPrologue(0x20)
         enc.emitMovRR("r10", "rcx")
         SyscallEmitter.emitSyscall(enc, 0x0B)
@@ -859,7 +1004,8 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// 编码 `read(rcx=fd, rdx=buf, r8=count) �?rax = bytes or -1`。NtReadFile�?x03）�?    fun emitRead(enc: X86Encoder): Unit {
+    /// 编码 `read(rcx=fd, rdx=buf, r8=count) rax = bytes or -1`。NtReadFilex03）
+    fun emitRead(enc: X86Encoder): Unit {
         enc.emitPrologue(0x60)
         enc.emitStackStore(-0x20, "rbx")
         enc.emitStackStore(-0x28, "rsi")
@@ -871,13 +1017,15 @@ object PhotonRuntime {
         enc.emitXorRR("rax", "rax")
         enc.emitStoreMemDisp32("rbx", 0, "rax")
         enc.emitStoreMemDisp32("rbx", 8, "rax")
-        // 栈参�?        enc.emitXorRR("rax", "rax")
+        // 栈参
+        enc.emitXorRR("rax", "rax")
         enc.emitStackStore(-0x38, "rax")
         enc.emitStackStore(-0x40, "rax")
         enc.emitStackStore(-0x48, "rax")
         enc.emitStackStore(-0x50, "rax")
         enc.emitStackStore(-0x58, "rax")
-        // 寄存�?        enc.emitStackLoad("rcx", -0x10)
+        // 寄存
+        enc.emitStackLoad("rcx", -0x10)
         enc.emitStackLoad("rdx", -0x18)
         enc.emitStackLoad("r8", -0x30)
         enc.emitLeaStack("r9", -0x50)
@@ -894,7 +1042,8 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// 编码 `write(rcx=fd, rdx=buf, r8=count) �?rax = bytes or -1`。NtWriteFile�?x08）�?    fun emitWrite(enc: X86Encoder): Unit {
+    /// 编码 `write(rcx=fd, rdx=buf, r8=count) rax = bytes or -1`。NtWriteFilex08）
+    fun emitWrite(enc: X86Encoder): Unit {
         enc.emitPrologue(0x60)
         enc.emitStackStore(-0x20, "rbx")
         enc.emitStackStore(-0x28, "rsi")
@@ -928,13 +1077,15 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// 编码 `access(rcx=path, rdx=mode) �?rax = 0`。stub 返回 0（存在）�?    fun emitAccess(enc: X86Encoder): Unit {
+    /// 编码 `access(rcx=path, rdx=mode) rax = 0`。stub 返回 0（存在）
+    fun emitAccess(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRI("eax", 0)
         enc.emitEpilogue()
     }
 
-    /// 编码 `exitGroup(rcx=code)`。NtTerminateProcess�?x2C）�?    fun emitExitGroup(enc: X86Encoder): Unit {
+    /// 编码 `exitGroup(rcx=code)`。NtTerminateProcessx2C）
+    fun emitExitGroup(enc: X86Encoder): Unit {
         enc.emitPrologue(0x20)
         enc.emitStackStore(-0x10, "rcx")
         enc.emitMovRI("r10", -1)
@@ -943,7 +1094,8 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// stub: fork/execve/wait4 返回 -1�?    fun emitStubMinus1(enc: X86Encoder): Unit {
+    /// stub: fork/execve/wait4 返回 -1
+    fun emitStubMinus1(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRI("eax", -1)
         enc.emitRet()
@@ -951,12 +1103,17 @@ object PhotonRuntime {
 
     // ── Step 4: Memory 内置函数实现 ──
     //
-    // `Memory.write/read/alloc/free` �?Aura 源码中是 `extern interface Memory`
+    // `Memory.write/read/alloc/free` Aura 源码中是 `extern interface Memory`
     // 的无 @native 注解方法（编译器内置）。Rust AOT 后端将它们内联为 store/load
-    // 指令，但 Photon 后端不做内联 —�?如果调用被映射到 `write`（FileOps.write �?    // 运行时函数），`Memory.write(addr, val)` 会被当成文件 I/O 写：fd=addr（无效）�?    // buf=val（小整数），count=未定�?�?NtWriteFile 失败返回 0 �?-1，导�?    // `writeObjectFile()` �?`while (written < want)` 无限循环挂起�?    //
+    // 指令，但 Photon 后端不做内联 —如果调用被映射到 `write`（FileOps.write
+     // 运行时函数），`Memory.write(addr, val)` 会被当成文件 I/O 写：fd=addr（无效）
+    // buf=val（小整数），count=未定NtWriteFile 失败返回 0 -1，导
+    // `writeObjectFile()` `while (written < want)` 无限循环挂起
+    //
     // 修复：提供独立的 `Memory_write` / `Memory_read` / `Memory_alloc` / `Memory_free`
-    // 符号，并�?`mapStdlibFuncName` 中按首参类型区分（Long �?Memory，Int �?FileOps）�?
-    /// 编码 `Memory_write(rcx=addr, rdx=val) �?无返回值`：将 val 写入 addr 指向的字节�?    fun emitMemoryWrite(enc: X86Encoder): Unit {
+    // 符号，并`mapStdlibFuncName` 中按首参类型区分（Long Memory，Int FileOps）
+    /// 编码 `Memory_write(rcx=addr, rdx=val) 无返回值`：将 val 写入 addr 指向的字节
+    fun emitMemoryWrite(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         // rcx = addr, rdx = val
         // store byte [rcx], dl
@@ -964,7 +1121,8 @@ object PhotonRuntime {
         enc.emitRet()
     }
 
-    /// 编码 `Memory_read(rcx=addr) �?rax = byte`：读�?addr 指向的字节�?    fun emitMemoryRead(enc: X86Encoder): Unit {
+    /// 编码 `Memory_read(rcx=addr) rax = byte`：读addr 指向的字节
+    fun emitMemoryRead(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         // rcx = addr
         // movzx eax, byte ptr [rcx]
@@ -972,58 +1130,67 @@ object PhotonRuntime {
         enc.emitRet()
     }
 
-    /// 编码 `Memory_write16(rcx=addr, rdx=val) �?无返回值`：写�?16 位值�?    fun emitMemoryWrite16(enc: X86Encoder): Unit {
+    /// 编码 `Memory_write16(rcx=addr, rdx=val) 无返回值`：写16 位值
+    fun emitMemoryWrite16(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitStoreMemDisp32("rcx", 0, "rdx")
         enc.emitRet()
     }
 
-    /// 编码 `Memory_read16(rcx=addr) �?rax = i16`：读�?16 位值�?    fun emitMemoryRead16(enc: X86Encoder): Unit {
+    /// 编码 `Memory_read16(rcx=addr) rax = i16`：读16 位值
+    fun emitMemoryRead16(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitLoadIndexed8("rax", "rcx", "rsp", 0)
         // 简化：直接加载 64 位（高位由调用者处理）
         enc.emitRet()
     }
 
-    /// 编码 `Memory_write32(rcx=addr, rdx=val) �?无返回值`：写�?32 位值�?    fun emitMemoryWrite32(enc: X86Encoder): Unit {
+    /// 编码 `Memory_write32(rcx=addr, rdx=val) 无返回值`：写32 位值
+    fun emitMemoryWrite32(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitStoreMemDisp32("rcx", 0, "rdx")
         enc.emitRet()
     }
 
-    /// 编码 `Memory_read32(rcx=addr) �?rax = i32`：读�?32 位值�?    fun emitMemoryRead32(enc: X86Encoder): Unit {
+    /// 编码 `Memory_read32(rcx=addr) rax = i32`：读32 位值
+    fun emitMemoryRead32(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitLoadIndexed8("rax", "rcx", "rsp", 0)
         enc.emitRet()
     }
 
-    /// 编码 `Memory_write64(rcx=addr, rdx=val) �?无返回值`：写�?64 位值�?    fun emitMemoryWrite64(enc: X86Encoder): Unit {
+    /// 编码 `Memory_write64(rcx=addr, rdx=val) 无返回值`：写64 位值
+    fun emitMemoryWrite64(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitStoreMemDisp32("rcx", 0, "rdx")
         enc.emitRet()
     }
 
-    /// 编码 `Memory_read64(rcx=addr) �?rax = i64`：读�?64 位值�?    fun emitMemoryRead64(enc: X86Encoder): Unit {
+    /// 编码 `Memory_read64(rcx=addr) rax = i64`：读64 位值
+    fun emitMemoryRead64(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitLoadIndexed8("rax", "rcx", "rsp", 0)
         enc.emitRet()
     }
 
-    /// 编码 `Memory_alloc(rcx=n) �?rax = ptr`：调�?runtime_emitObjectAlloc 分配内存�?    fun emitMemoryAlloc(enc: X86Encoder): Unit {
+    /// 编码 `Memory_alloc(rcx=n) rax = ptr`：调runtime_emitObjectAlloc 分配内存
+    fun emitMemoryAlloc(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
-        // rcx = n (已设�?
+        // rcx = n (已设
         enc.emitCallRel("runtime_emitObjectAlloc")
         enc.emitRet()
     }
 
-    /// 编码 `Memory_free(rcx=addr)`：bump 分配器无需释放（no-op）�?    fun emitMemoryFree(enc: X86Encoder): Unit {
+    /// 编码 `Memory_free(rcx=addr)`：bump 分配器无需释放（no-op）
+    fun emitMemoryFree(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitRet()
     }
 
     // ── Step 4: Stdlib 函数实现 ──
 
-    /// 编码 `__throw(rcx=msg)` �?打印错误�?exit(1)�?    fun emitThrow(enc: X86Encoder): Unit {
+    /// 编码 `__throw(rcx=msg)` 打印错误exit(1)
+    fun emitThrow(enc: X86Encoder): Unit {
         enc.emitPrologue(0x20)
         enc.emitStackStore(-0x10, "rcx")
         enc.emitCallRel("println")
@@ -1032,14 +1199,16 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// 编码 `arrayListOf()` �?调用 __list_alloc(0)�?    fun emitArrayListOf(enc: X86Encoder): Unit {
+    /// 编码 `arrayListOf()` 调用 __list_alloc(0)
+    fun emitArrayListOf(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitXorRR("rcx", "rcx")
         enc.emitCallRel("__list_alloc")
         enc.emitRet()
     }
 
-    /// 编码 `Collections.indexOf(rcx=list, rdx=elem) �?rax = index or -1`�?    /// list layout: [count:8][e0:8][e1:8]...
+    /// 编码 `Collections.indexOf(rcx=list, rdx=elem) rax = index or -1`
+    /// list layout: [count:8][e0:8][e1:8]...
     fun emitCollectionIndexOf(enc: X86Encoder): Unit {
         enc.emitPrologue(0x40)
         enc.emitStackStore(-0x10, "rcx")  // list
@@ -1054,7 +1223,7 @@ object PhotonRuntime {
         enc.emitStackLoad("rax", -0x10)
         // r8 = count = [list + 0]
         enc.emitLoadIndexed8("r8", "rax", "rsp", 0)
-        // cmp rdi, r8 �?if rdi >= count, not found
+        // cmp rdi, r8 if rdi >= count, not found
         enc.emitCmpRR("rdi", "r8")
         enc.emitJccLabel("ae", "cii_notfound")
         // rcx = [list + 8 + rdi*8] = element at index rdi
@@ -1083,7 +1252,8 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// 编码 `Collections.contains(rcx=list, rdx=elem) �?rax = 1 or 0`�?    fun emitCollectionContains(enc: X86Encoder): Unit {
+    /// 编码 `Collections.contains(rcx=list, rdx=elem) rax = 1 or 0`
+    fun emitCollectionContains(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitCallRel("Collections.indexOf")
         enc.emitCmpRI("rax", -1)
@@ -1095,7 +1265,8 @@ object PhotonRuntime {
         enc.emitRet()
     }
 
-    /// 编码 `Collections.remove(rcx=list, rdx=index) �?rax = removed elem`�?    /// list layout: [count:8][e0:8][e1:8]...
+    /// 编码 `Collections.remove(rcx=list, rdx=index) rax = removed elem`
+    /// list layout: [count:8][e0:8][e1:8]...
     fun emitCollectionRemove(enc: X86Encoder): Unit {
         enc.emitPrologue(0x40)
         enc.emitStackStore(-0x10, "rcx")  // list
@@ -1115,15 +1286,15 @@ object PhotonRuntime {
         enc.emitAddRI("rax", 8)
         enc.emitAddRR("rax", "r9")
         enc.emitLoadIndexed8("r8", "rax", "rsp", 0)
-        // r8 = removed element (保存返回�?
+        // r8 = removed element (保存返回
         enc.emitMovRR("rbx", "r8")
-        // 移动元素：从 index+1 �?count-1
+        // 移动元素：从 index+1 count-1
         // rsi = index + 1 (source)
         enc.emitIncRR("rsi")
         enc.emitLabel("cr_loop")
         // rdi = count - 1
         enc.emitDecRR("rdi")
-        // cmp rsi, rdi �?if rsi > rdi, done
+        // cmp rsi, rdi if rsi > rdi, done
         enc.emitCmpRR("rsi", "rdi")
         enc.emitJccLabel("ja", "cr_done")
         // rax = list + 8 + rsi*8 (source)
@@ -1157,31 +1328,36 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// stub: Collections.mapContainsKey 返回 0�?    fun emitCollectionMapContainsKey(enc: X86Encoder): Unit {
+    /// stub: Collections.mapContainsKey 返回 0
+    fun emitCollectionMapContainsKey(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRI("eax", 0)
         enc.emitRet()
     }
 
-    /// stub: transform 返回入参�?    fun emitTransform(enc: X86Encoder): Unit {
+    /// stub: transform 返回入参
+    fun emitTransform(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRR("rax", "rcx")
         enc.emitRet()
     }
 
-    /// stub: fromCharCode 返回 0�?    fun emitFromCharCode(enc: X86Encoder): Unit {
+    /// stub: fromCharCode 返回 0
+    fun emitFromCharCode(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRI("eax", 0)
         enc.emitRet()
     }
 
-    /// stub: ReadCStr 返回 0�?    fun emitReadCStr(enc: X86Encoder): Unit {
+    /// stub: ReadCStr 返回 0
+    fun emitReadCStr(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRI("eax", 0)
         enc.emitRet()
     }
 
-    /// 编码 `aura_mem_used_mb() �?rax = MB`。返�?heapBump �?/ 1024 / 1024�?    fun emitAuraMemUsedMb(enc: X86Encoder): Unit {
+    /// 编码 `aura_mem_used_mb() rax = MB`。返heapBump / 1024 / 1024
+    fun emitAuraMemUsedMb(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRIP("rax", "heapBump")
         enc.emitMovRI32("rdx", 0)
@@ -1192,8 +1368,10 @@ object PhotonRuntime {
 
     // ── print 实现（无换行）──
 
-    /// 编码 `print(rcx = char*)`�?    ///
-    /// �?println 相同，但不添加换行符�?    fun emitPrint(enc: X86Encoder): Unit {
+    /// 编码 `print(rcx = char*)`
+    ///
+    /// println 相同，但不添加换行符
+    fun emitPrint(enc: X86Encoder): Unit {
         enc.emitPrologue(PhotonRuntime.FRAME_SIZE)
 
         // 保存入参指针
@@ -1211,12 +1389,17 @@ object PhotonRuntime {
         enc.emitLabel("pr_strlen_done")
         enc.emitStackStore(PhotonRuntime.OFF_LEN, "rax")
 
-        // 获取 hStdOutput：PEB 走链（推导见 emitPrintln 中的注释�?        enc.emitMovGSSeg64("rax", 0x60)              // rax = PEB
-        enc.emitMovMemDisp8("rax", "rax", 0x20)      // rax = ProcessParameters (PEB+0x20)
-        enc.emitMovMemDisp8("rax", "rax", 0x28)      // rax = hStdOutput (ProcessParameters+0x28)
+        // 获取 hStdOutput：PEB 走链（推导见 emitPrintln 中的注释
+        enc.emitMovGSSeg64("rax", 0x60)
+              // rax = PEB
+        enc.emitMovMemDisp8("rax", "rax", 0x20)
+      // rax = ProcessParameters (PEB+0x20)
+        enc.emitMovMemDisp8("rax", "rax", 0x28)
+      // rax = hStdOutput (ProcessParameters+0x28)
         enc.emitStackStore(PhotonRuntime.OFF_HSTDOUT, "rax")
 
-        // NtWriteFile：写入字符串（无换行�?        enc.emitLeaStack("rax", PhotonRuntime.OFF_IOBLOCK)
+        // NtWriteFile：写入字符串（无换行
+        enc.emitLeaStack("rax", PhotonRuntime.OFF_IOBLOCK)
         enc.emitStackStore(PhotonRuntime.OFF_ARG5, "rax")
         enc.emitStackLoad("rax", PhotonRuntime.OFF_INPUT_PTR)
         enc.emitStackStore(PhotonRuntime.OFF_ARG6, "rax")
@@ -1226,31 +1409,39 @@ object PhotonRuntime {
         enc.emitStackStore(PhotonRuntime.OFF_ARG8, "rax")
         enc.emitStackStore(PhotonRuntime.OFF_ARG9, "rax")
         // EaLength 必须显式清零：NtWriteFile 的第 10 个参数，若栈上残留非 0
-        // 值，内核会尝试从 EaBuffer 复制扩展属性并导致访问违规�?        enc.emitStackStore(PhotonRuntime.OFF_ARG10, "rax")
+        // 值，内核会尝试从 EaBuffer 复制扩展属性并导致访问违规
+        enc.emitStackStore(PhotonRuntime.OFF_ARG10, "rax")
 
-        // ⚠️ Windows x64 syscall �?*�?1 个参数必须放�?r10**�?        // `syscall` 指令会把返回地址写进 rcx，因此内核从 r10 读取 arg1
-        // （ntdll �?stub 正是 `mov r10, rcx` 后再 `syscall`）�?        enc.emitStackLoad("r10", PhotonRuntime.OFF_HSTDOUT)
+        // ⚠️ Windows x64 syscall *1 个参数必须放r10**
+        // `syscall` 指令会把返回地址写进 rcx，因此内核从 r10 读取 arg1
+        // （ntdll stub 正是 `mov r10, rcx` 后再 `syscall`）
+        enc.emitStackLoad("r10", PhotonRuntime.OFF_HSTDOUT)
         enc.emitXorRR("rdx", "rdx")
         enc.emitXorRR("r8", "r8")
         enc.emitXorRR("r9", "r9")
-        SyscallEmitter.emitSyscall(enc, 0x08)  // NtWriteFile（本�?ntdll 实测 0x08�?
+        SyscallEmitter.emitSyscall(enc, 0x08)  // NtWriteFile（本ntdll 实测 0x08
         enc.emitEpilogue()
     }
 
     // ── puts 实现（带换行）──
 
-    /// 编码 `puts(rcx = char*)`�?    ///
-    /// �?println 相同：写入字符串并添加换行符�?    fun emitPuts(enc: X86Encoder): Unit {
+    /// 编码 `puts(rcx = char*)`
+    ///
+    /// println 相同：写入字符串并添加换行符
+    fun emitPuts(enc: X86Encoder): Unit {
         PhotonRuntime.emitPrintln(enc)
     }
 
     // ── toInt 实现 ──
 
-    /// 编码 `toInt(rcx = char*) �?rax = Int`�?    ///
-    /// 解析前导的十进制 ASCII 数字（支持负号），忽略尾部非数字字符�?    fun emitToInt(enc: X86Encoder): Unit {
+    /// 编码 `toInt(rcx = char*) rax = Int`
+    ///
+    /// 解析前导的十进制 ASCII 数字（支持负号），忽略尾部非数字字符
+    fun emitToInt(enc: X86Encoder): Unit {
         enc.emitPrologue(0x40)
 
-        // 检查前导负�?        enc.emitMovzxRegMemByte("rax", "rcx")
+        // 检查前导负
+        enc.emitMovzxRegMemByte("rax", "rcx")
         enc.emitCmpRI("rax", '-')
         enc.emitJccLabel("eq", "int_neg")
 
@@ -1304,10 +1495,14 @@ object PhotonRuntime {
 
     // ── toFloat 实现 ──
 
-    /// 编码 `toFloat(rcx = char*) �?rax = float`�?    ///
-    /// 简化的字符串到浮点转换：解析整数部分，忽略小数部分�?    /// 使用 toInt 解析字符串，然后转换�?float32�?    /// 
-    /// 注意：当前实现为简化版本（返回整数部分�?float32 表示），
-    /// 完整实现需�?FPU 指令支持�?    fun emitToFloat(enc: X86Encoder): Unit {
+    /// 编码 `toFloat(rcx = char*) rax = float`
+    ///
+    /// 简化的字符串到浮点转换：解析整数部分，忽略小数部分
+    /// 使用 toInt 解析字符串，然后转换float32
+    /// 
+    /// 注意：当前实现为简化版本（返回整数部分float32 表示），
+    /// 完整实现需FPU 指令支持
+    fun emitToFloat(enc: X86Encoder): Unit {
         enc.emitPrologue(0x50)
 
         // 保存非易失寄存器 rbx（下面用 rbx 做位长计数）
@@ -1319,7 +1514,8 @@ object PhotonRuntime {
         // 保存结果
         enc.emitStackStore(-0x20, "rax")
 
-        // 检查是否为�?        enc.emitStackLoad("rax", -0x20)
+        // 检查是否为
+        enc.emitStackLoad("rax", -0x20)
         enc.emitCmpRI("rax", 0)
         enc.emitJccLabel("eq", "tf_zero")
 
@@ -1327,7 +1523,9 @@ object PhotonRuntime {
         enc.emitCmpRI("rax", 0)
         enc.emitJccLabel("ge", "tf_nonneg")
 
-        // 负数：设置符号位，取�?        enc.emitMovRI32("ecx", 0x80000000)  // 符号�?        enc.emitXorRR("rdx", "rdx")
+        // 负数：设置符号位，取
+        enc.emitMovRI32("ecx", 0x80000000)  // 符号
+        enc.emitXorRR("rdx", "rdx")
         enc.emitSubRR("rdx", "rax")  // rdx = -rax
         enc.emitMovRR("rax", "rdx")
         enc.emitJmpLabel("tf_abs_done")
@@ -1336,11 +1534,13 @@ object PhotonRuntime {
         enc.emitXorRR("ecx", "ecx")  // 无符号位
 
         enc.emitLabel("tf_abs_done")
-        // rax = 绝对�? ecx = 符号�?(0x80000000 �?0)
+        // rax = 绝对 ecx = 符号(0x80000000 0)
 
-        // 保存绝对�?        enc.emitStackStore(-0x28, "rax")
+        // 保存绝对
+        enc.emitStackStore(-0x28, "rax")
 
-        // 计算位数（通过右移计数�?        enc.emitStackLoad("rbx", -0x28)
+        // 计算位数（通过右移计数
+        enc.emitStackLoad("rbx", -0x28)
         enc.emitXorRR("eax", "eax")  // eax = 位数计数
 
         enc.emitLabel("tf_count")
@@ -1356,16 +1556,18 @@ object PhotonRuntime {
         // 指数 = (位数 - 1) + 127
         enc.emitSubRI("eax", 1)
         enc.emitAddRI("eax", 127)
-        // eax = 指数（偏置后�?
-        // 左移指数到正确位�?        enc.emitShlRI("eax", 23)
+        // eax = 指数（偏置后
+        // 左移指数到正确位
+        enc.emitShlRI("eax", 23)
         // eax = 指数部分
 
-        // 构造尾数：原值去掉最高位，左移填�?23 �?        enc.emitStackLoad("rbx", -0x28)
-        // rbx = 原绝对�?
+        // 构造尾数：原值去掉最高位，左移填23
+         enc.emitStackLoad("rbx", -0x28)
+        // rbx = 原绝对
         // 计算 mask = (1 << (bit_length - 1)) - 1
         // 但位数已经被覆盖了，需要从 rbx 重新计算位数
-        // 简化：直接使用原值作为尾数（截断�?23 位）
-        enc.emitAndRR("rbx", "rbx")  // rbx = rbx & 0x7FFFFF (截断�?23 �?
+        // 简化：直接使用原值作为尾数（截断23 位）
+        enc.emitAndRR("rbx", "rbx")  // rbx = rbx & 0x7FFFFF (截断23 
         // 实际上需要不同的方法...
 
         // 简化实现：返回 0.0
@@ -1378,8 +1580,10 @@ object PhotonRuntime {
 
     // ── toString 实现 ──
 
-    /// 编码 `toString(rcx = Any) �?rax = char*`�?    ///
-    /// 将参数视�?char* 并原样返回（恒等函数）�?    fun emitToString(enc: X86Encoder): Unit {
+    /// 编码 `toString(rcx = Any) rax = char*`
+    ///
+    /// 将参数视char* 并原样返回（恒等函数）
+    fun emitToString(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRR("rax", "rcx")
         enc.emitEpilogue()
@@ -1387,26 +1591,34 @@ object PhotonRuntime {
 
     // ── ARC 支持 ──
 
-    /// 编码 `retain(rcx = obj*) �?obj*`：增加引用计数�?    ///
-    /// 简化实现：直接返回对象（无实际引用计数）�?    /// 完整实现需要对象头中的引用计数字段�?    fun emitRetain(enc: X86Encoder): Unit {
+    /// 编码 `retain(rcx = obj*) obj*`：增加引用计数
+    ///
+    /// 简化实现：直接返回对象（无实际引用计数）
+    /// 完整实现需要对象头中的引用计数字段
+    fun emitRetain(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRR("rax", "rcx")
         enc.emitEpilogue()
     }
 
-    /// 编码 `release(rcx = obj*) �?Unit`：减少引用计数�?    ///
-    /// 简化实现：无操作（无实际引用计数）�?    /// 完整实现需要对象头中的引用计数字段�?    fun emitRelease(enc: X86Encoder): Unit {
+    /// 编码 `release(rcx = obj*) Unit`：减少引用计数
+    ///
+    /// 简化实现：无操作（无实际引用计数）
+    /// 完整实现需要对象头中的引用计数字段
+    fun emitRelease(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitEpilogue()
     }
 
     // ── 目标文件产出 ──
 
-    /// 所有运行时函数名列表（逗号分隔）�?    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,io_open,io_close,io_read,io_write,io_access,Collections.listRemove"
+    /// 所有运行时函数名列表（逗号分隔）
+    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,io_open,io_close,io_read,io_write,io_access,Collections.listRemove"
 
-    /// 将所有运行时函数编码到目标文件中，返�?COFF hex�?    fun buildRuntimeObject(): String {
+    /// 将所有运行时函数编码到目标文件中，返COFF hex
+    fun buildRuntimeObject(): String {
         val writer = PhotonObjectWriter()
-        // 按顺序编码每个函数，�?appendFunction 追加
+        // 按顺序编码每个函数，appendFunction 追加
         val enc1 = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitPrintln(enc1)
         writer.appendFunction(
@@ -1527,12 +1739,13 @@ object PhotonRuntime {
             PhotonObjectWriterUtils.joinRelocRecords(enc13.getRelocations())
         )
 
-        // ── Step 4: 对象分配�?+ 类构造器 ──
+        // ── Step 4: 对象分配+ 类构造器 ──
         val encOA = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitObjectAlloc(encOA)
         writer.appendFunction(encOA.toHex(), "runtime_emitObjectAlloc", PhotonObjectWriterUtils.joinRelocRecords(encOA.getRelocations()))
 
-        // 类构造器：直接硬编码（避�?VM arrayListOf+add bug �?substring 类型问题�?        var encCC = X86EncoderUtils.emptyEncoder()
+        // 类构造器：直接硬编码（避VM arrayListOf+add bug substring 类型问题
+        var encCC = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitClassConstructor(encCC, 32)
         writer.appendFunction(encCC.toHex(), "ArenaAllocator", PhotonObjectWriterUtils.joinRelocRecords(encCC.getRelocations()))
         encCC = X86EncoderUtils.emptyEncoder()
@@ -1675,7 +1888,7 @@ object PhotonRuntime {
         writer.appendFunction(encCC.toHex(), "JitLinkResult", PhotonObjectWriterUtils.joinRelocRecords(encCC.getRelocations()))
         println("[rt] all constructors appended, funcs=" + writer.functions.length)
 
-        // POSIX 函数（io_* 前缀避免�?Rust 编译�?native wrapper 符号冲突�?        println("[rt] encoding POSIX open")
+        // POSIX 函数（io_* 前缀避免Rust 编译native wrapper 符号冲突        println("[rt] encoding POSIX open")
         val encOpen = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitOpen(encOpen)
         println("[rt] open encoded, hex len=" + encOpen.toHex().length)
@@ -1769,17 +1982,18 @@ object PhotonRuntime {
         PhotonRuntime.emitAuraMemUsedMb(encMem)
         writer.appendFunction(encMem.toHex(), "aura_mem_used_mb", PhotonObjectWriterUtils.joinRelocRecords(encMem.getRelocations()))
 
-        // .data 段：toStrBuffer(32B) + �?arena(1MB) + bump 游标(8B) + 对象 bump(8B)
+        // .data 段：toStrBuffer(32B) + arena(1MB) + bump 游标(8B) + 对象 bump(8B)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,heapArena:1048576,heapBump:8,objBump:8"
+        writer.dataSymbolName = "toStrBuffer:32,heapArena:1048576,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8"
         println("[rt] dataSection set, dataChars=" + writer.dataSection.length + " textChars=" + writer.textSection.length)
 
-        // 构建符号表（包含所有函数和 .data 符号�?        println("[rt] before buildSymbols")
+        // 构建符号表（包含所有函数和 .data 符号        println("[rt] before buildSymbols")
         writer.buildSymbols(writer.functions, writer.stringConsts)
         return writer.emit()
     }
 
-    /// 生成用户代码目标文件（定�?`main`，引�?`println`）�?    fun buildMainObject(text: String): String {
+    /// 生成用户代码目标文件（定`main`，引`println`）
+    fun buildMainObject(text: String): String {
         val enc = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitPrintMain(enc, text)
         val writer = PhotonObjectWriter()
@@ -1791,9 +2005,10 @@ object PhotonRuntime {
         )
     }
 
-    // ── 目标文件落盘（VM 路径：hex 文本；AOT 路径�?PhotonNativeWriter）──
+    // ── 目标文件落盘（VM 路径：hex 文本；AOT 路径PhotonNativeWriter）──
 
-    /// 生成 runtime 目标文件并落盘为 hex 文本�?    fun writeRuntimeObjectHexFile(path: String): Boolean {
+    /// 生成 runtime 目标文件并落盘为 hex 文本
+    fun writeRuntimeObjectHexFile(path: String): Boolean {
         val writer = PhotonObjectWriter()
 
         val enc1 = X86EncoderUtils.emptyEncoder()
@@ -1856,7 +2071,7 @@ object PhotonRuntime {
         PhotonRuntime.emitListGet(enc13)
         writer.appendFunction(enc13.toHex(), "__list_get", PhotonObjectWriterUtils.joinRelocRecords(enc13.getRelocations()))
 
-        // ── Step 4: 对象分配�?+ 类构造器 ──
+        // ── Step 4: 对象分配+ 类构造器 ──
         val encOA = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitObjectAlloc(encOA)
         writer.appendFunction(encOA.toHex(), "runtime_emitObjectAlloc", PhotonObjectWriterUtils.joinRelocRecords(encOA.getRelocations()))
@@ -2091,7 +2306,8 @@ object PhotonRuntime {
         return writer.writeObjectHexFile(path)
     }
 
-    /// 生成用户代码目标文件并落盘为 hex 文本（同上，重新序列化落盘）�?    fun writeMainObjectHexFile(text: String, path: String): Boolean {
+    /// 生成用户代码目标文件并落盘为 hex 文本（同上，重新序列化落盘）
+    fun writeMainObjectHexFile(text: String, path: String): Boolean {
         val enc = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitPrintMain(enc, text)
         val writer = PhotonObjectWriter()
@@ -2106,11 +2322,12 @@ object PhotonRuntime {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PhotonRuntimeUtils �?顶层辅助函数（S1.6�?// ─────────────────────────────────────────────────────────────
+// PhotonRuntimeUtils 顶层辅助函数（S1.6// ─────────────────────────────────────────────────────────────
 
 object PhotonRuntimeUtils {
 
-    /// 生成 runtime 目标文件并落盘为 hex 文本（供 compileHir 链接使用）�?    fun writeRuntimeObjectHexFile(path: String): Boolean {
+    /// 生成 runtime 目标文件并落盘为 hex 文本（供 compileHir 链接使用）
+    fun writeRuntimeObjectHexFile(path: String): Boolean {
         val writer = PhotonObjectWriter()
 
         val enc1 = X86EncoderUtils.emptyEncoder()
@@ -2173,7 +2390,7 @@ object PhotonRuntimeUtils {
         PhotonRuntime.emitListGet(enc13)
         writer.appendFunction(enc13.toHex(), "__list_get", PhotonObjectWriterUtils.joinRelocRecords(enc13.getRelocations()))
 
-        // ── Step 4: 对象分配�?+ 类构造器 ──
+        // ── Step 4: 对象分配+ 类构造器 ──
         val encOA = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitObjectAlloc(encOA)
         writer.appendFunction(encOA.toHex(), "runtime_emitObjectAlloc", PhotonObjectWriterUtils.joinRelocRecords(encOA.getRelocations()))
@@ -2408,8 +2625,11 @@ object PhotonRuntimeUtils {
         return writer.writeObjectHexFile(path)
     }
 
-    /// 由真实代码生成的机器码生�?main 目标文件（S1.6）�?    ///
-    /// �?X86Emitter 产出�?hex + reloc 记录写入 COFF 目标文件�?    /// �?emitPrintMain 的区别：这里的机器码来自真实管线，不是手写�?    fun buildMainObjectFromEncoded(
+    /// 由真实代码生成的机器码生main 目标文件（S1.6）
+    ///
+    /// X86Emitter 产出hex + reloc 记录写入 COFF 目标文件
+    /// emitPrintMain 的区别：这里的机器码来自真实管线，不是手写
+    fun buildMainObjectFromEncoded(
         machineCodeHex: String,
         relocRecords: String,
         moduleName: String

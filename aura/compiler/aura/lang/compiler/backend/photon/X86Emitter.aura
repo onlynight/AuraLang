@@ -475,12 +475,22 @@ class X86Emitter {
             // 使用者按 `node.reg` 取到的仍是**旧值**（实测 `"x = " + toStr(x)`
             // 里 strcat 的第二个实参读成第一个实参的寄存器；println 拿不到实参）。
             val dst: String = this.regOfNode(node)
-            if (dst != "" && dst != "rax") {
-                if (dst.startsWith("stack:")) {
-                    this.enc.emitStackStore(this.stackOffsetOf(dst), "rax")
+            // 返回值落地：无论 dst 是什么，都必须把 rax 搬到目标位置。
+            // 若节点被 spill 到栈槽，直接存栈；否则 mov 到目标寄存器。
+            // 若 dst == "rax"（默认 fallback），也必须存栈，否则后续 call 会覆写 rax。
+            if (dst.startsWith("stack:")) {
+                this.enc.emitStackStore(this.stackOffsetOf(dst), "rax")
+            } else if (dst != "" && dst != "rax") {
+                this.enc.emitMovRR(dst, "rax")
+            } else {
+                // dst == "rax" 或 dst == "" - 必须保存到栈槽
+                val spillOffset: Int = if (this.allocator != null && this.allocator.isSpilled(nodeId)) {
+                    this.allocator.getSpillOffset(nodeId)
                 } else {
-                    this.enc.emitMovRR(dst, "rax")
+                    // 节点未 spill 且无寄存器：分配默认栈槽 (rbp-8)
+                    8
                 }
+                this.enc.emitStackStore(spillOffset, "rax")
             }
         }
     }
