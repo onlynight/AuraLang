@@ -286,6 +286,20 @@ class Lexer {
     /// 查询仅一次 `contains` + 两次切片。
     var kwTable: String = ""
 
+    /// 单字符字符串表（下标 = 字节码 0..255）：`peek` 的 O(1) 零分配来源。
+    ///
+    /// **性能关键**：旧实现 `peek(k) = toStr(this.src[i])` —— AOT 下字符串索引
+    /// `src[i]` 落到 C `aura_string_charAt`，而它**每次都要 `strlen(整个源码)`**
+    /// 做越界判定（O(|src|)）。`peek` 又被 `scanAll` / `skipTrivia` / `advance` /
+    /// `scanIdentifier` / `scanNumber` … 逐字符调用（每字符约 2~4 次）⇒ 词法分析
+    /// 整体是 **O(|src|²)**。实测：自举前端处理 446KB 的 `aot/Emit.aura` 时，
+    /// 单文件词法就吃掉 **36 秒**（占前端 `link()` 的 2/3）；100KB 级模块各 1.5~1.9s。
+    ///
+    /// 预建 256 个单字符串（只调 256 次 `fromCharCode`，一次性开销可忽略），
+    /// 此后 `peek` 退化成「一次 `charCodeAt`（内联访存、NUL 即越界）+ 列表下标」。
+    /// 表内元素是**不可变**的单字符串，可安全在整次扫描中共享。
+    var charTable: List<String> = arrayListOf<String>()
+
     init(source: String) {
         this.src = source
         this.n = source.length()
@@ -293,6 +307,12 @@ class Lexer {
         this.line = 1
         this.col = 1
         this.kwTable = TokenUtils.keywordSearchTable()
+        this.charTable = arrayListOf<String>()
+        var cc: Int = 0
+        while (cc < 256) {
+            this.charTable.add(String.fromCharCode(cc))
+            cc = cc + 1
+        }
         this.kindList = arrayListOf<String>()
         this.litList = arrayListOf<String>()
         this.spanStart = arrayListOf<Int>()
@@ -310,14 +330,21 @@ class Lexer {
 
     /// 前瞻第 k 个字符（k = 0 为当前字符）；越界返回空串。
     ///
-    /// 直接使用字符串索引 `src[i]`（VM 已支持，越界返回 null，此处显式拦为 `""`）。
+    /// ⚠️ **不能写成 `toStr(this.src[i])`**：AOT 下 `src[i]` 落到
+    /// `aura_string_charAt`，每次都要 `strlen(整个源码)`（O(|src|)），而本函数
+    /// 被逐字符调用 ⇒ 整体 O(|src|²)（见 `charTable` 的说明）。
+    /// 这里走 `charCodeAt`（内联访存、越界返回 -1、NUL 返回 0）查预建单字符表，
+    /// 零 strlen、零分配。
     private fun peek(k: Int): String {
         val i: Int = this.pos + k
-        if (i >= this.n) {
+        if (i < 0 || i >= this.n) {
             return ""
         }
-        // sema 将字符串索引推断为 `Char`，此处显式转回 `String`（1 字符）
-        return toStr(this.src[i])
+        val c: Int = this.src.charCodeAt(i) as Int
+        if (c <= 0 || c > 255) {
+            return ""
+        }
+        return this.charTable[c]
     }
 
     /// 前进一个字符。

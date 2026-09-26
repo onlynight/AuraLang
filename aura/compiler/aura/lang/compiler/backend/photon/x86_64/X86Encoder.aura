@@ -12,8 +12,17 @@ import aura.lang.std.String
 /// x86_64 指令编码器：将操作码+操作数编码为机器码字节。
 class X86Encoder {
 
-    /// 输出缓冲区（字节序列，用字符串表示十六进制）。
-    private var buffer: String = ""
+    /// 输出缓冲区：**逐字节**的 2 位十六进制串列表（下标即字节偏移）。
+    ///
+    /// ⚠ 旧实现是 `buffer: String` + `writeByte` 里 `buffer = buffer + toHex2(b)`：
+    /// Aura 的 String 不可变，每写 1 个字节都要把**已产出的全部机器码**整段拷贝
+    /// ⇒ O(字节数²)。自举 `Main.aura`（1200+ 函数、机器码 ~10^5 字节）实测在
+    /// 编码阶段吃掉 5.6 GB（`aura_mem_used` 直方图：`<=1M` 桶 53292 次 / 5629 MB），
+    /// 而 AOT 运行时**没有 GC**（`free_calls=0`），这些中间串全部驻留。
+    ///
+    /// 改为「每字节一个列表项」：写入 O(1)、按下标改写 O(1)（`patchInt32` 用它）、
+    /// 只在 `toHex()` 时做一次两两归并（O(字节数 · log 字节数)）。
+    private var byteHex: List<String> = arrayListOf<String>()
 
     /// 重定位项列表。
     private var relocations: List<String> = arrayListOf<String>()
@@ -28,7 +37,7 @@ class X86Encoder {
     private var pendingJumps: List<String> = arrayListOf<String>()
 
     init() {
-        this.buffer = ""
+        this.byteHex = arrayListOf<String>()
         this.relocations = arrayListOf<String>()
         this.offset = 0
         this.labels = arrayListOf<String>()
@@ -37,7 +46,7 @@ class X86Encoder {
 
     /// 重置编码器。
     fun reset(): Unit {
-        this.buffer = ""
+        this.byteHex = arrayListOf<String>()
         this.relocations = arrayListOf<String>()
         this.offset = 0
         this.labels = arrayListOf<String>()
@@ -48,7 +57,7 @@ class X86Encoder {
 
     /// 写入一个字节。
     fun writeByte(b: Int): Unit {
-        this.buffer = this.buffer + toHex2(b & 255)
+        this.byteHex.add(toHex2(b & 255))
         this.offset = this.offset + 1
     }
 
@@ -330,6 +339,31 @@ class X86Encoder {
         this.emitShiftImm(reg, 7, imm)
     }
 
+    /// 编码 SHL reg, CL（REX.W D3 /4）。
+    /// 先将 src 移到 cl，再执行 SHL reg, CL。
+    fun emitShlRR(dst: String, src: String): Unit {
+        this.emitPush("r12")
+        this.emitMovRR("r12", "rcx")
+        if (src != "cl") {
+            this.emitMovRR("rcx", src)
+        }
+        this.emitShiftCl(dst, 4)
+        this.emitMovRR("rcx", "r12")
+        this.emitPop("r12")
+    }
+
+    /// 编码 SHR reg, CL（REX.W D3 /5）。
+    fun emitShrRR(dst: String, src: String): Unit {
+        this.emitPush("r12")
+        this.emitMovRR("r12", "rcx")
+        if (src != "cl") {
+            this.emitMovRR("rcx", src)
+        }
+        this.emitShiftCl(dst, 5)
+        this.emitMovRR("rcx", "r12")
+        this.emitPop("r12")
+    }
+
     /// 编码 SETcc reg（写目标寄存器的**低 8 位**，高位保持不变）。
     ///
     /// ⚠️ 调用方必须紧跟着用 `emitMovzxRegReg8` 把低 8 位零扩展 —— 否则整寄存器
@@ -495,12 +529,17 @@ class X86Encoder {
 
     /// 在指定字节偏移处覆盖写入 4 字节小端整数。
     private fun patchInt32(byteOffset: Int, value: Int): Unit {
-        val at: Int = byteOffset * 2
-        if (at < 0 || at + 8 > this.buffer.length) {
+        if (byteOffset < 0 || byteOffset + 4 > this.byteHex.size) {
             return
         }
-        this.buffer = this.buffer.substring(0, at) + this.intToHex8(value) +
-            this.buffer.substring(at + 8, this.buffer.length)
+        // 小端写入 4 个字节（与 `intToHex8` 同序：先低字节）。
+        var x: Int = value
+        var i: Int = 0
+        while (i < 4) {
+            this.byteHex[byteOffset + i] = toHex2(x & 255)
+            x = x >> 8
+            i = i + 1
+        }
     }
 
     /// 4 字节小端整数的 hex 表示。
@@ -518,18 +557,21 @@ class X86Encoder {
 
     /// 取 `a|b|c` 形式记录的第 index 个字段（越界返回空串）。
     ///
-    /// 注意：不使用 `String.charAt`（当前 VM 无法解析该方法），
-    /// 统一用 `substring(i, i+1).charCodeAt(0)` 取单字符。
+    /// ⚠️ 用 `charCodeAt` 直取码值，**不要**用 `record.substring(i, i+1)` 或
+    /// `record[i]`：前者每次新建子串、后者发射为 `String_charAt` 调用并新建
+    /// 单字符字符串（AOT 运行时无 GC，全部驻留）。本方法被 `resolveLabels`
+    /// 在每个待回填跳转上各调 2 次，逐字符扫描 ⇒ 字符数 × 跳转数 次分配。
     private fun fieldOf(record: String, index: Int): String {
+        val len: Int = record.length
         var cur: Int = 0
         var start: Int = 0
         var i: Int = 0
-        while (i <= record.length) {
+        while (i <= len) {
             var isSep: Boolean = false
-            if (i == record.length) {
+            if (i == len) {
                 isSep = true
             } else {
-                if (record.substring(i, i + 1).charCodeAt(0) == 124) {  // '|'
+                if ((record.charCodeAt(i) as Int) == 124) {  // '|'
                     isSep = true
                 }
             }
@@ -545,12 +587,13 @@ class X86Encoder {
         return ""
     }
 
-    /// 十进制字符串转整数。
+    /// 十进制字符串转整数（`charCodeAt` 直取码值，零分配）。
     private fun decToInt(text: String): Int {
         var total: Int = 0
+        val len: Int = text.length
         var i: Int = 0
-        while (i < text.length) {
-            total = total * 10 + (text.substring(i, i + 1).charCodeAt(0) - 48)
+        while (i < len) {
+            total = total * 10 + ((text.charCodeAt(i) as Int) - 48)
             i = i + 1
         }
         return total
@@ -613,6 +656,14 @@ class X86Encoder {
         this.writeByte(this.rexByte(true, 0, r))
         this.writeByte(0xFF)
         this.writeByte(0xC0 + (r & 7))
+    }
+
+    /// 编码 DEC reg（REX.W FF /1）。
+    fun emitDecRR(reg: String): Unit {
+        val r: Int = this.regNum(reg)
+        this.writeByte(this.rexByte(true, 0, r))
+        this.writeByte(0xFF)
+        this.writeByte(0xC0 + (0x1 << 3) + (r & 7))
     }
 
     /// 编码 MOV byte ptr [rbp + disp32], imm8（C6 /0 ib）。
@@ -702,6 +753,24 @@ class X86Encoder {
     /// 语义与 `emitMovzxRegMemByte` 完全一致，故直接转发，避免两份编码。
     fun emitMovByteRegMem(dstReg: String, srcMemReg: String): Unit {
         this.emitMovzxRegMemByte(dstReg, srcMemReg)
+    }
+
+    /// 编码 MOVZX r64, byte ptr [base + index]（基址+索引寻址）。
+    ///
+    /// 例如：emitMovzxRegMemIndexed("eax", "rcx", "rdx") → movzx eax, byte [rcx+rdx]
+    ///
+    /// 用于 charCodeAt(rcx = char*, rdx = index) → rax = Int。
+    fun emitMovzxRegMemIndexed(dstReg: String, baseReg: String, indexReg: String): Unit {
+        val d: Int = this.regNum(dstReg)
+        val b: Int = this.regNum(baseReg)
+        val i: Int = this.regNum(indexReg)
+        val rex: Int = this.rexIndexed(false, d, i)
+        if (rex != 0x40) {
+            this.writeByte(rex)
+        }
+        this.writeByte(0x0F)
+        this.writeByte(0xB6)  // MOVZX r64, r/m8
+        this.writeMemIndexed(0, b, i)
     }
 
     // ── 内存比较（基址 + 索引 寻址）──
@@ -850,12 +919,37 @@ class X86Encoder {
         if (this.pendingJumps.size > 0) {
             this.resolveLabels()
         }
-        return this.buffer
+        return this.joinBytes()
+    }
+
+    /// 把逐字节缓冲归并成完整 hex 串。
+    ///
+    /// 两两归并：每层拷贝总量恒为 O(总长)，共 O(log 字节数) 层
+    /// ⇒ 总分配 O(总长 · log 总长)，避免 `r = r + c` 的 O(总长²)。
+    private fun joinBytes(): String {
+        if (this.byteHex.size == 0) {
+            return ""
+        }
+        var cur: List<String> = this.byteHex
+        while (cur.size > 1) {
+            val next: List<String> = arrayListOf<String>()
+            var i: Int = 0
+            while (i < cur.size) {
+                if (i + 1 < cur.size) {
+                    next.add(cur[i] + cur[i + 1])
+                } else {
+                    next.add(cur[i])
+                }
+                i = i + 2
+            }
+            cur = next
+        }
+        return cur[0]
     }
 
     /// 获取编码后的字节数。
     fun byteCount(): Int {
-        return this.buffer.length / 2
+        return this.byteHex.size
     }
 
     /// 获取重定位项列表。
@@ -902,6 +996,14 @@ class X86Encoder {
         this.writeByte(0xC1)
         this.writeByte(0xC0 + (ext << 3) + (r & 7))
         this.writeByte(imm & 15)
+    }
+
+    /// 编码 SHL/SHR reg, CL（REX.W D3 /N）。
+    private fun emitShiftCl(reg: String, ext: Int): Unit {
+        val r: Int = this.regNum(reg)
+        this.writeByte(this.rexByte(true, 0, r))
+        this.writeByte(0xD3)
+        this.writeByte(0xC0 + (ext << 3) + (r & 7))
     }
 
     /// 组合 REX 前缀字节：0x40 | W<<3 | R<<2 | X<<1 | B。

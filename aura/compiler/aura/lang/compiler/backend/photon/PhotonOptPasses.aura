@@ -267,12 +267,14 @@ class PhotonOptPasses {
         var neg: Boolean = false
         var i: Int = 0
         val len: Int = s.length
-        if (i < len && s[i] == '-') {
+        // `charCodeAt` 直取码值：`s[i]` 会多一次原生调用（且字符串形态的
+        // `s[i]` 会新建单字符字符串，AOT 运行时无 GC，全部驻留）。
+        if (i < len && (s.charCodeAt(i) as Int) == 45) {
             neg = true
             i = i + 1
         }
         while (i < len) {
-            val c: Int = s[i]
+            val c: Int = s.charCodeAt(i) as Int
             if (c >= 48 && c <= 57) {
                 result = result * 10 + (c - 48)
             }

@@ -5,6 +5,9 @@ param(
     [string]$Entry = 'D:\Code\AuraLang\aura\compiler\aura\lang\compiler\Main.aura',
     [string]$Module = 'aura-compiler',
     [string]$HatName = 'aura-compiler.hat',
+    # 打开阶段进度/心跳（[hat-front] / [Phase A-E] / [isa] / [hat-parse]）。
+    [switch]$Verbose,
+    # 节点级崩溃诊断 + <out>/photon_trace.log 落盘（隐含 -Verbose）。
     [switch]$Trace,
     [switch]$PerFn
 )
@@ -15,6 +18,13 @@ $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:
 $env:AURA_PHOTON_DEBUG_HIR = ''
 if ($Trace) { $env:AURA_PHOTON_TRACE = '1' } else { $env:AURA_PHOTON_TRACE = '' }
 if ($PerFn) { $env:AURA_SSA_PERFN = '1' } else { $env:AURA_SSA_PERFN = '' }
+# 阶段进度/心跳默认关：驱动 stdout 只留 ===...=== 协议标记 + METRICS 段。
+# Trace 隐含 Verbose（节点级诊断时自然也要看阶段进度）。
+if ($Verbose -or $Trace) {
+    $env:AURA_PHOTON_VERBOSE = '1'; $env:AURA_HAT_TRACE = '1'
+} else {
+    $env:AURA_PHOTON_VERBOSE = '';  $env:AURA_HAT_TRACE = ''
+}
 
 $Entry  = $Entry
 $Driver = Join-Path $Root 'build\hat-native\PhotonHatCompile.exe'

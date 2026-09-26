@@ -23,6 +23,7 @@ package aura.lang.compiler.vm
 import aura.lang.std.String
 import aura.lang.compiler.lexer.Span
 import aura.lang.collection.ArrayList
+import aura.lang.collection.Collections
 import aura.lang.collection.HashMap
 
 /// 栈帧（结构化对象，替代旧版字符串编码）。
@@ -144,7 +145,7 @@ class FrameManager {
         if (this.callDepth > 0) {
             // 从尾部移除（LIFO）
             if (this.frames.size > 0) {
-                this.frames.remove(this.frames.size - 1)
+                Collections.listRemove(this.frames, this.frames.size - 1)
             }
             this.callDepth = this.callDepth - 1
         }

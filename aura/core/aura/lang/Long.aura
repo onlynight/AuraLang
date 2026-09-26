@@ -35,23 +35,24 @@ value class Long {
 
         /// 从字符串解析为长整数
         fun parseLong(text: String): Long {
-            var result: Int = 0
-            var sign: Int = 1
+            val n: Int = text.length
+            var result: Long = 0
+            var sign: Long = 1
             var i: Int = 0
-            if (i < text.length && text[i] == '-') {
+            if (i < n && text.charCodeAt(i) == '-') {
                 sign = -1
                 i = i + 1
-            } else if (i < text.length && text[i] == '+') {
+            } else if (i < n && text.charCodeAt(i) == '+') {
                 i = i + 1
             }
-            while (i < text.length) {
-                val c = text[i]
-                if (c >= '0' && c <= '9') {
-                    result = result * 10 + (c - '0')
+            while (i < n) {
+                val c: Int = text.charCodeAt(i) as Int
+                if (c >= 48 && c <= 57) {
+                    result = result * 10 + (c - 48)
                 }
                 i = i + 1
             }
-            return (result * sign) as Long
+            return result * sign
         }
     }
 
@@ -94,6 +95,11 @@ value class Long {
     /// 检查两个长整数是否相等
     override fun equals(other: Long): Boolean {
         return this == other
+    }
+
+    /// 长整数哈希：避免走 Any 默认的字符串哈希路径。
+    override fun hashCode(): Int {
+        return (this and 0xFFFFFFFFL) as Int
     }
 
     // ── 算术方法 ──

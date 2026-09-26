@@ -3,7 +3,6 @@ package aura.lang.cli
 
 import aura.lang.std.String
 import aura.lang.std.FileSystem
-import aura.lang.native.process.ProcessNative
 
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.lexer.Token
@@ -123,7 +122,10 @@ object CompilerApiUtils {
         return result.llvmIr
     }
 
-    /// VM 执行源码 → exit code（AOT 路径：写入临时文件，编译为原生 exe 并执行）。
+    /// VM 执行源码 → exit code。
+    ///
+    /// 在 VM 模式下使用完整编译管线（Parser→Sema→HIR→MIR→Codegen→VM）解释执行；
+    /// 在原生模式下（AOT 自举产物）使用 AOT 路径编译并执行。
     fun vmRun(src: String): Int {
         val p = Parser(src)
         p.parseProgram()
@@ -137,20 +139,25 @@ object CompilerApiUtils {
             println("Semantic errors: " + toStr(checker.tcGetErrors().count))
             return 1
         }
-        // 写入临时文件，使用 AOT 路径编译并执行
-        val tmpPath: String = "build/tmp/vmrun_src.aura"
-        FileSystem.mkdirP("build/tmp")
-        FileSystem.writeText(tmpPath, src)
-        val outDir: String = "build/tmp"
-        val outPath: String = "build/tmp/vmrun_exe"
-        val code: Int = CompilerApiUtils.aotBuildExeFile(tmpPath, outPath, "")
-        if (code != 0) {
+        // AST → HIR
+        val hl = HirLowerer()
+        hl.lower(p.ast)
+        // HIR → MIR
+        val ml = MirLowerer()
+        val mirRoot = ml.lower(hl.hir)
+        // MIR → 字节码
+        val cg = Codegen()
+        val bc = cg.emit(ml.mir)
+        // VM 执行
+        val vm = VmRunner()
+        vm.loadBytecode(bc, cg.constPoolStr(), cg.funcTableStr())
+        vm.run()
+        val vmError = vm.getError()
+        if (vmError != "") {
+            println("Runtime error: " + vmError)
             return 1
         }
-        // 执行编译后的 exe（Windows 路径需反斜杠）
-        val exePath: String = Aot.aotWinPath(outPath + ".exe")
-        val runCode: Int = ProcessNative.run(exePath)
-        return runCode
+        return 0
     }
 
     /// 语义检查 → 错误信息字符串。
@@ -215,23 +222,34 @@ object CompilerApiUtils {
         return "<html><body><pre>" + src + "</pre></body></html>"
     }
 
-    /// 执行表达式 → 结果字符串（AOT 路径：写入临时文件，编译为原生 exe 并执行）。
+    /// 执行表达式 → 结果字符串（VM 路径：编译并执行，通过 println 输出结果）。
     fun evalExec(expr: String): String {
-        val wrapper: String = "fun main() { val _r: Any = " + expr + "; println(toStr(_r)) }"
-        val tmpPath: String = "build/tmp/eval_src.aura"
-        FileSystem.mkdirP("build/tmp")
-        FileSystem.writeText(tmpPath, wrapper)
-        val outPath: String = "build/tmp/eval_exe"
-        val code: Int = CompilerApiUtils.aotBuildExeFile(tmpPath, outPath, "")
-        if (code != 0) {
-            return "error: AOT compilation failed"
+        // 包装为 fun main()，执行表达式并打印结果
+        val wrapper: String = "fun main() { println(toStr(" + expr + ")) }"
+        val p = Parser(wrapper)
+        p.parseProgram()
+        if (p.errors.count > 0) {
+            return "error: parse errors: " + toStr(p.errors.count)
         }
-        val exePath: String = Aot.aotWinPath(outPath + ".exe")
-        val runCode: Int = ProcessNative.run(exePath)
-        if (runCode != 0) {
-            return "error: execution failed with code " + toStr(runCode)
+        val checker = TypeChecker()
+        checker.tcCheck(p.ast)
+        if (checker.tcGetErrors().count > 0) {
+            return "error: semantic errors: " + toStr(checker.tcGetErrors().count)
         }
-        return "evaluated (exit code: " + toStr(runCode) + ")"
+        val hl = HirLowerer()
+        hl.lower(p.ast)
+        val ml = MirLowerer()
+        ml.lower(hl.hir)
+        val cg = Codegen()
+        val bc = cg.emit(ml.mir)
+        val vm = VmRunner()
+        vm.loadBytecode(bc, cg.constPoolStr(), cg.funcTableStr())
+        vm.run()
+        val vmError = vm.getError()
+        if (vmError != "") {
+            return "error: runtime error: " + vmError
+        }
+        return "evaluated successfully"
     }
 
     /// 导出 C ABI 头文件 → 头文件文本。

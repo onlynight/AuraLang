@@ -9,6 +9,7 @@ package aura.lang.compiler.memory
 // - 替代旧版空壳 object Arc（wrap 创建 Map 但不连接到对象图，IncRef/DecRef 空转）。
 
 import aura.lang.collection.ArrayList
+import aura.lang.collection.Collections
 import aura.lang.collection.HashMap
 
 /// 堆槽位（含引用计数）。
@@ -47,7 +48,7 @@ class ArcHeap {
     fun alloc(): Int {
         var idx: Int
         if (freeList.size > 0) {
-            idx = freeList.remove(freeList.size - 1)
+            idx = Collections.listRemove(freeList, freeList.size - 1) as Long as Int
             val slot = slots.get(idx)
             slot.data = HashMap<String, Any>()
             slot.rc = 1

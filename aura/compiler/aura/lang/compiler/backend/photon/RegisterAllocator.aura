@@ -15,6 +15,7 @@ package aura.lang.compiler.backend.photon
 
 import aura.lang.std.String
 import aura.lang.std.Env
+import aura.lang.std.FileSystem
 
 /// 寄存器分配器：乐观图着色算法。
 class RegisterAllocator {
@@ -26,6 +27,28 @@ class RegisterAllocator {
     /// r8-r11）会被 `call` 本身的返回值、实参装载以及被调函数无条件覆写 ——
     /// 实测 `"x = " + toStr(x)` 里字符串地址被 `toStr` 的返回值顶掉。
     private var availColors: String = "rbx,rsi,rdi,r12,r13,r14,r15"
+
+    /// 可用颜色的**预切分列表**（`availColors` 按逗号拆开）。
+    ///
+    /// `getFreeColor` / `tryOptimisticRecolor` 旧实现对 `availColors` **每次调用都
+    /// `splitComma` 一次**，而它们在 Step 2 里每节点至少跑一遍 —— 这是 Phase D
+    /// 持续的分配源之一。颜色集合整个分配过程不变，切一次即可。
+    private var availList: List<String> = arrayListOf<String>()
+
+    /// `availList` 的「带分隔符」镜像：每项为 `"," + 颜色 + ","`。
+    ///
+    /// 配合 `seenDelim`（同样带首尾逗号的颜色串）用 `indexOf` 判成员 —— 见
+    /// `containsColor` 的说明。预先生成，避免热路径里 `"," + c + ","` 拼接。
+    private var availDelim: List<String> = arrayListOf<String>()
+
+    /// Phase D 定位探针输出路径（空串 = 关闭）。
+    private var probePath: String = ""
+
+    /// 探针缓冲区（有界截断，见 `raProbe` 的说明）。
+    private var probeBuf: String = ""
+
+    /// 探针序号。
+    private var probeStep: Int = 0
 
     /// 节点颜色表（**按 DAG 节点 ID 直接下标**，O(1)）。
     ///
@@ -56,14 +79,26 @@ class RegisterAllocator {
     /// 标签 → 指令索引映射（"bb0|0\nbb1|3\n..."），用于控制流感知的 liveness 分析。
     private var labelIndexMap: String = ""
 
-    /// 节点活跃区间表（"nodeId|firstIdx|lastIdx\n"，已做回边修正）。
-    private var nodeSpan: String = ""
+    /// 节点活跃区间起始指令索引（**按节点 ID 下标**，-1 = 未出现；已做回边修正）。
+    ///
+    /// ⚠️ 旧实现是 `nodeSpan` 扁平串 + `splitNewline` 逐行扫：`nodeFirstIdx` /
+    /// `nodeLastIdx` 每次都要把整张表 split 一遍（O(节点数) 次分配），而它们又在
+    /// `buildIntervalInterference` 里对**每个节点**再对全部节点调一轮
+    /// ⇒ 总代价 O(节点数³)。自举 `Main.aura`（2831 节点）下即 ~4×10¹⁰ 次分配，
+    /// 表现为 Phase D 100% CPU、内存不涨、永不返回。按下标直存即 O(1)。
+    private var spanFirst: List<Int> = arrayListOf<Int>()
+
+    /// 节点活跃区间结束指令索引（按节点 ID 下标）。
+    private var spanLast: List<Int> = arrayListOf<Int>()
 
     /// 循环回边表（"targetIdx|jumpIdx\n"）。
     private var backEdges: String = ""
 
-    /// 标签名 → 指令索引（"bbN|idx\n"）。
-    private var labelInstrMap: String = ""
+    /// 标签名表（与 `labelInstrIdxs` 平行，下标对应）。
+    private var labelNames: List<String> = arrayListOf<String>()
+
+    /// 标签 → 指令索引（与 `labelNames` 平行）。
+    private var labelInstrIdxs: List<Int> = arrayListOf<Int>()
 
     init() {
         this.colors = arrayListOf<String>()
@@ -74,14 +109,19 @@ class RegisterAllocator {
         this.frameLayout = ""
         this.maxLiveRegs = 0
         this.labelIndexMap = ""
-        this.nodeSpan = ""
+        this.spanFirst = arrayListOf<Int>()
+        this.spanLast = arrayListOf<Int>()
         this.backEdges = ""
-        this.labelInstrMap = ""
+        this.labelNames = arrayListOf<String>()
+        this.labelInstrIdxs = arrayListOf<Int>()
     }
 
     /// 主入口：执行寄存器分配。
     fun allocate(d: MachineDag): Unit {
         this.dag = d
+        this.probePath = this.readProbePath()
+        this.raProbe("allocate enter nodes=" + toStr(d.nodeCount) +
+                " instrs=" + toStr(d.instrCount))
         this.colors = arrayListOf<String>()
         this.spilled = ""
         this.callStack = ""
@@ -89,15 +129,24 @@ class RegisterAllocator {
         this.frameLayout = ""
         this.maxLiveRegs = 0
         this.labelIndexMap = ""
-        this.nodeSpan = ""
+        this.spanFirst = arrayListOf<Int>()
+        this.spanLast = arrayListOf<Int>()
         this.backEdges = ""
-        this.labelInstrMap = ""
+        this.labelNames = arrayListOf<String>()
+        this.labelInstrIdxs = arrayListOf<Int>()
+
+        // 颜色集合预切分（见 `availList` 的说明）：整个着色过程只切一次，
+        // 取代 `getFreeColor` / `tryOptimisticRecolor` 里每节点一次的 splitComma。
+        this.buildAvailTables()
 
         // Step -1: 回边（循环）分析与回边修正后的活跃区间。
         // 必须在着色前算好：着色逐节点进行，区间一算错就无法挽回
         //（见 buildBackEdges 的说明）。
         this.buildBackEdges()
+        this.raProbe("backEdges done edges=" + toStr(this.backEdges.length))
         this.buildNodeSpans()
+        this.raProbe("spans done first=" + toStr(this.spanFirst.size) +
+                " last=" + toStr(this.spanLast.size))
 
         // Phase D: 基于 liveness 的干扰图构建
         // Step 0: **登记固定寄存器节点**。
@@ -115,6 +164,7 @@ class RegisterAllocator {
             }
             fi = fi + 1
         }
+        this.raProbe("step0 done colors=" + toStr(this.colors.size))
 
         // Step 1: 活跃区间在 `buildIntervalInterference` 里现场扫描指令流计算
 
@@ -130,8 +180,16 @@ class RegisterAllocator {
                 val interference: String = this.buildIntervalInterference(i)
                 this.assignColor(i, interference)
             }
+            // 每 4000 节点打一次点：OOM 时最后一行即「卡在第几个节点」。
+            if (i % 4000 == 3999) {
+                this.raProbe("step2 i=" + toStr(i + 1) + "/" + toStr(d.nodeCount) +
+                        " colors=" + toStr(this.colors.size) +
+                        " spills=" + toStr(this.spillSlots))
+            }
             i = i + 1
         }
+        this.raProbe("step2 done colors=" + toStr(this.colors.size) +
+                " spills=" + toStr(this.spillSlots))
 
         // S1.4: 将颜色回写到 DagNode.reg
         this.applyColors()
@@ -222,22 +280,17 @@ class RegisterAllocator {
     }
 
     /// 查找空闲颜色。
+    ///
+    /// 用预切分的 `availList` + 零分配的 `containsColor`（见其说明）。旧实现
+    /// 对 `availColors` 和 `used` 各 `splitComma` 一次，本函数在 Step 2 每节点
+    /// 至少调用一遍 —— 是 Phase D 的另一处持续分配源。
     private fun getFreeColor(used: String): String {
-        val avail: List<String> = this.splitComma(this.availColors)
-        val usedList: List<String> = this.splitComma(used)
+        val usedDelim: String = "," + used + ","
         var i: Int = 0
-        while (i < avail.size) {
-            var conflict: Boolean = false
-            var j: Int = 0
-            while (j < usedList.size) {
-                if (avail[i] == usedList[j]) {
-                    conflict = true
-                    break
-                }
-                j = j + 1
-            }
-            if (!conflict) {
-                return avail[i]
+        val n: Int = this.availList.size
+        while (i < n) {
+            if (!this.containsColor(usedDelim, this.availList[i])) {
+                return this.availList[i]
             }
             i = i + 1
         }
@@ -246,7 +299,6 @@ class RegisterAllocator {
 
     /// 乐观重着色。
     private fun tryOptimisticRecolor(nodeId: Int, interference: String): Boolean {
-        val avail: List<String> = this.splitComma(this.availColors)
         val usedList: List<String> = this.splitComma(interference)
         var i: Int = 0
         while (i < usedList.size) {
@@ -453,7 +505,10 @@ class RegisterAllocator {
         var pos: Int = 0
         val len: Int = this.labelIndexMap.length
         while (pos <= len) {
-            if (pos == len || this.labelIndexMap.charAt(pos).toString() == "\n") {
+            // ⚠️ `charAt(pos)` 在 AOT 下落到 C `aura_string_charAt`，会先
+            // `strlen` 整个 labelIndexMap（O(|map|)）—— 逐字符调用即 O(|map|²)。
+            // `charCodeAt` 是内联访存（NUL 即越界），零分配零 strlen。
+            if (pos == len || (this.labelIndexMap.charCodeAt(pos) as Int) == 10) {
                 val line: String = this.labelIndexMap.substring(lineStart, pos)
                 if (line.length > targetKey.length && line.startsWith(targetKey)) {
                     val idxStr: String = line.substring(targetKey.length, line.length)
@@ -530,7 +585,92 @@ class RegisterAllocator {
         return result
     }
 
-    /// 检查逗号分隔字符串中是否包含指定节点。
+    /// 切分颜色集合（见 `availList` 说明）。整个着色过程只调用一次。
+    private fun buildAvailTables(): Unit {
+        val parts: List<String> = this.splitComma(this.availColors)
+        this.availList = arrayListOf<String>()
+        this.availDelim = arrayListOf<String>()
+        var i: Int = 0
+        while (i < parts.size) {
+            if (parts[i] != "") {
+                this.availList.add(parts[i])
+                this.availDelim.add("," + parts[i] + ",")
+            }
+            i = i + 1
+        }
+    }
+
+    /// 读取探针输出路径；空串表示关闭。
+    ///
+    /// 与 Phase C 的 `InstructionSelection.readProbePath` 同一套开关：
+    ///   `AURA_RA_PROBE=1`  或  `AURA_SEL_PROBE=1`  或  `AURA_MEM_STATS=1`
+    ///   `AURA_RA_PROBE_PATH`  输出文件（默认 `<AURA_HAT_OUT>/ra_probe.log`）
+    private fun readProbePath(): String {
+        if (Env.get("AURA_RA_PROBE", "") != "1" &&
+            Env.get("AURA_SEL_PROBE", Env.get("AURA_MEM_STATS", "")) != "1") {
+            return ""
+        }
+        val p: String = Env.get("AURA_RA_PROBE_PATH", "")
+        if (p != "") { return p }
+        val dir: String = Env.get("AURA_HAT_OUT", "")
+        if (dir == "") { return "" }
+        return dir + "/ra_probe.log"
+    }
+
+    /// Phase D **定位探针**：把当前上下文立即落盘（用于锁定内存失控点）。
+    ///
+    /// 与 `InstructionSelection.selProbe` 同样采用**有界截断**（只保留尾部
+    /// 2.5KB，每次重写一个 ≤3KB 小文件）——累积式落盘本身就会成为持续分配
+    /// 源，那正是我们要抓的病。OOM 时本文件的最后几行就是出事的精确上下文
+    /// （哪一步、处理到第几个节点）。
+    private fun raProbe(msg: String): Unit {
+        if (this.probePath == "") { return }
+        this.probeStep = this.probeStep + 1
+        this.probeBuf = this.probeBuf + "[s" + this.probeStep + "] " + msg + "\n"
+        if (this.probeBuf.length > 3000) {
+            this.probeBuf = this.probeBuf.substring(this.probeBuf.length - 2500)
+        }
+        FileSystem.writeText(this.probePath, this.probeBuf)
+    }
+
+    /// 检查「带首尾逗号」的颜色串中是否已包含指定颜色（**零分配**）。
+    ///
+    /// ⚠️ 这是 Phase D 的内存/耗时黑洞，旧实现是：
+    ///
+    ///     val parts: List<String> = this.splitComma(set)
+    ///     while (i < parts.size) { if (parts[i] == node) return true; ... }
+    ///
+    /// `splitComma` → `String.split` → C 层 `aura_lang_std_String_split`：每次
+    /// 新建一个 `AuraDynList`（2 次 `aura_mem_alloc`）、每个元素再
+    /// `aura_substr_dup` 一次。而本函数在 `buildIntervalInterference` 的**内层
+    /// 循环**里被调用 —— 每个 DAG 节点都要对每个「已着色节点」各调一次。
+    ///
+    /// 自举 `Main.aura`（62,984 节点）实测：`splitComma` 被调用 **41,424,177**
+    /// 次，连带 **402,152,493** 次 `aura_substr_dup`，AOT 运行时无 GC，全都不
+    /// 释放 → 8 GiB 上限在 Phase D 被打穿（退出码 70）。
+    ///
+    /// 这里改用「首尾补逗号 + `indexOf`」：颜色串 `rbx,rsi,rdi` 记成
+    /// `,rbx,rsi,rdi,`，查找 `rbx` 即查 `,rbx,`。`indexOf` 是逐字符码比较
+    /// （见 `String.indexOf` 的说明），零分配且失配时通常只比 1 个字符即跳出。
+    /// 带分隔符能避免子串误判（如查 `rdi` 不会命中 `rdi1`）。
+    private fun containsColor(seenDelim: String, color: String): Boolean {
+        if (seenDelim == "" || color == "") { return false }
+        var j: Int = 0
+        val n: Int = this.availDelim.size
+        while (j < n) {
+            if (this.availList[j] == color) {
+                return seenDelim.indexOf(this.availDelim[j]) >= 0
+            }
+            j = j + 1
+        }
+        return false
+    }
+
+    /// 检查逗号分隔字符串中是否包含指定节点（**冷路径**，仅 liveness 分析用）。
+    ///
+    /// ⚠️ 不要用本函数做热路径成员判定：它按分隔符切分整串，每次调用都要新建
+    /// 一个 `List` 并为每个元素各分配一个子串。着色主循环请用零分配的
+    /// `containsColor`（见其说明）。
     private fun containsNode(set: String, node: String): Boolean {
         if (set == "" || node == "") { return false }
         val parts: List<String> = this.splitComma(set)
@@ -541,8 +681,17 @@ class RegisterAllocator {
         }
         return false
     }
-
     /// 基于**活跃区间**构建干扰列表（区间现场扫描指令流计算，不落表）。
+    ///
+    /// ⚠️ **两处复杂度修正，缺一不可**（自举 `Main.aura`，62,984 节点）：
+    ///
+    /// 1. **成员判定零分配** —— 旧写法 `!this.containsNode(result, c)` 每次
+    ///    `splitComma` 一次（见 `containsColor` 的说明）。实测 41,424,177 次
+    ///    `splitComma` + 402,152,493 次 `substr_dup`，AOT 运行时无 GC 全不释放
+    ///    → 8 GiB 上限在 Phase D 被打穿（退出码 70）。
+    /// 2. **颜色收齐即停** —— 干扰集合只可能来自 `availColors`（外加少量固定
+    ///    寄存器名）。一旦已收齐全部可用颜色，继续扫描也不可能再新增颜色，
+    ///    直接结束内层循环。旧实现无条件扫完全部节点。
     ///
     /// 干扰 = 所有活跃区间与当前节点重叠、且**已分配寄存器**的节点颜色。
     ///
@@ -555,22 +704,29 @@ class RegisterAllocator {
     /// 否则循环携带值会被线性区间错误地判为「短命」。
     private fun buildIntervalInterference(nodeId: Int): String {
         var result: String = ""
+        var seenDelim: String = ""
         val firstN: Int = this.nodeFirstIdx(nodeId)
         val lastN: Int = this.nodeLastIdx(nodeId)
         if (firstN < 0) {
             // 没有活跃区间信息：退化为「args 颜色」这一保守近似
             return this.buildInterference(nodeId)
         }
+        // 可用颜色收齐即停（见下方说明第 2 点）。
+        val availCount: Int = this.availList.size
+        var distinct: Int = 0
         var m: Int = 0
         while (m < this.dag.nodeCount) {
+            if (distinct >= availCount) { break }
             if (m != nodeId) {
                 val c: String = this.colorGet(m)
-                if (c != "" && !this.containsNode(result, c)) {
+                if (c != "" && !this.containsColor(seenDelim, c)) {
                     val firstM: Int = this.nodeFirstIdx(m)
                     val lastM: Int = this.nodeLastIdx(m)
                     if (firstM >= 0 && firstN <= lastM && firstM <= lastN) {
                         if (result != "") { result = result + "," }
                         result = result + c
+                        seenDelim = "," + result + ","
+                        distinct = distinct + 1
                     }
                 }
             }
@@ -591,14 +747,16 @@ class RegisterAllocator {
     /// 循环结束后打印 `1`（应为 100）。
     private fun buildBackEdges(): Unit {
         this.backEdges = ""
-        this.labelInstrMap = ""
+        this.labelNames = arrayListOf<String>()
+        this.labelInstrIdxs = arrayListOf<Int>()
         val instrs: List<DagInstruction> = this.dag.instrs
         var i: Int = 0
         while (i < instrs.size) {
             if (instrs[i].template == "label") {
                 val parts: List<String> = this.splitPipe(instrs[i].nodes)
                 if (parts.size >= 1 && parts[0] != "") {
-                    this.labelInstrMap = this.labelInstrMap + parts[0] + "|" + toStr(i) + "\n"
+                    this.labelNames.add(parts[0])
+                    this.labelInstrIdxs.add(i)
                 }
             }
             i = i + 1
@@ -621,140 +779,141 @@ class RegisterAllocator {
 
     /// 标签名 → 指令索引。
     private fun labelInstrIndexOf(name: String): Int {
-        if (this.labelInstrMap == "") { return -1 }
-        val targetKey: String = name + "|"
-        val lines: List<String> = this.splitNewline(this.labelInstrMap)
         var i: Int = 0
-        while (i < lines.size) {
-            if (lines[i] != "" && lines[i].startsWith(targetKey)) {
-                val rest: String = lines[i].substring(targetKey.length, lines[i].length)
-                return strToInt(rest)
+        while (i < this.labelNames.size) {
+            if (this.labelNames[i] == name) {
+                return this.labelInstrIdxs[i]
             }
             i = i + 1
         }
         return -1
     }
 
-    /// 计算所有节点的**回边修正后**活跃区间，写入 `nodeSpan`
-    ///（格式 `nodeId|firstIdx|lastIdx\n`）。
+    /// 计算所有节点的**回边修正后**活跃区间，写入 `spanFirst` / `spanLast`
+    ///（按节点 ID 下标）。
     ///
     /// 修正规则：若节点的线性区间 [f,l] 与某条回边区间 [t,j]（t <= j，且
     /// t 是回边目标、j 是回边指令索引）**相交但不被其包含**，说明该值跨越了
     /// 循环边界（在本轮迭代定义、下一轮迭代使用），把区间扩展到覆盖该回边。
     /// 迭代到不动点，嵌套循环随之逐层扩展。
     private fun buildNodeSpans(): Unit {
-        this.nodeSpan = ""
+        this.spanFirst = arrayListOf<Int>()
+        this.spanLast = arrayListOf<Int>()
+        var n: Int = this.dag.nodeCount
         var i: Int = 0
-        while (i < this.dag.nodeCount) {
-            var f: Int = this.rawFirstIdx(i)
-            var l: Int = this.rawLastIdx(i)
-            if (f >= 0 && this.backEdges != "") {
-                var changed: Boolean = true
-                var guard: Int = 0
-                while (changed && guard < 8) {
-                    changed = false
-                    guard = guard + 1
-                    val edges: List<String> = this.splitNewline(this.backEdges)
-                    var e: Int = 0
-                    while (e < edges.size) {
-                        if (edges[e] != "") {
-                            val p: List<String> = this.splitPipe(edges[e])
-                            if (p.size >= 2) {
-                                val t: Int = strToInt(p[0])
-                                val j: Int = strToInt(p[1])
-                                val intersects: Boolean = f <= j && l >= t
-                                val contained: Boolean = f >= t && l <= j
-                                if (intersects && !contained) {
-                                    if (f > t) { f = t; changed = true }
-                                    if (l < j) { l = j; changed = true }
-                                }
-                            }
-                        }
-                        e = e + 1
-                    }
-                }
-            }
-            this.nodeSpan = this.nodeSpan + toStr(i) + "|" + toStr(f) + "|" + toStr(l) + "\n"
+        while (i < n) {
+            this.spanFirst.add(-1)
+            this.spanLast.add(-1)
             i = i + 1
         }
-    }
 
-    /// 读取 `nodeSpan` 中的字段（field=1 首索引，field=2 末索引）。
-    private fun spanField(nodeId: Int, field: Int): Int {
-        if (this.nodeSpan == "") { return -1 }
-        val targetKey: String = toStr(nodeId) + "|"
-        val lines: List<String> = this.splitNewline(this.nodeSpan)
-        var i: Int = 0
-        while (i < lines.size) {
-            val line: String = lines[i]
-            if (line != "" && line.startsWith(targetKey)) {
-                val parts: List<String> = this.splitPipe(line)
-                if (parts.size >= 3) {
-                    return strToInt(parts[field])
-                }
-            }
-            i = i + 1
-        }
-        return -1
-    }
-
-    /// 节点首次出现的指令索引（回边修正后；-1 = 未出现）。
-    private fun nodeFirstIdx(nodeId: Int): Int {
-        return this.spanField(nodeId, 1)
-    }
-
-    /// 节点最后出现的指令索引（回边修正后；-1 = 未出现）。
-    private fun nodeLastIdx(nodeId: Int): Int {
-        return this.spanField(nodeId, 2)
-    }
-
-    /// 节点首次出现的指令索引（未修正）。
-    private fun rawFirstIdx(nodeId: Int): Int {
+        // ── 单遍扫描指令流，填每个节点的首次/末次索引 ──
+        //
+        // 旧实现是「每个节点各扫一遍全部指令」（`rawFirstIdx` / `rawLastIdx`），
+        // 且每次判定都要 `splitComma` 分配 —— O(节点数 × 指令数) 次循环叠加
+        // 同量级字符串分配。这里改成对指令流只扫一遍：O(指令数 × 操作数)。
         val instrs: List<DagInstruction> = this.dag.instrs
         var j: Int = 0
         while (j < instrs.size) {
-            if (this.instrTouches(instrs[j], nodeId)) { return j }
+            this.touchInstr(instrs[j], j)
             j = j + 1
         }
-        return -1
-    }
 
-    /// 节点最后出现的指令索引（未修正）。
-    private fun rawLastIdx(nodeId: Int): Int {
-        val instrs: List<DagInstruction> = this.dag.instrs
-        var j: Int = instrs.size - 1
-        while (j >= 0) {
-            if (this.instrTouches(instrs[j], nodeId)) { return j }
-            j = j - 1
+        // ── 回边修正 ──
+        // 回边表解析一次（旧实现在每个节点 × 每轮迭代里 split 一次）。
+        if (this.backEdges != "") {
+            val edges: List<String> = this.splitNewline(this.backEdges)
+            val edgeT: List<Int> = arrayListOf<Int>()
+            val edgeJ: List<Int> = arrayListOf<Int>()
+            var e: Int = 0
+            while (e < edges.size) {
+                if (edges[e] != "") {
+                    val p: List<String> = this.splitPipe(edges[e])
+                    if (p.size >= 2) {
+                        edgeT.add(strToInt(p[0]))
+                        edgeJ.add(strToInt(p[1]))
+                    }
+                }
+                e = e + 1
+            }
+            i = 0
+            while (i < n) {
+                var f: Int = this.spanFirst[i]
+                var l: Int = this.spanLast[i]
+                if (f >= 0) {
+                    var changed: Boolean = true
+                    var guard: Int = 0
+                    while (changed && guard < 8) {
+                        changed = false
+                        guard = guard + 1
+                        var k: Int = 0
+                        while (k < edgeT.size) {
+                            val t: Int = edgeT[k]
+                            val jj: Int = edgeJ[k]
+                            val intersects: Boolean = f <= jj && l >= t
+                            val contained: Boolean = f >= t && l <= jj
+                            if (intersects && !contained) {
+                                if (f > t) { f = t; changed = true }
+                                if (l < jj) { l = jj; changed = true }
+                            }
+                            k = k + 1
+                        }
+                    }
+                }
+                this.spanFirst[i] = f
+                this.spanLast[i] = l
+                i = i + 1
+            }
         }
-        return -1
     }
 
-    /// 指令是否「触及」该节点：定义、操作数、或 call 节点的实参装载点。
+    /// 把指令 j 触及的节点登记进活跃区间表（首次索引只记一次，末次索引持续覆盖）。
+    private fun touchNode(nid: Int, instrIdx: Int): Unit {
+        if (nid < 0 || nid >= this.spanFirst.size) { return }
+        if (this.spanFirst[nid] < 0) {
+            this.spanFirst[nid] = instrIdx
+        }
+        this.spanLast[nid] = instrIdx
+    }
+
+    /// 登记一条指令「触及」的全部节点：定义、操作数、以及操作数节点自身的实参。
     ///
     /// 第三项很关键：`call` 的实参寄存器装载由 X86Emitter 现场发 `mov argreg, src`，
     /// 不在 DAG 指令里；不把实参算作使用点的话，「等着一会儿当实参」的值活跃
     /// 区间会过早结束，寄存器被复用 → 实参取到错误的值。
-    private fun instrTouches(instr: DagInstruction, nodeId: Int): Boolean {
-        if (instr.output == nodeId) { return true }
+    private fun touchInstr(instr: DagInstruction, instrIdx: Int): Unit {
+        if (instr.output >= 0) {
+            this.touchNode(instr.output, instrIdx)
+        }
         var k: Int = 0
         while (k < instr.nodeCount()) {
             val nid: Int = instr.nodeAt(k)
-            if (nid == nodeId) { return true }
+            this.touchNode(nid, instrIdx)
             if (nid >= 0) {
                 val cn: DagNode = this.dag.nodeOf(nid)
                 if (cn.args != "") {
                     val parts: List<String> = this.splitComma(cn.args)
                     var ai: Int = 0
                     while (ai < parts.size) {
-                        if (strToInt(parts[ai]) == nodeId) { return true }
+                        this.touchNode(strToInt(parts[ai]), instrIdx)
                         ai = ai + 1
                     }
                 }
             }
             k = k + 1
         }
-        return false
+    }
+
+    /// 节点首次出现的指令索引（回边修正后；-1 = 未出现）。
+    private fun nodeFirstIdx(nodeId: Int): Int {
+        if (nodeId < 0 || nodeId >= this.spanFirst.size) { return -1 }
+        return this.spanFirst[nodeId]
+    }
+
+    /// 节点最后出现的指令索引（回边修正后；-1 = 未出现）。
+    private fun nodeLastIdx(nodeId: Int): Int {
+        if (nodeId < 0 || nodeId >= this.spanLast.size) { return -1 }
+        return this.spanLast[nodeId]
     }
 
     // ── Phase D: 栈帧布局 ──
@@ -906,8 +1065,20 @@ class RegisterAllocator {
         var i: Int = 0
         val tlen: Int = target.length
         val len: Int = withBoundaries.length
+        // ⚠️ 不能写 `withBoundaries.substring(i, i + tlen) == target`：AOT 下
+        // `substring` 每次都要 `strlen(整个串)`（O(|s|)），逐位置比较就是
+        // O(|s|²)。本方法对每个节点各调一次，是 Phase D 的主要热点之一。
+        // 改用 charCodeAt 逐字符比较（内联访存，零分配）。
         while (i <= len - tlen) {
-            if (withBoundaries.substring(i, i + tlen) == target) {
+            var j: Int = 0
+            var ok: Boolean = true
+            while (j < tlen && ok) {
+                if ((withBoundaries.charCodeAt(i + j) as Int) != (target.charCodeAt(j) as Int)) {
+                    ok = false
+                }
+                j = j + 1
+            }
+            if (ok) {
                 return true
             }
             i = i + 1
@@ -928,7 +1099,8 @@ class RegisterAllocator {
         var lastComma: Int = -1
         var i: Int = this.callStack.length - 1
         while (i >= 0) {
-            if (this.callStack.charAt(i).toString() == ",") { lastComma = i; break }
+            // `charAt` 每次都要 strlen 整个 callStack（见 labelToIndex 的说明）。
+            if ((this.callStack.charCodeAt(i) as Int) == 44) { lastComma = i; break }
             i = i - 1
         }
         if (lastComma < 0) {
@@ -987,7 +1159,8 @@ class RegisterAllocator {
     private fun hexToInt(text: String): Int {
         var total: Int = 0
         var i: Int = 0
-        while (i < text.length) {
+        val len: Int = text.length
+        while (i < len) {
             val c: Int = text.charCodeAt(i)
             var digit: Int = -1
             if (c >= 48 && c <= 57) { digit = c - 48 }

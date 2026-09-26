@@ -133,18 +133,19 @@ object MathCore {
 
     /// 幂函数
     fun pow(base: Double, exp: Double): Double {
-        // 简化实现：只支持整数指数
         val e: Long = exp as Long
+        var b: Double = base
         var result: Double = 1.0
-        if (e >= 0) {
-            for (i in 0..e) {
-                result = result * base
+        var i: Long = if (e < 0) -e else e
+        while (i > 0) {
+            if (i % 2 == 1) {
+                result = result * b
             }
-        } else {
-            for (i in 0..(-e)) {
-                result = result * base
-            }
-            result = 1.0 / result
+            b = b * b
+            i = i / 2
+        }
+        if (e < 0) {
+            return 1.0 / result
         }
         return result
     }
@@ -152,13 +153,10 @@ object MathCore {
     /// Natural logarithm (ln) using series expansion
     fun log(x: Double): Double {
         if (x <= 0) { return 0.0 }
-        // Normalize: bring x into [1, 2) by factoring out powers of 2
         var y: Double = x
         var scale: Int = 0
         while (y >= 2.0) { y = y / 2.0; scale = scale + 1 }
         while (y < 1.0) { y = y * 2.0; scale = scale - 1 }
-        // ln(y) for y in [1, 2): use Taylor series ln(1+u) = u - u^2/2 + u^3/3 - ...
-        // where u = (y-1)/(y+1), then ln(y) = 2*(u + u^3/3 + u^5/5 + ...)
         val u: Double = (y - 1.0) / (y + 1.0)
         var sum: Double = 0.0
         var term: Double = u
@@ -166,8 +164,24 @@ object MathCore {
             sum = sum + term / (2 * i + 1)
             term = term * u * u
         }
-        // ln(x) = scale * ln(2) + 2 * sum
         return scale * 0.693147180559945 + 2.0 * sum
+    }
+
+    /// Logarithm base 2, computed directly from the same reduction as log().
+    fun log2(x: Double): Double {
+        if (x <= 0) { return 0.0 }
+        var y: Double = x
+        var scale: Int = 0
+        while (y >= 2.0) { y = y / 2.0; scale = scale + 1 }
+        while (y < 1.0) { y = y * 2.0; scale = scale - 1 }
+        val u: Double = (y - 1.0) / (y + 1.0)
+        var sum: Double = 0.0
+        var term: Double = u
+        for (i in 0..30) {
+            sum = sum + term / (2 * i + 1)
+            term = term * u * u
+        }
+        return scale + 2.0 * sum / 0.693147180559945
     }
 
     /// 指数函数

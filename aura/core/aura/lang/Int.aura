@@ -38,19 +38,20 @@ value class Int {
 
         /// 从字符串解析为整数
         fun parseInt(text: String): Int {
+            val n: Int = text.length
             var result: Int = 0
             var sign: Int = 1
             var i: Int = 0
-            if (i < text.length and text.charAt(i).toString() == '-') {
+            if (i < n and text.charCodeAt(i) == 45) {
                 sign = -1
                 i = i + 1
-            } else if (i < text.length and text.charAt(i).toString() == '+') {
+            } else if (i < n and text.charCodeAt(i) == 43) {
                 i = i + 1
             }
-            while (i < text.length) {
-                val c = text.charAt(i)
-                if (c >= '0' and c <= '9') {
-                    result = result * 10 + (c - '0')
+            while (i < n) {
+                val c: Int = text.charCodeAt(i) as Int
+                if (c >= 48 and c <= 57) {
+                    result = result * 10 + (c - 48)
                 }
                 i = i + 1
             }
@@ -112,6 +113,11 @@ value class Int {
     /// 检查两个整数是否相等
     override fun equals(other: Int): Boolean {
         return this == other
+    }
+
+    /// 整数哈希：避免走 Any 默认的字符串哈希路径。
+    override fun hashCode(): Int {
+        return this
     }
 
     // ── 算术方法 ──

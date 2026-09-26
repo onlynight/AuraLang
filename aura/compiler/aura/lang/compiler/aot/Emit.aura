@@ -2498,6 +2498,26 @@ class LlvmEmitter {
             pre.sbAdd("  " + wf3 + " = or i32 " + wf2 + ", " + wd + "\n")
             val wf4: String = this.freshVar()
             pre.sbAdd("  " + wf4 + " = or i32 " + wf3 + ", " + we + "\n")
+            // **O_WRONLY/O_RDWR 翻译**：Linux O_WRONLY=1, O_RDWR=2 → Windows _O_WRONLY=0x8001, _O_RDWR=0x8002
+            // 需要添加 0x8000 高位标记
+            val wmode: String = this.freshVar()
+            pre.sbAdd("  " + wmode + " = and i32 " + fl + ", 3\n")
+            val wshift: String = this.freshVar()
+            pre.sbAdd("  " + wshift + " = shl i32 " + wmode + ", 15\n")  // 1→0x8000, 2→0x10000 (截断为0x0000)
+            // 修正：O_WRONLY(1)→0x8001, O_RDWR(2)→0x8002
+            val wfix1: String = this.freshVar()
+            pre.sbAdd("  " + wfix1 + " = and i32 " + fl + ", 1\n")
+            val wfix2: String = this.freshVar()
+            pre.sbAdd("  " + wfix2 + " = or i32 " + wfix1 + ", 32769\n")  // 1 → 0x8001
+            val wfix3: String = this.freshVar()
+            pre.sbAdd("  " + wfix3 + " = and i32 " + fl + ", 2\n")
+            val wfix4: String = this.freshVar()
+            pre.sbAdd("  " + wfix4 + " = or i32 " + wfix3 + ", 32770\n")  // 2 → 0x8002
+            val wmode2: String = this.freshVar()
+            pre.sbAdd("  " + wmode2 + " = xor i32 " + wfix2 + ", " + wfix4 + "\n")
+            pre.sbAdd("  " + wmode2 + " = and i32 " + wmode2 + ", 65534\n")  // 清除低位
+            val wf5: String = this.freshVar()
+            pre.sbAdd("  " + wf5 + " = or i32 " + wf4 + ", " + wmode2 + "\n")
             // **二进制模式位保留**：Aura 侧用 `0x8000` 表示「二进制打开」
             //（Linux 该位为 O_LARGEFILE，读场景无副作用）。必须显式保留：
             // 否则 UCRT `_open` 默认**文本模式**，`_read` 遇到 0x1A(Ctrl+Z)
@@ -2506,8 +2526,8 @@ class LlvmEmitter {
             // 破坏二进制内容。
             val wfbin: String = this.freshVar()
             pre.sbAdd("  " + wfbin + " = and i32 " + fl + ", 32768\n")
-            val wf5: String = this.freshVar()
-            pre.sbAdd("  " + wf5 + " = or i32 " + wf4 + ", " + wfbin + "\n")
+            val wf6: String = this.freshVar()
+            pre.sbAdd("  " + wf6 + " = or i32 " + wf5 + ", " + wfbin + "\n")
             // 第 3 个实参是 **创建模式**（仅 `_O_CREAT` 时生效），UCRT 要求
             // `_S_IREAD(0x100) | _S_IWRITE(0x80)` = 384。
             // 旧实现硬编码 `i32 0`（无任何权限）→ Windows 建出的文件被标记为
@@ -2516,7 +2536,7 @@ class LlvmEmitter {
             // 编译器重写 `.ll` 失败后，`llc -verify` 校验的是**上一次的旧 IR**，
             // 报出早已修掉的错误（自举产物上表现为「改了代码但错误不变」）。
             return this.winCrtFinish(pre, "_open", "i32",
-                "i8* " + p + ", i32 " + wf5 + ", i32 384")
+                "i8* " + p + ", i32 " + wf6 + ", i32 384")
         }
         // ── shell 执行：`run(command)` → UCRT `system`（内部走 `cmd /C`）──
         if (lc == "runshell" || lc == "system" || lc == "run") {

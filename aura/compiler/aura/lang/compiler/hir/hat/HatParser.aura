@@ -9,6 +9,9 @@ package aura.lang.compiler.hir.hat
 
 import aura.lang.std.String
 import aura.lang.std.FileSystem
+// 进度心跳的开关读取（`AURA_HAT_TRACE`）：同包符号需显式导入，否则会退化为
+// 未解析调用。
+import aura.lang.std.Env
 import aura.lang.collection.ArrayList
 import "../../mir/SsaMir.aura"
 import "../../mir/TypeRegistry.aura"
@@ -35,7 +38,25 @@ class HatParser {
     private var tmpCount: Int = 0
 
     /// 值引用映射：HAT 中的 @name 或 @t0 → SSA ValueID。
-    private var valMap: String = ""
+    ///
+    /// ⚠️ 必须是**列表**（每项 `name|vid`，只追加），不能是「一整串 + 每次改动
+    /// 重建」。旧实现 `replaceVal` 每次登记一个名字都要把**整个映射串**逐行重拼，
+    /// 单次代价 O(映射长度²)；而它每条指令都会被调一次。自举 `Main.aura` 的
+    /// `.hat`（620 万字符 / 14 万值）下，仅这一处就在 2 s 内分配到 8 GB 被内存
+    /// 闸门杀掉。列表追加是 O(1)；查找从尾部倒序扫描（值名在函数内唯一，
+    /// 倒序同时保证「后定义者优先」的语义）。
+    /// 值名列表（与 `valIds` 平行，下标对应）。分开存是为了查找时能直接用
+    /// 字符串相等比较，避免每次都对 `name|vid` 做 `indexOf` + `substring` 分配。
+    private var valNames: List<String> = arrayListOf<String>()
+
+    /// 值 id 列表（与 `valNames` 平行）。
+    private var valIds: List<Int> = arrayListOf<Int>()
+
+    /// 重置值映射。
+    private fun valReset(): Unit {
+        this.valNames = arrayListOf<String>()
+        this.valIds = arrayListOf<Int>()
+    }
 
     /// 块名映射：块标签名 → BlockID。
     private var blockMap: String = ""
@@ -58,6 +79,20 @@ class HatParser {
     /// 已解析函数数。
     private var funcCount: Int = 0
 
+    /// 已解析的块体行数（仅用于进度心跳）。
+    private var bodyLineCount: Int = 0
+
+    /// 是否输出解析进度心跳（默认关）。
+    ///
+    /// 大文件（自举 `Main.aura` 的 `.hat` 有 620 万字符 / 16 万行）解析是分钟级的，
+    /// 没有心跳时无法区分「慢」与「卡死」—— 所以保留开关，但**默认不打**。
+    ///
+    /// 任一开关为 `1` 即开启：
+    ///   `AURA_HAT_TRACE=1`        仅 HAT 解析器心跳
+    ///   `AURA_PHOTON_VERBOSE=1`   整个编译链路的阶段进度
+    ///   `AURA_PHOTON_TRACE=1`     上者 + 节点级诊断
+    private var traceOn: Boolean = false
+
     /// HAT 文本行数缓存。
     private var lines: List<String> = arrayListOf<String>()
 
@@ -68,7 +103,7 @@ class HatParser {
         this.curBlock = -1
         this.curRetType = 0
         this.tmpCount = 0
-        this.valMap = ""
+        this.valReset()
         this.blockMap = ""
         this.curBlockLabel = ""
         this.warnCount = 0
@@ -87,32 +122,57 @@ class HatParser {
         this.curBlock = -1
         this.curRetType = 0
         this.tmpCount = 0
-        this.valMap = "\n"
+        this.valReset()
         this.blockMap = "\n"
         this.warnCount = 0
         this.errCount = 0
         this.funcCount = 0
 
         // 按行分割文本
+        //
+        // ⚠️ **必须走原生 `String.split`（C 侧一次 `strstr` 扫描）**，不能在 Aura 里
+        // 逐字符扫描 + 逐行 `substring`：
+        //   · AOT 下 `String.length` / `String.substring` 都要 `strlen(整个源串)`
+        //     （O(|s|)），而 `substring` 的终点钳位恰恰依赖它；
+        //   · `.hat` 有 6.6MB / 17 万行 —— 每行一次 strlen 就是 ~2 TB 字节扫描，
+        //     实测本循环单独耗时 **129 秒**（占整个后端编译的 1/3）。
+        // C 侧 `aura_string_split` 只做一遍 `strstr`、按偏移切分，总代价 O(|s|)。
+        //
+        // 语义与旧实现一致：**丢弃空行**（旧循环 `if (pos > lineStart)` 只收非空
+        // 片段）。空行必须剔掉 —— `parseBbBody` 以「空行」作为块体结束信号。
+        this.traceOn = Env.get("AURA_HAT_TRACE", "") == "1"
+                || Env.get("AURA_PHOTON_VERBOSE", "") == "1"
+                || Env.get("AURA_PHOTON_TRACE", "") == "1"
+        if (this.traceOn) {
+            println("[hat-parse] split start len=" + HatParserUtils.toStr(text.length))
+        }
         this.lines = arrayListOf<String>()
-        var lineStart: Int = 0
-        var pos: Int = 0
-        var len: Int = text.length
-        while (pos <= len) {
-            if (pos == len || text.charCodeAt(pos) == 10) {
-                if (pos > lineStart) {
-                    this.lines.add(HatParserUtils.safeSubstring(text, lineStart, pos))
-                }
-                lineStart = pos + 1
+        val rawLines: List<String> = text.split("\n")
+        var li: Int = 0
+        while (li < rawLines.size) {
+            if (rawLines[li] != "") {
+                this.lines.add(rawLines[li])
             }
-            pos = pos + 1
+            li = li + 1
+        }
+        if (this.traceOn) {
+            println("[hat-parse] split done lines=" + HatParserUtils.toStr(this.lines.size) +
+                    " raw=" + HatParserUtils.toStr(rawLines.size))
         }
 
         var i: Int = 0
         var lineCount: Int = this.lines.size
+        var lastReport: Int = 0
         while (i < lineCount) {
             val line: String = this.lines[i]
             val stripped: String = this.stripComment(line)
+
+            // 进度心跳（大文件解析是分钟级的，没有它无法区分「慢」与「卡死」）
+            if (this.traceOn && (this.funcCount - lastReport >= 200 || i - lastReport >= 50000)) {
+                lastReport = this.funcCount
+                println("[hat-parse] funcs=" + HatParserUtils.toStr(this.funcCount) +
+                        " lines=" + HatParserUtils.toStr(i) + "/" + HatParserUtils.toStr(lineCount))
+            }
 
             if (stripped.startsWith("@fn")) {
                 i = this.parseFunction(i)
@@ -175,7 +235,7 @@ class HatParser {
         this.curFunc = fid
 
         // 重置值映射和块映射
-        this.valMap = "\n"
+        this.valReset()
         this.blockMap = "\n"
         this.tmpCount = 0
 
@@ -229,7 +289,7 @@ class HatParser {
         this.prog.endFunction()
         this.curFunc = -1
         this.curBlock = -1
-        this.valMap = "\n"
+        this.valReset()
         this.blockMap = "\n"
         this.tmpCount = 0
 
@@ -297,7 +357,7 @@ class HatParser {
         val paramVal: Int = this.prog.addValue("Param", paramTypeId, "", name, this.curBlock)
 
         // 添加到 valMap
-        this.valMap = this.replaceVal(this.valMap, name, paramVal)
+        this.valAdd(name, paramVal)
 
         // 添加到函数参数列表
         val f: MirFunction = this.prog.functionOf(this.curFunc)
@@ -417,6 +477,13 @@ class HatParser {
                 break
             }
 
+            this.bodyLineCount = this.bodyLineCount + 1
+            if (this.traceOn && this.bodyLineCount % 50000 == 0) {
+                println("[hat-parse] bb-body lines=" + HatParserUtils.toStr(this.bodyLineCount) +
+                        " funcs=" + HatParserUtils.toStr(this.funcCount) +
+                        " line=" + HatParserUtils.toStr(i))
+            }
+
             if (line.startsWith("@br_if")) {
                 this.parseBrIf(line)
             } else if (line.startsWith("@br ")) {
@@ -478,7 +545,7 @@ class HatParser {
 
         // 注册目标名
         if (target != "") {
-            this.valMap = this.replaceVal(this.valMap, target, vid)
+            this.valAdd(target, vid)
         }
     }
 
@@ -662,7 +729,7 @@ class HatParser {
 
         // 注册目标名
         if (target != "") {
-            this.valMap = this.replaceVal(this.valMap, target, vid)
+            this.valAdd(target, vid)
         }
     }
 
@@ -901,42 +968,25 @@ class HatParser {
 
     // ── 值引用解析 ──
 
-    /// 从 valMap 中查找值。
-    private fun lookupVal(name: String): Int {
-        val key: String = "\n" + name + "|"
-        val at: Int = this.valMap.indexOf(key)
-        if (at < 0) {
-            return -1
-        }
-        val start: Int = at + key.length
-        var e: Int = start
-        var len: Int = this.valMap.length
-        while (e < len && this.valMap.charCodeAt(e) != 10) {
-            e = e + 1
-        }
-        return HatParserUtils.strToInt(HatParserUtils.safeSubstring(this.valMap, start, e))
+    /// 登记一个值名 → ValueID（O(1) 追加）。
+    ///
+    /// 与旧的 `replaceVal` 语义一致（同名覆盖）靠**倒序查找**实现：查找总是取
+    /// 最后一个同名的条目，因此新定义天然覆盖旧定义，无需重建整张表。
+    private fun valAdd(name: String, vid: Int): Unit {
+        this.valNames.add(name)
+        this.valIds.add(vid)
     }
 
-    /// 替换 valMap 中的值。
-    private fun replaceVal(map: String, name: String, vid: Int): String {
-        val key: String = name + "|"
-        var out: String = "\n"
-        var lineStart: Int = 0
-        var pos: Int = 0
-        var len: Int = map.length
-        while (pos <= len) {
-            if (pos == len || map.charCodeAt(pos) == 10) {
-                if (pos > lineStart) {
-                    val line: String = HatParserUtils.safeSubstring(map, lineStart, pos)
-                    if (!line.startsWith(key)) {
-                        out = out + line + "\n"
-                    }
-                }
-                lineStart = pos + 1
+    /// 从值映射中查找值（倒序扫描，后定义者优先）。
+    private fun lookupVal(name: String): Int {
+        var i: Int = this.valNames.size - 1
+        while (i >= 0) {
+            if (this.valNames[i] == name) {
+                return this.valIds[i]
             }
-            pos = pos + 1
+            i = i - 1
         }
-        return out + name + "|" + HatParserUtils.toStr(vid) + "\n"
+        return -1
     }
 
     /// 查找块名对应的 BlockID。

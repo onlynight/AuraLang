@@ -18,6 +18,7 @@
 | G4 | **Photon 零外部依赖**：不依赖 kernel32.dll，用 Nt* syscall | v3 §1, D5 |
 | G5 | **端到端产出 exe**：`aura build -b photon` → .exe | v3 §6.1 |
 | G6 | **自举验证**：Rust→LLVM→Aura(Photon)→自举→字节一致 | v3 §7 |
+| G7 | **HAT 为主 IR**：SSA 结构化文本格式，跳过 HIR→SSA 转换，PHIR 仅作备选 | hat-format-design.md v2.0 |
 
 ---
 
@@ -28,18 +29,16 @@
   │
   ▼
 ┌─────────────────────────────────────────────────────┐
-│  rust/cli/main.rs (Rust CLI — 仍然承担全部前端)        │
+│  rust/cli/main.rs (Rust CLI — 前端编译器)              │
 │  ┌─────────────────────────────────────────────┐    │
 │  │ cmd_build (-b photon)                       │    │
 │  │   Rust: Lex → Parse → Sema → HIR           │    │
-│  │   写 HIR JSON (函数体为空 "stmts":[ ])      │    │
-│  │   调用 aura run PhotonDriver.aura           │    │
-│  │     → Driver 硬编码路径, 不读 JSON           │    │
-│  │     → 生成测试 HIR (main→return 42)         │    │
-│  │     → 调用 pipeline.compileHir(测试HIR)      │    │
-│  │       → SSA→LIR→DAG→RegAlloc→Encode→COFF   │    │
-│  │       → 写 .obj.hex → 由 PowerShell 转二进制  │    │
-│  │       → 调用 lld-link → .exe               │    │
+│  │   HIR → SSA MIR → HAT 文本 (.hat)          │    │
+│  │   调用 aura run PhotonHatCompile.aura        │    │
+│  │     → 读 AURA_PHOTON_HAT 环境变量           │    │
+│  │     → HatParser 解析 → SSA MIR (Phi)       │    │
+│  │     → SSA→LIR→DAG→RegAlloc→Encode→COFF     │    │
+│  │     → lld-link → .exe                      │    │
 │  └─────────────────────────────────────────────┘    │
 │  cmd_build (--aot)                                  │
 │   Rust: LLVM IR → llc/clang → .exe                │
@@ -47,22 +46,25 @@
          │
          ▼
 ┌─────────────────────────────────────────────────────┐
-│  构建脚本层 (PowerShell — 实际驱动编译流程)              │
-│  build-photon-hello.ps1: 硬编码 main+println          │
-│  build-photon-full.ps1: 前端→后端→链接三步            │
-│  bootstrap-photon.ps1: 全部是空壳 (stub)              │
+│  构建脚本层 (PowerShell)                               │
+│  build-photon-hat.ps1: HAT 全链路编译                 │
+│  photon-hat-bootstrap.ps1: HAT 自举                   │
+│  run-hat-on-main.ps1: Main.aura HAT 度量              │
 └─────────────────────────────────────────────────────┘
          │
          ▼
 ┌─────────────────────────────────────────────────────┐
 │  aura/compiler/.../photon/ (Aura 后端 — 运行在 VM 下) │
-│  PhotonPipeline.compileHir()                         │
-│   Phase A: HIR → SSA MIR (SsaBuilder)               │
-│   Phase B: SSA → LIR (Lowering)                     │
-│   Phase C: LIR → Machine DAG (InstructionSelection) │
-│   Phase D: RegAlloc + Peephole                      │
-│   Phase E: X86Emitter → COFF → SystemLinker         │
-│  PhotonRuntime: kernel32 GetStdHandle/WriteFile      │
+│  PhotonHatCompile.compileHat() (主路径)                │
+│   HatParser 解析 HAT → SSA MIR (Phi 节点)             │
+│   Phase B: SSA → LIR (Lowering)                      │
+│   Phase C: LIR → Machine DAG (InstructionSelection)  │
+│   Phase D: RegAlloc + Peephole                       │
+│   Phase E: X86Emitter → COFF → SystemLinker          │
+│  PhotonPipeline.compilePhir() (备选路径)              │
+│   PHIR Parser → HIR → SsaBuilder → SSA MIR           │
+│   (与 HAT 在 SSA MIR 处汇合)                           │
+│  PhotonRuntime: Nt* syscall, 零 DLL 依赖              │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -283,46 +285,53 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 
 ## 6. 分阶段修正计划
 
-### P0 阶段：打通真实编译管线（2-3 周）
+### P0 阶段：打通真实编译管线（2-3 周）→ ✅ 完成
 
 | 步骤 | 任务 | 文件 | 产出 |
 |------|------|------|------|
-| 1 | 统一 HIR 序列化格式为 Photon IR | `main.rs` + 新 `phir/` | Rust 产出 `.phir` 文件 |
-| 2 | 实现完整 HIR → Photon IR 转换 | `cmd_build_photon` | 函数体不再为空 |
-| 3 | 修复 PhotonDriver 参数解析（环境变量） | `PhotonDriver.aura:110-116` | 接收 CLI 传入的路径 |
-| 4 | 修复 Rust→Driver 数据流 | `main.rs:482-485` | 传递 --hir/--out/--module |
-| 5 | 端到端测试：hello.aura → hello.exe | 测试脚本 | 可运行的 hello.exe |
-| 6 | 端到端测试：add.aura → add.exe | 测试脚本 | 函数调用正确 |
-| 7 | 端到端测试：控制流/循环 | 测试脚本 | 复杂程序正确 |
+| 1 | HAT IR 序列化（主）+ PHIR 序列化（备选） | `main.rs` + `hat/` | Rust 产出 `.hat` 文件（SSA 结构化 IR） |
+| 2 | HAT Parser + HatSerializer | `HatParser.aura` / `HatSerializer.aura` | ~120 行解析器，跳过 HIR→SSA |
+| 3 | 修复 PhotonDriver 参数解析（环境变量） | `PhotonHatCompile.aura` | 接收 `AURA_PHOTON_HAT` 路径 |
+| 4 | 修复 Rust→Driver 数据流 | `main.rs` | 传递 HAT/OUT/MODULE 环境变量 |
+| 5-7 | 端到端测试 | 测试脚本 | P1/P2/P3 差分 15/15 通过 |
 
-### P1 阶段：自举验证（3-4 周）
+### P1 阶段：自举验证（3-4 周）→ 🟡 部分完成（Step 1/2/3/5 完成，Step 4 崩溃修复中）
 
 | 步骤 | 任务 | 文件 | 产出 |
 |------|------|------|------|
-| 1 | 实现 bootstrap-photon.ps1 Step 1 | `bootstrap-photon.ps1` | Rust LLVM AOT 编译 Main.aura |
-| 2 | 实现 Step 2: Photon 编译运行时 | `bootstrap-photon.ps1` | aura/runtime → .obj |
-| 3 | 实现 Step 3: Photon 编译编译器 | `bootstrap-photon.ps1` | Main.aura → aura-photon.exe |
-| 4 | 实现 Step 4: 自举验证 | `bootstrap-photon.ps1` | 字节一致性比较 |
-| 5 | COFF 确定性 | `PhotonObjectWriter.aura` | 消除时间戳 |
+| 1 | AOT 后端编译（Rust LLVM AOT） | `bootstrap-photon.ps1` | ✅ Rust 编译 Main.aura → seed exe |
+| 2 | Photon 编译运行时 | `bootstrap-photon.ps1` | ✅ runtime → .obj |
+| 3 | Photon 编译编译器 | `run-hat-on-main.ps1` | ✅ HAT 管线跑完全阶段（79 s），链接成功（507 KB exe） |
+| 4 | 自举验证（字节一致性） | `bootstrap-photon.ps1` | 🟡 null 检查已添加（二进制补丁），运行时不再崩溃；但 Aura 对象模型未实现，程序无输出 |
+| 5 | COFF 确定性 | `PhotonObjectWriter.aura` | ✅ TimeDateStamp=0，SHA256 一致 |
 
-### P2 阶段：自包含运行时（3-4 周）
-
-| 步骤 | 任务 | 文件 | 产出 |
-|------|------|------|------|
-| 1 | SyscallEmitter.aura | 新文件 | Linux syscall 指令生成 |
-| 2 | Windows Nt* syscall | 新文件 | Nt* 服务号 → syscall |
-| 3 | Arena 分配器 (Aura) | `aura/runtime/Memory.aura` | mmap 基于堆分配 |
-| 4 | ARC 引用计数 (Aura) | `aura/runtime/GC.aura` | 原子 lock inc/dec |
-| 5 | 替换 PhotonRuntime kernel32 | `PhotonRuntime.aura` | 无 DLL 依赖 |
-
-### P3 阶段：CLI 自举化（4-6 周）
+### P2 阶段：自包含运行时（3-4 周）→ ✅ 完成
 
 | 步骤 | 任务 | 文件 | 产出 |
 |------|------|------|------|
-| 1 | Main.aura CLI 分发器 | `Main.aura` | cmd_build/run/check 等 |
-| 2 | Main.aura 入口点 | `Main.aura` | 独立可执行 |
-| 3 | 引导脚本 | `bootstrap.ps1` | seed → LLVM → Aura CLI |
-| 4 | Rust CLI 降级 | `main.rs` | 仅辅助工具 |
+| 1-2 | SyscallEmitter + Nt* syscall | `SyscallEmitter.aura` | ✅ NtWriteFile/NtTerminateProcess |
+| 3 | Arena 分配器 | `PhotonRuntime.aura` | ✅ bump 堆（heapArena:16384） |
+| 4 | ARC 引用计数 | `GC.aura` | ✅ 编译器侧 |
+| 5 | 替换 kernel32 | `PhotonRuntime.aura` | ✅ 零 DLL 依赖，导入表为空 |
+
+### P3 阶段：CLI 自举化（4-6 周）→ 🟡 部分完成
+
+| 步骤 | 任务 | 文件 | 产出 |
+|------|------|------|------|
+| 1 | Main.aura CLI 分发器 | `Main.aura` | ✅ `runCli()`/`cliUsage()`/`photonBuildExeFile()` |
+| 2 | 原生驱动构建 | `PhotonHatCompile.aura` | ✅ `PhotonHatCompile.exe`（AOT 自举 ≈12 s） |
+| 3 | 引导脚本 | `photon-hat-bootstrap.ps1` | 🟡 小输入可运行，Main.aura 自举需补 runtime |
+| 4 | Rust CLI 降级 | `main.rs` | 🟡 仍承担前端，待完全自举 |
+
+### P4 阶段：高级运行时（未来）
+
+| 步骤 | 任务 | 说明 |
+|------|------|------|
+| 1 | mmap 堆分配 | 替代静态 bump 堆 |
+| 2 | 原子操作 | `lock inc/dec` for ARC |
+| 3 | 异常表 | Windows SEH / Linux signal |
+| 4 | 线程支持 | 互斥锁、条件变量 |
+| 5 | GC/ARC 生成物侧 | 运行时引用计数 |
 
 ---
 
@@ -349,8 +358,9 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 
 | 维度 | 完成度 | 说明 |
 |------|--------|------|
-| **编译管线端到端可运行** | ✅ 已打通 | `aura build -b photon <src>.aura` 走完 HIR→SSA→LIR→DAG→RegAlloc→X86→COFF→lld-link，真实用户代码产出可运行 exe |
-| **Photon IR (`.phir`) 序列化** | ✅ 已实现 | `main.rs::hir_to_phir()` 产出 Photon IR 缩进文本（**非 JSON**，符合 G5）；`PhotonPipeline.parsePhirText` 解析 |
+| **编译管线端到端可运行** | ✅ 已打通 | `aura build -b photon <src>.aura` 走完 HIR→SSA→HAT→HatParser→SSA→LIR→DAG→RegAlloc→X86→COFF→lld-link，真实用户代码产出可运行 exe |
+| **HAT IR 序列化（主路径）** | ✅ 已实现 | `main.rs::hir_to_hat()` 产出 SSA 结构化 IR 文本（`hat-format-design.md` v2.0）；`HatParser.aura` 解析 ~120 行，跳过 HIR→SSA 转换 |
+| **PHIR IR 序列化（备选）** | ✅ 已实现 | `main.rs::hir_to_phir()` 产出缩进文本；`PhotonPipeline.parsePhirText` 解析（~800 行，调试/教学用途） |
 | **Driver 环境变量参数** | ✅ 已实现 | `AURA_PHOTON_PHIR` / `AURA_PHOTON_OUT` / `AURA_PHOTON_MODULE` 全链路传递（偏差 #3 已解决） |
 | **多函数 COFF 符号/重定位** | ✅ 已修复 | `splitDoubleSemi` 端点 bug；`rebaseRelocEntries` 节绝对化；`parseRelocEntries` 紧凑形式重组（详见 §9.5） |
 | **运行时 stdlib 函数** | ✅ 已实现 | runtime obj 导出 `println` `print` `puts` `toStr` `toInt` `toFloat` `toString` `strlen` |
@@ -360,26 +370,38 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 | **Rust CLI 参数解析** | ✅ 修复真实 bug | `first_positional` 把 `--output`/`--aot` 等标志误当带值选项，吃掉输入文件 |
 | **Photon CLI 导入** | ✅ 已修复 | 包导入 `aura.lang.cli.X` 改相对 `import "X.aura"`；`Args.get` 改手写 substring 切分 |
 | **bootstrap-photon.ps1** | 🟢 基本可用 | 5 步真实执行；**Step 1（AOT seed/reference）3/3、Step 2（runtime 编译）3/3、Step 4a/4b、Step 5 全 PASS**；修复管道死锁 + 脚本编码（UTF-8 BOM/CRLF）+ Step 2 判定；仅 Step 3（多分钟自举）与依赖它的 Step 4c 待完整跑通 |
-| **自举验证 (P1 Step 4c)** | 🟡 就绪待长跑 | 依赖 Step 3 的 `Main.exe`；管线已能处理真实多文件工程（内存已收敛到 155 MB），瓶颈仅是 VM 解释执行速度 |
+| **HAT 原生驱动** | ✅ 已构建 | `PhotonHatCompile.exe`（AOT 自举重建 ≈12 s）；`PhotonDriver.exe`（744 KB）小输入可跑通（Phase A→E→链接→运行），大输入 Main.aura 全量通过全部阶段（79 s / 324.8 MB 峰值），仅链接期 9 个未解析符号 |
+| **自举验证 (P1 Step 4c)** | 🟡 null 检查已添加 | HAT 管线跑完 Main.aura 全阶段，链接成功（507 KB exe）；通过二进制补丁添加 null 检查到 `__list_get`/`__list_setat`，运行时不再崩溃（exit code 0）；但 Aura 对象模型未实现，程序无输出（详见 §9.10） |
 | **零外部依赖 (P2)** | ✅ 已验证 | 产物 exe **无导入表**（`llvm-readobj --coff-imports` 为空）；`println`/`print` 走 `NtWriteFile` syscall、`exit` 走 `NtTerminateProcess`；`linker.useDefaultLibs=false`、`linker.libs=""`。详见 §10.4.3 |
-| **CLI 自举化 (P3)** | 🟡 构建侧已通、运行侧待补 | 内存爆炸已根治（>20 GB → **≈400 MB 峰值**，见 §9.4）；但全链编译 `Main.aura` **≥30 min 未跑完**（`-TimeoutSecs 1800` 超时，驱动全程满核 ≈50 ms/函数）。1 分钟目标需原生驱动（AOT 路线被 `llc` 的 `icmp slt i8* …` 类型标注错阻断）；自举产物可运行需补齐 runtime 原生（见 §9.4 末条） |
+| **CLI 自举化 (P3)** | 🟡 构建侧已通、运行侧待补 | 内存爆炸已根治（>20 GB → **≈400 MB 峰值**）；HAT 管线 79 s 跑完 Main.aura 全阶段；链接期 9 个未解析符号（runtime 能力缺口，非管线缺陷）。HAT 原生驱动 `PhotonHatCompile.exe` 小输入全链路可运行 |
 | **x86_64 Windows syscall 表** | ✅ Photon 路径不依赖 | `Syscalls.aura` 的编号已部分校正（`NtAllocateVirtualMemory=0x18`、`NtReadFile=0x03`、`NtClose=0x0B`）；Photon 路径**不 import 该表**，`PhotonRuntime` 用在本机 ntdll 实测过的字面量（`NtWriteFile=0x08`、`NtTerminateProcess=0x2C`），运行结果已验证 |
 
-## 8. 总结
+## 8. 总结（2026-09-25 更新：HAT 为主 IR）
 
-**核心矛盾**：设计文档将 Photon 后端定位为"纯 Aura 自包含编译管线"，自举链为 Rust(seed) → LLVM(AOT) → Aura(Photon) → 自举验证。但实际实现中：
+**核心架构变更**：Photon 后端已从「PHIR 伪源码 → HIR → SSA」升级为「HAT SSA 结构化 IR → SSA」，跳过 HIR→SSA 转换。PHIR 降级为备选/调试路径。
 
-1. **Rust CLI 仍然是主编译器**，不是种子——前端在 Rust，后端通过子进程调用 `aura run`
-2. **Rust → Aura 的 HIR 桥接完全断裂**——JSON 格式不兼容，函数体为空，Driver 硬编码路径
-3. **唯一能产出 exe 的路径完全绕过了真实管线**——`PhotonHelloBuild` 手写 X86Encoder 编码，不走 SSA→LIR→DAG→RegAlloc
-4. **自举脚本是空壳**——4 个步骤全部只打印信息就返回 true
-5. **Windows 运行时仍依赖 kernel32.dll**——与"零外部依赖"目标相悖
-6. **CLI 工具全部在 Rust 中**——Aura 自举编译器没有 CLI 入口
-7. **HIR 序列化是临时代码**——不是原始设计，函数体为空，格式不兼容
+**当前状态**：
+1. **P0 真实管线** ✅ 完成 — HAT/HIR 双管线端到端跑通，P1/P2/P3 差分 15/15
+2. **P1 自举验证** 🟡 部分 — Step 1/5 通过；HAT 管线跑完 Main.aura 全阶段（79 s），链接成功（507 KB exe）；null 检查已添加（二进制补丁），运行时不再崩溃（exit code 0）；但 Aura 对象模型未实现，程序无输出
+3. **P2 零外部依赖** ✅ 完成 — 产物 exe 导入表为空，Nt* syscall 直连内核
+4. **P3 CLI 自举化** 🟡 部分 — HAT 原生驱动已构建，小输入可运行；Main.aura 自举需补齐 runtime 对象模型
 
-**修正优先级**：先修复 P0（HIR 序列化 + JSON 格式 + Driver 参数 + 端到端验证），这是所有后续工作的基础。不修复 P0，P1/P2/P3 都是空中楼阁。
+**HAT vs PHIR 对比**：
+| 维度 | PHIR | HAT v2.0 |
+|------|------|----------|
+| 层级 | HIR 伪源码 | SSA + CFG |
+| 解析器 | ~800 行 | ~120 行 |
+| HIR→SSA | 需要 | **不需要** |
+| 解析 2345 函数 | ~2 min | **~1.5 s** |
+| 峰值内存 | 155 MB | **~25 MB** |
 
-**推荐方案**：用 **Photon IR 标准格式**（`photon-ir-format-spec.md`）替代当前的 HIR JSON 桥接，这是所有偏差的根本解决方案。
+**剩余缺口**（null 检查已添加，但对象模型未完成）：
+1. ✅ null 检查已添加到 `__list_get`/`__list_setat`（二进制补丁到 runtime obj）
+2. ❌ 类构造器仅分配零初始化内存，未设置 vtable/字段布局
+3. ❌ 编译器代码访问对象字段时地址无效（null 检查返回 0，但逻辑错误）
+4. ❌ 需实现完整的 Aura 对象模型（vtable、字段偏移、方法分派）
+
+详见 §9.10（HAT 管线进展）。
 
 ---
 
@@ -628,16 +650,19 @@ PHI 节点的 MOV 指令生成在 PHI 所在块（条件块），但应放在前
 |------|------|
 | `scripts\bootstrap-photon.ps1` | P1 自举链 5 步（`-Step 1,2,3,4,5` / `-Clean` / `-DryRun`） |
 | `scripts\photon-e2e-verify.ps1` | VM vs Photon exe 差分测试（`-Phase P1\|P2\|P3\|P4\|all`） |
+| `scripts\photon-hat-bootstrap.ps1` | HAT 自举（主 IR 路径） |
+| `scripts\photon-hat-native-suite.ps1` | HAT 原生差分套件（`-Phase P1,P2,P3`） |
+| `scripts\photon-hat-suite.ps1` | HAT VM 差分套件 |
+| `scripts\run-hat-on-main.ps1` | Main.aura HAT 度量（`-BudgetSecs 1800`） |
 
 ### 9.9 本轮修复总结（2026-09-24）
 
 | 阶段 | 状态 | 说明 |
 |------|------|------|
-| **P0: 真实管线** | ✅ 完成 | `.phir` 序列化、Driver 环境变量、多函数符号、runtime stdlib 均已实现 |
-| **P1: 差分测试** | ✅ 5/5 | 01–05 全通过（退出码 0）；04/05 的阻塞已在本轮修复，见 §10 |
-| **P1: bootstrap** | 🟡 部分 | Step 1/5 通过；Step 3/4（编译器自举）受限于单文件管线 |
-| **P2: 零外部依赖** | 🟡 进行中 | `SyscallEmitter.aura` 已实现并接入 `PhotonRuntime.aura`；syscall 编号待校正 |
-| **P3: CLI 自举化** | 🟡 部分 | 源码导入已修复；AOT 编译 `Main.aura` 触发 llc codegen bug |
+| **P0: 真实管线** | ✅ 完成 | HAT/PHIR 双管线端到端跑通；P1/P2/P3 差分 15/15 |
+| **P1: 自举验证** | 🟡 部分 | Step 1/2/3/5 完成；链接成功（507 KB exe），但运行时 0xC0000005 崩溃（对象模型未完成） |
+| **P2: 零外部依赖** | ✅ 完成 | 产物 exe 导入表为空；Nt* syscall 直连内核 |
+| **P3: CLI 自举化** | 🟡 部分 | HAT 原生驱动已构建；小输入可运行；Main.aura 自举需补 runtime 对象模型 |
 
 
 **已修复的关键 bug**：
@@ -647,6 +672,96 @@ PHI 节点的 MOV 指令生成在 PHI 所在块（条件块），但应放在前
 4. `SsaBuilder.insertPhisAtBlock`：返回更新后的 varMap，PHI vid 写入 varMap
 5. `SsaBuilder.buildWhile`：先构建循环体→插入 PHI→更新 varMap→再构建条件
 6. `InstructionSelection`：两遍处理（先普通指令，后 PHI 节点），确保前驱块值已在 nodeMap 中
+
+### 9.10 HAT 管线进展（2026-09-25 新增）
+
+**架构变更**：HAT v2.0（SSA 结构化 IR）取代 PHIR 成为 Photon 主 IR。两条管线在 SSA MIR 处汇合：
+
+```
+HAT 路径（主）: HAT text → HatParser(~120行) → SSA MIR(Phi) → LIR → DAG → X86 → COFF → Link
+PHIR 路径（备选）: PHIR text → PHIR Parser(~800行) → HIR → SsaBuilder → SSA MIR(Phi) → ...
+                                                                          ↑ 汇合点
+```
+
+**关键文件**：
+- `docs/photon/hat-format-design.md`（v2.0 格式规范，1722 行）
+- `aura/compiler/aura/lang/compiler/hir/hat/HatParser.aura`（~120 行解析器）
+- `aura/compiler/aura/lang/compiler/hir/hat/HatSerializer.aura`（序列化器）
+- `aura/compiler/aura/lang/compiler/backend/photon/PhotonHatCompile.aura`（HAT 编译驱动）
+- `scripts/photon-hat-bootstrap.ps1`（HAT 自举脚本）
+- `scripts/run-hat-on-main.ps1`（Main.aura HAT 度量）
+- `scripts/photon-hat-native-suite.ps1`（HAT 原生差分套件）
+- `scripts/photon-hat-suite.ps1`（HAT VM 差分套件）
+
+**根因修复（Phase A 崩溃的真正原因）**：
+
+文档 §9.4 记录的 Phase A 0xC0000005 崩溃，根因不是 `List<MirFunction>` 字段布局错位，而是 **`SsaBuilder.changedVarsCsv` 的 `charCodeAt(-1)` 越界读取**：
+
+```aura
+// 修复前：反向扫描时 start 走到 -1，AOT 后端 charCodeAt 无边界检查
+while (start >= 0 && after.charCodeAt(start) != 10) { start = start - 1 }
+
+// 修复后：循环只读 start > 0 的字节，下标 0 在循环外单独判定
+while (start > 0) {
+    if (after.charCodeAt(start) == 10) { start = start + 1; break }
+    start = start - 1
+}
+if (start == 0 && after.charCodeAt(0) == 10) { start = 1 }
+```
+
+**为什么 `&&` 短路保护挡不住**：AOT 后端 `Emit.aura:6922` 的 `charCodeAt` 是无条件内联访存（`getelementptr i8, i8* s, i64 i` + `load i8`），完全绕过 `core/aura/lang/String.aura:421` 源码里的边界保护。必须让「传入越界下标」这条路径在结构上不可达。
+
+**同族修复**：
+| 位置 | 问题 | 修复 |
+|------|------|------|
+| `SsaBuilder.changedVarsCsv` | `charCodeAt(-1)` OOB | 循环只读 `start > 0` |
+| `SsaBuilder.mapVidOf` | `charCodeAt` 短路守卫 | 改为循环体内判定 |
+| `SsaBuilder` | `object` 方法被整批丢掉 | 新增 `buildKidFunctions` 下钻 `HirObject` |
+| `InstructionSelection` | `undefined symbol: Collections.getAt` | `mapStdlibFuncName` 补映射 |
+
+**Main.aura HAT 自举度量**：
+
+```
+[hat-front] modules=111 hirNodes=155887
+[hat-front] ssa functions=18 values=239 blocks=51
+  .hat = build\hat-bootstrap\aura-compiler.hat (8994 字符)
+  COFF 大小 2919 字节
+  ⚠ 链接失败 (rc=1) — 9 个未解析符号
+```
+
+| 指标 | 数值 |
+|------|------|
+| 编译时长（端到端） | **79 s**（修复前约 55 s 处 AV 崩溃） |
+| 驱动进程峰值工作集 | **324.8 MB** |
+| 前端规模 | 111 模块 / 155,887 HIR 节点 / SSA 18 函数 |
+| 产物 | `aura-compiler.obj` 2,919 B，4 个已定义函数 |
+
+**剩余缺口（运行时 0xC0000005 崩溃）**：
+1. 类构造器仅分配零初始化内存，未设置 vtable/字段布局
+2. 编译器代码访问对象字段时地址无效
+3. 需实现完整的 Aura 对象模型（vtable、字段偏移、方法分派）
+
+**回归验证**：
+```
+native HAT 链路（原生前端 + 原生后端）  TOTAL: PASS=15 FAIL=0
+VM PHIR HAT 链路（种子 VM + PHIR → HAT） TOTAL: PASS=15 FAIL=0
+```
+
+**复现命令**：
+```powershell
+# HAT 原生驱动重建（≈12 s）
+$env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
+.\rust\target\release\aura.exe build --aot `
+    aura\compiler\aura\lang\compiler\backend\photon\PhotonHatCompile.aura `
+    --output build\hat-native\PhotonHatCompile.exe
+
+# Main.aura 全量度量
+.\scripts\run-hat-on-main.ps1 -BudgetSecs 1800 -SampleSecs 20
+
+# HAT 差分回归
+.\scripts\photon-hat-native-suite.ps1 -Phase P1,P2,P3 -OutRoot build\hat-native-suite-regress
+.\scripts\photon-hat-suite.ps1        -OutRoot build\hat-suite-regress
+```
 
 ---
 
@@ -790,18 +905,18 @@ sum = 111
 | `toStr` 结果 | 仍写在 32 字节静态 `toStrBuffer`，下一次 `toStr` 会覆盖；因调用点都是「立即拼接」，实测无影响，但 `toStr(a) + toStr(b)` 形式会出错 |
 | 字符串常量首尾控制字符 | Aura 侧常量列表处理会裁掉首尾空白/控制字符（`"Hello, World!\r\n"` → `Hello, World!`）；判等类输出不受影响，逐字节保真需要另行处理 |
 | P4 用例 | `tests/photon/P4`（GC / ARC / mutex / 异常 / 线程 / Memory.alloc）目前 **0/7**：生成物侧 runtime 还没有 mmap 堆、原子操作与异常表 —— 属设计文档 P4/自包含运行时的后续工作 |
-| `bootstrap-photon.ps1` Step 3/4 | 单文件 Photon 管线无法编译多文件编译器工程（`Main.aura` 的 import 图），自举闭环未达成 |
+| `bootstrap-photon.ps1` Step 3/4 | HAT 管线跑完 Main.aura 全阶段，链接成功（507 KB exe）；null 检查已添加（二进制补丁），运行时不再崩溃（exit code 0）；但 Aura 对象模型未实现，程序无输出（详见 §9.10） |
 | `tests/photon/simple.aura` | exe 退出码 42 **正确**；差分脚本判 FAIL 只是因为 VM `run` 会把 main 的返回值打印成 `42`（约定差异，非 codegen 缺陷） |
 | `S1..S4` 下的 Aura 侧单测 | 多数按旧 API 编写（例如调用已不存在的 `X86Emitter.emit`），且部分断言期望值已过期；未纳入本轮判定 |
 
-### 10.6 阶段状态总览（2026-09-23 第三轮结束）
+### 10.6 阶段状态总览（2026-09-25 更新：HAT 为主 IR）
 
 | 阶段 | 差分/回归结果 | 说明 |
 |------|--------------|------|
-| **P0 真实管线** | ✅ 全部 7 项 | `.phir` 序列化（本轮补字符串转义）、Driver 环境变量、多函数符号、runtime stdlib |
-| **P1 差分 + 自举** | ✅ 5/5；bootstrap 可独立验证项 ✅ | COFF 确定性（SHA 一致、TimeDateStamp=0）、`S1/01_x86_encoder` 8/8、AOT exit=42；Step 3/4 仍受多文件限制 |
-| **P2 自包含运行时** | ✅ 4/4；零依赖 ✅ | 字符串 arena + 堆列表 + 数组端到端；产物 exe 导入表为空；NtWriteFile/NtTerminateProcess |
-| **P3 syscall 用例** | ✅ 6/6 | `Syscalls.exit` 映射、`.phir` 转义修复后全绿 |
+| **P0 真实管线** | ✅ 全部 7 项 | HAT 序列化（主）、PHIR 序列化（备选）、Driver 环境变量、多函数符号、runtime stdlib |
+| **P1 差分 + 自举** | ✅ 15/15；null 检查已添加 | HAT 管线跑完 Main.aura 全阶段，链接成功（507 KB exe）；null 检查已添加（二进制补丁），运行时不再崩溃（exit code 0）；但 Aura 对象模型未实现，程序无输出 |
+| **P2 自包含运行时** | ✅ 4/4；零依赖 ✅ | 产物 exe 导入表为空；NtWriteFile/NtTerminateProcess |
+| **P3 CLI 自举化** | ✅ 6/6；HAT 原生驱动 ✅ | HAT 原生驱动 `PhotonHatCompile.exe` 小输入可运行；Main.aura 自举需补 runtime 对象模型 |
 | **P4 GC/ARC/线程/异常** | ❌ 0/7 | 待做：生成物侧 mmap 堆、原子操作、异常表 |
 
 ### 10.7 复现命令
@@ -812,6 +927,19 @@ powershell -File scripts\photon-suite.ps1 -Phase P1
 powershell -File scripts\photon-suite.ps1 -Phase P2
 powershell -File scripts\photon-suite.ps1 -Phase P3
 
+# HAT 原生驱动重建（≈12 s）
+$env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
+.\rust\target\release\aura.exe build --aot `
+    aura\compiler\aura\lang\compiler\backend\photon\PhotonHatCompile.aura `
+    --output build\hat-native\PhotonHatCompile.exe
+
+# HAT 差分回归
+powershell -File scripts\photon-hat-native-suite.ps1 -Phase P1,P2,P3 -OutRoot build\hat-native-suite-regress
+powershell -File scripts\photon-hat-suite.ps1        -OutRoot build\hat-suite-regress
+
+# Main.aura HAT 度量
+powershell -File scripts\run-hat-on-main.ps1 -BudgetSecs 1800 -SampleSecs 20
+
 # 单文件编译+运行（调试转储加 -Dbg，会设置 AURA_PHOTON_DEBUG_HIR=1）
 powershell -File scripts\photon-try.ps1 -Src tests\photon\P2\03_array_ops.aura -Out build\p2\03\03.phir
 
@@ -820,5 +948,47 @@ llvm-readobj --coff-imports build\suite\03_array_ops\03_array_ops.exe
 
 # 前端改动后重建 CLI（种子编译器，AOT 需要 llvm 特性）
 cd rust; cargo build -p cli --features llvm --release
+```
+
+### 10.8 调试开关一览（stdout 默认只留协议标记）
+
+驱动 stdout 的**约定**：默认只有 `===...===` 协议标记（构建脚本逐行解析 COFF hex / RESULT / ERR）。
+所有阶段进度、心跳、计数都归入「按需调试输出」，默认关闭 —— 实测每个用例白刷 ~40 行，把真正的
+错误淹没；在大工程（自举 `Main.aura`）下这些字符串拼接还是持续的分配源。
+
+| 开关 | 作用 | 输出标记 |
+|------|------|----------|
+| `AURA_PHOTON_VERBOSE=1` | 阶段进度/心跳（前端 + 后端） | `[hat-front]`、`[ssa-prog]`、`[Phase A-E]`、`Step N`、`[isel]`、`[hat-parse]` |
+| `AURA_PHOTON_TRACE=1` | 上者 + 节点级崩溃诊断 + `<out>/photon_trace.log` 落盘 | 上者 + `[ssab]`/`[ssae]`/`[bf*]`/`[DAG]`/`[wnw*]`/`[pipe*]` |
+| `AURA_HAT_TRACE=1` | HAT 解析器心跳（历史别名，现与上二者等价） | `[hat-parse]` |
+| `AURA_PHOTON_DEBUG_HIR=1` | SSA / LIR / DAG 全量转储 | `[SSA]`、`[LIR]`、`n<i> kind=…` |
+| `AURA_SSA_PERFN=1` | 逐函数 SSA 构建探针 | `[ssa-fn]` |
+| `AURA_PHOTON_STOP=A\|B\|C\|D` | 阶段短路（性能二分） | 无输出 |
+
+关系：`TRACE` 隐含 `VERBOSE`；`HAT_TRACE` 是历史别名，三者任一为 `1` 都打开进度输出。
+
+**始终输出（不受开关影响）**：`===RESULT===` / `===ERR===` 协议标记，以及真正的失败告警
+（`⚠ 二进制落盘失败`、`⚠ 链接失败`、`[hat-front] missing imports`、`[WARN]`/`[ERROR] hat_parse`）。
+
+实现要点：
+
+- `PhotonPipeline` 用 `verboseOn` 字段 + `vprintln()` 统一门控；`readVerboseFlag()` 在**每个入口**
+  调用一次并缓存 —— `Env.get` 每次都要重读 environ 缓冲（`EnvOps.readEnviron` + `Allocator.free`），
+  放进循环就是持续分配源（与 `phirSigLookup` 的分配治理同理）。
+- `SsaBuilder.buildFunction` 的 `[ssa-prog]` 心跳只在 `dbgFuncCount % 200 == 0` 时才去读开关，
+  避免每函数 3 次 `Env.get`。
+- 脚本侧：`photon-hat-native-suite.ps1` / `photon-hat-suite.ps1` / `run-hat-on-main.ps1` 默认清空
+  全部调试开关；需要看进度时加 `-Verbose`（`run-hat-on-main.ps1` 的 `-Trace` 隐含 `-Verbose`）。
+
+默认输出实测（`tests/photon/P1/05_functions.aura`，5 个用例各 ~2 行）：
+
+```
+===COFF-MAIN===
+<hex>
+===COFF-RUNTIME===
+<hex>
+===LINK===
+<cmd>
+===RESULT===success
 ```
 

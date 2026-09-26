@@ -25,19 +25,20 @@ value class Byte {
 
         /// 从字符串解析为字节
         fun parseInt(text: String): Byte {
+            val n: Int = text.length
             var result: Int = 0
             var sign: Int = 1
             var i: Int = 0
-            if (i < text.length && text[i] == '-') {
+            if (i < n && text.charCodeAt(i) == 45) {
                 sign = -1
                 i = i + 1
-            } else if (i < text.length && text[i] == '+') {
+            } else if (i < n && text.charCodeAt(i) == 43) {
                 i = i + 1
             }
-            while (i < text.length) {
-                val c = text[i]
-                if (c >= '0' && c <= '9') {
-                    result = result * 10 + (c - '0')
+            while (i < n) {
+                val c: Int = text.charCodeAt(i) as Int
+                if (c >= 48 && c <= 57) {
+                    result = result * 10 + (c - 48)
                 }
                 i = i + 1
             }
@@ -79,6 +80,10 @@ value class Byte {
     /// 检查两个字节是否相等
     override fun equals(other: Byte): Boolean {
         return this == other
+    }
+
+    override fun hashCode(): Int {
+        return this as Int
     }
 
     // ── 算术方法 ──

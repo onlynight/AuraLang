@@ -14,6 +14,7 @@ package aura.lang.compiler.backend.photon
 
 import aura.lang.std.String
 import aura.lang.std.Env
+import aura.lang.std.FileSystem
 import "Lir.aura"
 import "MachineDag.aura"
 // `emitConst` 需要按类型 id 判断字符串常量（this.types.isString）：
@@ -65,6 +66,49 @@ class InstructionSelector {
     /// 字符串常量列表（逗号分隔的字符串内容）。
     var stringConstants: String = ""
 
+    /// `computeReachable` 的列表形式结果（供 `select()` 免分配查表）。
+    private var reachableNames: List<String> = arrayListOf<String>()
+
+    /// Phase C 定位探针（见 `selProbe` 的说明）。
+    private var probePath: String = ""
+    private var probeBuf: String = ""
+    private var probeStep: Int = 0
+
+    /// 字符串常量分块表（`select()` 结束时归并成 `stringConstants`）。
+    ///
+    /// ⚠ 旧实现是 `stringConstants = stringConstants + "," + lit`，而它**跨函数**
+    /// 累积（`select()` 期间一共只有一份表）：自举 `Main.aura` 选中 1200+ 个函数后
+    /// 常量条目上万，逐条整段拷贝 ⇒ O(条目数²)，实测在 Phase C 吃掉 20 GB
+    /// （`AURA_MEM_LIMIT_MB=20480` 仍被打爆）。改为分块追加 + 末尾两两归并。
+    private var stringConstChunks: List<String> = arrayListOf<String>()
+
+    /// 追加一条字符串常量（O(1)，不做拷贝）。
+    private fun stringConstAdd(lit: String): Unit {
+        this.stringConstChunks.add(lit)
+    }
+
+    /// 把分块列表两两归并成整串（O(总长 · log 块数)）。
+    private fun joinChunks(items: List<String>): String {
+        var cur: List<String> = items
+        while (cur.size > 1) {
+            val next: List<String> = arrayListOf<String>()
+            var i: Int = 0
+            while (i < cur.size) {
+                if (i + 1 < cur.size) {
+                    next.add(cur[i] + "," + cur[i + 1])
+                } else {
+                    next.add(cur[i])
+                }
+                i = i + 2
+            }
+            cur = next
+        }
+        if (cur.size == 0) {
+            return ""
+        }
+        return cur[0]
+    }
+
     /// 当前函数已处理的参数计数（用于确定 ABI 寄存器 rcx/rdx/r8/r9）。
     private var paramIndex: Int = 0
 
@@ -80,9 +124,20 @@ class InstructionSelector {
     /// `x = 42`。配合「函数入口保存/出口恢复」这套约定才成立。
     private var constRegs: List<String> = listOf("rbx", "rsi", "rdi", "r12", "r13", "r14", "r15")
 
-    /// PHI 前驱信息：blockId|phiVid|incomingVid\n...
-    /// 用于 PHI 消除：在前驱块末尾插入 MOV phi_node, incoming_node。
+    /// PHI 前驱信息（保留供调试打印；正式数据在下面两张表里）。
     private var phiPreds: String = ""
+
+    /// PHI-MOV 表：**按边块 ID − `phiMovBase` 下标**，每项是若干 `phiVid,incomingVid\n`。
+    ///
+    /// ⚠ 旧实现把全部 PHI-MOV 累计进一个 `phiPreds` 大串：
+    ///   * 生产端 `phiPreds = phiPreds + …` 每条边一次整段拷贝 ⇒ O(边数²)；
+    ///   * 消费端 `emitPhiMovsForBlock` 对**每个块**都 `split` 整串 ⇒ O(块数 × 边数)。
+    /// 自举 `Main.aura` 的 `emitCall`（547 块）实测 phiPreds 涨到 16 万字符以上
+    /// 并在 Phase C 吃满 12 GB 内存闸门。按下标存即两侧都 O(1)/O(本块边数)。
+    private var phiMovByBlock: List<String> = arrayListOf<String>()
+
+    /// PHI-MOV 表的下标基准（函数内最小块 ID）。
+    private var phiMovBase: Int = 0
 
     /// 类型注册表（MIR/LIR 的类型 id → 类型名）。
     ///
@@ -104,6 +159,7 @@ class InstructionSelector {
         this.labelNames = arrayListOf<String>()
         this.strConstCount = 0
         this.stringConstants = ""
+        this.stringConstChunks = arrayListOf<String>()
         this.types = TypeRegistry()
         this.paramIndex = 0
         this.constRegCounter = 0
@@ -125,6 +181,7 @@ class InstructionSelector {
         this.labelNames = arrayListOf<String>()
         this.strConstCount = 0
         this.stringConstants = ""
+        this.stringConstChunks = arrayListOf<String>()
         this.paramIndex = 0
         this.constRegCounter = 0
         this.lir = src
@@ -141,19 +198,70 @@ class InstructionSelector {
         // `println("Hello, World!")` 这种只用到 `println` 的程序都**链不出来**。
         //
         // 找不到入口（脚本型模块等情况）时退回「全选」，避免行为回退。
+        this.probePath = this.readProbePath()
+        this.probeBuf = ""
+        this.probeStep = 0
+        this.selProbe("select start fn=" + MachineDagUtils.toStr(src.functionCount) +
+                " probe=" + this.probePath)
         val reachable: String = this.computeReachable(src, "main")
+        this.selProbe("reachable done n=" + MachineDagUtils.toStr(this.reachableNames.size) +
+                " strLen=" + MachineDagUtils.toStr(reachable.length))
         val hasEntry: Boolean = this.nameInList(reachable, "main")
+
+        // 已选函数名（去重表）。
+        //
+        // ⚠ Aura 自举前端的函数命名空间是**扁平的裸名**（`HirLowerer.lowerCall`
+        // 对 `X.m()` 只取成员名，见 `SsaBuilder.buildAllFunctions` 的说明），
+        // 于是不同模块/类里同名的函数（实测自举 `Main.aura`：`run` ×4、
+        // `println` ×2、`strlen` ×2、`isValid` ×2 …）会被**各自**编进 .text。
+        // 同名符号在 COFF 符号表里重复 → 链接期 `duplicate symbol`。
+        // 这里按名字去重（先到先得，与 `computeReachable` 的「名字即身份」一致）。
+        val selected: List<String> = arrayListOf<String>()
+        // 每函数一条进度心跳：自举 `Main.aura` 要选 ~2000 个函数，没有它无法
+        // 区分「慢」与「卡死」。默认关闭（stdout 只留 `===...===` 协议标记）。
+        // 任一开关为 `1` 即开启：AURA_PHOTON_VERBOSE / AURA_PHOTON_TRACE；
+        // AURA_HAT_TRACE 为历史别名，继续有效。
+        val traceOn: Boolean = this.traceFlag()
         var fi: Int = 0
         while (fi < src.functionCount) {
             val func: LirFunction = src.functionOf(fi)
-            if (!hasEntry || this.nameInList(reachable, func.name)) {
+            if ((!hasEntry || this.listContains(this.reachableNames, func.name))
+                && !this.isRuntimeSymbol(func.name)
+                && !this.listContains(selected, func.name)) {
+                selected.add(func.name)
+                if (traceOn) {
+                    // 打印在**进入**函数之前：崩溃时最后一行就是出事的函数名。
+                    println("[isel] fi=" + MachineDagUtils.toStr(fi) + "/" +
+                            MachineDagUtils.toStr(src.functionCount) +
+                            " nodes=" + MachineDagUtils.toStr(this.dag.nodeCount) +
+                            " instrs=" + MachineDagUtils.toStr(this.dag.instrCount) +
+                            " fn=" + func.name)
+                }
+                // 探针同样打在**进入函数之前**：C 侧链超限时 `exit(71)`，
+                // 最后一行就是出事的函数（`selProbe` 是立即落盘的）。
+                this.selProbe("fn enter fi=" + MachineDagUtils.toStr(fi) + "/" +
+                        MachineDagUtils.toStr(src.functionCount) +
+                        " sel=" + MachineDagUtils.toStr(selected.size) +
+                        " nodes=" + MachineDagUtils.toStr(this.dag.nodeCount) +
+                        " instrs=" + MachineDagUtils.toStr(this.dag.instrCount) +
+                        " fn=" + func.name)
                 this.selectFunction(func, src)
             }
             fi = fi + 1
         }
 
         // Phase C: 寻址模式融合 — Load/Store 对消除
+        this.selProbe("before fuse instrs=" + MachineDagUtils.toStr(this.dag.instrCount) +
+                " nodes=" + MachineDagUtils.toStr(this.dag.nodeCount))
         this.fuseLoadStorePairs()
+        this.selProbe("after fuse instrs=" + MachineDagUtils.toStr(this.dag.instrCount) +
+                " nodes=" + MachineDagUtils.toStr(this.dag.nodeCount) +
+                " strChunks=" + MachineDagUtils.toStr(this.stringConstChunks.size))
+
+        // 字符串常量表在**全部函数选完之后**一次性归并（见 `stringConstChunks`）。
+        this.stringConstants = this.joinChunks(this.stringConstChunks)
+        this.selProbe("after joinChunks strConsts=" +
+                MachineDagUtils.toStr(this.stringConstants.length))
 
         return this.dag
     }
@@ -165,54 +273,140 @@ class InstructionSelector {
     /// 见 `select()` 里的说明：不可达函数会被编进 .text 并引入 runtime 未提供的
     /// 外部符号（`toStr` 等），让链接直接失败。
     private fun computeReachable(src: LirProgram, entry: String): String {
-        var out: String = ""
-        var pending: String = entry
-        var guard: Int = 0
-        while (pending != "" && guard < 128) {
-            guard = guard + 1
-            val heads: List<String> = LirUtils.splitArgs(pending)
-            val cur: String = heads[0]
-            // 其余待处理名字（保持队列语义）
-            var rest: String = ""
-            var i: Int = 1
-            while (i < heads.size) {
-                if (rest == "") { rest = heads[i] } else { rest = rest + "," + heads[i] }
-                i = i + 1
-            }
-            pending = rest
+        // 为什么用**列表队列 + 列表去重**，而不是「逗号串 + `splitArgs` 出队」：
+        // 旧实现把待处理队列存成一个字符串，每展开一次就 `splitArgs` 出队、再
+        // 把该函数**所有调用点**的被调名（含大量重复）`pending = pending + "," + …`
+        // 追加回去。自举 `Main.aura` 的调用点多达十几万，队列串被反复整段拷贝 ⇒
+        // O(边数 × 队列长度) 的分配，实测在 Phase C 前就吃满 12 GB 内存闸门
+        // （`guard` 只限制「名字」数，限制不了这类重复追加）。
+        //
+        // 同时旧实现的 `guard < 128` 会**提前截断**遍历：`readBytecode` /
+        // `countTextLines` 等确有定义的函数进不了 `out`，`select()` 不选它们，
+        // 链接期报一堆 `undefined symbol`。新实现靠「每个名字只展开一次」自然收敛。
+        val outList: List<String> = arrayListOf<String>()
+        val queue: List<String> = arrayListOf<String>()
+        queue.add(entry)
+        var head: Int = 0
 
-            if (!this.nameInList(out, cur)) {
-                if (out == "") { out = cur } else { out = out + "," + cur }
-                // 扫描 `cur` 的所有基本块，收集其 Call 的被调函数名
-                var fi: Int = 0
-                while (fi < src.functionCount) {
-                    val f: LirFunction = src.functionOf(fi)
-                    if (f.name == cur) {
-                        val blks: List<String> = LirUtils.splitArgs(f.blocks)
-                        var bi: Int = 0
-                        while (bi < blks.size) {
-                            val b: LirBlock = src.blockOf(LirUtils.strToInt(blks[bi]))
-                            val instrIds: List<String> = LirUtils.splitArgs(b.instrs)
-                            var ii: Int = 0
-                            while (ii < instrIds.size) {
-                                val v: LirValue = src.valueOf(LirUtils.strToInt(instrIds[ii]))
-                                if (v.op == "Call" && v.aux != "") {
-                                    if (pending == "") {
-                                        pending = v.aux
-                                    } else {
-                                        pending = pending + "," + v.aux
-                                    }
-                                }
-                                ii = ii + 1
+        while (head < queue.size) {
+            val cur: String = queue[head]
+            head = head + 1
+            if (cur == "" || this.listContains(outList, cur)) {
+                continue
+            }
+            outList.add(cur)
+
+            // 扫描 `cur` 的基本块，收集其 Call 的被调函数名（同名函数只取第一个，
+            // 与 `select()` 的「同名去重」保持同一身份口径）。
+            var fi: Int = 0
+            while (fi < src.functionCount) {
+                val f: LirFunction = src.functionOf(fi)
+                if (f.name == cur) {
+                    val blks: List<String> = LirUtils.splitArgs(f.blocks)
+                    var bi: Int = 0
+                    while (bi < blks.size) {
+                        val b: LirBlock = src.blockOf(LirUtils.strToInt(blks[bi]))
+                        val instrIds: List<String> = LirUtils.splitArgs(b.instrs)
+                        var ii: Int = 0
+                        while (ii < instrIds.size) {
+                            val v: LirValue = src.valueOf(LirUtils.strToInt(instrIds[ii]))
+                            if (v.op == "Call" && v.aux != "" && !this.listContains(outList, v.aux)) {
+                                queue.add(v.aux)
                             }
-                            bi = bi + 1
+                            ii = ii + 1
                         }
+                        bi = bi + 1
                     }
-                    fi = fi + 1
+                    // 同名函数只展开第一个（名字即身份），避免重复展开
+                    break
                 }
+                fi = fi + 1
             }
         }
+
+        // 出口仍返回逗号串（`nameInList` 语义），同时留下列表供 `select()` 免分配查表
+        this.reachableNames = outList
+        var out: String = ""
+        var i: Int = 0
+        while (i < outList.size) {
+            if (out == "") { out = outList[i] } else { out = out + "," + outList[i] }
+            i = i + 1
+        }
         return out
+    }
+
+    /// 列表内是否包含指定名字（无分配的线性扫描）。
+    private fun listContains(list: List<String>, name: String): Boolean {
+        var i: Int = 0
+        while (i < list.size) {
+            if (list[i] == name) { return true }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 进度/心跳开关：任一为 `1` 即开启。默认关闭（stdout 只留 `===...===`
+    /// 协议标记，构建脚本逐行解析）。
+    ///   `AURA_PHOTON_VERBOSE=1`   阶段进度/心跳
+    ///   `AURA_PHOTON_TRACE=1`     上者 + 节点级崩溃诊断
+    ///   `AURA_HAT_TRACE=1`        历史别名（HAT 解析器心跳），继续有效
+    private fun traceFlag(): Boolean {
+        return Env.get("AURA_PHOTON_VERBOSE", "") == "1"
+                || Env.get("AURA_PHOTON_TRACE", "") == "1"
+                || Env.get("AURA_HAT_TRACE", "") == "1"
+    }
+
+    /// 读取一次探针输出路径（`Env.get` 不能进循环，见 `PhotonPipeline.verboseOn`
+    /// 的说明），只返回一次；空串表示关闭。
+    private fun readProbePath(): String {
+        if (Env.get("AURA_SEL_PROBE", Env.get("AURA_MEM_STATS", "")) != "1") {
+            return ""
+        }
+        val p: String = Env.get("AURA_SEL_PROBE_PATH", "")
+        if (p != "") { return p }
+        val dir: String = Env.get("AURA_HAT_OUT", "")
+        if (dir == "") { return "" }
+        return dir + "/isel_probe.log"
+    }
+
+    /// Phase C **定位探针**：把当前上下文立即落盘（用于锁定内存失控点）。
+    ///
+    /// ⚠️ 为什么与 `PhotonPipeline.traceMark` 不同：后者把消息 append 进
+    /// `traceBuf` 再**整文件重写**，成本 O(行数²)；Phase C 是每函数/每块打点，
+    /// 累积式落盘本身就会成为持续分配源（正是我们要抓的病）。这里改成
+    /// **有界截断**——只保留尾部 2.5KB，每次重写一个 ≤3KB 的小文件，
+    /// 内存与时间都有界，同时保留最近一段历史。
+    ///
+    /// 与 C 运行库的拼接链探测（`AURA_CHAIN_TRIP_KB`）配合使用：链长超限时
+    /// C 侧写报告并 `exit(71)`，因此本文件的**最后几行就是出事的精确上下文**
+    /// （哪个函数、哪一遍、处理到第几个块 / 多少指令）。
+    ///
+    ///   `AURA_SEL_PROBE=1`      开启
+    ///   `AURA_MEM_STATS=1`      亦开启（诊断模式连带打开，便于一次跑齐两份证据）
+    ///   `AURA_SEL_PROBE_PATH`   输出文件（默认 `<AURA_HAT_OUT>/isel_probe.log`）
+    private fun selProbe(msg: String): Unit {
+        if (this.probePath == "") { return }
+        this.probeStep = this.probeStep + 1
+        this.probeBuf = this.probeBuf + "[s" + this.probeStep + "] " + msg + "\n"
+        if (this.probeBuf.length > 3000) {
+            this.probeBuf = this.probeBuf.substring(this.probeBuf.length - 2500)
+        }
+        FileSystem.writeText(this.probePath, this.probeBuf)
+    }
+
+    /// 名字是否由 Photon runtime 目标文件（`aura_runtime.obj`）提供。
+    ///
+    /// ⚠ 这些符号**不能**再被用户目标文件定义：链接期会 `duplicate symbol`
+    ///（实测自举 `Main.aura` 的 `strlen`：用户源码里的 `strlen` 与 runtime 的
+    /// `strlen` 同名，`lld-link: error: duplicate symbol: strlen`）。
+    /// 与 `PhotonRuntime.RUNTIME_SYMBOLS` 必须保持同步；调用点已由
+    /// `mapStdlibFuncName` 映射到这些名字，因此跳过定义不会产生 undefined symbol。
+    private fun isRuntimeSymbol(name: String): Boolean {
+        if (name == "println" || name == "print" || name == "puts") { return true }
+        if (name == "toStr" || name == "strcat" || name == "toInt") { return true }
+        if (name == "toFloat" || name == "toString" || name == "charCodeAt") { return true }
+        if (name == "strlen" || name == "exit") { return true }
+        return false
     }
 
     /// 逗号分隔名表中是否包含指定名字。
@@ -240,12 +434,27 @@ class InstructionSelector {
         // 记录函数起始指令数（多函数发射时用于标记指令边界）。
         val startInstr: Int = this.dag.instrCount
 
-        // 第一遍：分析 PHI 前驱信息（用于 PHI 消除）。
-        this.analyzePhiPreds(func, src)
-
         val blockParts: List<String> = LirUtils.splitArgs(func.blocks)
+        val traceFn: Boolean = this.traceFlag() && blockParts.size > 200
+        if (traceFn) {
+            println("[isel-fn] " + func.name + " blocks=" + MachineDagUtils.toStr(blockParts.size))
+        }
+
+        // 第一遍：分析 PHI 前驱信息（用于 PHI 消除）。
+        this.selProbe("fn pass1 enter fn=" + func.name +
+                " blocks=" + MachineDagUtils.toStr(blockParts.size))
+        this.analyzePhiPreds(func, src)
+        this.selProbe("fn pass1 done fn=" + func.name +
+                " phiSlots=" + MachineDagUtils.toStr(this.phiMovByBlock.size) +
+                " instrs=" + MachineDagUtils.toStr(this.dag.instrCount))
+        if (traceFn) {
+            println("[isel-fn] " + func.name + " afterPhiPreds phiSlots=" +
+                    MachineDagUtils.toStr(this.phiMovByBlock.size) +
+                    " instrs=" + MachineDagUtils.toStr(this.dag.instrCount))
+        }
 
         // 第二遍：处理所有 Phi 节点（注册到 nodeMap，供前驱块 MOV 使用）。
+        this.selProbe("fn pass2 enter fn=" + func.name)
         var bi2: Int = 0
         while (bi2 < blockParts.size) {
             val blockId2: Int = LirUtils.strToInt(blockParts[bi2])
@@ -253,10 +462,23 @@ class InstructionSelector {
                 val block2: LirBlock = src.blockOf(blockId2)
                 this.selectBlockPhis(block2, src)
             }
+            if (traceFn && bi2 % 100 == 0) {
+                println("[isel-fn] " + func.name + " pass2 bi=" + MachineDagUtils.toStr(bi2) +
+                        " instrs=" + MachineDagUtils.toStr(this.dag.instrCount))
+            }
+            if (bi2 % 200 == 0) {
+                this.selProbe("fn pass2 bi=" + MachineDagUtils.toStr(bi2) + "/" +
+                        MachineDagUtils.toStr(blockParts.size) +
+                        " fn=" + func.name +
+                        " instrs=" + MachineDagUtils.toStr(this.dag.instrCount))
+            }
             bi2 = bi2 + 1
         }
+        this.selProbe("fn pass2 done fn=" + func.name +
+                " instrs=" + MachineDagUtils.toStr(this.dag.instrCount))
 
         // 第三遍：处理所有基本块（含 PHI MOVs 在终结指令之前）。
+        this.selProbe("fn pass3 enter fn=" + func.name)
         var bi: Int = 0
         while (bi < blockParts.size) {
             val blockId: Int = LirUtils.strToInt(blockParts[bi])
@@ -264,8 +486,23 @@ class InstructionSelector {
                 val block: LirBlock = src.blockOf(blockId)
                 this.selectBlock(block, src)
             }
+            if (traceFn && bi % 10 == 0) {
+                println("[isel-fn] " + func.name + " pass3 bi=" + MachineDagUtils.toStr(bi) +
+                        " nodes=" + MachineDagUtils.toStr(this.dag.nodeCount) +
+                        " instrs=" + MachineDagUtils.toStr(this.dag.instrCount))
+            }
+            if (bi % 200 == 0) {
+                this.selProbe("fn pass3 bi=" + MachineDagUtils.toStr(bi) + "/" +
+                        MachineDagUtils.toStr(blockParts.size) +
+                        " fn=" + func.name +
+                        " nodes=" + MachineDagUtils.toStr(this.dag.nodeCount) +
+                        " instrs=" + MachineDagUtils.toStr(this.dag.instrCount))
+            }
             bi = bi + 1
         }
+        this.selProbe("fn pass3 done fn=" + func.name +
+                " nodes=" + MachineDagUtils.toStr(this.dag.nodeCount) +
+                " instrs=" + MachineDagUtils.toStr(this.dag.instrCount))
 
         // 为所有新指令打上 funcName 标记（多函数发射用）。
         var ii: Int = startInstr
@@ -274,6 +511,8 @@ class InstructionSelector {
             instr.funcName = this.funcName
             ii = ii + 1
         }
+        this.selProbe("fn tail done fn=" + func.name +
+                " instrs=" + MachineDagUtils.toStr(this.dag.instrCount))
     }
 
     // ── PHI 前驱分析（用于 PHI 消除）──
@@ -292,10 +531,49 @@ class InstructionSelector {
     private fun analyzePhiPreds(func: LirFunction, src: LirProgram): Unit {
         this.phiPreds = ""
         val blockParts: List<String> = LirUtils.splitArgs(func.blocks)
+        val traceBig: Boolean = this.traceFlag() && blockParts.size > 200
 
-        // ① 建立「块 → 后继块」并反转为「块 → 前驱块列表」（"blockId|p1,p2,\n"）
-        var predMap: String = ""
+        // ① 建立「块 → 后继块」并反转为「块 → 前驱块列表」。
+        //
+        // ⚠ 旧实现把「块 → 前驱」存成 `"blockId|p1,p2,\n"` 的**扁平串**，每追加
+        // 一条边都调 `appendPred`：`splitFlat` 拆整表 + 逐行重拼 + 拷回 ——
+        // 单次 O(块数²)，而它被每条边调用一次 ⇒ O(块数³) 并伴随同量级 `split`
+        // 分配。自举 `Main.aura` 的 `emitCall`（单函数 14007 行 .hat，约 1500 块）
+        // 直接吃满 12 GB 内存闸门。这里改为**按块 ID 下标的前驱槽表**：
+        // 一条边一次 O(1) 追加（每个槽的前驱数很小），总代价 O(边数)。
+        //
+        // 块 ID 在同一函数内连续（HAT 解析器预登记 / SsaBuilder 建块均按序分配，
+        // Lowering 保持同号），因此用 `[最小 ID, 最大 ID]` 作下标区间。
+        var base: Int = -1
+        var top: Int = -1
         var bi: Int = 0
+        while (bi < blockParts.size) {
+            val b: Int = LirUtils.strToInt(blockParts[bi])
+            if (b >= 0) {
+                if (base < 0 || b < base) { base = b }
+                if (b > top) { top = b }
+            }
+            bi = bi + 1
+        }
+        if (base < 0) {
+            return
+        }
+        val predSlots: List<String> = arrayListOf<String>()
+        var slotIdx: Int = 0
+        while (slotIdx <= top - base) {
+            predSlots.add("")
+            slotIdx = slotIdx + 1
+        }
+        // PHI-MOV 表：按「边块 ID − base」下标，每项为若干 `phiVid,incomingVid\n`。
+        this.phiMovBase = base
+        this.phiMovByBlock = arrayListOf<String>()
+        slotIdx = 0
+        while (slotIdx <= top - base) {
+            this.phiMovByBlock.add("")
+            slotIdx = slotIdx + 1
+        }
+
+        bi = 0
         while (bi < blockParts.size) {
             val bid: Int = LirUtils.strToInt(blockParts[bi])
             if (bid >= 0) {
@@ -305,8 +583,13 @@ class InstructionSelector {
                     var si: Int = 0
                     while (si < sp.size) {
                         val s: Int = LirUtils.strToInt(sp[si])
-                        if (s >= 0) {
-                            predMap = this.appendPred(predMap, s, bid)
+                        if (s >= base && s <= top) {
+                            val cur: String = predSlots[s - base]
+                            if (cur == "") {
+                                predSlots[s - base] = LirUtils.toStr(bid)
+                            } else {
+                                predSlots[s - base] = cur + "," + LirUtils.toStr(bid)
+                            }
                         }
                         si = si + 1
                     }
@@ -314,15 +597,36 @@ class InstructionSelector {
             }
             bi = bi + 1
         }
+        if (traceBig) {
+            println("[isel-phi] " + func.name + " pass1 done base=" + LirUtils.toStr(base) +
+                    " top=" + LirUtils.toStr(top))
+        }
+        this.selProbe("phi pass1 done fn=" + func.name +
+                " base=" + LirUtils.toStr(base) + " top=" + LirUtils.toStr(top) +
+                " slots=" + MachineDagUtils.toStr(this.phiMovByBlock.size))
 
         // ② 为每个 PHI 的每条入边确定「边块」：先按定义块精确匹配，
         //    未能匹配的入边值按顺序分配给剩余前驱。
         bi = 0
         while (bi < blockParts.size) {
             val blockId: Int = LirUtils.strToInt(blockParts[bi])
+            if (traceBig && bi % 25 == 0) {
+                println("[isel-phi] " + func.name + " pass2 bi=" + LirUtils.toStr(bi) +
+                        " phiSlots=" + LirUtils.toStr(this.phiMovByBlock.size))
+            }
+            if (bi % 250 == 0) {
+                this.selProbe("phi pass2 bi=" + LirUtils.toStr(bi) + "/" +
+                        LirUtils.toStr(blockParts.size) + " fn=" + func.name)
+            }
             if (blockId >= 0) {
                 val block: LirBlock = src.blockOf(blockId)
-                val preds: List<String> = this.predsOf(predMap, blockId)
+                var preds: List<String> = emptyList()
+                if (blockId >= base && blockId <= top) {
+                    val slot: String = predSlots[blockId - base]
+                    if (slot != "") {
+                        preds = LirUtils.splitArgs(slot)
+                    }
+                }
                 val phiParts: List<String> = LirUtils.splitArgs(block.phis)
                 var pi: Int = 0
                 while (pi < phiParts.size) {
@@ -330,7 +634,23 @@ class InstructionSelector {
                     if (phiVid >= 0) {
                         val phiVal: LirValue = src.valueOf(phiVid)
                         val incoming: List<String> = LirUtils.splitArgs(phiVal.args)
-                        var usedIdx: String = ""
+                        // 「已使用的入边值」标记表：按下标标记（O(1) 判定）。
+                        //
+                        // ⚠️ 旧实现用 `usedIdx = usedIdx + toStr(pick) + ","` 这个
+                        // `s = s + x` 累加器，并靠 `flatContains(usedIdx, …)` 查表，
+                        // 而 `flatContains` 每次都要 `usedIdx.split(",")` **整段
+                        // 重新分配一个 List + 全部子串**。它在
+                        // 「块 × PHI × 前驱 × 入边」四层循环的最内层被调用，
+                        // 自举 `Main.aura` 的循环函数里 PHI 的入边可达上百条，
+                        // 于是这一步单独就产生千万次小串分配（Phase C 的
+                        // `<=64B` 桶 1190 万次 / 119MB 主要来源）。改成标记表后
+                        // 两侧都是 O(1) 且零分配。
+                        val used: List<Int> = arrayListOf<Int>()
+                        var u0: Int = 0
+                        while (u0 < incoming.size) {
+                            used.add(0)
+                            u0 = u0 + 1
+                        }
                         var ri: Int = 0
                         while (ri < preds.size) {
                             val predB: Int = LirUtils.strToInt(preds[ri])
@@ -338,7 +658,7 @@ class InstructionSelector {
                             // (a) 精确定义块匹配
                             var ai: Int = 0
                             while (ai < incoming.size) {
-                                if (!this.flatContains(usedIdx, MachineDagUtils.toStr(ai))) {
+                                if (used[ai] == 0) {
                                     val iv: Int = LirUtils.strToInt(incoming[ai])
                                     if (iv >= 0 && src.valueOf(iv).block == predB) {
                                         pick = ai
@@ -351,7 +671,7 @@ class InstructionSelector {
                             if (pick < 0) {
                                 var aj: Int = 0
                                 while (aj < incoming.size) {
-                                    if (!this.flatContains(usedIdx, MachineDagUtils.toStr(aj))) {
+                                    if (used[aj] == 0) {
                                         pick = aj
                                         break
                                     }
@@ -359,9 +679,8 @@ class InstructionSelector {
                                 }
                             }
                             if (pick >= 0) {
-                                usedIdx = usedIdx + MachineDagUtils.toStr(pick) + ","
-                                this.phiPreds = this.phiPreds + predB + "|" +
-                                                phiVid + "|" + incoming[pick] + "\n"
+                                used[pick] = 1
+                                this.phiMovAdd(predB, phiVid, LirUtils.strToInt(incoming[pick]))
                             }
                             ri = ri + 1
                         }
@@ -386,54 +705,6 @@ class InstructionSelector {
             if (p.size >= 2) { return p[1] }
         }
         return ""
-    }
-
-    /// 在 predMap 中把 `pred` 追加到块 `target` 的前驱列表。
-    private fun appendPred(predMap: String, target: Int, pred: Int): String {
-        val lines: List<String> = this.splitFlat(predMap, "\n")
-        var out: String = ""
-        var found: Boolean = false
-        var i: Int = 0
-        while (i < lines.size) {
-            val line: String = lines[i]
-            if (line != "") {
-                val parts: List<String> = this.splitFlat(line, "|")
-                if (parts.size >= 2 && parts[0] == MachineDagUtils.toStr(target)) {
-                    out = out + parts[0] + "|" + parts[1] + MachineDagUtils.toStr(pred) + ",\n"
-                    found = true
-                } else {
-                    out = out + line + "\n"
-                }
-            }
-            i = i + 1
-        }
-        if (!found) {
-            out = out + MachineDagUtils.toStr(target) + "|" + MachineDagUtils.toStr(pred) + ",\n"
-        }
-        return out
-    }
-
-    /// 读取块的前驱列表。
-    private fun predsOf(predMap: String, blockId: Int): List<String> {
-        if (predMap == "") { return emptyList() }
-        val targetKey: String = MachineDagUtils.toStr(blockId) + "|"
-        val lines: List<String> = this.splitFlat(predMap, "\n")
-        var i: Int = 0
-        while (i < lines.size) {
-            val line: String = lines[i]
-            if (line != "" && line.startsWith(targetKey)) {
-                val rest: String = line.substring(targetKey.length, line.length)
-                val trimmed: String = if (rest.endsWith(",")) {
-                    rest.substring(0, rest.length - 1)
-                } else {
-                    rest
-                }
-                if (trimmed == "") { return emptyList() }
-                return trimmed.split(",")
-            }
-            i = i + 1
-        }
-        return emptyList()
     }
 
     /// 扁平逗号串是否包含指定 token。
@@ -505,19 +776,30 @@ class InstructionSelector {
         }
     }
 
+    /// 登记一条 PHI-MOV（边块 `blockId` 末尾：`phiVid <- incomingVid`）。
+    private fun phiMovAdd(blockId: Int, phiVid: Int, incomingVid: Int): Unit {
+        val idx: Int = blockId - this.phiMovBase
+        if (idx < 0 || idx >= this.phiMovByBlock.size) { return }
+        this.phiMovByBlock[idx] = this.phiMovByBlock[idx] +
+                MachineDagUtils.toStr(phiVid) + "," + MachineDagUtils.toStr(incomingVid) + "\n"
+    }
+
     /// 为指定块发射 PHI 前驱 MOV 指令。
     /// 在块末尾（终结指令之前）插入 MOV phi_node, incoming_node。
     private fun emitPhiMovsForBlock(blockId: Int): Unit {
-        if (this.phiPreds == "") { return }
-        val lines: List<String> = this.splitFlat(this.phiPreds, "\n")
+        val idx: Int = blockId - this.phiMovBase
+        if (idx < 0 || idx >= this.phiMovByBlock.size) { return }
+        val recs: String = this.phiMovByBlock[idx]
+        if (recs == "") { return }
+        val lines: List<String> = this.splitFlat(recs, "\n")
         var i: Int = 0
         while (i < lines.size) {
             val line: String = lines[i]
             if (line != "") {
-                val parts: List<String> = this.splitFlat(line, "|")
-                if (parts.size >= 3 && parts[0] == this.intToStr(blockId)) {
-                    val phiVid: Int = LirUtils.strToInt(parts[1])
-                    val incomingVid: Int = LirUtils.strToInt(parts[2])
+                val parts: List<String> = this.splitFlat(line, ",")
+                if (parts.size >= 2) {
+                    val phiVid: Int = LirUtils.strToInt(parts[0])
+                    val incomingVid: Int = LirUtils.strToInt(parts[1])
                     val phiNode: Int = this.lookupNode(phiVid)
                     val incomingNode: Int = this.lookupNode(incomingVid)
                     if (phiNode >= 0 && incomingNode >= 0) {
@@ -700,11 +982,7 @@ class InstructionSelector {
         if (this.types.isString(typeId)) {
             val strName: String = "@str." + this.strConstCount
             this.strConstCount = this.strConstCount + 1
-            if (this.stringConstants == "") {
-                this.stringConstants = constVal
-            } else {
-                this.stringConstants = this.stringConstants + "," + constVal
-            }
+            this.stringConstAdd(constVal)
 
             // Const 节点（aux = @str.N 符号名），寄存器由分配器决定。
             val nodeId: Int = this.dag.addNode("Const", val.op, val.type,
@@ -801,11 +1079,7 @@ class InstructionSelector {
     private fun emitStringConstNode(vid: Int, literal: String): Int {
         val strName: String = "@str." + this.strConstCount
         this.strConstCount = this.strConstCount + 1
-        if (this.stringConstants == "") {
-            this.stringConstants = literal
-        } else {
-            this.stringConstants = this.stringConstants + "," + literal
-        }
+        this.stringConstAdd(literal)
 
         val strTypeId: Int = this.types.fromTypeName("String")
         val nodeId: Int = this.dag.addNode("Const", "ConstImm", strTypeId,
@@ -1011,6 +1285,7 @@ class InstructionSelector {
     /// 是同一策略：按接收者类型把裸名补齐。
     private fun mapStdlibFuncName(name: String, recvTy: String): String {
         if (name == "String.length" || name == "String.size") { return "strlen" }
+        if (name == "String.charCodeAt" || name == "charCodeAt") { return "charCodeAt" }
         if (name == "Any.toString") { return "toString" }
         if (name == "Any.equals") { return "streq" }
         // 裸名 + 接收者类型：`s.length()` / `s.size()` / `a.equals(b)`。
@@ -1020,6 +1295,7 @@ class InstructionSelector {
             if (name == "length" || name == "size") { return "strlen" }
             if (name == "equals") { return "streq" }
             if (name == "toString") { return "toString" }
+            if (name == "charCodeAt") { return "charCodeAt" }
         }
         // 堆列表：`arr[i] = v` 由 HIR 降级为 `.Collections.set(arr, i, v)`
         //（返回容器本身），对应 runtime 的 `__list_setat`。
@@ -1040,6 +1316,27 @@ class InstructionSelector {
         // syscall 封装：`Syscalls.exit(code)` → runtime 的 `exit`
         //（内部为 NtTerminateProcess syscall；参数已在 rcx）。
         if (name == "aura.lang.native.Syscalls.exit" || name == "Syscalls.exit") { return "exit" }
+        // Memory 内置操作（首参为 Long 地址）：
+        // `Memory.write(addr, val)` → Memory_write（区别于 `FileOps.write(fd, buf, count)` → io_write）
+        if (name == "write" && recvTy == "Long") { return "Memory_write" }
+        if (name == "read" && recvTy == "Long") { return "Memory_read" }
+        if (name == "write16" && recvTy == "Long") { return "Memory_write16" }
+        if (name == "read16" && recvTy == "Long") { return "Memory_read16" }
+        if (name == "write32" && recvTy == "Long") { return "Memory_write32" }
+        if (name == "read32" && recvTy == "Long") { return "Memory_read32" }
+        if (name == "write64" && recvTy == "Long") { return "Memory_write64" }
+        if (name == "read64" && recvTy == "Long") { return "Memory_read64" }
+        if (name == "alloc" && recvTy == "Long") { return "Memory_alloc" }
+        if (name == "free" && recvTy == "Long") { return "Memory_free" }
+        // FileOps → io_* 避免与 Rust 编译器 native wrapper 符号冲突
+        if (name == "write" && recvTy != "Long") { return "io_write" }
+        if (name == "read" && recvTy != "Long") { return "io_read" }
+        if (name == "open") { return "io_open" }
+        if (name == "close") { return "io_close" }
+        if (name == "access") { return "io_access" }
+        // Collections.listRemove(list, idx) → 运行时移除元素
+        if (name == "aura.lang.std.Collections.listRemove" || name == "Collections.listRemove"
+            || name == ".Collections.listRemove" || name == "remove") { return "Collections.listRemove" }
         return name
     }
 

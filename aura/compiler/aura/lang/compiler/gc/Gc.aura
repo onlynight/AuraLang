@@ -10,6 +10,7 @@ package aura.lang.compiler.gc
 // - 替代旧版全空壳的 object Gc（malloc→null, sweep→0, shouldCollect→always true）。
 
 import aura.lang.collection.ArrayList
+import aura.lang.collection.Collections
 import aura.lang.collection.HashMap
 
 /// 堆对象槽位。
@@ -55,7 +56,7 @@ class GcHeap {
     /// 分配一个新对象槽位，返回堆索引。
     fun alloc(): Int {
         if (freeList.size > 0) {
-            val idx = freeList.remove(freeList.size - 1)
+            val idx = Collections.listRemove(freeList, freeList.size - 1) as Long as Int
             val slot = slots.get(idx)
             slot.data = HashMap<String, Any>()
             slot.marked = false
@@ -116,7 +117,7 @@ class GcHeap {
         var i = 0
         while (i < roots.size) {
             if (roots.get(i) == idx) {
-                roots.remove(i)
+                Collections.listRemove(roots, i)
                 return
             }
             i = i + 1

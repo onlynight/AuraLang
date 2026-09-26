@@ -196,9 +196,11 @@ class Fold {
         if (len == 0) return false
         var i: Int = 0
         while (i < len) {
-            val c: String = toStr(text[i])
-            if (c != "-" && c != "+" && c != "0" && c != "1" && c != "2" && c != "3"
-                && c != "4" && c != "5" && c != "6" && c != "7" && c != "8" && c != "9") {
+            // 用 `charCodeAt` 直接比较码值（45='-', 43='+', 48..57='0'..'9'）：
+            // 旧写法 `toStr(text[i])` 的 `String_charAt` **每次都要 strlen 整个 text**
+            // （O(|text|)），逐字符比较即 O(|text|²)（同 Lexer.peek 的历史缺陷）。
+            val c: Int = text.charCodeAt(i) as Int
+            if (c != 45 && c != 43 && (c < 48 || c > 57)) {
                 return false
             }
             i = i + 1

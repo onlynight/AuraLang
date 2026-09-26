@@ -56,9 +56,13 @@ object DwarfUtils {
     fun debugInfoFromPath(path: String, enabled: Boolean): DebugInfo {
         var lastSep: Int = -1
         var i: Int = 0
-        while (i < path.length) {
-            val c: String = toStr(path[i])
-            if (c == "/" || c == "\\") {
+        // `path.length` 提到循环外（AOT 下是 strlen），并改用 `charCodeAt` 比较码值
+        // （47='/', 92='\'）：`toStr(path[i])` 的 `String_charAt` 每次都要 strlen
+        // 整个 path，逐字符扫描即 O(|path|²)。
+        val plen: Int = path.length
+        while (i < plen) {
+            val c: Int = path.charCodeAt(i) as Int
+            if (c == 47 || c == 92) {
                 lastSep = i
             }
             i = i + 1

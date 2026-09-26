@@ -9,6 +9,7 @@ package aura.lang.compiler.backend.photon
 
 import aura.lang.std.String
 import aura.lang.std.Env
+import aura.lang.std.FileSystem
 import "x86_64/X86Encoder.aura"
 import "MachineDag.aura"
 import "RegisterAllocator.aura"
@@ -51,6 +52,11 @@ class X86Emitter {
     /// 调用方跨调用存活的值会被悄悄改掉（实测 `"x = " + toStr(x)` 输出 `42`）。
     private var savedRegs: String = ""
 
+    // ── 定位探针（有界截断，见 `xeProbe` 的说明）──
+    private var probePath: String = ""
+    private var probeStep: Int = 0
+    private var probeBuf: String = ""
+
     init() {
         this.enc = X86EncoderUtils.emptyEncoder()
         this.outputHex = ""
@@ -63,8 +69,38 @@ class X86Emitter {
 
     // ── 主入口 ──
 
+    /// 读取探针输出路径；空串表示关闭。与 Phase C/D/E 同一套开关。
+    private fun readProbePath(): String {
+        if (Env.get("AURA_XE_PROBE", "") != "1" &&
+            Env.get("AURA_SEL_PROBE", Env.get("AURA_MEM_STATS", "")) != "1") {
+            return ""
+        }
+        val p: String = Env.get("AURA_XE_PROBE_PATH", "")
+        if (p != "") { return p }
+        val dir: String = Env.get("AURA_HAT_OUT", "")
+        if (dir == "") { return "" }
+        return dir + "/xe_probe.log"
+    }
+
+    /// Phase E(编码) **定位探针**：立即落盘当前上下文。
+    ///
+    /// 与 `selProbe` / `raProbe` / `peProbe` 同法：有界截断（保留尾部 2.5KB，
+    /// 每次重写一个 ≤3KB 小文件）——累积式落盘本身会成为持续分配源。
+    /// OOM 时本文件最后几行就是出事的精确上下文（处理到第几条指令、已编码字节数）。
+    private fun xeProbe(msg: String): Unit {
+        if (this.probePath == "") { return }
+        this.probeStep = this.probeStep + 1
+        this.probeBuf = this.probeBuf + "[s" + this.probeStep + "] " + msg + "\n"
+        if (this.probeBuf.length > 3000) {
+            this.probeBuf = this.probeBuf.substring(this.probeBuf.length - 2500)
+        }
+        FileSystem.writeText(this.probePath, this.probeBuf)
+    }
+
     /// 发射整个 MachineDag 为机器码（支持多函数：每个函数独立 prologue/epilogue）。
     fun emitFunction(dag: MachineDag, funcName: String): Unit {
+        this.probePath = this.readProbePath()
+        this.xeProbe("emitFunction enter instrs=" + toStr(dag.instrCount))
         this.enc.reset()
         this.outputHex = ""
         this.relocRecords = ""
@@ -113,6 +149,11 @@ class X86Emitter {
 
             this.emitInstr(instr, dag)
             i = i + 1
+            if (i % 4000 == 0) {
+                this.xeProbe("i=" + toStr(i) + "/" + toStr(dag.instrCount) +
+                        " bytes=" + toStr(this.enc.byteCount()) +
+                        " relocs=" + toStr(this.enc.getRelocations().size))
+            }
         }
 
         // 发射最后一个函数的 epilogue。
@@ -124,11 +165,16 @@ class X86Emitter {
         }
 
         // 解析标签。
+        this.xeProbe("loop done bytes=" + toStr(this.enc.byteCount()) +
+                " relocs=" + toStr(this.enc.getRelocations().size))
         this.enc.resolveLabels()
+        this.xeProbe("resolveLabels done bytes=" + toStr(this.enc.byteCount()))
 
         // 获取最终 hex 和重定位。
         this.outputHex = this.enc.toHex()
+        this.xeProbe("toHex done hexChars=" + toStr(this.outputHex.length))
         this.relocRecords = this.joinRelocRecords(this.enc.getRelocations())
+        this.xeProbe("joinReloc done relocChars=" + toStr(this.relocRecords.length))
     }
 
     /// 获取函数偏移表（格式 "funcName|offset;;funcName|offset"）。
@@ -575,16 +621,51 @@ class X86Emitter {
         return "rax"
     }
 
-    /// 连接重定位记录为逗号分隔字符串。
+    /// 连接重定位记录为 `|` 分隔字符串。
+    ///
+    /// ⚠️ 旧实现是 `out = out + relocs[i]` —— Aura 的 String 不可变，每拼一条
+    /// 都要把**已累积的全部记录**整段拷贝 ⇒ O(记录数²)。自举 `Main.aura` 有
+    /// 17,066 条重定位（总长约 0.7MB），实测这一步单独吃掉约 7GB 常驻分配
+    /// （`aura_string_concat` 归因 7,013MB / 8,134,000+ 次），AOT 运行时无
+    /// GC（`free_calls=0`）全部驻留，8 GiB 上限在此被打穿（退出码 70）。
+    ///
+    /// 现改为「先逐条入列表（含分隔符），再两两归并」：追加 O(1)，归并
+    /// O(总长 · log 记录数)，与 `X86Encoder.joinBytes` / `PhotonObjectWriter.coffJoinList`
+    /// 同一手法。
     private fun joinRelocRecords(relocs: List<String>): String {
-        var out: String = ""
+        val parts: List<String> = arrayListOf<String>()
         var i: Int = 0
         while (i < relocs.size) {
-            if (out != "") { out = out + "|" }
-            out = out + relocs[i]
+            if (i > 0) { parts.add("|") }
+            parts.add(relocs[i])
             i = i + 1
         }
-        return out
+        return this.joinPairwise(parts)
+    }
+
+    /// 把片段列表两两归并成单个字符串。
+    ///
+    /// 每层拷贝总量恒为 O(总长)，共 O(log 片段数) 层 ⇒ 总分配
+    /// O(总长 · log 片段数)，避免 `out = out + part` 的 O(总长²)。
+    private fun joinPairwise(parts: List<String>): String {
+        if (parts.size == 0) {
+            return ""
+        }
+        var cur: List<String> = parts
+        while (cur.size > 1) {
+            val next: List<String> = arrayListOf<String>()
+            var i: Int = 0
+            while (i < cur.size) {
+                if (i + 1 < cur.size) {
+                    next.add(cur[i] + cur[i + 1])
+                } else {
+                    next.add(cur[i])
+                }
+                i = i + 2
+            }
+            cur = next
+        }
+        return cur[0]
     }
 
     // ── 查询 ──

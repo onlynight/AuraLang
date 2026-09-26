@@ -160,6 +160,15 @@ class MirFunction {
     /// 是否为原生函数。
     var isNative: Boolean = false
 
+    /// 本函数**第一个** SSA 值的 id（即 `addFunction` 时的 `program.valueCount`）。
+    ///
+    /// 函数的全部值在 `values` 中是**连续区间** `[valueStart, 下一个函数的 valueStart)`
+    /// （值按创建顺序追加，函数按创建顺序编号）。下游（如 `Lowering`）据此在
+    /// O(1) 内定位本函数的值，避免「对每个函数全量扫所有值」的 O(函数数 × 值数)
+    /// 扫描 —— 自举 `Main.aura` 规模下那会退化为 ~4×10⁸ 次循环 + 同量级字符串
+    /// 分配，直接吃满内存闸门。
+    var valueStart: Int = 0
+
     init() {
         this.name = ""
         this.type = 0
@@ -168,6 +177,7 @@ class MirFunction {
         this.params = ""
         this.returnType = 0
         this.isNative = false
+        this.valueStart = 0
     }
 }
 
@@ -314,6 +324,8 @@ class MirSsaProgram {
         f.blocks = ""
         f.entryBlock = -1
         f.params = ""
+        // 记录本函数值的起点（见 `MirFunction.valueStart` 说明）。
+        f.valueStart = this.valueCount
         this.functions.add(f)
         this.functionCount = this.functions.size
         this.currentFunc = this.functions.size - 1

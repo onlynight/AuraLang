@@ -20,8 +20,28 @@ class HatSerializer {
     /// 目标三元组。
     private var targetTriple: String = "x86_64-pc-windows-msvc"
 
-    /// 输出缓冲。
-    private var output: String = ""
+    /// 输出缓冲（**分块列表**）。
+    ///
+    /// ⚠️ **不能用 `output: String` + `output = output + x`**：Aura 的 String
+    /// 不可变，每次追加都要整段拷贝。N 次追加就是 O(N²) 字节分配，而 AOT/原生
+    /// 运行时**没有 GC**（malloc 即泄漏）。实测自举 `Main.aura`：开启 `object`
+    /// 方法下钻后函数数从 18 涨到 375+，序列化阶段在 4.4 s 内分配到 **8 GB**
+    /// 被内存闸门杀掉；同一路径此前（18 个函数）恰好只有 ≈9 KB 输出，所以从未暴露。
+    ///
+    /// 这里改为「每段追加只入列表，最后两两归并成整串」（[`joinChunks`]）：
+    /// 每段按引用存入列表（无拷贝），归并层数 O(log N)、每层总拷贝 O(总长)
+    /// ⇒ 总分配 O(总长 · log N)，彻底消除平方级拷贝。
+    ///
+    /// 为什么不用 `EmitBuffer`（原生 StringBuilder）：它经 `CString(s)` → VM 的
+    /// `native_builtin_cstring` 取得 C 字符串指针，而该指针缓存**以「字符串数据
+    /// 地址」为键** —— 地址在 `Rc<str>` 释放后会被复用，于是后续追加会读到
+    /// **上一个同地址字符串**的陈旧内容，串出乱序/重复的文本（实测
+    /// `tests/hat_serializer_tests.aura` 由 30/30 变成 26/30）。分块列表不依赖
+    /// 该 ABI，VM / AOT / Photon 三条路径行为一致。
+    private var chunks: List<String> = arrayListOf<String>()
+
+    /// 最近一次 `serialize()` 的产物（供 `getOutput()` 读取）。
+    private var lastOutput: String = ""
 
     /// 类型注册表。
     private var types: TypeRegistry = TypeRegistry()
@@ -35,10 +55,43 @@ class HatSerializer {
     init() {
         this.moduleName = "main"
         this.targetTriple = "x86_64-pc-windows-msvc"
-        this.output = ""
+        this.chunks = arrayListOf<String>()
+        this.lastOutput = ""
         this.types = TypeRegistry()
         this.curEntryBlock = -1
         this.definedConsts = "\n"
+    }
+
+    // ── 输出缓冲 ──
+
+    /// 追加一段文本（O(1)，不做拷贝）。
+    private fun w(s: String): Unit {
+        this.chunks.add(s)
+    }
+
+    /// 把分块列表两两归并成整串（O(总长 · log 块数)）。
+    ///
+    /// 直接写 `r = r + c` 逐段拼接是 O(总长²)（每次都要拷贝已累积的全部内容）；
+    /// 两两归并让每层的拷贝总量恒为 O(总长)，共 O(log 块数) 层。
+    private fun joinChunks(items: List<String>): String {
+        var cur: List<String> = items
+        while (cur.size > 1) {
+            val next: List<String> = arrayListOf<String>()
+            var i: Int = 0
+            while (i < cur.size) {
+                if (i + 1 < cur.size) {
+                    next.add(cur[i] + cur[i + 1])
+                } else {
+                    next.add(cur[i])
+                }
+                i = i + 2
+            }
+            cur = next
+        }
+        if (cur.size == 0) {
+            return ""
+        }
+        return cur[0]
     }
 
     // ── 主入口 ──
@@ -46,12 +99,14 @@ class HatSerializer {
     /// 从 SSA MIR 程序序列化为 HAT 文本。
     fun serialize(mir: MirSsaProgram): String {
         this.types = mir.types
-        this.output = ""
+        this.chunks = arrayListOf<String>()
+        this.lastOutput = ""
+        this.blockIndexReady = false
 
         // 元数据头
-        this.output = this.output + "; module " + this.moduleName + " target " + this.targetTriple + "\n"
-        this.output = this.output + "; schema=HAT/2.0\n"
-        this.output = this.output + "\n"
+        this.w("; module " + this.moduleName + " target " + this.targetTriple + "\n")
+        this.w("; schema=HAT/2.0\n")
+        this.w("\n")
 
         // 函数定义
         var fi: Int = 0
@@ -59,11 +114,14 @@ class HatSerializer {
         while (fi < funcCount) {
             val func: MirFunction = mir.functionOf(fi)
             this.serializeFunction(mir, func)
-            this.output = this.output + "\n"
+            this.w("\n")
             fi = fi + 1
         }
 
-        return this.output
+        val text: String = this.joinChunks(this.chunks)
+        this.chunks = arrayListOf<String>()
+        this.lastOutput = text
+        return text
     }
 
     // ── 函数序列化 ──
@@ -74,7 +132,7 @@ class HatSerializer {
         this.definedConsts = "\n"
         // 函数签名
         var retTy: String = this.typeName(mir, func.returnType)
-        this.output = this.output + "@fn " + func.name + "("
+        this.w("@fn " + func.name + "(")
 
         // 参数
         var params: String = func.params
@@ -93,9 +151,9 @@ class HatSerializer {
                             if (first) {
                                 first = false
                             } else {
-                                this.output = this.output + ", "
+                                this.w(", ")
                             }
-                            this.output = this.output + "@" + value.aux + ": " + this.typeName(mir, value.type)
+                            this.w("@" + value.aux + ": " + this.typeName(mir, value.type))
                         }
                     }
                     pStart = pi + 1
@@ -104,7 +162,7 @@ class HatSerializer {
             }
         }
 
-        this.output = this.output + ") -> " + retTy + "\n"
+        this.w(") -> " + retTy + "\n")
 
         // 基本块
         var blocks: String = func.blocks
@@ -122,7 +180,7 @@ class HatSerializer {
                             if (first) {
                                 first = false
                             } else {
-                                this.output = this.output + "\n"
+                                this.w("\n")
                             }
                             this.serializeBlock(mir, blockId, blockId == func.entryBlock)
                         }
@@ -145,7 +203,7 @@ class HatSerializer {
         if (label == "" && isEntry) {
             label = "entry"
         }
-        this.output = this.output + "  bb " + label + ":\n"
+        this.w("  bb " + label + ":\n")
 
         // Phi 节点
         var phis: String = block.phis
@@ -176,20 +234,98 @@ class HatSerializer {
         // 且 `@t2` 从未定义 ⇒ HAT 解析器报 unresolved value、DAG 空转）。
         // 这里与 `Lowering.lowerFunction` 保持一致：按全局 `values` 顺序、
         // 用 `v.block == blockId` 归块（值 id 顺序即程序顺序）。
-        var vi: Int = 0
-        while (vi < mir.valueCount) {
-            val v: MirValue = mir.valueOf(vi)
-            if (v.block == blockId && block.term != vi && v.op != "Phi" && v.op != "Param") {
-                this.serializeInstr(mir, vi)
-            }
-            vi = vi + 1
-        }
+        //
+        // 归块本身走一次性索引（[`ensureBlockIndex`]）：对每个块全量扫 `values`
+        // 是 O(块数 × 值数)，自举规模下会退化到 10^10 量级。
+        this.forEachIndex(this.blockValueIndex(mir, blockId), block, mir)
 
         // 终结指令
         if (block.term >= 0) {
             val term: MirValue = mir.valueOf(block.term)
             this.serializeTerminator(mir, term)
         }
+    }
+
+    /// 遍历块索引给出的值 id 列表并序列化（跳过终结指令 / Phi / Param）。
+    private fun forEachIndex(vals: String, block: MirBlock, mir: MirSsaProgram): Unit {
+        var vi: Int = 0
+        var vStart: Int = 0
+        var vLen: Int = vals.length
+        while (vi <= vLen) {
+            if (vi == vLen || vals.charCodeAt(vi) == 44) {
+                if (vi > vStart) {
+                    val idStr: String = HatParserUtils.safeSubstring(vals, vStart, vi).trim()
+                    val vid: Int = HatSerializerUtils.strToInt(idStr)
+                    if (vid >= 0 && block.term != vid) {
+                        val v: MirValue = mir.valueOf(vid)
+                        if (v.op != "Phi" && v.op != "Param") {
+                            this.serializeInstr(mir, vid)
+                        }
+                    }
+                }
+                vStart = vi + 1
+            }
+            vi = vi + 1
+        }
+    }
+
+
+    /// 取「本块内普通值的 id 列表」（逗号分隔）。
+    ///
+    /// 旧实现在 `serializeBlock` 里对**每个块**都全量扫 `mir.valueCount` 个值，
+    /// 总代价 O(块数 × 值数)。自举 `Main.aura` 规模下（数万块 × 数十万值）会退化到
+    /// 10^10 量级。这里改为一次性建立索引。
+    ///
+    /// 索引以**每块一个 id 串**的形式缓存在 `blockValueBuckets` 里（下标 = 块 id），
+    /// 构造只做一次 O(值数)，查询是一次列表下标。
+    ///
+    /// ⚠️ 曾把整张索引拼成一个巨大 CSV + 每块起始下标 CSV，查询时
+    /// `indexFieldAt` 线性扫起点（O(块数²)）、`safeSubstring` 再切值列表
+    /// （每次 `strlen(整张索引)` ≈ 750KB）。20826 个块时两者合计十几 GB
+    /// 字节扫描 —— `.hat` 序列化 13 秒的主要来源。逐块一个字符串的列表
+    /// 两者都省掉了（且逐块小串拼接只影响块内值数，是 O(值数) 总量）。
+    private var blockValueBuckets: List<String> = arrayListOf<String>()
+
+    /// 确保块索引已建立（幂等）。
+    private fun ensureBlockIndex(mir: MirSsaProgram): Unit {
+        if (this.blockIndexReady) {
+            return
+        }
+        // 单遍扫描 values，把 vid 追加到所属块的桶里。
+        // 用「每块一个 ArrayList<Int>」避免字符串拼接的平方开销。
+        var buckets: List<String> = arrayListOf<String>()
+        var bi: Int = 0
+        while (bi < mir.blockCount) {
+            buckets.add("")
+            bi = bi + 1
+        }
+        var vi: Int = 0
+        while (vi < mir.valueCount) {
+            val v: MirValue = mir.valueOf(vi)
+            val b: Int = v.block
+            if (b >= 0 && b < buckets.size) {
+                buckets[b] = buckets[b] + HatSerializerUtils.toStr(vi) + ","
+            }
+            vi = vi + 1
+        }
+        // 直接保留「每块一个 id 串」的列表：查询即一次列表下标，无需再拼整串。
+        this.blockValueBuckets = buckets
+        this.blockIndexReady = true
+    }
+
+    /// 块索引是否已建立。
+    private var blockIndexReady: Boolean = false
+
+    /// 取某一块的「普通值 id 列表」（逗号分隔）。
+    ///
+    /// 索引串里每个 id 后面都跟一个逗号，块 i 的区间为
+    /// `[start_i, start_{i+1})`，因此切片即可。
+    private fun blockValueIndex(mir: MirSsaProgram, blockId: Int): String {
+        this.ensureBlockIndex(mir)
+        if (blockId < 0 || blockId >= this.blockValueBuckets.size) {
+            return ""
+        }
+        return this.blockValueBuckets[blockId]
     }
 
     // ── Phi 节点序列化 ──
@@ -199,8 +335,8 @@ class HatSerializer {
         val phi: MirValue = mir.valueOf(phiId)
         var ty: String = this.typeName(mir, phi.type)
         val operands: String = this.operandsText(mir, phi.args)
-        this.output = this.output + "    @" + this.targetName(phi) + " = @phi(" +
-            operands + ") : " + ty + "\n"
+        this.w("    @" + this.targetName(phi) + " = @phi(" +
+            operands + ") : " + ty + "\n")
     }
 
     // ── 普通指令序列化 ──
@@ -236,7 +372,7 @@ class HatSerializer {
 
         // 先算操作数（其中可能按需补发常量定义行），再整体写出本行
         val operands: String = this.operandsText(mir, instr.args)
-        this.output = this.output + head + "(" + operands + ") : " + ty + "\n"
+        this.w(head + "(" + operands + ") : " + ty + "\n")
     }
 
     /// 生成操作数列表文本（`@a, @b, ...`）。
@@ -279,10 +415,10 @@ class HatSerializer {
         val ty: String = this.typeName(mir, value.type)
         val constOp: String = this.constOpName(mir, value)
         if (constOp == "null") {
-            this.output = this.output + "    @" + this.targetName(value) + " = @null : " + ty + "\n"
+            this.w("    @" + this.targetName(value) + " = @null : " + ty + "\n")
         } else {
-            this.output = this.output + "    @" + this.targetName(value) + " = @" + constOp + " " +
-                this.constLiteral(mir, value) + " : " + ty + "\n"
+            this.w("    @" + this.targetName(value) + " = @" + constOp + " " +
+                this.constLiteral(mir, value) + " : " + ty + "\n")
         }
         this.definedConsts = this.definedConsts + HatSerializerUtils.toStr(value.id) + "|\n"
     }
@@ -308,18 +444,18 @@ class HatSerializer {
             val targetId: Int = HatSerializerUtils.strToInt(args)
             if (targetId >= 0) {
                 var label: String = this.blockLabel(mir, targetId)
-                this.output = this.output + "    @br @" + label + "\n"
+                this.w("    @br @" + label + "\n")
             }
         } else if (op == "CondBr") {
             // @br_if @cond => @then, @else
             var args: String = term.args
             val body: String = this.condBrArgsText(mir, args)
-            this.output = this.output + "    @br_if " + body + "\n"
+            this.w("    @br_if " + body + "\n")
         } else if (op == "Ret") {
             // @ret @val : Type  或  @ret () : Unit
             var args: String = term.args
             if (args == "") {
-                this.output = this.output + "    @ret () : Unit\n"
+                this.w("    @ret () : Unit\n")
             } else {
                 val valId: Int = HatSerializerUtils.strToInt(args)
                 if (valId >= 0) {
@@ -328,14 +464,14 @@ class HatSerializer {
                         this.ensureConstDefined(mir, val)
                     }
                     var ty: String = this.typeName(mir, term.type)
-                    this.output = this.output + "    @ret @" + this.valueName(mir, val) + " : " + ty + "\n"
+                    this.w("    @ret @" + this.valueName(mir, val) + " : " + ty + "\n")
                 } else {
-                    this.output = this.output + "    @ret () : Unit\n"
+                    this.w("    @ret () : Unit\n")
                 }
             }
         } else {
             // 其他终结指令
-            this.output = this.output + "    @" + op + "\n"
+            this.w("    @" + op + "\n")
         }
     }
 
@@ -431,29 +567,46 @@ class HatSerializer {
 
     /// 转义 HAT 字符串字面量载荷（`\` / `"` / 换行 / 回车 / 制表 / `|`）。
     private fun escapeHatText(s: String): String {
-        var out: String = ""
-        var i: Int = 0
+        // ⚠️ 旧实现有两处平方级：
+        //   1. `out = out + …` 逐字符拼接 —— 对长度 L 的载荷是 O(L²) 拷贝；
+        //   2. 普通字符走 `s.substring(i, i + 1)` —— AOT 下 `substring` 每次都要
+        //      `strlen(s)`（O(L)），逐字符即 O(L²)。
+        // 编译器自身的字符串常量里有数 KB 级的 LLVM IR 模板（`Emit.aura`），
+        // 两者叠加在 `.hat` 序列化阶段吃掉十余秒。改为「按转义点切成若干段，
+        // 段间原样切片、转义符单独成段，最后两两归并」：转义符少时总代价 O(L)。
         val len: Int = s.length
+        val parts: List<String> = arrayListOf<String>()
+        var runStart: Int = 0
+        var i: Int = 0
         while (i < len) {
             val c: Int = s.charCodeAt(i)
+            var rep: String = ""
             if (c == 92) {
-                out = out + "\\\\"
+                rep = "\\\\"
             } else if (c == 34) {
-                out = out + "\\\""
+                rep = "\\\""
             } else if (c == 10) {
-                out = out + "\\n"
+                rep = "\\n"
             } else if (c == 13) {
-                out = out + "\\r"
+                rep = "\\r"
             } else if (c == 9) {
-                out = out + "\\t"
+                rep = "\\t"
             } else if (c == 124) {
-                out = out + "\\|"
-            } else {
-                out = out + s.substring(i, i + 1)
+                rep = "\\|"
+            }
+            if (rep != "") {
+                if (i > runStart) {
+                    parts.add(s.substring(runStart, i))
+                }
+                parts.add(rep)
+                runStart = i + 1
             }
             i = i + 1
         }
-        return out
+        if (runStart < len) {
+            parts.add(s.substring(runStart, len))
+        }
+        return this.joinChunks(parts)
     }
 
     /// 根据常量类型名选择 HAT 常量操作码。
@@ -657,9 +810,9 @@ class HatSerializer {
         this.targetTriple = triple
     }
 
-    /// 获取输出。
+    /// 获取输出（最近一次 `serialize()` 的产物；未序列化时为空串）。
     fun getOutput(): String {
-        return this.output
+        return this.lastOutput
     }
 }
 

@@ -5,8 +5,12 @@ import aura.lang.std.IO
 import aura.lang.std.String
 import aura.lang.std.FileSystem
 import "CompilerApi.aura"
-import aura.lang.native.process.ProcessNative
-import aura.lang.compiler.aot.Aot
+import aura.lang.compiler.parser.Parser
+import aura.lang.compiler.sema.TypeChecker
+import aura.lang.compiler.hir.Hir
+import aura.lang.compiler.mir.MirLower
+import aura.lang.compiler.codegen.Codegen
+import aura.lang.compiler.vm.VmRunner
 
 // ═══════════════════════════════════════════════════════════════
 // 交互式 REPL（纯 Aura 实现）
@@ -136,20 +140,34 @@ object ReplUtils {
             wrapper = "fun main() { " + trimmed + " }"
         }
 
-        // 写入临时文件，使用 AOT 路径编译并执行
-        val tmpPath: String = "build/tmp/repl_src.aura"
-        FileSystem.mkdirP("build/tmp")
-        FileSystem.writeText(tmpPath, wrapper)
-
-        val outPath: String = "build/tmp/repl_exe"
-        val compileCode: Int = CompilerApiUtils.aotBuildExeFile(tmpPath, outPath, "")
-        if (compileCode != 0) {
+        // VM 路径：直接编译并解释执行
+        val p = Parser(wrapper)
+        p.parseProgram()
+        if (p.errors.count > 0) {
+            IO.println("Error: parse errors: " + toStr(p.errors.count))
             return 1
         }
-
-        val exePath: String = Aot.aotWinPath(outPath + ".exe")
-        val runCode: Int = ProcessNative.run(exePath)
-        return runCode
+        val checker = TypeChecker()
+        checker.tcCheck(p.ast)
+        if (checker.tcGetErrors().count > 0) {
+            IO.println("Error: semantic errors: " + toStr(checker.tcGetErrors().count))
+            return 1
+        }
+        val hl = HirLowerer()
+        hl.lower(p.ast)
+        val ml = MirLowerer()
+        ml.lower(hl.hir)
+        val cg = Codegen()
+        val bc = cg.emit(ml.mir)
+        val vm = VmRunner()
+        vm.loadBytecode(bc, cg.constPoolStr(), cg.funcTableStr())
+        vm.run()
+        val vmError = vm.getError()
+        if (vmError != "") {
+            IO.println("Error: " + vmError)
+            return 1
+        }
+        return 0
     }
 
     /// 判断代码是否为纯表达式（非语句/块）。

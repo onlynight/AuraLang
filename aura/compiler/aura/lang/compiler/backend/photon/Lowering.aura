@@ -58,10 +58,18 @@ class Lowering {
     /// 内存链计数器（S2: 用于 Load/Store 指令的内存依赖排序）。
     var chainCounter: Int = 0
 
+    /// 当前函数的值区间起点（见 `lower()` 的区间说明）。
+    private var curValueStart: Int = 0
+
+    /// 当前函数的值区间终点（不含）。
+    private var curValueEnd: Int = 0
+
     init() {
         this.types = TypeRegistry()
         this.currentFunc = -1
         this.chainCounter = 0
+        this.curValueStart = 0
+        this.curValueEnd = 0
     }
 
     // ── 主入口 ──
@@ -80,6 +88,17 @@ class Lowering {
         var fi: Int = 0
         while (fi < src.functionCount) {
             val srcFunc: MirFunction = src.functionOf(fi)
+            // 本函数的值区间 `[start, end)`：函数按序创建、值按序追加，因此
+            // 下一个函数的 `valueStart` 就是本区间的终点（最后一个函数到末尾）。
+            var vStart: Int = srcFunc.valueStart
+            var vEnd: Int = src.valueCount
+            if (fi + 1 < src.functionCount) {
+                vEnd = src.functionOf(fi + 1).valueStart
+            }
+            if (vStart < 0) { vStart = 0 }
+            if (vEnd < vStart) { vEnd = vStart }
+            this.curValueStart = vStart
+            this.curValueEnd = vEnd
             this.lowerFunction(srcFunc, src, dst)
             fi = fi + 1
         }
@@ -129,17 +148,6 @@ class Lowering {
 
         lfunc.entryBlock = entryLirBlock
 
-        // 本函数的块 id 集合（",0,1,2," 形式，便于 contains 判断）。
-        var blockSet: String = ","
-        bi = 0
-        while (bi < blockParts.size) {
-            val srcBlockId: Int = SsaMirUtils.strToInt(blockParts[bi])
-            if (srcBlockId >= 0) {
-                blockSet = blockSet + LirUtils.toStr(srcBlockId) + ","
-            }
-            bi = bi + 1
-        }
-
         // ── 第二遍：按 SSA 值 id **全局升序**降低 ──
         //
         // ⚠ 为什么必须是全局升序，而不是「逐块降低」：
@@ -152,19 +160,24 @@ class Lowering {
         // 与 SSA id 错位，而 `lowerValue` 只原样复制 `args`（不做重映射）——
         // 实测 04_control_flow 的 `"while i = " + toStr(i)` 被降成
         // `Add(Phi, Const5)`（整数相加），运行即段错误。
-        var vi: Int = 0
-        while (vi < src.valueCount) {
+        //
+        // 区间 `[curValueStart, curValueEnd)` 由 `lower()` 按「下一个函数的
+        // valueStart」算出（本函数的值在 `values` 里连续）。旧实现在这里对**每个
+        // 函数**都全量扫 `src.valueCount` 个值，并用「拼串 + indexOf」判断值是否
+        // 属于本函数 —— 总代价 O(函数数 × 值数) + 同量级字符串分配。自举
+        // `Main.aura`（2647 函数 × 14 万值）下即 ~4×10⁸ 次循环 + ~10⁹ 次小字符串
+        // 分配，是 `.hat` 解析之后的下一个内存爆炸点。
+        var vi: Int = this.curValueStart
+        while (vi < this.curValueEnd) {
             val v: MirValue = src.valueOf(vi)
-            if (blockSet.indexOf("," + LirUtils.toStr(v.block) + ",") >= 0) {
-                val dstBlockId: Int = v.block
-                val blk: MirBlock = src.blockOf(v.block)
-                if (blk.term == vi) {
-                    this.lowerTerminator(vi, src, dst, dstBlockId)
-                } else if (v.op == "Phi") {
-                    dst.addPhi(dstBlockId, v.type, v.args, v.aux)
-                } else {
-                    this.lowerValue(vi, src, dst, dstBlockId)
-                }
+            val dstBlockId: Int = v.block
+            val blk: MirBlock = src.blockOf(v.block)
+            if (blk.term == vi) {
+                this.lowerTerminator(vi, src, dst, dstBlockId)
+            } else if (v.op == "Phi") {
+                dst.addPhi(dstBlockId, v.type, v.args, v.aux)
+            } else {
+                this.lowerValue(vi, src, dst, dstBlockId)
             }
             vi = vi + 1
         }
