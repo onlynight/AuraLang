@@ -28,6 +28,15 @@ extern interface Memory {
     fun read16(addr: Long): Short
     fun read32(addr: Long): Int
     fun read64(addr: Long): Long
+
+    /// 原子 `fetch_add`：返回**旧值**，`[addr] ← [addr] + delta`。
+    ///
+    /// Mutex / Condvar 自旋锁的底座（内联汇编 `lock xaddq`）。
+    ///
+    /// 声明在 `Memory` 而不是 `Cpu` 是因为 `extern interface Cpu` 的
+    /// `@native(asm = ...)` 成员目前无法进入 `singletonCsv`，调用点的
+    /// 接收者不会被丢弃（实参整体错位一位）；`Memory` 是稳定注册的单例。
+    @native(asm = "lock xaddq") fun atomicAdd(addr: Long, delta: Long): Long
     fun write(addr: Long, v: Byte)
     fun write16(addr: Long, v: Short)
     fun write32(addr: Long, v: Int)
@@ -130,13 +139,19 @@ object ArenaAllocator {
 
 /// 全局内存管理器
 object MemoryManager {
-    val heap: ArenaAllocator = ArenaAllocator()
+    /// 唯一状态。
+    ///
+    /// ⚠️ 不要持有 `ArenaAllocator` 的**实例字段**（`val heap = ArenaAllocator()`）：
+    /// `ArenaAllocator` 是 `object`（单例），其方法在 SSA 侧**不注入 `this` 形参**
+    /// （见 `SsaBuilder.buildFunction`），于是 `this.heap.alloc(n)` 的接收者会被
+    /// 当成第 1 个形参传进去，实参整体错位一位。直接调单例方法即可：
+    /// `ArenaAllocator.alloc(n)`（与 `Mutex.lock(m)` 同形）。
     var initialized: Boolean = false
 
     /// 初始化全局内存管理器
     fun init(size: Long): Boolean {
         if (this.initialized) { return true }
-        val result: Boolean = this.heap.init(size)
+        val result: Boolean = ArenaAllocator.init(size)
         if (result) {
             this.initialized = true
         }
@@ -145,28 +160,28 @@ object MemoryManager {
 
     /// 分配内存
     fun alloc(size: Long): Long {
-        return this.heap.alloc(size)
+        return ArenaAllocator.alloc(size)
     }
 
     /// 释放全部内存
     fun free(): Unit {
-        this.heap.free()
+        ArenaAllocator.free()
         this.initialized = false
     }
 
     /// 重置分配器
     fun reset(): Unit {
-        this.heap.reset()
+        ArenaAllocator.reset()
     }
 
     /// 获取已使用内存大小
     fun getUsedSize(): Long {
-        return this.heap.getUsedSize()
+        return ArenaAllocator.getUsedSize()
     }
 
     /// 获取剩余内存大小
     fun getFreeSize(): Long {
-        return this.heap.getFreeSize()
+        return ArenaAllocator.getFreeSize()
     }
 }
 

@@ -1,4 +1,4 @@
-ï»¿# -------------------------------------------------------------
+# -------------------------------------------------------------
 # Build the Aura compiler (Self-Bootstrap) - Windows PowerShell
 #
 # Produces:
@@ -50,9 +50,9 @@ if (-not (Test-Path $Entry)) {
     exit 1
 }
 
-# ç§å­é€‰æ‹©ï¼šä¼˜å…ˆç”¨ cargo ä»Ž `rust/` æž„å»ºçš„ç§å­ï¼ˆè·¯å¾„æ­£ç¡®ã€å‰ç«¯å®Œæ•´ï¼‰ï¼Œ
-# åªæœ‰æ˜¾å¼ -FrozenSeed æˆ–ä¸¤è€…éƒ½ä¸å­˜åœ¨æ—¶ï¼Œæ‰å›žé€€åˆ° git-lfs è·Ÿè¸ªçš„å†»ç»“ç§å­ã€‚
-# å†»ç»“ç§å­æŠŠ AOT è¿è¡Œåº“è·¯å¾„å†™æ­»ä¸ºæ—§ç›®å½•å `AuraLangWithRust\...`ï¼Œå·²ä¸å†æ”¯æŒã€‚
+# ÖÖ×ÓÑ¡Ôñ£ºÓÅÏÈÓÃ cargo ´Ó `rust/` ¹¹½¨µÄÖÖ×Ó£¨Â·¾¶ÕýÈ·¡¢Ç°¶ËÍêÕû£©£¬
+# Ö»ÓÐÏÔÊ½ -FrozenSeed »òÁ½Õß¶¼²»´æÔÚÊ±£¬²Å»ØÍËµ½ git-lfs ¸ú×ÙµÄ¶³½áÖÖ×Ó¡£
+# ¶³½áÖÖ×Ó°Ñ AOT ÔËÐÐ¿âÂ·¾¶Ð´ËÀÎª¾ÉÄ¿Â¼Ãû `AuraLangWithRust\...`£¬ÒÑ²»ÔÙÖ§³Ö¡£
 $SeedPath = ''
 if (-not $FrozenSeed) {
     foreach ($c in @('rust/target/release/aura.exe', 'rust/target/debug/aura.exe')) {
@@ -75,13 +75,13 @@ Write-Host "[build-aura-compiler] auc:   $AucDir"
 if (-not (Test-Path $BinDir)) { New-Item -ItemType Directory -Path $BinDir -Force | Out-Null }
 if (-not (Test-Path $AucDir)) { New-Item -ItemType Directory -Path $AucDir -Force | Out-Null }
 
-# ---- ä¸å†éœ€è¦æ—§ç›®å½•åå…¼å®¹å±‚ ------------------------------------------
-# æ—§æ ‘ `AuraLangWithRust/` å·²æ”¹åä¸º `rust/`ï¼ˆå”¯ä¸€ç›®å½•ï¼Œä¸å†å»ºè”æŽ¥ï¼‰ã€‚
-# æ—©æœŸå†»ç»“çš„ç§å­äºŒè¿›åˆ¶æŠŠ AOT çš„ C è¿è¡Œåº“è·¯å¾„å†™æ­»æˆ `AuraLangWithRust\...`ï¼Œ
-# ä¸ºæ­¤æ›¾å»ºç«‹ `AuraLangWithRust -> rust` ç›®å½•è”æŽ¥ï¼›çŽ°æ”¹ä¸º**ä¼˜å…ˆä½¿ç”¨ cargo
-# ä»Ž `rust/` é‡æ–°æž„å»ºçš„ç§å­**ï¼ˆå…¶è·¯å¾„æŒ‰ CARGO_MANIFEST_DIR è§£æžï¼Œå¤©ç„¶æŒ‡å‘
-# `rust/compiler/...` ä¸Ž `aura/runtime/cffi/...`ï¼‰ï¼Œå› æ­¤æ— éœ€ä»»ä½•å…¼å®¹è”æŽ¥ã€‚
-# ä»…å½“æ˜¾å¼æŒ‡å®š -FrozenSeed æ—¶æ‰å›žé€€åˆ° `aura/seed/aura.exe`ã€‚
+# ---- ²»ÔÙÐèÒª¾ÉÄ¿Â¼Ãû¼æÈÝ²ã ------------------------------------------
+# ¾ÉÊ÷ `AuraLangWithRust/` ÒÑ¸ÄÃûÎª `rust/`£¨Î¨Ò»Ä¿Â¼£¬²»ÔÙ½¨Áª½Ó£©¡£
+# ÔçÆÚ¶³½áµÄÖÖ×Ó¶þ½øÖÆ°Ñ AOT µÄ C ÔËÐÐ¿âÂ·¾¶Ð´ËÀ³É `AuraLangWithRust\...`£¬
+# Îª´ËÔø½¨Á¢ `AuraLangWithRust -> rust` Ä¿Â¼Áª½Ó£»ÏÖ¸ÄÎª**ÓÅÏÈÊ¹ÓÃ cargo
+# ´Ó `rust/` ÖØÐÂ¹¹½¨µÄÖÖ×Ó**£¨ÆäÂ·¾¶°´ CARGO_MANIFEST_DIR ½âÎö£¬ÌìÈ»Ö¸Ïò
+# `seed/compiler/...` Óë `aura/runtime/cffi/...`£©£¬Òò´ËÎÞÐèÈÎºÎ¼æÈÝÁª½Ó¡£
+# ½öµ±ÏÔÊ½Ö¸¶¨ -FrozenSeed Ê±²Å»ØÍËµ½ `aura/seed/aura.exe`¡£
 
 # 1) Bootstrap compiler -> build/bin/aura.exe
 if (-not $NoBootstrap) {

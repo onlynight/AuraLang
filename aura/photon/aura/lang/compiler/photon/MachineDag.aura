@@ -1,0 +1,672 @@
+﻿// aura:///aura/lang/compiler/photon/MachineDag.aura
+package aura.lang.compiler.photon
+// ─────────────────────────────────────────────────────────────
+// Machine DAG �?Phase C (任务 C.1)
+//
+// 指令选择阶段使用的机器级 DAG 表示�?// �?LIR（Lir.aura）通过 DAG Tiling 选择为机器指令序列�?//
+// ── 设计方式（与 Mir/SsaMir/Lir 一致）───────────────────────
+//
+// MachineDag 采用 List-based arena 表示�?// 节点通过 id 引用，操作数使用逗号分隔字符串编码�?// 链（chain）用于编码内存依赖�?//
+// ── 节点类型（DagNode.kind）──
+//
+//   "Value" �?运算值节点（�?DAG Tiling 产生�?//   "Reg"   �?物理寄存器节点（已分配寄存器�?//   "Const" �?常量节点（立即数�?//   "Stack" �?栈槽节点（溢出寄存器�?//   "Ext"   �?终止指令节点（调用约�?控制流）
+//
+// ── 指令模板示例（DagInstruction.template）──
+//
+//   "add $imm, %dst, %src" �?立即数加�?//   "mov %dst, %src"       �?寄存器间移动
+//   "mov %dst, [mem]"      �?内存加载
+//   "call %func"           �?函数调用
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.Env
+
+// ─────────────────────────────────────────────────────────────
+// DagNode �?DAG 节点
+// ─────────────────────────────────────────────────────────────
+
+/// 机器�?DAG 节点�?///
+/// `kind` 为节点类型（"Value"/"Reg"/"Const"/"Stack"/"Ext"），
+/// `op` �?LIR 操作符（�?"Add"�?Load"�?Call"），
+/// `reg` 为已分配的物理寄存器名（�?"rax"�?rbx"，未分配时为空串），
+/// `args` 为逗号分隔的子节点 ID 列表�?/// `uses` 为逗号分隔的父节点 ID 列表（使用本节点的节点）�?/// `chain` 为内存链前驱节点 ID�?1 表示无内存依赖）�?/// `aux` 为辅助信息（常量值、栈偏移等）�?class DagNode {
+
+    /// 节点 ID（全局唯一）�?    var id: Int = 0
+
+    /// 节点类型�?Value"/"Reg"/"Const"/"Stack"/"Ext"）�?    var kind: String = ""
+
+    /// LIR 操作符（�?"Add"�?Load"�?Call"�?Const"）�?    var op: String = ""
+
+    /// 结果类型 TypeID�?    var type: Int = 0
+
+    /// 物理寄存器名（如 "rax"�?rbx"�?rcx"；未分配时为空串）�?    var reg: String = ""
+
+    /// 操作数节�?ID 列表（逗号分隔字符串）�?    var args: String = ""
+
+    /// 使用本节点的节点 ID 列表（逗号分隔字符串）�?    var uses: String = ""
+
+    /// 内存链前驱节�?ID�?1 表示无内存依赖）�?    var chain: Int = -1
+
+    /// 发射器为**调用结果**分配的兜底栈槽偏移（负值；0 = 未分配）�?    ///
+    /// 为什么放在节点上：`emitCall` 把调用结果落到一个默认槽，�?RA 并不认为
+    /// 该节点被 spill 过。若不登记，后续 `regOfNode` 只能回退�?`node.reg`�? `rax`�?    /// �?读到上一个调用留�?rax 的返回值（实测自举 `Main.exe`：`Env.get` 的结�?    /// 存进 `[rbp-8]`，`streq(s, "")` 的实参却�?`rax` �?�?对垃圾指针比�?�?崩溃）�?    ///
+    /// ⚠️ 必须�?*节点字段**而不是发射器里的 CSV 表：CSV 会随调用结果数线性增长�?    /// 且每次查�?`indexOf` 全表 �?O(N²) 字符串分配，实测直接把自举顶�?8 GiB 闸门
+    ///（退出码 70）。放节点上则 O(1)、零分配�?    var stackDisp: Int = 0
+
+    /// 辅助信息（常量值、栈偏移、地址模式描述等）�?    var aux: String = ""
+
+    init() {
+        this.id = 0
+        this.kind = ""
+        this.op = ""
+        this.type = 0
+        this.reg = ""
+        this.args = ""
+        this.uses = ""
+        this.chain = -1
+        this.aux = ""
+    }
+
+    /// 获取�?i 个操作数的节�?ID�?    fun argAt(i: Int): Int {
+        if (this.args == "") {
+            return -1
+        }
+        val parts: List<String> = MachineDagUtils.splitArgs(this.args)
+        if (i < 0 || i >= parts.size) {
+            return -1
+        }
+        return MachineDagUtils.strToInt(parts[i])
+    }
+
+    /// 获取操作数个数�?    fun argCount(): Int {
+        if (this.args == "") {
+            return 0
+        }
+        return MachineDagUtils.splitArgs(this.args).size
+    }
+
+    /// 是否为常量节点�?    fun isConst(): Boolean {
+        return this.kind == "Const"
+    }
+
+    /// 是否为运算值节点�?    fun isValue(): Boolean {
+        return this.kind == "Value"
+    }
+
+    /// 是否为寄存器节点�?    fun isReg(): Boolean {
+        return this.kind == "Reg"
+    }
+
+    /// 是否为终止指令节点�?    fun isExt(): Boolean {
+        return this.kind == "Ext"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// DagInstruction �?机器指令
+// ─────────────────────────────────────────────────────────────
+
+/// 机器级指令�?///
+/// `template` 为指令模板（�?"add $imm, %dst, %src"），
+/// `nodes` 为逗号分隔的输入节�?ID 列表�?/// `output` 为输出节�?ID�?1 表示无输出）�?/// `flags` 为标志位（位标志组合），
+/// `cond` 为条件指令的条件字符串（�?"eq"�?ne"�?lt"），
+/// `mem` 为内存操作数描述（如 "[rax+8]"�?[rbx]"），
+/// `bytes` 为指令的十六进制编码（如 "48 83 C0 01"）�?class DagInstruction {
+
+    /// 指令 ID（全局唯一）�?    var id: Int = 0
+
+    /// 指令模板（如 "add $imm, %dst, %src"）�?    var template: String = ""
+
+    /// 输入节点 ID 列表（逗号分隔字符串）�?    var nodes: String = ""
+
+    /// 输出节点 ID�?1 表示无输出）�?    var output: Int = -1
+
+    /// 标志位：
+    ///   1  = usesFlags（读取标志）
+    ///   2  = setsFlags（写入标志）
+    ///   4  = sideEffect（有副作用，不可重排�?    ///   8  = terminator（终止指令，�?RET/JMP�?    ///   16 = call（函数调用）
+    var flags: Int = 0
+
+    /// 条件（条件指令用，如 "eq"�?ne"�?lt"�?gt"）�?    var cond: String = ""
+
+    /// 内存操作数描述（�?"[rax+8]"�?[rbx]"）�?    var mem: String = ""
+
+    /// 指令的十六进制编码（空格分隔字节）�?    var bytes: String = ""
+
+    /// 所属函数名（多函数发射时用于标记指令边界）�?    var funcName: String = ""
+
+    init() {
+        this.id = 0
+        this.template = ""
+        this.nodes = ""
+        this.output = -1
+        this.flags = 0
+        this.cond = ""
+        this.mem = ""
+        this.bytes = ""
+        this.funcName = ""
+    }
+
+    /// 获取�?i 个输入节点的 ID�?    ///
+    /// ⚠️ 非数�?token 必须返回 -1：`label` / `jmp @target` / `jcc @target` �?    /// `nodes` 存的�?*标签�?*（如 `bb4`），�?`MachineDagUtils.strToInt` 会从
+    /// 任意字符串里**提取数字**（`strToInt("bb4") == 4`）。若不拦截，活跃区间
+    /// 分析会把「标�?bb4」当成「节�?4」，跨函�?跨块的假干扰随之产生�?    /// 分配器把寄存器全判为占用 �?节点无颜�?�?回退 `rax` �?互相覆写�?    fun nodeAt(i: Int): Int {
+        if (this.nodes == "") {
+            return -1
+        }
+        val parts: List<String> = MachineDagUtils.splitArgs(this.nodes)
+        if (i < 0 || i >= parts.size) {
+            return -1
+        }
+        val token: String = parts[i]
+        if (!MachineDagUtils.isNumericToken(token)) {
+            return -1
+        }
+        return MachineDagUtils.strToInt(token)
+    }
+
+    /// 获取输入节点个数�?    fun nodeCount(): Int {
+        if (this.nodes == "") {
+            return 0
+        }
+        return MachineDagUtils.splitArgs(this.nodes).size
+    }
+
+    /// 是否读取标志寄存器�?    fun usesFlags(): Boolean {
+        return (this.flags & 1) != 0
+    }
+
+    /// 是否写入标志寄存器�?    fun setsFlags(): Boolean {
+        return (this.flags & 2) != 0
+    }
+
+    /// 是否有副作用（不可重排、不可消除）�?    fun isSideEffect(): Boolean {
+        return (this.flags & 4) != 0
+    }
+
+    /// 是否为终止指令（RET/JMP 等）�?    ///
+    /// 名字**不能**�?`isTerminator`：该方法名同时被 `LirInstruction`�?    /// `SsaMirValue` 使用，而旧前端在接收者类型未落到具体类时只能�?    /// 「全表唯一候选」兜底解析，重名即降级为裸名调用
+    /// （`[bytecode] error: 未解析的函数调用 'isTerminator'`）�?    fun isDagTerminator(): Boolean {
+        return (this.flags & 8) != 0
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// MachineDag �?机器�?DAG
+// ─────────────────────────────────────────────────────────────
+
+/// 机器�?DAG（指令选择的输出表示）�?///
+/// 包含节点表、指令表、根节点列表、内存链头列表�?/// 寄存器单元名列表、溢出槽数量，以及模式匹配缓存�?class MachineDag {
+
+    /// DAG 节点表（List<DagNode>）�?    var nodes: List<DagNode> = arrayListOf<DagNode>()
+
+    /// 指令表（List<DagInstruction>）�?    var instrs: List<DagInstruction> = arrayListOf<DagInstruction>()
+
+    /// 根节�?ID 列表（逗号分隔字符串）�?    var roots: String = ""
+
+    /// 内存链头节点 ID 列表（逗号分隔字符串）�?    var chains: String = ""
+
+    /// 可用物理寄存器单元名列表（逗号分隔，如 "rax,rbx,rcx,rdx,rsi,rdi,rbp,rsp"）�?    var regUnits: String = ""
+
+    /// 已分配的溢出栈槽数量�?    var spillSlots: Int = 0
+
+    /// 模式匹配缓存（并行列表：keys �?values）�?    var patternCacheKeys: String = ""
+    var patternCacheVals: String = ""
+
+    /// 节点总数�?    var nodeCount: Int = 0
+
+    /// 指令总数�?    var instrCount: Int = 0
+
+    init() {
+        this.nodes = arrayListOf<DagNode>()
+        this.instrs = arrayListOf<DagInstruction>()
+        this.roots = ""
+        this.chains = ""
+        this.regUnits = "rax,rbx,rcx,rdx,rsi,rdi,rbp,rsp"
+        this.spillSlots = 0
+        this.patternCacheKeys = ""
+        this.patternCacheVals = ""
+        this.nodeCount = 0
+        this.instrCount = 0
+    }
+
+    // ── 节点管理 ──
+
+    /// �?DAG 添加一个节点，返回节点 ID�?    fun addNode(kind: String, op: String, type: Int, reg: String,
+                args: String, uses: String, chain: Int, aux: String): Int {
+        val n: DagNode = DagNode()
+        n.id = this.nodeCount
+        n.kind = kind
+        n.op = op
+        n.type = type
+        n.reg = reg
+        n.args = args
+        n.uses = uses
+        n.chain = chain
+        n.aux = aux
+        this.nodes.add(n)
+        this.nodeCount = this.nodes.size
+        return n.id
+    }
+
+    /// 通过 ID 获取节点（越界返回空节点）�?    fun nodeOf(id: Int): DagNode {
+        if (id < 0 || id >= this.nodes.size) {
+            return DagNode()
+        }
+        return this.nodes[id]
+    }
+
+    // ── 指令管理 ──
+
+    /// �?DAG 添加一条机器指令，返回指令 ID�?    fun addInstr(template: String, nodes: String, output: Int,
+                 flags: Int, cond: String, mem: String, bytes: String): Int {
+        val i: DagInstruction = DagInstruction()
+        i.id = this.instrCount
+        i.template = template
+        i.nodes = nodes
+        i.output = output
+        i.flags = flags
+        i.cond = cond
+        i.mem = mem
+        i.bytes = bytes
+        this.instrs.add(i)
+        this.instrCount = this.instrs.size
+        if (template == "ret" && Env.get("AURA_PHOTON_TRACE", "") == "1") {
+            println("    [DAG] addInstr RET id=" + toStr(i.id) + " instrCount=" + toStr(this.instrCount) + " nodes=" + nodes)
+        }
+        return i.id
+    }
+
+    /// 通过 ID 获取指令（越界返回空指令）�?    fun instrOf(id: Int): DagInstruction {
+        if (id < 0 || id >= this.instrs.size) {
+            return DagInstruction()
+        }
+        return this.instrs[id]
+    }
+
+    // ── DAG Tiling 入口 ──
+
+    /// DAG Tiling：根�?patternId 和输入节�?ID 列表�?    /// 选择一条机器指令并添加�?DAG 中�?    ///
+    /// `patternId`   �?匹配到的模式 ID
+    /// `inputNodes`  �?逗号分隔的输入节�?ID 列表
+    /// `outputNode`  �?输出节点 ID�?1 表示无输出）
+    ///
+    /// 返回新指令的 ID�?    fun selectPattern(patternId: Int, inputNodes: String, outputNode: Int): Int {
+        // ⚠️ 这条打印�?*逐模�?*的（每个 LIR 值至少一次）：真实工�?12 万个�?        // 就是 12 万次字符串拼�?+ 写管道，曾让 Phase C 成为整条管线的主要耗时�?        // 必须门控�?AURA_PHOTON_TRACE 下�?        if (Env.get("AURA_PHOTON_TRACE", "") == "1") {
+            println("    [DAG] selectPattern patternId=" + toStr(patternId) + " inputNodes=" + inputNodes + " outputNode=" + toStr(outputNode))
+        }
+        // 检查模式缓存：同一模式已匹配过则复用�?        val cached: Int = this.patternCacheGet(patternId)
+        if (cached >= 0) {
+            // 缓存命中：复用已有指令模板，但创建新的指令实例�?            val existing: DagInstruction = this.instrOf(cached)
+            return this.addInstr(
+                existing.template, inputNodes, outputNode,
+                existing.flags, existing.cond, existing.mem, existing.bytes
+            )
+        }
+
+        // 根据 patternId 选择对应的机器指令模板�?        val template: String = MachineDagUtils.patternTemplate(patternId)
+        val flags: Int = MachineDagUtils.patternFlags(patternId)
+        val cond: String = MachineDagUtils.patternCond(patternId)
+        val mem: String = MachineDagUtils.patternMem(patternId)
+        val bytes: String = MachineDagUtils.patternBytes(patternId)
+
+        val id: Int = this.addInstr(template, inputNodes, outputNode,
+                                    flags, cond, mem, bytes)
+
+        // 缓存此模式的首次匹配结果�?        this.patternCachePut(patternId, id)
+        return id
+    }
+
+    /// 模式缓存查询�?    private fun patternCacheGet(patternId: Int): Int {
+        // S1: 暂时禁用模式缓存以避�?VM �?split 限制
+        return -1
+    }
+
+    /// 模式缓存写入�?    ///
+    /// ⚠️ **刻意 no-op**——这�?Phase C 内存失控的主因，不要"顺手恢复"它�?    ///
+    /// `patternCacheGet` 被禁用（见下，S1 遗留�?`return -1`），于是 `Put` �?    /// 结果**从未被读取过**：它�?`selectPattern` 里被**每条指令调用一�?*�?    /// 且对两个字符串做 `s = s + "," + …` 的不可变拼接。`MachineDag` �?    /// `InstructionSelector.select()` �?*整个模块共用一个实�?*（`addNode` /
+    /// `addInstr` 从不回退计数），所以这两张表随指令数单调增长且**永不释放**
+    /// （AOT 运行时无 GC）：
+    ///   * `keys`：每�?+2 字节 �?�?n 条指令时字符串已 n×2 长；
+    ///   * `vals`：每�?+6 字节（指�?ID �?5 位数）→ n×6 长�?    /// 每次追加都整体拷贝旧串，累计分配 = O(n²)，且每一版都留在堆上�?    ///
+    /// 实测自举 `Main.aura`：处理到�?405 个函数（�?3.7 万条指令）时，这两张
+    /// 表就已经吃进 ~2 GB 存活内存（`AURA_MEM_STATS` �?`<=1M` �?53k �?/
+    /// 5.6 GB 主要就是它们），�?8 GiB 闸门打爆 �?Phase C 永远跑不完�?    ///
+    /// 缓存本身也没有意义：`patternTemplate` / `patternFlags` / `patternCond` /
+    /// `patternMem` / `patternBytes` 都是 `patternId` �?*纯函�?*（见
+    /// `MachineDagUtils`），下方每次都直接重算，命中路径本就不会走。若将来真要
+    /// 恢复缓存，必须换成按 `patternId` 直接下标的列表（参�?    /// `InstructionSelector.nodeMapIds` 的做法），绝不能再退回字符串累加�?    private fun patternCachePut(patternId: Int, instrId: Int): Unit {
+        // 缓存已禁用：什么都不做�?    }
+
+    // ── �?链管�?──
+
+    /// 向根节点列表追加一个节�?ID�?    fun addRoot(nodeId: Int): Unit {
+        if (this.roots == "") {
+            this.roots = MachineDagUtils.toStr(nodeId)
+        } else {
+            this.roots = this.roots + "," + MachineDagUtils.toStr(nodeId)
+        }
+    }
+
+    /// 向内存链头列表追加一个节�?ID�?    fun addChainHead(nodeId: Int): Unit {
+        if (this.chains == "") {
+            this.chains = MachineDagUtils.toStr(nodeId)
+        } else {
+            this.chains = this.chains + "," + MachineDagUtils.toStr(nodeId)
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// MachineDagUtils �?顶层辅助函数
+// ─────────────────────────────────────────────────────────────
+
+object MachineDagUtils {
+
+    /// 字符串转整数（支持负号前缀）�?    fun strToInt(text: String): Int {
+        if (text == "") {
+            return 0
+        }
+        val len: Int = text.length
+        var total: Int = 0
+        var i: Int = 0
+        var neg: Boolean = false
+        // ⚠️ 必须�?`charCodeAt` 判负号。`text.charAt(0).toString()` 会走原生
+        // `String_charAt` 并新建单字符串，�?*自举（Photon�?*路径下不可靠 —�?        // 实测它检测不�?'-'，于�?`"-8"` 被解析成 **8**（符号丢失）�?        //
+        // 后果极硬：栈槽偏移本应是负值（`[rbp-8]`），丢符号后写成 `[rbp+8]`�?        // �?`push rbp; mov rbp,rsp` 之后 `[rbp+8]` 正是**返回地址** —�?        // 于是「函数一被调用就崩」。实测自�?`Main.exe`�?        //     BOOT-1 �?BOOT-1a �?CEA-1 �?CEA-2 �?0xC0000005
+        //（崩�?`Env.get` 返回之后�?`streq(s, "")`，因�?`s` 被存到了 `[rbp+8]`）�?        // 这正是本文件其它 `strToInt` 副本（如 `RegisterAllocator`）早已采用的写法�?        if (len > 0 && (text.charCodeAt(0) as Int) == 45) {
+            neg = true
+            i = 1
+        }
+        while (i < len) {
+            val digit: Int = "0123456789".indexOf(text.charAt(i))
+            if (digit >= 0 && digit <= 9) {
+                total = total * 10 + digit
+            }
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
+    }
+
+    /// 判断字符串是否为合法的整�?token（可带前�?`-`）�?    ///
+    /// 用于区分「节�?ID」与「标签名」等非数字占位串�?    fun isNumericToken(text: String): Boolean {
+        if (text == "") { return false }
+        var k: Int = 0
+        if (text.charAt(0).toString() == "-") { k = 1 }
+        if (k >= text.length) { return false }
+        while (k < text.length) {
+            if ("0123456789".indexOf(text.charAt(k)) < 0) { return false }
+            k = k + 1
+        }
+        return true
+    }
+
+    /// 整数转字符串�?    fun toStr(n: Int): String {
+        if (n == 0) {
+            return "0"
+        }
+        var neg: Boolean = false
+        if (n < 0) {
+            neg = true
+            n = -n
+        }
+        var result: String = ""
+        while (n > 0) {
+            result = digitChar(n % 10) + result
+            n = n / 10
+        }
+        if (neg) {
+            result = "-" + result
+        }
+        return result
+    }
+
+    /// �?0-9 的数字转换为单字符字符串�?    fun digitChar(value: Int): String {
+        if (value < 0 || value > 9) {
+            return ""
+        }
+        return "0123456789".substring(value, value + 1)
+    }
+
+    /// 创建空的 MachineDag�?    fun emptyDag(): MachineDag {
+        return MachineDag()
+    }
+
+    /// 按逗号切分 args 字符串，返回 List<String>�?    fun splitArgs(text: String): List<String> {
+        // �?MirUtils.mirSplit：`arrayListOf + add` 在本 VM 下读�?null�?        if (text == "") {
+            return emptyList()
+        }
+        return text.split(",")
+    }
+
+    // ── 模式 �?指令模板映射 ──
+    // patternId 是内部序号，对应一条固定的机器指令模板�?
+    /// 模式 ID �?指令模板字符串�?    fun patternTemplate(patternId: Int): String {
+        // 0..9   : 简�?ALU 指令
+        // 10..19 : 内存指令
+        // 20..29 : 控制流指�?        // 30..39 : 条件设置指令
+        // 40..49 : 调用指令
+        // 注意：用 @ 代替 $ 以避�?Aura 字符串插值（$var �?null�?        if (patternId == 0) { return "add %dst, %src, @imm" }
+        if (patternId == 1) { return "add %dst, %src" }
+        if (patternId == 2) { return "sub %dst, %src, @imm" }
+        if (patternId == 3) { return "sub %dst, %src" }
+        if (patternId == 4) { return "imul %dst, %src, @imm" }
+        if (patternId == 5) { return "imul %dst, %src" }
+        if (patternId == 6) { return "mov %dst, @imm" }
+        if (patternId == 7) { return "mov %dst, %src" }
+        if (patternId == 8) { return "and %dst, %src" }
+        if (patternId == 9) { return "or %dst, %src" }
+        // 内存指令
+        if (patternId == 10) { return "mov %dst, [mem]" }
+        if (patternId == 11) { return "mov [mem], %src" }
+        if (patternId == 12) { return "lea %dst, [mem]" }
+        if (patternId == 13) { return "xor %dst, %src" }
+        if (patternId == 14) { return "div %dst, %src" }
+        if (patternId == 15) { return "rem %dst, %src" }
+        if (patternId == 16) { return "shl %dst, @shift" }
+        if (patternId == 17) { return "shr %dst, @shift" }
+        if (patternId == 18) { return "shl %dst, %src" }
+        if (patternId == 19) { return "shr %dst, %src" }
+        // 比较指令
+        if (patternId == 20) { return "cmp %src, @imm" }
+        if (patternId == 21) { return "cmp %src1, %src2" }
+        // 控制�?        if (patternId == 30) { return "ret" }
+        if (patternId == 31) { return "jmp @target" }
+        if (patternId == 32) { return "jcc @target" }
+        // 条件设置
+        if (patternId == 40) { return "setcc %dst" }
+        // 调用
+        if (patternId == 50) { return "call %func" }
+        // 字符串地址加载（lea %dst, @sym�?        if (patternId == 63) { return "lea %dst, @sym" }
+        // 默认
+        return "nop"
+    }
+
+    /// 模式 ID �?标志位�?    fun patternFlags(patternId: Int): Int {
+        // 0..9   : ALU �?setsFlags(2) | sideEffect(4) 对于 Add/Sub �?        // 10..12 : 内存 �?sideEffect(4)
+        // 20..21 : CMP �?setsFlags(2)
+        // 30..32 : 控制�?�?terminator(8)
+        // 40     : SETcc �?usesFlags(1)
+        // 50     : CALL �?sideEffect(4) | call(16)
+        if (patternId == 0) { return 2 + 4 }
+        if (patternId == 1) { return 2 + 4 }
+        if (patternId == 2) { return 2 + 4 }
+        if (patternId == 3) { return 2 + 4 }
+        if (patternId == 4) { return 2 + 4 }
+        if (patternId == 5) { return 2 + 4 }
+        if (patternId == 6) { return 4 }
+        if (patternId == 7) { return 4 }
+        if (patternId == 8) { return 2 + 4 }  // and �?sets flags
+        if (patternId == 9) { return 2 + 4 }  // or �?sets flags
+        if (patternId == 10) { return 4 }
+        if (patternId == 11) { return 4 }
+        if (patternId == 12) { return 4 }
+        if (patternId == 13) { return 2 + 4 }  // xor �?sets flags
+        if (patternId == 14) { return 4 + 16 } // div �?side effect
+        if (patternId == 15) { return 4 + 16 } // rem �?side effect
+        if (patternId == 16) { return 4 }      // shl imm
+        if (patternId == 17) { return 4 }      // shr imm
+        if (patternId == 18) { return 4 }      // shl reg
+        if (patternId == 19) { return 4 }      // shr reg
+        if (patternId == 20) { return 2 }
+        if (patternId == 21) { return 2 }
+        if (patternId == 30) { return 8 }
+        if (patternId == 31) { return 8 }
+        if (patternId == 32) { return 8 }
+        if (patternId == 40) { return 1 }
+        if (patternId == 50) { return 4 + 16 }
+        if (patternId == 63) { return 4 } // lea %dst, @sym �?side effect (loads address)
+        return 0
+    }
+
+    /// 模式 ID �?条件字符串（仅条件跳转和 SETcc 使用）�?    fun patternCond(patternId: Int): String {
+        // 条件由调用者在选择时动态指定，不固定于 pattern�?        return ""
+    }
+
+    /// 模式 ID �?内存操作数描述（仅内存指令使用）�?    fun patternMem(patternId: Int): String {
+        // 内存操作数由调用者在发射时动态指定�?        return ""
+    }
+
+    /// 模式 ID �?指令编码（十六进制字符串）�?    fun patternBytes(patternId: Int): String {
+        // 实际编码在发射阶段根据操作数填充�?        return ""
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// DagPatterns �?DAG 模式匹配对象
+// ─────────────────────────────────────────────────────────────
+
+/// DAG 模式匹配：识别常见运算模式以选择更优的机器指令序列�?object DagPatterns {
+
+    /// 匹配 Add + 常量操作数模式�?    ///
+    /// 检�?`node` 是否�?Add 运算且至少一个操作数为常量节点�?    /// 匹配时可将立即数编码�?`add $imm, %dst, %src` 指令�?    fun matchAddConst(node: DagNode, dag: MachineDag): Boolean {
+        if (!node.isValue()) {
+            return false
+        }
+        if (node.op != "Add") {
+            return false
+        }
+        val arg0: Int = node.argAt(0)
+        val arg1: Int = node.argAt(1)
+        if (arg0 < 0 || arg1 < 0) {
+            return false
+        }
+        val n0: DagNode = dag.nodeOf(arg0)
+        val n1: DagNode = dag.nodeOf(arg1)
+        return n0.isConst() || n1.isConst()
+    }
+
+    /// 匹配 Mul + 常量操作数模式�?    ///
+    /// 检�?`node` 是否�?Mul 运算且至少一个操作数为常量节点�?    /// 如果常量�?2 的幂，可优化�?shift + add�?    fun matchMulConst(node: DagNode, dag: MachineDag): Boolean {
+        if (!node.isValue()) {
+            return false
+        }
+        if (node.op != "Mul") {
+            return false
+        }
+        val arg0: Int = node.argAt(0)
+        val arg1: Int = node.argAt(1)
+        if (arg0 < 0 || arg1 < 0) {
+            return false
+        }
+        val n0: DagNode = dag.nodeOf(arg0)
+        val n1: DagNode = dag.nodeOf(arg1)
+        return n0.isConst() || n1.isConst()
+    }
+
+    /// 匹配 Load 后紧�?Store 模式�?    ///
+    /// 如果 Load 的结果只被同一块内紧接着�?Store 使用�?    /// 可以合并为单条指令（�?movs 或消除中间寄存器）�?    ///
+    /// 返回匹配�?Store 指令 ID，未找到返回 -1�?    fun matchLoadStorePair(dag: MachineDag): Int {
+        // 遍历所有节点，查找 Load �?Store 紧邻对�?        var i: Int = 0
+        while (i < dag.nodeCount) {
+            val node: DagNode = dag.nodeOf(i)
+            if (node.isValue() && node.op == "Load") {
+                // 检查该 Load 的使用者�?                if (node.uses == "") {
+                    i = i + 1
+                    continue
+                }
+                // 遍历 Load 的使用者，查找紧接着�?Store�?                val useParts: List<String> = MachineDagUtils.splitArgs(node.uses)
+                var j: Int = 0
+                while (j < useParts.size) {
+                    val useId: Int = MachineDagUtils.strToInt(useParts[j])
+                    val useNode: DagNode = dag.nodeOf(useId)
+                    if (useNode.isValue() && useNode.op == "Store") {
+                        // 检�?Store 是否只引用此 Load 作为源操作数�?                        val storeArg0: Int = useNode.argAt(0)
+                        if (storeArg0 == i) {
+                            return useId
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 匹配 Call 指令模式�?    ///
+    /// 查找 DAG 中所�?Call 类型�?Value 节点�?    /// 返回第一�?Call 节点�?ID，未找到返回 -1�?    fun matchCallPattern(dag: MachineDag): Int {
+        var i: Int = 0
+        while (i < dag.nodeCount) {
+            val node: DagNode = dag.nodeOf(i)
+            if (node.isValue() && node.op == "Call") {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    // ── 模式缓存操作已移�?MachineDag �?──
+
+    // ── 工具 ──
+
+    private fun strToInt(text: String): Int {
+        if (text == "") { return 0 }
+        val len: Int = text.length
+        var total: Int = 0
+        var i: Int = 0
+        var neg: Boolean = false
+        if (len > 0 && text.charCodeAt(0) == 45) { neg = true; i = 1 }
+        while (i < len) {
+            val digit: Int = text.charCodeAt(i) - 48
+            if (digit >= 0 && digit <= 9) { total = total * 10 + digit }
+            i = i + 1
+        }
+        if (neg) { return -total }
+        return total
+    }
+
+    private fun toStr(n: Int): String {
+        if (n == 0) { return "0" }
+        var neg: Boolean = false
+        if (n < 0) { neg = true; n = -n }
+        var result: String = ""
+        while (n > 0) {
+            val digit: Int = n % 10
+            val digitStr: String = this.digitChar(digit)
+            result = digitStr + result
+            n = n / 10
+        }
+        if (neg) { result = "-" + result }
+        return result
+    }
+
+    /// 将单个数字转为字符串�?    private fun digitChar(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        if (d == 9) { return "9" }
+        return ""
+    }
+}

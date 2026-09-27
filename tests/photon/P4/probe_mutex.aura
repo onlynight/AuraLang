@@ -1,0 +1,16 @@
+// tests/photon/P4/probe_mutex.aura
+// 诊断：复现 07_mutex_ops 的挂起
+import aura.lang.std.String
+import aura.lang.concurrent.Mutex
+
+fun main() {
+    println("A")
+    var mutex: Mutex = Mutex()
+    println("B mutex=" + toStr(mutex))
+    println("Locked: " + toStr(mutex.isLocked()))
+    println("C")
+    mutex.lock()
+    println("D locked=" + toStr(mutex.isLocked()))
+    mutex.unlock()
+    println("E unlocked=" + toStr(mutex.isLocked()))
+}

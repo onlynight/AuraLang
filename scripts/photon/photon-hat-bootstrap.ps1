@@ -1,18 +1,18 @@
-ï»¿# photon-hat-bootstrap.ps1 â€” ç”¨ Photon HAT ç‹¬ç«‹é“¾è·¯ç¼–è¯‘ Aura è‡ªä¸¾ç¼–è¯‘å™¨
+# photon-hat-bootstrap.ps1 ¡ª ÓÃ Photon HAT ¶ÀÁ¢Á´Â·±àÒë Aura ×Ô¾Ù±àÒëÆ÷
 #
-#   Main.aura(å«é€’å½’ import) â”€â”€[åŸç”Ÿ PhotonHatCompile.exe]â”€â”€â–º HIR â”€â”€â–º SSA â”€â”€â–º
-#   .hat â”€â”€â–º LIR â”€â”€â–º DAG â”€â”€â–º RegAlloc â”€â”€â–º X86 â”€â”€â–º COFF â”€â”€â–º lld-link â”€â”€â–º exe
+#   Main.aura(º¬µİ¹é import) ©¤©¤[Ô­Éú PhotonHatCompile.exe]©¤©¤? HIR ©¤©¤? SSA ©¤©¤?
+#   .hat ©¤©¤? LIR ©¤©¤? DAG ©¤©¤? RegAlloc ©¤©¤? X86 ©¤©¤? COFF ©¤©¤? lld-link ©¤©¤? exe
 #
-# å…¨ç¨‹**ä¸ç”Ÿæˆã€ä¸è¯»å– .phir**ï¼ˆHAT æ–‡æœ¬æ˜¯å”¯ä¸€ä¸­é—´è¡¨ç¤ºï¼‰ï¼Œå‰ç«¯ä¸åç«¯éƒ½åœ¨åŸç”Ÿ
-# è¿è¡Œæ—¶ä¸‹æ‰§è¡Œã€‚æœ¬è„šæœ¬åªè´Ÿè´£è·‘ä¸€æ¬¡å¹¶é‡‡é›†ä¸¤é¡¹æŒ‡æ ‡ï¼š
-#   1) ç¼–è¯‘æ€»æ—¶é•¿ â€”â€” é©±åŠ¨è¿›ç¨‹ä» Start åˆ° Exit çš„å¢™é’Ÿæ—¶é—´ï¼›
-#   2) ç¼–è¯‘æœŸå³°å€¼å†…å­˜ â€”â€”
-#        Â· é©±åŠ¨è¿›ç¨‹è‡ªèº«ï¼šè¯» `Process.PeakWorkingSet64`ï¼ˆç³»ç»Ÿè®°å½•çš„è¿›ç¨‹æœ€é«˜æ°´ä½ï¼Œ
-#          ä¸ä¾èµ–é‡‡æ ·é¢‘ç‡ï¼Œæœ€å¯é ï¼‰ï¼›
-#        Â· å­è¿›ç¨‹ï¼ˆllc / clang / lld-linkï¼‰ï¼šæŒ‰åå­— + çˆ¶å­å…³ç³»æ¯ 500ms é‡‡æ ·ä¸€æ¬¡
-#          å·¥ä½œé›†ï¼Œå–å†å²æœ€å¤§å€¼ï¼ˆè¿™äº›æ˜¯çŸ­å‘½è¿›ç¨‹ï¼Œé‡‡æ ·æ˜¯å”¯ä¸€æ‰‹æ®µï¼‰ã€‚
+# È«³Ì**²»Éú³É¡¢²»¶ÁÈ¡ .phir**£¨HAT ÎÄ±¾ÊÇÎ¨Ò»ÖĞ¼ä±íÊ¾£©£¬Ç°¶ËÓëºó¶Ë¶¼ÔÚÔ­Éú
+# ÔËĞĞÊ±ÏÂÖ´ĞĞ¡£±¾½Å±¾Ö»¸ºÔğÅÜÒ»´Î²¢²É¼¯Á½ÏîÖ¸±ê£º
+#   1) ±àÒë×ÜÊ±³¤ ¡ª¡ª Çı¶¯½ø³Ì´Ó Start µ½ Exit µÄÇ½ÖÓÊ±¼ä£»
+#   2) ±àÒëÆÚ·åÖµÄÚ´æ ¡ª¡ª
+#        ¡¤ Çı¶¯½ø³Ì×ÔÉí£º¶Á `Process.PeakWorkingSet64`£¨ÏµÍ³¼ÇÂ¼µÄ½ø³Ì×î¸ßË®Î»£¬
+#          ²»ÒÀÀµ²ÉÑùÆµÂÊ£¬×î¿É¿¿£©£»
+#        ¡¤ ×Ó½ø³Ì£¨llc / clang / lld-link£©£º°´Ãû×Ö + ¸¸×Ó¹ØÏµÃ¿ 500ms ²ÉÑùÒ»´Î
+#          ¹¤×÷¼¯£¬È¡ÀúÊ·×î´óÖµ£¨ÕâĞ©ÊÇ¶ÌÃü½ø³Ì£¬²ÉÑùÊÇÎ¨Ò»ÊÖ¶Î£©¡£
 #
-# ç”¨æ³•:
+# ÓÃ·¨:
 #   powershell -File scripts\photon-hat-bootstrap.ps1
 #   powershell -File scripts\photon-hat-bootstrap.ps1 -Rebuild -TimeoutSecs 3600
 param(
@@ -36,8 +36,8 @@ if (-not (Test-Path $Entry)) { Write-Host "entry not found: $Entry" -ForegroundC
 if (-not (Test-Path $Aura))  { Write-Host "aura.exe not found: $Aura" -ForegroundColor Red; exit 1 }
 
 if ($Rebuild -or -not (Test-Path $Driver)) {
-    $src = Join-Path $Root 'aura\compiler\aura\lang\compiler\backend\photon\PhotonHatCompile.aura'
-    Write-Host "[build] AOT æ„å»ºåŸç”Ÿ HAT é©±åŠ¨ ..." -ForegroundColor Cyan
+    $src = Join-Path $Root 'aura\photon\aura\lang\compiler\photon\PhotonHatCompile.aura'
+    Write-Host "[build] AOT ¹¹½¨Ô­Éú HAT Çı¶¯ ..." -ForegroundColor Cyan
     New-Item -ItemType Directory -Force -Path (Split-Path $Driver) | Out-Null
     $t = Get-Date
     & $Aura build --aot $src --output $Driver 2>&1 | Select-String -Pattern 'complete|failed|error' | Select-Object -Last 3
@@ -54,12 +54,12 @@ $env:AURA_HAT_SRC    = $hat
 $env:AURA_HAT_OUT    = $OutDir
 $env:AURA_HAT_MODULE = 'aura-compiler'
 
-# è¢«é‡‡æ ·çš„å­è¿›ç¨‹åï¼ˆç¼–è¯‘å™¨ç®¡çº¿å¯èƒ½è°ƒç”¨çš„å¤–éƒ¨å·¥å…·ï¼‰
+# ±»²ÉÑùµÄ×Ó½ø³ÌÃû£¨±àÒëÆ÷¹ÜÏß¿ÉÄÜµ÷ÓÃµÄÍâ²¿¹¤¾ß£©
 $ChildNames = @('llc','clang','lld-link','lld-link.exe','link','cmake')
 
-# â”€â”€ å­è¿›ç¨‹å·¥ä½œé›†é‡‡æ · â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# åªæŒ‰åå­—å–è¿›ç¨‹ï¼ˆä¸åšå…¨ç³»ç»Ÿæšä¸¾ï¼‰ï¼Œå†ç”¨ã€Œçˆ¶è¿›ç¨‹é“¾ã€ç¡®è®¤å®ƒå±äºé©±åŠ¨è¿›ç¨‹ï¼Œ
-# ä»è€Œé¿å…æŠŠæœºå™¨ä¸Šå…¶å®ƒåŒåè¿›ç¨‹ç®—è¿›æ¥ã€‚
+# ©¤©¤ ×Ó½ø³Ì¹¤×÷¼¯²ÉÑù ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+# Ö»°´Ãû×ÖÈ¡½ø³Ì£¨²»×öÈ«ÏµÍ³Ã¶¾Ù£©£¬ÔÙÓÃ¡¸¸¸½ø³ÌÁ´¡¹È·ÈÏËüÊôÓÚÇı¶¯½ø³Ì£¬
+# ´Ó¶ø±ÜÃâ°Ñ»úÆ÷ÉÏÆäËüÍ¬Ãû½ø³ÌËã½øÀ´¡£
 $childParent = @{}
 function Get-TreePids([int]$root) {
     $ids = New-Object 'System.Collections.Generic.List[int]'
@@ -78,7 +78,7 @@ function Get-TreePids([int]$root) {
 }
 
 Write-Host ""
-Write-Host "=== Photon HAT ç¼–è¯‘ Aura è‡ªä¸¾ç¼–è¯‘å™¨ ===" -ForegroundColor Cyan
+Write-Host "=== Photon HAT ±àÒë Aura ×Ô¾Ù±àÒëÆ÷ ===" -ForegroundColor Cyan
 Write-Host ("  entry  : {0}" -f $Entry)
 Write-Host ("  driver : {0}" -f $Driver)
 Write-Host ("  out    : {0}" -f $OutDir)
@@ -133,7 +133,7 @@ while (-not $proc.WaitForExit(500)) {
 $sw.Stop()
 $elapsed = $sw.Elapsed
 
-# é©±åŠ¨è¿›ç¨‹è‡ªèº«ï¼šè¯»ç³»ç»Ÿè®°å½•çš„å³°å€¼ï¼ˆè¿›ç¨‹å·²é€€å‡ºä¹Ÿèƒ½è¯»åˆ°ï¼‰
+# Çı¶¯½ø³Ì×ÔÉí£º¶ÁÏµÍ³¼ÇÂ¼µÄ·åÖµ£¨½ø³ÌÒÑÍË³öÒ²ÄÜ¶Áµ½£©
 $driverPeak = [long]0
 try { $driverPeak = [long]$proc.PeakWorkingSet64 } catch {}
 $driverPriv = [long]0
@@ -147,7 +147,7 @@ try { $code = $proc.ExitCode } catch {}
 
 $env:AURA_HAT_AURA = ''; $env:AURA_HAT_SRC = ''; $env:AURA_HAT_OUT = ''; $env:AURA_HAT_MODULE = ''
 
-# â”€â”€ ç»“æœè§£æ â”€â”€
+# ©¤©¤ ½á¹û½âÎö ©¤©¤
 $result = ''; $errMsg = ''; $lastMarker = ''
 foreach ($l in (($so + "`n" + $se) -split "`n")) {
     $t = $l.TrimEnd("`r")
@@ -159,18 +159,18 @@ foreach ($l in (($so + "`n" + $se) -split "`n")) {
 }
 
 Write-Host ""
-Write-Host "â”€â”€â”€ æŒ‡æ ‡ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€" -ForegroundColor Cyan
-Write-Host ("  ç¼–è¯‘æ€»æ—¶é•¿                  : {0}" -f $elapsed.ToString("hh\:mm\:ss\.ff"))
-Write-Host ("  å³°å€¼å†…å­˜ Â· é©±åŠ¨è¿›ç¨‹è‡ªèº«      : {0} MB   (PeakWorkingSet64)" -f [Math]::Round($driverPeak / 1MB, 1))
-Write-Host ("  å³°å€¼å†…å­˜ Â· å­è¿›ç¨‹æœ€å¤§å•é¡¹    : {0} MB" -f [Math]::Round($peakChildOne / 1MB, 1))
-Write-Host ("  å³°å€¼å†…å­˜ Â· å­è¿›ç¨‹åŒåˆ»æ€»å’Œ    : {0} MB   {1}" -f [Math]::Round($peakChildSum / 1MB, 1), $childDetail)
-Write-Host ("  é‡‡æ ·æ¬¡æ•°(å­è¿›ç¨‹, 500ms ä¸€æ¬¡) : {0}" -f $samples)
+Write-Host "©¤©¤©¤ Ö¸±ê ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤" -ForegroundColor Cyan
+Write-Host ("  ±àÒë×ÜÊ±³¤                  : {0}" -f $elapsed.ToString("hh\:mm\:ss\.ff"))
+Write-Host ("  ·åÖµÄÚ´æ ¡¤ Çı¶¯½ø³Ì×ÔÉí      : {0} MB   (PeakWorkingSet64)" -f [Math]::Round($driverPeak / 1MB, 1))
+Write-Host ("  ·åÖµÄÚ´æ ¡¤ ×Ó½ø³Ì×î´óµ¥Ïî    : {0} MB" -f [Math]::Round($peakChildOne / 1MB, 1))
+Write-Host ("  ·åÖµÄÚ´æ ¡¤ ×Ó½ø³ÌÍ¬¿Ì×ÜºÍ    : {0} MB   {1}" -f [Math]::Round($peakChildSum / 1MB, 1), $childDetail)
+Write-Host ("  ²ÉÑù´ÎÊı(×Ó½ø³Ì, 500ms Ò»´Î) : {0}" -f $samples)
 Write-Host ""
 Write-Host ("  exit code     : {0}" -f $code)
 Write-Host ("  ===RESULT===  : {0}" -f $result)
 if ($timedOut) { Write-Host ("  TIMEOUT       : {0}s" -f $TimeoutSecs) -ForegroundColor Yellow }
 Write-Host ("  .hat          : {0}" -f $(if (Test-Path $hat) { "$hat  ($((Get-Item $hat).Length) bytes)" } else { 'MISSING' }))
-Write-Host ("  .exe          : {0}" -f $(if (Test-Path $exe) { "$exe  ($((Get-Item $exe).Length) bytes)" } else { 'æœªç”Ÿæˆï¼ˆé©±åŠ¨åªè¾“å‡º COFF hexï¼Œä¸è‡ªè¡Œé“¾æ¥ï¼‰' }))
+Write-Host ("  .exe          : {0}" -f $(if (Test-Path $exe) { "$exe  ($((Get-Item $exe).Length) bytes)" } else { 'Î´Éú³É£¨Çı¶¯Ö»Êä³ö COFF hex£¬²»×ÔĞĞÁ´½Ó£©' }))
 if ($errMsg -ne '') { Write-Host ("  ===ERR===     : {0}" -f $errMsg) -ForegroundColor Red }
 Write-Host ""
 

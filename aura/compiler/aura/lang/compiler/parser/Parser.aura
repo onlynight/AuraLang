@@ -1141,6 +1141,27 @@ class Parser {
                 this.prsExpect("RParen")
             }
             var bodyKids = noKids()
+            // 构造器委托：`constructor(m) : super(m) { }`
+            if (this.prsMatch("Colon")) {
+                if (this.prsCheck("Ident") && this.prsCurLit() == "super") {
+                    this.prsAdvance() // super
+                    var sa = noKids()
+                    if (this.prsCheck("LParen")) {
+                        this.prsAdvance()
+                        if (!this.prsCheck("RParen")) {
+                            while (true) {
+                                sa = kidsAdd(sa, this.parseExpr())
+                                if (!this.prsMatch("Comma")) { break }
+                            }
+                        }
+                        this.prsExpect("RParen")
+                    }
+                    if (kidsCount(sa) > 0) {
+                        bodyKids = kidsAdd(bodyKids,
+                            this.ast.add("Call", "super", "", this.prsCurSpan(), sa))
+                    }
+                }
+            }
             if (this.prsCheck("LBrace")) {
                 bodyKids = kidsAdd(bodyKids, this.parseBlock())
             }

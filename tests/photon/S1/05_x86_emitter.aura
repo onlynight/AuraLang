@@ -1,21 +1,19 @@
 // tests/photon/S1/05_x86_emitter.aura
-// ═════════════════════════════════════════════════════════════
-// X86Emitter 单元测试
+// ════════════════════════════════════════════════════════════�?// X86Emitter 单元测试
 // 运行：aura run tests/photon/S1/05_x86_emitter.aura
-// ═════════════════════════════════════════════════════════════
-
+// ════════════════════════════════════════════════════════════�?
 import aura.lang.std.String
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/X86Emitter.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/MachineDag.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/X86Emitter.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/InstructionSelection.aura"
 
 fun main() {
-    println("═══ X86Emitter 测试 ═══")
+    println("══�?X86Emitter 测试 ══�?)
     var pass: Int = 0
     var fail: Int = 0
 
-    // ── [1] 空 DAG ──
-    println("[1] 空 DAG")
+    // ── [1] �?DAG ──
+    println("[1] �?DAG")
     val d1 = MachineDagUtils.emptyDag()
     val e1 = X86EmitterUtils.emptyEmitter()
     e1.emitFunction(d1, "test")

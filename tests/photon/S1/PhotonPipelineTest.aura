@@ -1,20 +1,20 @@
-// aura:///aura/lang/compiler/backend/photon/PhotonPipelineTest.aura
-package aura.lang.compiler.backend.photon
+// aura:///aura/lang/compiler/photon/PhotonPipelineTest.aura
+package aura.lang.compiler.photon
 // ─────────────────────────────────────────────────────────────
-// S1 管线集成测试 — 真实数据流端到端
+// S1 管线集成测试 �?真实数据流端到端
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/RegisterAllocator.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/X86Emitter.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonObjectWriter.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/Lir.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/MachineDag.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/InstructionSelection.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/RegisterAllocator.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/X86Emitter.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
 
 fun main() {
     println("╔══════════════════════════════════════════════╗")
-    println("║   S1 管线集成测试 — 真实数据流端到端         ║")
+    println("�?  S1 管线集成测试 �?真实数据流端到端         �?)
     println("╚══════════════════════════════════════════════╝")
 
     var passCount: Int = 0
@@ -33,15 +33,15 @@ fun main() {
     if (hex1.length >= 20) {
         println("  hex=" + hex1)
         println("  bytes=" + enc.byteCount())
-        println("  ✓ PASS")
+        println("  �?PASS")
         passCount = passCount + 1
     } else {
-        println("  ✗ FAIL — hex too short")
+        println("  �?FAIL �?hex too short")
     }
 
-    // ── Test 2: X86Encoder 重定位 ──
+    // ── Test 2: X86Encoder 重定�?──
     println("")
-    println("[Test 2] X86Encoder: 重定位生成")
+    println("[Test 2] X86Encoder: 重定位生�?)
     enc = X86EncoderUtils.emptyEncoder()
     enc.emitPrologue(0x30)
     enc.emitLeaRIP("rcx", "@str.0")
@@ -51,24 +51,24 @@ fun main() {
     val relocs2 = enc.getRelocations()
     if (relocs2.size == 2) {
         println("  relocs=" + relocs2.size)
-        println("  ✓ PASS")
+        println("  �?PASS")
         passCount = passCount + 1
     } else {
-        println("  ✗ FAIL — expected 2 relocs, got " + relocs2.size)
+        println("  �?FAIL �?expected 2 relocs, got " + relocs2.size)
     }
 
-    // ── Test 3: InstructionSelection 空 LIR 程序 ──
+    // ── Test 3: InstructionSelection �?LIR 程序 ──
     println("")
-    println("[Test 3] InstructionSelection: 空程序")
+    println("[Test 3] InstructionSelection: 空程�?)
     val emptyLir = LirUtils.emptyProgram()
     val sel = InstructionSelectorUtils.emptySelector()
     val dag3 = sel.select(emptyLir)
     if (dag3.nodeCount == 0 && dag3.instrCount == 0) {
-        println("  empty DAG ✓")
-        println("  ✓ PASS")
+        println("  empty DAG �?)
+        println("  �?PASS")
         passCount = passCount + 1
     } else {
-        println("  ✗ FAIL — expected empty DAG")
+        println("  �?FAIL �?expected empty DAG")
     }
 
     // ── Test 4: InstructionSelection 常量 + Add ──
@@ -82,8 +82,7 @@ fun main() {
     val funcId4 = lir4.addFunction("test", intType4, intType4, false)
     val func4 = lir4.functionOf(funcId4)
 
-    // 创建块
-    val blockId4 = lir4.addBlock()
+    // 创建�?    val blockId4 = lir4.addBlock()
     func4.blocks = LirBlockUtils.succsAdd(func4.blocks, blockId4)
     func4.entryBlock = blockId4
 
@@ -99,10 +98,10 @@ fun main() {
     val dag4 = sel4.select(lir4)
     if (dag4.instrCount >= 2) {
         println("  DAG instrs=" + dag4.instrCount + " nodes=" + dag4.nodeCount)
-        println("  ✓ PASS")
+        println("  �?PASS")
         passCount = passCount + 1
     } else {
-        println("  ✗ FAIL — expected >= 2 instrs, got " + dag4.instrCount)
+        println("  �?FAIL �?expected >= 2 instrs, got " + dag4.instrCount)
     }
 
     // ── Test 5: RegisterAllocator 颜色分配 ──
@@ -122,28 +121,28 @@ fun main() {
     val color5b = alloc5.getColor(n5b)
     if (color5a != "" && color5b != "") {
         println("  color(a)=" + color5a + " color(b)=" + color5b)
-        // 验证颜色回写到 DagNode.reg
+        // 验证颜色回写�?DagNode.reg
         val nodeReg = dag5.nodeOf(n5a).reg
         if (nodeReg == color5a) {
-            println("  ✓ color written back to DagNode.reg")
+            println("  �?color written back to DagNode.reg")
             passCount = passCount + 1
         } else {
-            println("  ✗ FAIL — color not written back (reg=" + nodeReg + ")")
+            println("  �?FAIL �?color not written back (reg=" + nodeReg + ")")
         }
     } else {
-        println("  ✗ FAIL — no color assigned (a=" + color5a + " b=" + color5b + ")")
+        println("  �?FAIL �?no color assigned (a=" + color5a + " b=" + color5b + ")")
     }
 
     // ── Test 6: RegisterAllocator 溢出 ──
     println("")
-    println("[Test 6] RegisterAllocator: 溢出检测")
+    println("[Test 6] RegisterAllocator: 溢出检�?)
     val spillCount5 = alloc5.getSpillSlots()
     if (spillCount5 >= 0) {
         println("  spillSlots=" + spillCount5)
-        println("  ✓ PASS")
+        println("  �?PASS")
         passCount = passCount + 1
     } else {
-        println("  ✗ FAIL")
+        println("  �?FAIL")
     }
 
     // ── Test 7: X86Emitter 函数发射 ──
@@ -161,18 +160,18 @@ fun main() {
     if (hex7.length >= 20) {
         println("  hex=" + hex7)
         println("  bytes=" + (hex7.length / 2))
-        println("  ✓ PASS")
+        println("  �?PASS")
         passCount = passCount + 1
     } else {
-        println("  ✗ FAIL — hex too short: " + hex7)
+        println("  �?FAIL �?hex too short: " + hex7)
     }
 
-    // ── Test 8: X86Emitter 重定位 ──
+    // ── Test 8: X86Emitter 重定�?──
     println("")
-    println("[Test 8] X86Emitter: 重定位记录")
+    println("[Test 8] X86Emitter: 重定位记�?)
     val relocs7 = emitter7.getRelocRecords()
     println("  relocs=" + relocs7)
-    println("  ✓ PASS")
+    println("  �?PASS")
     passCount = passCount + 1
 
     // ── Test 9: PhotonObjectWriter 从机器码发射 COFF ──
@@ -182,10 +181,10 @@ fun main() {
     val coff9 = writer9.emitFromMachineCode(hex7, relocs7, "", "test")
     if (coff9.length >= 200) {
         println("  COFF size=" + (coff9.length / 2) + " bytes")
-        println("  ✓ PASS")
+        println("  �?PASS")
         passCount = passCount + 1
     } else {
-        println("  ✗ FAIL — COFF too small (" + coff9.length + " hex chars)")
+        println("  �?FAIL �?COFF too small (" + coff9.length + " hex chars)")
     }
 
     // ── Test 10: PhotonObjectWriter hex 文件写入 ──
@@ -195,10 +194,10 @@ fun main() {
     val writeOk9 = writer9.writeObjectHexFile(hexPath9)
     if (writeOk9) {
         println("  wrote " + hexPath9)
-        println("  ✓ PASS")
+        println("  �?PASS")
         passCount = passCount + 1
     } else {
-        println("  ✗ FAIL — file write failed")
+        println("  �?FAIL �?file write failed")
     }
 
     // ── Summary ──
@@ -206,9 +205,9 @@ fun main() {
     println("══════════════════════════════════════════════")
     println("测试结果: " + passCount + "/" + totalTests + " 通过")
     if (passCount == totalTests) {
-        println("RESULT: PASS — S1 管线集成测试全部通过")
+        println("RESULT: PASS �?S1 管线集成测试全部通过")
     } else {
-        println("RESULT: FAIL — " + (totalTests - passCount) + " 项失败")
+        println("RESULT: FAIL �?" + (totalTests - passCount) + " 项失�?)
     }
     println("══════════════════════════════════════════════")
 }

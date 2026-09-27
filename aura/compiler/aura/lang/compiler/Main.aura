@@ -61,8 +61,8 @@ import aura.lang.compiler.aot.Aot
 import aura.lang.compiler.aot.ModuleLink
 
 // Photon 后端
-import aura.lang.compiler.backend.photon.PhotonPipeline
-import aura.lang.compiler.backend.photon.JitBackend
+import aura.lang.compiler.photon.PhotonPipeline
+import aura.lang.compiler.photon.JitBackend
 
 // JIT 后端
 import aura.lang.compiler.jit.JitUtil
@@ -518,6 +518,8 @@ object MainUtils {
     /// CLI 模式：读取命令行参数 → 读源文件 → AOT 产出原生可执行文件。
     fun runCli(): Unit {
         val argc: Int = cliArgCount()
+        println("[RUNCLI] argc=" + toStr(argc)
+                + " a1=[" + cliArg(1) + "] a3=[" + cliArg(3) + "]")
         var inputPath: String = ""
         var outputPath: String = ""
         var backend: String = "vm"
@@ -537,7 +539,16 @@ object MainUtils {
             base = 2
         }
         var i: Int = base + 1
+        // 诊断守卫：超过 20 次迭代就打印 i / argc 的实际值并返回，
+        // 既能定位「计数器不前进 / 上限被覆写」的成因，又避免死循环。
+        var argGuard: Int = 0
         while (i < argc) {
+            argGuard = argGuard + 1
+            if (argGuard > 20) {
+                println("[ARGLOOP] i=" + toStr(i) + " argc=" + toStr(argc)
+                        + " guard=" + toStr(argGuard))
+                return
+            }
             val a: String = cliArg(i)
             if (a == "-o" || a == "--output") {
                 if (i + 1 < argc) {
@@ -752,8 +763,11 @@ object MainUtils {
 
 /// 读取环境变量通道的参数个数；无该通道时返回 -1。
 fun cliEnvArgCount(): Int {
+    println("CEA-1")
     val s: String = Env.get("AURA_ARGV_COUNT")
+    println("CEA-2 L=" + toStr(s.length) + " C0=" + toStr(s.charCodeAt(0)) + " s=[" + s + "]")
     if (s == "") {
+        println("CEA-3-empty")
         return -1
     }
     var n: Int = 0
@@ -803,12 +817,31 @@ fun main() {
     // the VM passes [exe, "run", file.auc, ...].  Skip those two so that
     // arg(1) is the first user-supplied argument, matching standalone invocation.
     var base: Int = 0
+    println("BOOT-1a")
     val cnt0: Int = cliArgCount()
     println("BOOT-1b cnt=" + toStr(cnt0))
     if (cnt0 >= 3 && cliArg(1) == "run") {
         base = 2
     }
     println("BOOT-2")
+    // 诊断：把 base / 参数条数 / 具体参数值一次打出来（定位「进入 usage 而非 runCli」）。
+    println("[MAIN] base=" + toStr(base) + " cnt=" + toStr(cliArgCount())
+            + " a0=[" + cliArg(0) + "] a1=[" + cliArg(1) + "]"
+            + " a2=[" + cliArg(2) + "] a3=[" + cliArg(3) + "]")
+    // 对照实验：定位 `streq`（字符串判等）是否失真。
+    // 期望 r_run=0 r_same=1 r_diff=0 r_ab=0（"a" vs "b" 必须为假）。
+    var cRun: Int = 0
+    if (cliArg(1) == "run") { cRun = 1 }
+    var cSame: Int = 0
+    if (cliArg(1) == cliArg(1)) { cSame = 1 }
+    var cDiff: Int = 0
+    if (cliArg(1) == cliArg(2)) { cDiff = 1 }
+    var cAb: Int = 0
+    if ("a" == "b") { cAb = 1 }
+    var cEmpty: Int = 0
+    if (cliArg(1) == "") { cEmpty = 1 }
+    println("[CMP] run=" + toStr(cRun) + " same=" + toStr(cSame)
+            + " diff=" + toStr(cDiff) + " ab=" + toStr(cAb) + " empty=" + toStr(cEmpty))
 
     if (cliArgCount() >= base + 2) {
         val first: String = cliArg(base + 1)

@@ -1,6 +1,6 @@
 # Aura Programming Language
 
-> A system-level scripting language for NovaOS — Kotlin-style syntax, Rust implementation, AOT + JIT hybrid compilation, zero-cost FFI, ARC memory management, plus a **direct-to-COFF native backend (HAT / Photon)** that emits a native executable without LLVM IR.
+> A system-level scripting language for NovaOS — Kotlin-style syntax, **pure Aura implementation (self-bootstrapping)**, AOT + JIT hybrid compilation, zero-cost FFI, ARC memory management, plus a **direct-to-COFF native backend (HAT / Photon)** that emits a native executable without LLVM IR.
 >
 > **中文文档** → [README.zh-CN.md](README.zh-CN.md)
 
@@ -143,16 +143,16 @@ Full breakdown: [`build/hat-bootstrap/REPORT-HAT-bootstrap.md`](build/hat-bootst
 
 ---
 
-## Pure Aura Compiler Migration (纯 Aura 化迁移)
+## Pure Aura Compiler (纯 Aura 编译器)
 
-In parallel with the Rust compiler, a **compiler written entirely in Aura** is built under `aura/compiler/aura/lang/compiler/`. The Rust compiler (`rust/compiler/`) is preserved unmodified as the fallback and reference implementation.
+The **entire compiler is written in Aura itself** — the last remaining Rust dependency has been removed, and the compiler bootstraps itself. The core compiler lives under `aura/compiler/aura/lang/compiler/`, and the Photon native backend is under `aura/photon/aura/lang/compiler/photon/`.
 
 ### Self-Bootstrap Process (自举流程)
 
 The Aura compiler is bootstrapped from a pre-built seed binary:
 
 ```
-aura/seed/aura.exe          <- Rust bootstrap (seed, no rebuild needed)
+seed/aura.exe               <- Rust bootstrap (seed, no rebuild needed)
         │
         ▼  aura build aura/compiler/.../Main.aura
         │
@@ -168,8 +168,8 @@ build/output/<file>.exe               <- AOT-compiled native executable
 A second, independent bootstrap path drives the HAT chain directly and skips the VM entirely:
 
 ```
-rust/target/release/aura.exe
-        │  aura build --aot aura/compiler/.../backend/photon/PhotonHatCompile.aura
+seed/aura.exe
+        │  aura build --aot aura/photon/.../PhotonHatCompile.aura
         ▼
 build/hat-native/PhotonHatCompile.exe        <- AOT-compiled HAT chain driver
         │  <driver>  Main.aura
@@ -177,22 +177,7 @@ build/hat-native/PhotonHatCompile.exe        <- AOT-compiled HAT chain driver
 Main.aura ──► HirProgram ──► SSA MIR ──► .hat ──► COFF ──► lld-link ──► .exe
 ```
 
-**Bootstrap resolution order** (in `build-aura-compiler.ps1`):
-
-1. `rust/target/release/aura.exe` — cargo-built, preferred
-2. `rust/target/debug/aura.exe`
-3. `aura/seed/aura.exe` — frozen git-LFS seed, only with `-FrozenSeed` or if no target build exists
-
-**Rebuilding the seed** (when `rust/compiler` is updated):
-
-```powershell
-cd rust
-cargo build --release -p cli --features llvm
-copy target\release\aura.exe ..\aura\seed\aura.exe
-
-# or, from the repository root:
-scripts\build-aura-compiler.ps1 -RebuildSeed
-```
+**Bootstrap**: the frozen seed at `seed/aura.exe` (tracked in git) eliminates the need for a Rust toolchain entirely. `build-aura-compiler.ps1` uses it by default; `-FrozenSeed` forces it even when other builds exist.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
@@ -265,7 +250,6 @@ Main.aura   — Compiler entry skeleton
 
 ```text
 AuraLang/
-├── Cargo.toml              Workspace root
 ├── LICENSE                 Apache-2.0
 ├── README.md               ← You are here
 ├── README.zh-CN.md         中文文档
@@ -273,7 +257,7 @@ AuraLang/
 │
 ├── aura/                   Aura language sources (self-bootstrapping)
 │   ├── core/               Core language types (Any, Int, String, List, Map, ...)
-│   ├── compiler/           Compiler written in Aura
+│   ├── compiler/           Core compiler written in Aura
 │   │   └── aura/lang/compiler/
 │   │       ├── lexer/ parser/ ast/ sema/ errors/ sourcemap/   Front end
 │   │       ├── hir/                        HIR + optimizer passes
@@ -281,26 +265,24 @@ AuraLang/
 │   │       ├── mir/                        MIR + SSA (SsaBuilder, SsaMir, Linearizer)
 │   │       ├── codegen/ vm/                Bytecode emission + VM interpreter
 │   │       ├── aot/ jit/                   LLVM IR AOT + Cranelift JIT
-│   │       ├── backend/photon/             HAT native backend (LIR → COFF → exe)
 │   │       ├── gc/ memory/ runtime/        GC, ARC, coroutine runtime
 │   │       ├── serialize/ linker/ signature/ auz/ package/
 │   │       └── Main.aura                   Compiler entry
-│   ├── runtime/            Runtime support sources
-│   ├── toolchain/          LSP, debugger, docgen, cli
-│   └── seed/
-│       └── aura.exe        Rust bootstrap seed (pre-built, no rebuild needed)
+│   ├── photon/             Photon native backend (HAT / LIR / COFF)
+│   │   └── aura/lang/compiler/photon/
+│   │       ├── x86_64/                  X86-64 encoder
+│   │       └── (PhotonPipeline, RegisterAllocator, X86Encoder, ...)
+│   ├── runtime/            Runtime support sources (C: aura_syscalls.c)
+│   └── toolchain/          LSP, debugger, docgen, loom, cli
 │
-├── rust/                   Rust toolchain (build from here)
-│   ├── compiler/           Compiler crate (lexer, sema, codegen, vm, std, lsp, ...)
-│   ├── cli/                Binaries: `aura`, `aura-lsp`, `aura-debug`
-│   ├── loom/               Gradle/Bazel-style build system
-│   └── target/             Rust build artifacts (generated)
+├── seed/                   Rust seed workspace (Cargo.toml, compiler/, target/)
+│   └── aura.exe            Frozen bootstrap binary (pre-built, no rebuild needed)
 │
 ├── book/                   User documentation (tutorials, API, migration)
 ├── docs/                   Technical design documents (系统/编译/语言/集成/规划)
 ├── examples/               Aura source examples
 ├── tests/                  Test files
-│   ├── phase{0..9}_tests.aura      Pure-Aura compiler migration tests
+│   ├── phase{0..9}_tests.aura      Pure-Aura compiler tests
 │   ├── photon/
 │   │   ├── P1/ P2/ P3/ P4/         End-to-end differential cases
 │   │   └── S1/ S2/ S3/ S4/         Backend unit/integration tests
@@ -308,11 +290,8 @@ AuraLang/
 │   └── snapshots/                  Snapshot tests
 ├── scripts/                PowerShell build, bootstrap & suite scripts
 │   ├── build-aura-compiler.ps1        Seed → Aura-compiler build
-│   ├── bootstrap-photon.ps1           Photon bootstrap
-│   ├── photon-hat-bootstrap.ps1       HAT self-bootstrap of Main.aura
-│   ├── photon-hat-native-suite.ps1    HAT chain differential suite
-│   ├── photon-hat-suite.ps1           VM→HAT chain differential suite
-│   └── run-hat-on-main.ps1            HAT driver metrics harness
+│   ├── photon/                        Photon build & test scripts
+│   └── ...
 ├── tools/                  Editor/IDE tooling
 │   ├── dsh-plugins/        DSH syntax highlighting (aura, hat, phir)
 │   ├── ide-extension/      IDE extension sources
@@ -320,9 +299,10 @@ AuraLang/
 └── build/                  Generated artifacts (incl. build/hat-native/, build/hat-bootstrap/)
 ```
 
-> **Layout note:** the Rust compiler, CLI and `loom` build system live under `rust/`, not at the
-> repository root. `aura/` holds the Aura-written language sources; the compiler is bootstrapped
-> from the pre-built seed at `aura/seed/aura.exe`.
+> **Layout note:** `aura/compiler/` holds the core compiler (lexer, parser, sema, HIR, MIR, codegen,
+> VM, AOT, JIT); `aura/photon/` holds the HAT/Photon native backend (LIR, register allocation,
+> x86-64 encoder, COFF writer); `seed/` holds the Rust seed workspace. The compiler bootstraps from
+> the frozen seed at `seed/aura.exe` — no Rust toolchain is required.
 
 ---
 
@@ -330,7 +310,6 @@ AuraLang/
 
 ### Prerequisites
 
-- Rust 1.75+ (edition 2024)
 - LLVM ≥ 23 (tested with `clang+llvm-23.1.0-x86_64-pc-windows-msvc`), including `lld-link.exe` for the
   HAT/Photon native backend; `llc` for the LLVM-IR AOT path
 - Windows / PowerShell 5.1+ for the build and bootstrap scripts
@@ -338,29 +317,25 @@ AuraLang/
 ### Build
 
 ```powershell
-# Build the Aura compiler (self-bootstrap, no Rust toolchain needed)
+# Build the Aura compiler (self-bootstrap from frozen seed, no Rust needed)
 scripts\build-aura-compiler.ps1
 
 # Build with AOT (native executable, needs LLVM)
 scripts\build-aura-compiler.ps1 -Aot
 
-# Rebuild the seed binary from Rust source (when rust/compiler is updated)
-scripts\build-aura-compiler.ps1 -RebuildSeed
-
-# Rebuild the native HAT driver (AOT-compiled by the Rust `aura` binary, ~12 s)
+# Rebuild the native HAT driver (AOT-compiled by the seed `aura` binary, ~12 s)
 $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
-.\rust\target\release\aura.exe build --aot `
-    aura\compiler\aura\lang\compiler\backend\photon\PhotonHatCompile.aura `
+.\seed\aura.exe build --aot `
+    aura\photon\aura\lang\compiler\photon\PhotonHatCompile.aura `
     --output build\hat-native\PhotonHatCompile.exe
 
 # HAT differential suites (each rebuilds the driver first with -Rebuild)
-.\scripts\photon-hat-native-suite.ps1 -Phase P1,P2,P3 -OutRoot build\hat-native-suite
-.\scripts\photon-hat-suite.ps1        -Phase P1,P2,P3 -OutRoot build\hat-suite
+.\scripts\photon\photon-hat-native-suite.ps1 -Phase P1,P2,P3 -OutRoot build\hat-native-suite
+.\scripts\photon\photon-hat-suite.ps1        -Phase P1,P2,P3 -OutRoot build\hat-suite
 ```
 
-> **Note:** The frozen seed at `aura/seed/aura.exe` (git-LFS tracked) eliminates the need for a Rust
-> toolchain entirely — `build-aura-compiler.ps1 -FrozenSeed` uses it directly. Otherwise the script
-> prefers a cargo build at `rust/target/{release,debug}/aura.exe`. Only `-RebuildSeed` needs `cargo`.
+> **Note:** The frozen seed at `seed/aura.exe` (tracked in git) eliminates the need for a Rust
+> toolchain entirely. `-FrozenSeed` forces it even when other builds exist.
 
 ### Run
 
@@ -615,25 +590,23 @@ Install: `aura-language` from the VS Code Marketplace, or build from `tools/ide-
 
 ## Development
 
-The Rust workspace lives in `rust/`:
+The compiler and toolchain are written in Aura. Build and test with:
 
-```bash
-# Format
-cd rust && cargo fmt --all
+```powershell
+# Build the compiler (self-bootstrap from frozen seed)
+scripts\build-aura-compiler.ps1
 
-# Lint
-cd rust && cargo clippy --all-features -- -D warnings
+# Build with AOT (native executable)
+scripts\build-aura-compiler.ps1 -Aot
 
-# Test
-cd rust && cargo test --workspace
-cd rust && cargo test --release --test perf_lexer -- --nocapture
+# Run compiler tests
+aura run tests/phase9_compiler_tests.aura
+aura run tests/pure_aura_cffi/test.aura
 
-# Update snapshots
-INSTA_UPDATE=always cargo test
+# Run HAT / Photon test suites
+scripts\photon\photon-hat-native-suite.ps1 -Phase P1,P2,P3
+scripts\photon\photon-hat-suite.ps1 -Phase P1,P2,P3
 ```
-
-CI: `rust/.github/workflows/ci.yml` — `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`
-(debug + release), coverage.
 
 ### Debugging the HAT / Photon backend
 

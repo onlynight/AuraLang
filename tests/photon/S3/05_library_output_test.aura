@@ -1,24 +1,20 @@
 // tests/photon/S3/05_library_output_test.aura
-// E3: 库输出测试 — dll/so/lib
+// E3: 库输出测�?�?dll/so/lib
 //
-// 验证 PhotonPipeline 支持不同输出类型：
-//   - exe: 可执行文件（默认）
-//   - dll: Windows 动态链接库
-//   - so: Linux 共享库
-//   - lib: 静态库（.lib/.a）
-
+// 验证 PhotonPipeline 支持不同输出类型�?//   - exe: 可执行文件（默认�?//   - dll: Windows 动态链接库
+//   - so: Linux 共享�?//   - lib: 静态库�?lib/.a�?
 import aura.lang.std.String
 import aura.lang.std.Process
 
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonPipeline.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonSystemLinker.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonObjectWriter.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lowering.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/x86_64/X86Encoder.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/X86Emitter.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/PhotonPipeline.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/PhotonSystemLinker.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/MachineDag.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/InstructionSelection.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/Lir.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/Lowering.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/x86_64/X86Encoder.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/X86Emitter.aura"
 import "../../../aura/compiler/aura/lang/compiler/hir/Hir.aura"
 import "../../../aura/compiler/aura/lang/compiler/mir/SsaBuilder.aura"
 
@@ -36,7 +32,7 @@ fun check(cond: Boolean, name: String): Unit {
 }
 
 fun main(): Unit {
-    println("═══ E3 库输出测试 ═══")
+    println("══�?E3 库输出测�?══�?)
 
     // ── 1. exe 输出类型（默认）──
     println("[1] exe 输出类型")
@@ -76,21 +72,19 @@ fun main(): Unit {
 
     // ── 结果 ──
     println("")
-    println("═══ 结果 ═══")
+    println("══�?结果 ══�?)
     println("PASS: " + toStr(pass) + "/" + toStr(pass + fail))
     if (fail == 0) {
-        println("ALL PASS — 库输出就绪")
+        println("ALL PASS �?库输出就�?)
     } else {
         println("FAIL: " + toStr(fail))
     }
     Process.exit(if (fail == 0) 0 else 1)
 }
 
-/// 辅助类：构建简单 HIR 用于测试。
-class HirBuilder {
+/// 辅助类：构建简�?HIR 用于测试�?class HirBuilder {
     fun buildSimpleFunction(): Hir {
         val hir = Hir()
-        // 空 HIR — 仅用于测试管线流程
-        return hir
+        // �?HIR �?仅用于测试管线流�?        return hir
     }
 }

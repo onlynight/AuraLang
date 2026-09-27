@@ -1,15 +1,12 @@
 // tests/photon/S1/07_pipeline_integration.aura
-// ═════════════════════════════════════════════════════════════
-// PhotonPipeline 集成测试（S1 管线工具函数）
-// 运行：aura run tests/photon/S1/07_pipeline_integration.aura
-// ═════════════════════════════════════════════════════════════
-
+// ════════════════════════════════════════════════════════════�?// PhotonPipeline 集成测试（S1 管线工具函数�?// 运行：aura run tests/photon/S1/07_pipeline_integration.aura
+// ════════════════════════════════════════════════════════════�?
 import aura.lang.std.String
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonPipeline.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonSystemLinker.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/PhotonPipeline.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/PhotonSystemLinker.aura"
 
 fun main() {
-    println("═══ PhotonPipeline 集成测试 ═══")
+    println("══�?PhotonPipeline 集成测试 ══�?)
     var pass: Int = 0
     var fail: Int = 0
 

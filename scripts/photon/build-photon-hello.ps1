@@ -1,4 +1,4 @@
-﻿# -------------------------------------------------------------
+# -------------------------------------------------------------
 # Photon E3 smoke test: build and run "hello world" - Windows
 #
 # Pipeline:
@@ -35,7 +35,7 @@ Set-Location $Root
 # touch `$Lld` again (otherwise the driver-parsing block below silently wipes it).
 $LldOverride = $Lld
 
-$Driver = 'aura/compiler/aura/lang/compiler/backend/photon/PhotonHelloBuild.aura'
+$Driver = 'aura/photon/aura/lang/compiler/photon/PhotonHelloBuild.aura'
 $OutDir = Join-Path $Root 'build/lldtest'
 $Expect = 'hello world' + "`r`n"
 

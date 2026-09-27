@@ -1,16 +1,14 @@
 // tests/photon/S1/01_x86_encoder.aura
-// ═════════════════════════════════════════════════════════════
-// X86Encoder 单元测试 — 基础指令编码
+// ════════════════════════════════════════════════════════════�?// X86Encoder 单元测试 �?基础指令编码
 //
 // 覆盖：Prologue/Epilogue、MOV、ADD、SUB、IMUL、CMP、SETcc、RET
 // 运行：aura run tests/photon/S1/01_x86_encoder.aura
-// ═════════════════════════════════════════════════════════════
-
+// ════════════════════════════════════════════════════════════�?
 import aura.lang.std.String
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/x86_64/X86Encoder.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/x86_64/X86Encoder.aura"
 
 fun main() {
-    println("═══ X86Encoder 基础编码测试 ═══")
+    println("══�?X86Encoder 基础编码测试 ══�?)
     var pass = 0
     var total = 8
 

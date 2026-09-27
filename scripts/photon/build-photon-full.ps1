@@ -1,4 +1,4 @@
-ï»¿# -------------------------------------------------------------
+# -------------------------------------------------------------
 # Photon full compilation pipeline - Windows
 #
 # Pipeline:
@@ -37,9 +37,9 @@ $SourceAbs = (Resolve-Path $Source).Path
 $OutDirAbs = Join-Path $Root $OutDir
 $ModuleName = [System.IO.Path]::GetFileNameWithoutExtension($SourceAbs)
 
-Write-Host "â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"
-Write-Host "â•‘   Photon Full Compilation Pipeline           â•‘"
-Write-Host "â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+Write-Host "¨X¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨["
+Write-Host "¨U   Photon Full Compilation Pipeline           ¨U"
+Write-Host "¨^¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨a"
 Write-Host "  Source:   $SourceAbs"
 Write-Host "  Output:   $OutDirAbs"
 Write-Host "  Module:   $ModuleName"
@@ -179,7 +179,7 @@ Write-Host "  HIR generated: $hirOut ($hirSize bytes)"
 # ---- 3. Run Photon backend via Aura VM ----
 Write-Host "`n[2/3] Running Photon backend (aura run PhotonDriver.aura)..."
 
-$driverPath = 'aura/compiler/aura/lang/compiler/backend/photon/PhotonDriver.aura'
+$driverPath = 'aura/photon/aura/lang/compiler/photon/PhotonDriver.aura'
 $driverArgs = @('run', $driverPath)
 
 $prevEap = $ErrorActionPreference

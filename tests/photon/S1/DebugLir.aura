@@ -1,12 +1,12 @@
-// aura:///aura/lang/compiler/backend/photon/DebugLir.aura
-package aura.lang.compiler.backend.photon
+// aura:///aura/lang/compiler/photon/DebugLir.aura
+package aura.lang.compiler.photon
 // Debug: test LirProgram creation
 
 import aura.lang.std.String
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/Lir.aura"
 
 fun main() {
-    println("═══ Debug Lir ═══")
+    println("══�?Debug Lir ══�?)
 
     println("[1] LirUtils.emptyProgram()")
     val lir = LirUtils.emptyProgram()

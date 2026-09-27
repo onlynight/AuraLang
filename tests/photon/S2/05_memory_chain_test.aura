@@ -1,19 +1,16 @@
 // tests/photon/S2/05_memory_chain_test.aura
-// ═════════════════════════════════════════════════════════════
-// 内存链（Memory Chain）测试
-// 运行：aura run tests/photon/S2/05_memory_chain_test.aura
-// ═════════════════════════════════════════════════════════════
-
+// ════════════════════════════════════════════════════════════�?// 内存链（Memory Chain）测�?// 运行：aura run tests/photon/S2/05_memory_chain_test.aura
+// ════════════════════════════════════════════════════════════�?
 import aura.lang.std.String
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/Lir.aura"
 
 fun main() {
-    println("═══ 内存链测试 ═══")
+    println("══�?内存链测�?══�?)
     var pass = 0
     var total = 3
 
-    // [1] 创建带内存链的 Load 指令
-    println("[1] 创建带内存链的 Load 指令")
+    // [1] 创建带内存链�?Load 指令
+    println("[1] 创建带内存链�?Load 指令")
     val lir = LirUtils.emptyProgram()
     val t = lir.types
     val i32 = t.intType(32)
@@ -27,14 +24,13 @@ fun main() {
     println("  chain=" + lir.valueOf(vLoad).chain)
     if (lir.valueOf(vLoad).chain == 0) { pass = pass + 1 }
 
-    // [2] 创建带内存链的 Store 指令
-    println("[2] 创建带内存链的 Store 指令")
+    // [2] 创建带内存链�?Store 指令
+    println("[2] 创建带内存链�?Store 指令")
     val vStore = lir.addValueWithChain("Store", i32, "0,0", "", bid, 1)
     println("  chain=" + lir.valueOf(vStore).chain)
     if (lir.valueOf(vStore).chain == 1) { pass = pass + 1 }
 
-    // [3] 普通指令（无内存链）
-    println("[3] 普通指令（无内存链）")
+    // [3] 普通指令（无内存链�?    println("[3] 普通指令（无内存链�?)
     val vConst = lir.addValue("Const", i32, "", "42", bid)
     println("  chain=" + lir.valueOf(vConst).chain)
     if (lir.valueOf(vConst).chain == -1) { pass = pass + 1 }
