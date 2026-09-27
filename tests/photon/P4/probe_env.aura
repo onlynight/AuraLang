@@ -1,0 +1,13 @@
+// tests/photon/P4/probe_env.aura
+// 验证 Photon 运行库的 env_get（PEB 实现）能否真正读到环境变量。
+// 期望：设 AURA_ARGV_COUNT=6 时打印 CNT=[6] LEN=1
+import aura.lang.std.Env
+
+fun main() {
+    val s: String = Env.get("AURA_ARGV_COUNT")
+    println("CNT=[" + s + "]")
+    println("LEN=" + toStr(s.length))
+
+    val missing: String = Env.get("AURA_NO_SUCH_VAR_XYZ")
+    println("MISS=[" + missing + "]")
+}

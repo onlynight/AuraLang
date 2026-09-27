@@ -71,6 +71,18 @@ class DagNode {
     /// 内存链前驱节点 ID（-1 表示无内存依赖）。
     var chain: Int = -1
 
+    /// 发射器为**调用结果**分配的兜底栈槽偏移（负值；0 = 未分配）。
+    ///
+    /// 为什么放在节点上：`emitCall` 把调用结果落到一个默认槽，而 RA 并不认为
+    /// 该节点被 spill 过。若不登记，后续 `regOfNode` 只能回退到 `node.reg`（= `rax`）
+    /// ⇒ 读到上一个调用留在 rax 的返回值（实测自举 `Main.exe`：`Env.get` 的结果
+    /// 存进 `[rbp-8]`，`streq(s, "")` 的实参却从 `rax` 取 → 对垃圾指针比较 → 崩溃）。
+    ///
+    /// ⚠️ 必须用**节点字段**而不是发射器里的 CSV 表：CSV 会随调用结果数线性增长、
+    /// 且每次查询 `indexOf` 全表 ⇒ O(N²) 字符串分配，实测直接把自举顶穿 8 GiB 闸门
+    ///（退出码 70）。放节点上则 O(1)、零分配。
+    var stackDisp: Int = 0
+
     /// 辅助信息（常量值、栈偏移、地址模式描述等）。
     var aux: String = ""
 
@@ -463,7 +475,17 @@ object MachineDagUtils {
         var total: Int = 0
         var i: Int = 0
         var neg: Boolean = false
-        if (len > 0 && text.charAt(0).toString() == "-") {
+        // ⚠️ 必须用 `charCodeAt` 判负号。`text.charAt(0).toString()` 会走原生
+        // `String_charAt` 并新建单字符串，在**自举（Photon）**路径下不可靠 ——
+        // 实测它检测不出 '-'，于是 `"-8"` 被解析成 **8**（符号丢失）。
+        //
+        // 后果极硬：栈槽偏移本应是负值（`[rbp-8]`），丢符号后写成 `[rbp+8]`，
+        // 而 `push rbp; mov rbp,rsp` 之后 `[rbp+8]` 正是**返回地址** ——
+        // 于是「函数一被调用就崩」。实测自举 `Main.exe`：
+        //     BOOT-1 → BOOT-1a → CEA-1 → CEA-2 → 0xC0000005
+        //（崩在 `Env.get` 返回之后的 `streq(s, "")`，因为 `s` 被存到了 `[rbp+8]`）。
+        // 这正是本文件其它 `strToInt` 副本（如 `RegisterAllocator`）早已采用的写法。
+        if (len > 0 && (text.charCodeAt(0) as Int) == 45) {
             neg = true
             i = 1
         }

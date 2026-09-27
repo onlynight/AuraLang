@@ -69,7 +69,7 @@ class SsaBuilder {
 
     /// 局部变量名 → ValueID 映射（扁平字符串：name|vid\nname|vid\n…）。
     ///
-    /// 采用与 MirLower.aura 一致的扁平字符串格式（`name|vid\n` 拼接），
+    /// 采用与 MirLower.aura 一致的扁平字符串格式（\name|vid\n` 拼接），
     /// 避免 `HashMap<String, Int>` 在 VM 内类调用时未链接的问题。
     private var varMap: String = ""
 
@@ -144,8 +144,45 @@ class SsaBuilder {
     /// 当前函数所属类（空 = 自由函数）。
     private var curClass: String = ""
 
-    /// 当前函数内「局部变量名 → 声明类型名」（每行 `name|TypeName`，倒序优先）。
+    /// 当前函数内「局部变量名 → 声明类型名」（每行 \name|TypeName`，倒序优先）。
     private var localTypes: String = ""
+
+    /// `object`（`HirObject`）/ `extern interface`（`HirExternObject`）声明名表
+    /// （`\nName\n`）。
+    ///
+    /// ⚠️ 只有**单例模块**声明进表；`HirClass`/`HirStruct` 不进表。两者的方法
+    /// **都不接收**接收者实参（见 `buildFunction` / `buildCall`），但承载字段
+    /// 状态的那一批，`this` 要解析到 `synthesizeSingletons` 惰性分配的实例上。
+    private var singletonCsv: String = ""
+
+    /// 对象声明名 → 是否带**字段状态**（`\nName|1\n`）。
+    ///
+    /// `ArenaAllocator` / `MemoryManager` / `GC` 这类 `object` 既被当成模块用
+    ///（`GC.isEnabled()`）又被实例化（`ArenaAllocator()`）；`Mutex` / `Thread` /
+    /// `Cpu` 只有静态方法、无字段。只有带字段的那批需要「惰性单例实例」来承载
+    /// 字段（`__field_get`/`__field_set` 需要一个真实对象指针）。
+    private var objFieldStateCsv: String = ""
+
+    /// 单例模块名（按 arena 顺序，供 `synthesizeSingletons` 冷路径遍历）。
+    private var singletonList: List<String> = arrayListOf<String>()
+
+    /// `extern interface`（`HirExternObject`）声明名表（`\nName\n`）。
+    ///
+    /// 成员由编译器/运行库实现（`Memory_alloc` 在 `aura_runtime.obj`），
+    /// **只被调用、从不生成函数体** —— `buildAllFunctions` 对它们的
+    /// 属主直接跳过，否则链接期 `duplicate symbol: Memory_alloc`。
+    private var externCsv: String = ""
+
+    /// `init` 节点声明的元数表（`\nClass|arity\n`）。
+    ///
+    /// 由 `scanInitArities` 在建函数之前一次性填充；`synthesizeCtors` 用它决定
+    /// 要给每个类生成哪些 `<Class>__new<N>`，`buildFunction` 用它判断
+    /// `<Class>_init` 要不要按元数加后缀。
+    ///
+    /// 只能是字符串 CSV，不能是 `List[Int]`：`mutableListOf` 泛型路径在 AOT
+    /// 自举下会崩（见 `scanInitArities` 的注释）。
+
+    private var initArityCsv: String = ""
 
     init() {
         this.program = MirSsaProgram()
@@ -169,6 +206,11 @@ class SsaBuilder {
         this.ownerByNode = arrayListOf<String>()
         this.curClass = ""
         this.localTypes = ""
+        this.singletonCsv = ""
+        this.externCsv = ""
+        this.objFieldStateCsv = ""
+        this.singletonList = arrayListOf<String>()
+        this.initArityCsv = ""
     }
 
     // ── 主入口 ──
@@ -184,7 +226,13 @@ class SsaBuilder {
 
         // 类元数据必须在建函数之前就绪：方法与调用点都要用它解析字段/构造器。
         this.buildClassIndex(src)
+        // `init` 重载元数（决定 `<Class>_init<N>` 后缀与要生成哪些 `__new<N>`）。
+        this.scanInitArities(src)
+        // 构造器 `<Class>__new<N>`：每个类每个元数一份，必须早于用户函数。
         this.synthesizeCtors(src)
+        // 单例字段实例访问器（<Name>_getInstance）必须在用户函数之前建好：
+        // buildFunction 会把单例方法里的 this 解析成对它的一次调用。
+        this.synthesizeSingletons(src)
 
         this.buildAllFunctions(src)
 
@@ -221,7 +269,7 @@ class SsaBuilder {
         val n: Int = src.count
         var i: Int = 0
         while (i < n) {
-            if (src.kindOf(i) == "HirFunction") {
+            if (src.kindOf(i) == "HirFunction" && !this.isExternObjMethod(i)) {
                 this.dbgFuncCount = this.dbgFuncCount + 1
                 // 崩溃诊断：AURA_PHOTON_TRACE=1 时逐函数打印，定位精确崩溃点
                 if (traceOn) {
@@ -270,6 +318,21 @@ class SsaBuilder {
         if (ownerCls != "" && rawName != "") {
             name = ownerCls + "_" + rawName
         }
+        if (rawName == "init" && this.initOverloaded(ownerCls)) {
+            // 构造器重载：`init` 在同类里出现多次（`constructor()` /
+            // `constructor(m)`），而 COFF 只保留同名符号的**一份** ⇒ 必须按
+            // 元数加后缀（`Exception_init0` / `Exception_init1`），否则三个
+            // `Exception_init` 互相覆盖、构造器拿不到正确的字段布局。
+            // 调用点见 `buildCall` 的 `super` 分支与构造器调用分支。
+            //
+            // 只在**真有重载**时加后缀：`ArenaAllocator.init(size)` /
+            // `MemoryManager.init(size)` 这类**普通同名方法**只有一个 `init`，
+            // 加后缀会让定义落成 `ArenaAllocator_init1` 而调用点仍是
+            // `ArenaAllocator_init`（P4 `probe_arena` / `test_memory_alloc`
+            // 的 undefined symbol）。
+            name = name + toStr(this.hirExplicitParamCount(src, id))
+        }
+
         val retTy: String = src.tyOf(id)
 
         // 注册返回类型
@@ -303,11 +366,31 @@ class SsaBuilder {
         this.localTypes = ""
         if (ownerCls != "") {
             this.curClass = ownerCls
-            val selfVal: Int = this.program.addValue("Param", this.types.fromTypeName("Long"),
-                                                     "", "this", entryBlock)
-            this.curParams = toStr(selfVal)
-            this.varMapAdd("this", selfVal)
-            this.program.functionOf(this.curFunc).params = this.curParams
+            if (this.isSingletonObj(ownerCls)) {
+                // ── 单例模块方法：**无** `this` 形参 ──
+                //
+                // `Mutex.lock(m)` / `GC.isEnabled()` 在 HIR 里被降级成带接收者
+                // 实参的成员调用（`Hir.aura` 对 Member callee 一律把接收者作
+                // kids[0]），但单例本身不是对象：没有可传的接收者值，`buildCall`
+                // 已把它丢弃。这里也**不能**再注入 `this` 形参 —— 注入后形参表
+                // 整体右移一位，`lock(lock_id)` 的 `lock_id` 会落进「接收者」槽。
+                //
+                // 带字段状态的单例（`GC`/`ARC`/`MemoryManager`/`Runtime`）：`this`
+                // 解析到 `synthesizeSingletons` 生成的 `<Owner>_getInstance()` ——
+                // 惰性分配一个真实对象承载字段，后续 `__field_get`/`__field_set`
+                // 照常工作。用 **Call** 而非 Param：单例首次访问才有副作用
+                //（分配对象），且调用点不传任何实参。
+                val getInstanceSym: String = ownerCls + "_getInstance"
+                val instVal: Int = this.program.addValue("Call",
+                        this.types.fromTypeName("Long"), "", getInstanceSym, entryBlock)
+                this.varMapAdd("this", instVal)
+            } else {
+                val selfVal: Int = this.program.addValue("Param", this.types.fromTypeName("Long"),
+                                                         "", "this", entryBlock)
+                this.curParams = toStr(selfVal)
+                this.varMapAdd("this", selfVal)
+                this.program.functionOf(this.curFunc).params = this.curParams
+            }
         }
 
         // 处理参数
@@ -687,7 +770,7 @@ class SsaBuilder {
         return true
     }
 
-    /// 在 `name|vid\n…` 扁平变量表中，从末尾向前找 `name` 的最新 vid（未找到 -1）。
+    /// 在 \name|vid\n…` 扁平变量表中，从末尾向前找 \name` 的最新 vid（未找到 -1）。
     ///
     /// 零分配：按 `\n` 定位行，行内按 `|`（124）定位，只对命中项切片一次。
     /// ⚠️ 所有 `charCodeAt` 调用都必须落在 `[0, len)` 内（AOT 内联访存无边界检查）。
@@ -1118,7 +1201,7 @@ class SsaBuilder {
                     if (owner != "") {
                         val fIdx: Int = this.classFieldIndex(owner, fname)
                         if (fIdx >= 0) {
-                            val recvVal: Int = this.buildExpr(src, recvNode)
+                            val recvVal: Int = this.recvObjectValue(src, recvNode, owner)
                             this.emitFieldSet(recvVal, fIdx, val)
                             return
                         }
@@ -1333,7 +1416,16 @@ class SsaBuilder {
 
         // 映射运算符
         val mirOp: String = this.mapUnaryOp(op)
-        val typeId: Int = this.types.fromTypeName(src.tyOf(id))
+        // 逻辑非的结果恒为布尔：`!x` 只有 0/1 两个取值，必须定型为 `Boolean`，
+        // 否则 `toStr(!mutex.isLocked())` 的 `isBool` 判定失效，打印 `1`/`0`
+        // 而不是 VM 语义的 `true`/`false`（P4 `test_thread` 的判定行）。
+        // 注意 `&&` / `||` 虽然也是逻辑运算，但复用 `And` / `Or` 操作符且与
+        // 按位 `&` / `|` 无法区分，**不**在这里定型。
+        val typeId: Int = if (mirOp == "Not") {
+            this.types.fromTypeName("Boolean")
+        } else {
+            this.types.fromTypeName(src.tyOf(id))
+        }
 
         return this.program.addValue(mirOp, typeId, args, "", this.curBlock)
     }
@@ -1342,18 +1434,35 @@ class SsaBuilder {
     fun buildCall(src: Hir, id: Int): Int {
         this.dbgCalls = this.dbgCalls + 1
         var funcName: String = src.textOf(id)
+        val bareName: String = funcName
         val kids: String = src.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
+
+        // ── 单例模块调用：丢弃降级进来的「接收者」实参 ──
+        //
+        // `Hir.aura::lowerCall` 对 Member callee（`Mutex.lock(...)` /
+        // `Cpu.atomicAdd(...)`）一律把接收者降级成 kids[0]。对**类实例**这是对的
+        //（形参表首项就是 `this`）；对**单例模块**则是错的：单例没有接收者值
+        //（降级成 `@null` / 常量 0），而方法本身也没有 `this` 形参 ⇒ 实参整体错位
+        // 一位。实测后果：
+        //   * `Cpu.atomicAdd(addr, 1)`   → `atomicAdd(0, addr, 1, mem)`
+        //   * `Memory.mmap(0,n,3,34,-1,0)` → `mmap(0, 0, n, 3, 34, -1, 0, mem)`
+        // 单例没有形参表可依（`HirNativeFunction` 无函数体），所以只能在**调用点**
+        // 靠「接收者是单例模块名」这一可靠信号来判定。
+        val skipFirst: Boolean =
+            (kCount >= 1) && this.recvIsSingleton(src, HirUtils.hirKidsAt(kids, 0))
 
         // 构建参数列表
         var args: String = ""
         var i: Int = 0
         while (i < kCount) {
-            val argVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, i))
-            if (args == "") {
-                args = toStr(argVal)
-            } else {
-                args = args + "," + toStr(argVal)
+            if (!(i == 0 && skipFirst)) {
+                val argVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, i))
+                if (args == "") {
+                    args = toStr(argVal)
+                } else {
+                    args = args + "," + toStr(argVal)
+                }
             }
             i = i + 1
         }
@@ -1370,8 +1479,46 @@ class SsaBuilder {
         // 类**的零初始化构造器（符号名就是裸类名）。若沿用裸类名，用户类/自举类
         // 会与它们 `duplicate symbol`，且会静默拿到零初始化对象。加后缀后这批
         // 旧桩彻底不可达，构造器体统一由 `synthesizeCtors` 生成。
-        if (this.isClassName(funcName)) {
-            funcName = funcName + "__new"
+        // ── 构造器委托：`constructor(m) : super(m) { }` ──
+        //
+        // 降级形态是 `HirCall("super", [实参...])`（见 `Parser` 的 ctor 分支）。
+        // 需要解析成**父类的 init 重载**并把接收者补到实参首位：
+        // `super(m)` → `<Parent>_init1(obj, m)`。
+        if (funcName == "super") {
+            val par: String = this.parentOfClass(this.curClass)
+            if (par != "") {
+                // 元数后缀与 `buildFunction` 保持一致：只有父类真有重载
+                // （多个 `init`）时定义侧才加 `<N>`，否则是裸 `<Parent>_init`。
+                if (this.initOverloaded(par)) {
+                    funcName = par + "_init" + toStr(kCount)
+                } else {
+                    funcName = par + "_init"
+                }
+                val selfVal: Int = this.varMapLookup("this")
+                if (args == "") {
+                    args = toStr(selfVal)
+                } else {
+                    args = toStr(selfVal) + "," + args
+                }
+            } else {
+                // 无父类：委托无处可去，退化为无副作用的空调用
+                funcName = "Memory_alloc"
+            }
+        } else if (this.isClassName(funcName)) {
+            // 单例模块（`object`）的 \new` 是**普通方法**，符号为 `Mutex_new`；
+            // 真正的类才走 `synthesizeCtors` 合成的 `<Class>__new`。
+            // 不加这个分支的话 `Mutex()` 会退化成 `Mutex__new` → undefined symbol。
+            if (this.isSingletonObj(funcName) && this.classDeclaresMethod(funcName, "new")) {
+                funcName = funcName + "_new"
+            } else if (this.isSingletonObj(funcName)) {
+                // 单例没有 \new`（`ArenaAllocator` / `MemoryManager`）：`X()` 取
+                // 惰性单例实例，而不是合成构造器 —— 单例不进 `classList`，
+                // `synthesizeCctors` 不会为它们生成 `<X>__new0`。
+                funcName = funcName + "_getInstance"
+            } else {
+                // 元数后缀与 `synthesizeCtors` 的 `scanInitArities` 对齐
+                funcName = funcName + "__new" + toStr(kCount)
+            }
         } else {
             // 成员方法调用：把裸方法名解析为声明类的限定符号（A-2）。
             funcName = this.resolveMethodSymbol(src, kids, kCount, funcName)
@@ -1385,7 +1532,18 @@ class SsaBuilder {
             }
         }
 
-        val typeId: Int = this.types.fromTypeName(src.tyOf(id))
+        var typeId: Int = this.types.fromTypeName(src.tyOf(id))
+        // ── 布尔返回类型定型 ──
+        //
+        // `Hir.aura::lowerCall` 把 HirCall 的 type 一律写空串（见 `buildVarDecl`
+        // 的注释），于是 `toStr(mutex.isLocked())` 的实参类型落成 `Basic`，
+        // `InstructionSelection.emitCall` 里的 `isBool` 判定随之失效 → 打印
+        // `1`/`0`，与 VM 语义 `true`/`false` 不符（P4 全部并发用例的判定行）。
+        // 这里按被调方法的**声明返回类型**补定型；只认 `Boolean` —— 整数 / 浮点
+        // / 指针与 `Basic` 同宽，定型无收益且可能改变指令选择路径，一律不碰。
+        if (src.tyOf(id) == "" && this.uniqueMethodReturnType(bareName) == "Boolean") {
+            typeId = this.types.fromTypeName("Boolean")
+        }
         val callVal: Int = this.program.addValue("Call", typeId, args, funcName, this.curBlock)
 
         // Phase A: 更新内存链 — Call 后创建新的 mem token
@@ -1475,9 +1633,27 @@ class SsaBuilder {
         if (owner != "") {
             val fIdx: Int = this.classFieldIndex(owner, fieldName)
             if (fIdx >= 0) {
-                val recvVal: Int = this.buildExpr(src, recvNode)
+                val recvVal: Int = this.recvObjectValue(src, recvNode, owner)
                 return this.emitFieldGet(recvVal,
                     this.classFieldTypeByName(owner, fieldName), fIdx)
+            }
+        }
+
+        // ── 单例模块字段：`GC.gcEnabled`（接收者是模块名，不是实例值）──
+        //
+        // `receiverClassOf` 对非 `this`、非定型局部量返回 ""，于是**外部**直接读
+        // 单例字段会落到下面的「无法定型」通用分支（拿 `HirVar("GC")` 降级成
+        // 常量 0 当对象指针）。补一条：接收者是带字段的单例模块名时，等价于在
+        // `<Name>_getInstance()` 返回的惰性实例上读字段。
+        if (owner == "" && this.recvIsSingleton(src, recvNode)) {
+            val sName: String = src.textOf(recvNode)
+            val sIdx: Int = this.classFieldIndex(sName, fieldName)
+            if (sIdx >= 0) {
+                val instVal: Int = this.program.addValue("Call",
+                        this.types.fromTypeName("Long"), "", sName + "_getInstance",
+                        this.curBlock)
+                return this.emitFieldGet(instVal,
+                    this.classFieldTypeByName(sName, fieldName), sIdx)
             }
         }
 
@@ -1600,7 +1776,7 @@ class SsaBuilder {
 
     /// 向变量映射表追加一个条目。
     ///
-    /// 使用 `name|vid\n` 拼接格式，与 MirLower.aura 一致。
+    /// 使用 \name|vid\n` 拼接格式，与 MirLower.aura 一致。
     private fun varMapAdd(name: String, vid: Int) {
         this.varMap = this.varMap + name + "|" + toStr(vid) + "\n"
         // Phase A S2: 变量重命名 — 每次赋值递增版本号
@@ -1631,7 +1807,7 @@ class SsaBuilder {
 
     /// 从变量映射表查找变量值，返回 SSA ValueID。
     ///
-    /// 遍历所有 `name|vid\n` 行，按 `|` 拆分后匹配名称。
+    /// 遍历所有 \name|vid\n` 行，按 `|` 拆分后匹配名称。
     private fun varMapLookup(name: String): Int {
         val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
         if (traceOn) println("            [vml0] varMapLookup name=" + name)
@@ -1740,6 +1916,102 @@ class SsaBuilder {
             return false
         }
         return this.classNamesCsv.indexOf("\n" + name + "\n") >= 0
+    }
+
+    /// 是否为**单例模块**（`object` / `extern interface`）声明。
+    ///
+    /// 与 `isClassName` 的区别：单例的调用点**没有接收者实参**
+    ///（`Mutex.lock(m)` 只传 `m`），调用点解析必须丢弃降级进来的接收者，
+    /// 否则实参整体错位一位（实测 `Cpu.atomicAdd(addr, 1)` 的 `addr` 落进
+    /// 「接收者」槽、`1` 落进 `addr` 槽）。
+    private fun isSingletonObj(name: String): Boolean {
+        if (name == "" || this.singletonCsv == "") {
+            return false
+        }
+        return this.singletonCsv.indexOf("\n" + name + "\n") >= 0
+    }
+
+    /// 是否属于 `extern interface`（`HirExternObject`）成员。
+    ///
+    /// 这类成员的实现由编译器/运行库提供（`Memory_alloc` 在 `aura_runtime.obj`），
+    /// `buildAllFunctions` 必须跳过 —— 生成用户函数体会在链接期
+    /// `duplicate symbol: Memory_alloc`。
+    private fun isExternObj(name: String): Boolean {
+        if (name == "" || this.externCsv == "") {
+            return false
+        }
+        return this.externCsv.indexOf("\n" + name + "\n") >= 0
+    }
+
+    /// `HirFunction` 是否属于某个 `extern interface`。
+    private fun isExternObjMethod(node: Int): Boolean {
+        return this.isExternObj(this.ownerClassNameOf(node))
+    }
+
+    /// 单例模块是否带**字段状态**。
+    ///
+    /// `GC` / `ARC` / `MemoryManager` / `Runtime` 带字段，字段必须有一个真实
+    /// 对象指针承载（`__field_get(obj, i)` 需要非零 obj）；`Mutex` / `Thread` /
+    /// `Condvar` / `Cpu` 无字段，是纯静态方法。
+    private fun hasFieldState(name: String): Boolean {
+        if (name == "" || !this.isSingletonObj(name)) {
+            return false
+        }
+        return this.flatCount(this.classFields, "\n" + name + "|") > 0
+    }
+
+    /// 调用/成员访问的**第一个子节点**是否为单例模块引用。
+    ///
+    /// 只认 `HirVar` 直接命名（`Mutex.lock` 降级后的接收者子节点就是
+    /// `HirVar("Mutex")`）：`this` 与局部实例仍走原有接收者路径。
+    private fun recvIsSingleton(src: Hir, node: Int): Boolean {
+        if (node < 0 || src.kindOf(node) != "HirVar") {
+            return false
+        }
+        if (this.isSingletonObj(src.textOf(node))) {
+            return true
+        }
+        // extern interface (Memory/Cpu/ThreadOps) 也没有接收者形参
+        return this.isExternObj(src.textOf(node))
+    }
+
+    /// 接收者是否是**裸单例模块引用**（`HirVar` 且名字本身就是单例模块名）。
+    ///
+    /// 局部实例（`var a: ArenaAllocator = ArenaAllocator()`）不算裸引用：
+    /// `localTypeOf` 命中即排除，继续走 `buildExpr`。
+    private fun recvIsBareSingleton(src: Hir, node: Int): Boolean {
+        if (node < 0 || src.kindOf(node) != "HirVar") {
+            return false
+        }
+        val n: String = src.textOf(node)
+        if (n == "" || n == "this") {
+            return false
+        }
+        if (this.localTypeOf(n) != "") {
+            return false
+        }
+        return this.isSingletonObj(n)
+    }
+
+    /// 取成员访问/赋值的接收者**对象指针**值。
+    ///
+    /// ⚠️ 裸单例引用（`ArenaAllocator.x` / `MemoryManager.y = v`）的接收者子节点
+    /// 是 `HirVar("ArenaAllocator")`，它**不是实例值**。而 `receiverClassOf` 对
+    /// 它返回模块名（非 ""），于是调用点走 `buildExpr`，`HirVar` 查不到局部量
+    /// 就降级成常量 0；`__field_get(0, i)` 的「对象为 0 → 返回 0」兜底让**所有
+    /// 外部单例字段读恒为 0、写被静默丢弃**。
+    ///
+    /// 实测（probe_arena）：`ArenaAllocator.usedSize` 恒 0，而 `getUsedSize()`
+    /// 返回正确值 64 —— 方法体里的 `this` 走 `receiverClassOf → curClass`，
+    /// 再由 `buildFunction` 解析成 `ArenaAllocator_getInstance()` 调用，所以是对的。
+    ///
+    /// 这里对裸单例引用改为发射一次 `<Name>_getInstance()` 取惰性实例。
+    private fun recvObjectValue(src: Hir, recvNode: Int, owner: String): Int {
+        if (this.recvIsBareSingleton(src, recvNode)) {
+            val lty: Int = this.types.fromTypeName("Long")
+            return this.program.addValue("Call", lty, "", owner + "_getInstance", this.curBlock)
+        }
+        return this.buildExpr(src, recvNode)
     }
 
     /// 类的直接基类名（无继承返回 ""）。
@@ -2009,8 +2281,18 @@ class SsaBuilder {
             return this.curClass
         }
         val ty: String = this.localTypeOf(n)
-        if (ty != "" && this.isClassName(ty)) {
+        // 单例模块名也要认（`var mutex: Mutex` 后 `mutex.isLocked()` 的接收者
+        // 静态类型就是 `Mutex`）；不认的话调用点退化成裸名 `isLocked`，
+        // 而定义侧是 `Mutex_isLocked` ⇒ 链接期 undefined symbol。
+        if (ty != "" && (this.isClassName(ty) || this.isSingletonObj(ty))) {
             return ty
+        }
+        // `Memory.alloc(8L)` / `Cpu.atomicAdd(addr, 1)` / `MemoryManager.alloc(n)`：
+        // 接收者子节点就是**类名/模块名本身**，不是某个局部变量。此时静态类型
+        // 就是这个名字。不认的话 `alloc` 落进「全局唯一属主」兜底（重名歧义）
+        // 退化成裸名 `alloc`，链接期 undefined symbol。
+        if (this.isClassName(n) || this.isSingletonObj(n)) {
+            return n
         }
         return ""
     }
@@ -2084,7 +2366,15 @@ class SsaBuilder {
         while (i < n) {
             val k: String = src.kindOf(i)
             if (k == "HirClass" || k == "HirStruct") {
-                this.registerClass(src, i)
+                this.registerClass(src, i, k)
+            } else if (k == "HirObject" || k == "HirExternObject") {
+                // ⚠️ P4：`object` 单例与 `extern interface` 的成员此前**完全没有属主**
+                //（`registerClass` 只认 `HirClass`/`HirStruct`），于是 `Mutex.lock` /
+                // `Cpu.atomicAdd` / `Memory.mmap` 一律落成裸名 —— `init`×6、`alloc`×3、
+                // `free`×3 在 COFF 里互相覆盖，调用点整体错位（P4 全 7 例链接失败的
+                // 第一根因）。这里登记属主/字段表，但**不进** `classList`
+                //（`synthesizeCtors` 只为真正的类合成 `<Class>__new`）。
+                this.registerClass(src, i, k)
             }
             i = i + 1
         }
@@ -2134,21 +2424,34 @@ class SsaBuilder {
     }
 
     /// 登记单个类/结构体：继承关系 + 字段布局 + 方法属主。
-    private fun registerClass(src: Hir, id: Int) {
+    /// `kind` 区分真类（`HirClass`/`HirStruct`）与单例模块
+    ///（`HirObject`/`HirExternObject`）：后者**不进** `classList`。
+    private fun registerClass(src: Hir, id: Int, kind: String) {
         val name: String = src.textOf(id)
         if (name == "" || this.isClassName(name) || this.isBuiltinValueClass(name)) {
             return
         }
         this.classNamesCsv = this.classNamesCsv + "\n" + name + "\n"
-        this.classList.add(name)
-
+        if (kind == "HirExternObject") {
+            // `extern interface`：成员由编译器/运行库实现，只被调用、
+            // 从不生成函数体（见 `buildAllFunctions` 的跳过逻辑）。
+            this.externCsv = this.externCsv + "\n" + name + "\n"
+        } else if (kind == "HirObject") {
+            this.singletonCsv = this.singletonCsv + "\n" + name + "\n"
+            this.singletonList.add(name)
+        } else {
+            this.classList.add(name)
+        }
         val parent: String = src.tyOf(id)
+        // ⚠️ 必须始终加 `\n` 前缀：`parentOfClass` 用 `"\n" + cls + "|"` 做
+        // 唯一性查找（避免 `A` 命中 `AB`）。旧实现在 `classParents` 为空时省略
+        // 前缀，导致**第一条继承记录**永远查不到 —— `Exception : Throwable()`
+        // 恰好是第一个有父类的类，于是 `classFieldIndex("Exception", "message")`
+        // 沿不到 `Throwable` 的字段表，`ex.message` 退化成通用 `GetField`
+        // （后端不发射加载指令，返回残留寄存器）→ `strcat` 拿垃圾指针 →
+        // `0xC0000005`（P4 `test_exception` 的根因）。
         if (parent != "" && parent != name) {
-            if (this.classParents == "") {
-                this.classParents = name + "|" + parent
-            } else {
-                this.classParents = this.classParents + "\n" + name + "|" + parent
-            }
+            this.classParents = this.classParents + "\n" + name + "|" + parent
         }
 
         // 字段序号起点 = 继承链上祖先的字段总数（父类字段占据前缀）
@@ -2164,10 +2467,26 @@ class SsaBuilder {
             } else if (ck == "HirVarDecl" || ck == "HirValDecl") {
                 this.addField(src, name, child, idx)
                 idx = idx + 1
-            } else if (ck == "HirFunction") {
+            } else if (ck == "HirFunction" || ck == "HirNativeFunction") {
+                // `HirNativeFunction` = `@native` 成员（`Memory.mmap` /
+                // `Cpu.atomicAdd` / `ThreadOps.currentId`）：无函数体，
+                // 登记属主只为让调用点拿到限定名。
+                //
+                // ⚠️ 必须**同时**调 `addClassMethod`：`classMethods` 只在
+                // `registerClassBody`（类体块）里登记，而 `extern interface`
+                // 的成员**直接挂在节点下**、没有 HirBlock 包裹 ⇒
+                // `Memory|alloc` / `Cpu|atomicAdd` / `ThreadOps|currentId`
+                // 查不到 ⇒ `methodOwnerClass` 返回 "" ⇒ 调用点退化成裸名
+                // `alloc` / `write64` / `currentId`，链接期 undefined symbol。
                 this.addMethodOwner(child, name)
+                this.addClassMethod(name, src.textOf(child))
             }
             j = j + 1
+        }
+
+        // 字段状态登记：只有带字段的单例才需要「惰性实例」承载字段。
+        if (kind == "HirObject" && this.flatCount(this.classFields, "\n" + name + "|") > 0) {
+            this.objFieldStateCsv = this.objFieldStateCsv + "\n" + name + "|1\n"
         }
     }
 
@@ -2184,7 +2503,7 @@ class SsaBuilder {
             if (ck == "HirVarDecl" || ck == "HirValDecl") {
                 this.addField(src, cls, child, idx)
                 idx = idx + 1
-            } else if (ck == "HirFunction") {
+            } else if (ck == "HirFunction" || ck == "HirNativeFunction") {
                 this.addMethodOwner(child, cls)
                 this.addClassMethod(cls, src.textOf(child))
                 this.addMethodReturnType(src.textOf(child), src.tyOf(child))
@@ -2469,6 +2788,10 @@ class SsaBuilder {
         if (name.startsWith("Collections.")) { return true }
         if (name.startsWith("io_")) { return true }
         if (name.startsWith("String")) { return true }
+        // P4: 原子操作 / ARC / 线程桥 runtime 符号
+        if (name == "atomicAdd" || name == "atomicDec" || name == "cas") { return true }
+        if (name == "arcIncrement" || name == "arcDecrement") { return true }
+        if (name.startsWith("ThreadOps_")) { return true }
         if (name == "get" || name == "set" || name == "size" || name == "count") { return true }
         return false
     }
@@ -2506,7 +2829,11 @@ class SsaBuilder {
             if (recvCls != "") {
                 val owner: String = this.methodOwnerClass(recvCls, bare)
                 if (owner != "") {
-                    return owner + "_" + bare
+                    val sym: String = owner + "_" + bare
+                    if (bare == "init" && this.initOverloaded(owner)) {
+                        return sym + toStr(kCount)
+                    }
+                    return sym
                 }
             }
         }
@@ -2578,12 +2905,144 @@ class SsaBuilder {
         return v
     }
 
-    /// 为每个类合成构造器 `<Class>__new`（0 形参，返回对象指针）。
+    /// 统计 HIR 函数节点的**显式**形参个数（不含隐式 `this`）。
     ///
-    /// 形参表刻意留空：调用点会把构造实参 + 内存链 token 一起压进
-    /// rcx/rdx/r8/r9，被调方不读它们 —— 多传的实参无害；0 形参让
-    /// `applyCallingConvention`（按**实参个数**装寄存器）与 callee 侧完全解耦，
-    /// 不必先知道每个类的 `init` 重载元数。
+    /// `lowerFunction` 把 `Params` 展开成若干同级 `HirParam`，所以直接数
+    /// kids 里的 `HirParam` 即可。供构造器重载按元数消歧
+    ///（`Exception_init1` / `Exception__new1`）。
+    private fun hirExplicitParamCount(src: Hir, id: Int): Int {
+        val kids: String = src.kidsOf(id)
+        val kn: Int = HirUtils.hirKidsCount(kids)
+        var cnt: Int = 0
+        var j: Int = 0
+        while (j < kn) {
+            if (src.kindOf(HirUtils.hirKidsAt(kids, j)) == "HirParam") {
+                cnt = cnt + 1
+            }
+            j = j + 1
+        }
+        return cnt
+    }
+
+    /// 预扫描全部 `init` 节点，把「属主类 → 去重元数集合」登记进
+    /// `initArityCsv`。必须在 `synthesizeCtors` 之前跑。
+    ///
+    /// ⚠️ 只做**字符串拼接 + `indexOf`**：不能用 `mutableListOf<Int>` 收集
+    /// 元数。实测 `List<Int>` + `contains`/`add`/`isEmpty`/索引 + 手写插入排序
+    /// 组合下来，driver 自举在字符串工具函数里 `0xC0000005`（P1 全挂、
+    /// 崩溃偏移与输入无关）—— `ArrayList<Any>` 与泛型装箱路径在 AOT 运行时
+    /// 下不可靠（同 `Emit.aura:9502` 的 `MutableList<...>` 递归坑）。
+    private fun scanInitArities(src: Hir) {
+        val n: Int = src.count
+        var i: Int = 0
+        while (i < n) {
+            if (src.kindOf(i) == "HirFunction" && src.textOf(i) == "init") {
+                val owner: String = this.ownerClassNameOf(i)
+                if (owner != "") {
+                    val ar: String = toStr(this.hirExplicitParamCount(src, i))
+                    this.addCtorArity(owner, this.hirExplicitParamCount(src, i))
+                }
+            }
+            // ── 调用点：`Foo(a, b, …)` → 需要 `Foo__new<n>` ──
+            //
+            // ⚠️ 只扫 `init` **声明**是不够的：`buildCall` 用的是**调用点实参个数**
+            //（`funcName + "__new" + kCount`），而很多类根本没写 `init`
+            //（`class Span(a,b,c,d,e,f)` 这种**主构造参数**写法），于是声明侧扫出的
+            // 元数集合里没有调用点那个数 ⇒ `Span__new6` / `Parser__new1` /
+            // `AotOptions__new4` 等 7 个符号未定义（实测自举 `Main.exe` 链接失败）。
+            //
+            // HIR call 节点的 kids 是否含 callee 子节点不必确定：`kn` 与 `kn-1`
+            // 两种都登记，多合成一个 `__new` 是无害的（幂等且体积可忽略）。
+            if (src.kindOf(i) == "HirCall") {
+                val callee: String = src.textOf(i)
+                // ⚠️ 只对**没有 `init` 声明**的类补：这正是出问题的那一类
+                //（`class Span(a,b,c,d,e,f)` 主构造参数写法）。已声明 `init` 的类，
+                // 声明侧已经把正确元数登记好了，这里再按调用点补就是**纯过度生成** ——
+                // 实测自举 `Main.obj` 1.11MB → 1.73MB、耗时 43s → 265s，收益为零。
+                // 判据用 `initAritiesOf` 的返回：无任何登记时返回 ""。
+                if (callee != "" && this.isClassName(callee)
+                        && this.initAritiesOf(callee) == "") {
+                    val kn: Int = HirUtils.hirKidsCount(src.kidsOf(i))
+                    if (kn > 0) {
+                        this.addCtorArity(callee, kn)
+                        this.addCtorArity(callee, kn - 1)
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    /// 把「类名 | 元数」登记进 `initArityCsv`（幂等；CSV 格式 `\nOwner|arity\n`）。
+    private fun addCtorArity(cls: String, ar: Int): Unit {
+        if (cls == "" || ar < 0) {
+            return
+        }
+        val key: String = "\n" + cls + "|" + toStr(ar) + "\n"
+        if (this.initArityCsv.indexOf(key) < 0) {
+            this.initArityCsv = this.initArityCsv + key
+        }
+    }
+
+    /// 本类的**全部** `init` 元数（去重、扫描顺序）。
+    /// CSV 格式 `\nOwner|arity\n`；按 `\n<cls>|` 定位行首、取 `|` 到行尾为元数。
+    private fun initAritiesOf(cls: String): String {
+        if (cls == "") {
+            return "0"
+        }
+        var out: String = ""
+        var csv: String = this.initArityCsv
+        val clsLen: Int = cls.length
+        val len: Int = csv.length
+        var i: Int = 0
+        while (i + clsLen + 2 <= len) {
+            if (csv.charCodeAt(i) == 10
+                    && cls == csv.substring(i + 1, i + 1 + clsLen)
+                    && csv.charCodeAt(i + 1 + clsLen) == 124) {
+                val arStart: Int = i + 2 + clsLen
+                var arEnd: Int = arStart
+                while (arEnd < len && csv.charCodeAt(arEnd) != 10) {
+                    arEnd = arEnd + 1
+                }
+                if (arEnd > arStart) {
+                    val ar: String = csv.substring(arStart, arEnd)
+                    if (out.indexOf("\n" + ar + "\n") < 0) {
+                        out = out + "\n" + ar + "\n"
+                    }
+                }
+                i = arEnd + 1
+            } else {
+                i = i + 1
+            }
+        }
+        return out
+    }
+
+    /// 本类的 `init` 是否有**真重载**（多个不同元数）。
+    ///
+    /// 只有真有重载时才按元数消歧（`Exception` 有 3 个构造器 →
+    /// `Exception_init0/1/2`）；`ArenaAllocator.init(size)` 这类**普通同名方法**
+    /// 只有 1 个 `init`，加后缀会把定义落成 `ArenaAllocator_init1` 而调用点
+    /// 仍是 `ArenaAllocator_init`（P4 `probe_arena` / `test_memory_alloc` 的
+    /// undefined symbol）。
+    private fun initOverloaded(cls: String): Boolean {
+        var csv: String = this.initAritiesOf(cls)
+        var n: Int = 0
+        var j: Int = 0
+        val len: Int = csv.length
+        while (j < len) {
+            if (csv.charCodeAt(j) == 10) {
+                n = n + 1
+            }
+            j = j + 1
+        }
+        return n > 2
+    }
+
+    /// 为每个类、每个**观测到的元数**合成构造器 `<Class>__new<ar>`。
+    ///
+    /// 元数集合 = 声明侧（`scanInitArities`）∪ {0}。裸 `Class()` 构造必须总能
+    /// 落到 `__new0`；多参构造（`Exception("m")`）落到 `__new1`。
     private fun synthesizeCtors(src: Hir) {
         val savedMem: Int = this.memHead
         val savedBlock: Int = this.curBlock
@@ -2596,39 +3055,29 @@ class SsaBuilder {
         var ci: Int = 0
         while (ci < this.classList.size) {
             val cname: String = this.classList[ci]
-            val fid: Int = this.program.addFunction(cname + "__new", 0, lty, false)
-            val entry: Int = this.program.addBlock()
-            this.curBlock = entry
-            this.curClass = cname
-            this.memHead = -1
-            this.varMap = ""
-            this.curParams = ""
-            this.localTypes = ""
-
-            val sizeVal: Int = this.program.addValue("Const", this.types.intType(64), "",
-                                                     toStr(this.classSizeOf(cname)), this.curBlock)
-            val objVal: Int = this.program.addValue("Call", lty, toStr(sizeVal),
-                                                    "Memory_alloc", this.curBlock)
-
-            val total: Int = this.classFieldTotal(cname)
-            var fi: Int = 0
-            while (fi < total) {
-                val fty: String = this.fieldTypeOfIndex(cname, fi)
-                val defNode: Int = this.fieldDefaultOfIndex(cname, fi)
-                var dv: Int = -1
-                if (defNode >= 0) {
-                    dv = this.buildExpr(src, defNode)
-                } else {
-                    dv = this.zeroConstOf(fty)
-                }
-                this.emitFieldSet(objVal, fi, dv)
-                fi = fi + 1
+            // 「0,\n<元数>\n」前缀保证裸构造总有落点；`initAritiesOf` 已去重，
+            // 这里只需再对 0 去一次。
+            var arStr: String = "0" + this.initAritiesOf(cname)
+            if (arStr.indexOf("\n0\n") < 0) {
+                arStr = arStr + "\n0\n"
             }
-
-            this.program.setTerminator(this.curBlock, "Ret", 0, toStr(objVal), "")
-            this.program.functionOf(fid).entryBlock = entry
-            this.program.functionOf(fid).params = ""
-            this.program.endFunction()
+            var ai: Int = 0
+            val alen: Int = arStr.length
+            while (ai < alen) {
+                if (arStr.charCodeAt(ai) == 10) {
+                    val astart: Int = ai + 1
+                    var ae: Int = astart
+                    while (ae < alen && arStr.charCodeAt(ae) != 10) {
+                        ae = ae + 1
+                    }
+                    if (ae > astart) {
+                        this.synthesizeCctorBody(src, cname, arStr.substring(astart, ae), lty)
+                    }
+                    ai = ae + 1
+                } else {
+                    ai = ai + 1
+                }
+            }
             ci = ci + 1
         }
 
@@ -2638,6 +3087,184 @@ class SsaBuilder {
         this.varMap = savedVarMap
         this.curParams = savedParams
         this.localTypes = savedLocalTypes
+    }
+
+    /// 合成单个构造器 `<Class>__new<ar>`（`ar` 个形参，返回对象指针）。
+    ///
+    /// 形参统一按 64 位建模：调用点会把构造实参 + 内存链 token 一起压进
+    /// rcx/rdx/r8/r9，本函数只读前 `ar` 个，多出来的实参无害。
+    ///
+    /// ⚠️ 构造体**不**写在这里：分配与字段默认值做完后，把实参原样转发给
+    /// `<Class>_init<ar>`（真构造器体：`super(...)` 委托 + 字段初始化）。
+    /// 此前 init 体被完全忽略，构造参数无处落地 —— P4 `test_exception` 的
+    /// `Exception("Test exception").message` 恒为空。只有父类**真有重载**
+    /// （多个 `init`）时才有 `<N>` 后缀，与 `buildFunction` / `buildCall` 一致。
+    private fun synthesizeCctorBody(src: Hir, cname: String, ar: String, lty: Int) {
+        val fid: Int = this.program.addFunction(cname + "__new" + ar, 0, lty, false)
+        val entry: Int = this.program.addBlock()
+        this.curBlock = entry
+        this.curClass = cname
+        this.memHead = -1
+        this.varMap = ""
+        this.curParams = ""
+        this.localTypes = ""
+
+        // 构造实参：Aura 的 Int / Long / Double / 指针都是 8 字节，统一按 64 位
+        // 建模；顺序与 `<Class>_init<ar>` 的声明顺序一致。
+        val l64: Int = this.types.intType(64)
+        val total: Int = SsaMirUtils.strToInt(ar)
+        var pi: Int = 0
+        while (pi < total) {
+            val pv: Int = this.program.addValue("Param", l64, "", "p" + toStr(pi), entry)
+            if (this.curParams == "") {
+                this.curParams = toStr(pv)
+            } else {
+                this.curParams = this.curParams + "," + toStr(pv)
+            }
+            pi = pi + 1
+        }
+
+        val sizeVal: Int = this.program.addValue("Const", l64, "",
+                toStr(this.classSizeOf(cname)), this.curBlock)
+        val objVal: Int = this.program.addValue("Call", lty, toStr(sizeVal),
+                "Memory_alloc", this.curBlock)
+
+        val fieldTotal: Int = this.classFieldTotal(cname)
+        var fi: Int = 0
+        while (fi < fieldTotal) {
+            val fty: String = this.fieldTypeOfIndex(cname, fi)
+            val defNode: Int = this.fieldDefaultOfIndex(cname, fi)
+            var dv: Int = -1
+            if (defNode >= 0) {
+                dv = this.buildExpr(src, defNode)
+            } else {
+                dv = this.zeroConstOf(fty)
+            }
+            this.emitFieldSet(objVal, fi, dv)
+            fi = fi + 1
+        }
+
+        // 把构造实参转发给 `<Class>_init<ar>`：`constructor(m) : super(m) { }`
+        // 的字段初始化写在 init 体里（经 `super` 降级），`__new` 只负责
+        // 分配与默认值。`curParams` 已是「入口块 Param 值」的逗号串，直接拼上。
+        if (this.initOverloaded(cname)) {
+            var initArgs: String = toStr(objVal)
+            if (this.curParams != "") {
+                initArgs = initArgs + "," + this.curParams
+            }
+            this.program.addValue("Call", lty, initArgs,
+                    cname + "_init" + ar, this.curBlock)
+            // 父类 init 由 `<Sub>_init<ar>` 体内的 `super(...)` 降级处理
+            //（见 `buildCall` 的 `super` 分支），这里不再重复调用。
+        }
+
+        this.program.setTerminator(this.curBlock, "Ret", 0, toStr(objVal), "")
+        this.program.functionOf(fid).entryBlock = entry
+        this.program.functionOf(fid).params = this.curParams
+        this.program.endFunction()
+    }
+
+    /// 为每个**带字段状态**的单例模块合成 `<Name>_getInstance()`
+    ///（0 形参，返回对象指针）。
+    ///
+    /// ⚠️ 单例模块（`object` / `extern interface`）**没有 `this` 形参**
+    ///（`Mutex.lock(m)` 的调用点不传接收者，见 `buildFunction` / `buildCall`），
+    /// 于是 `this.x` 这类字段访问落不到真实对象指针上。实测后果：
+    /// `GC.isEnabled()` 降级成 `@field(0, mem)`（对象指针恒 0），
+    /// `__field_get` 的「对象为 0 → 返回 0」兜底让**所有单例字段读恒返回 0**、
+    /// 写也一律被丢弃 —— `GC.collect()` 的 `gcCount` 永远加不上去（P4 全 0 的
+    /// 第二根因）。
+    ///
+    /// 解法：`this` 在单例方法里解析成一次 `<Name>_getInstance()` 调用。本方法
+    /// 生成该函数：先用 `.data` 里的 `objSlots` 表判空，为空则
+    /// `Memory_alloc(classSizeOf)` + 逐字段写默认值，之后返回缓存指针。
+    /// 对象布局与 `synthesizeCtors` 完全一致（`[0] vtable [8] size [16+i*8] 字段`），
+    /// `__field_get` / `__field_set` 无需任何改动。
+    private fun synthesizeSingletons(src: Hir) {
+        val savedMem: Int = this.memHead
+        val savedBlock: Int = this.curBlock
+        val savedClass: String = this.curClass
+        val savedVarMap: String = this.varMap
+        val savedParams: String = this.curParams
+        val savedLocalTypes: String = this.localTypes
+
+        val lty: Int = this.types.fromTypeName("Long")
+        var ci: Int = 0
+        while (ci < this.singletonList.size) {
+            val sname: String = this.singletonList[ci]
+            // 纯静态单例（`Mutex` / `Thread` / `Cpu`，无字段）也要生成：
+            // `buildFunction` 对**所有**单例方法都把 `this` 解析成
+            // `<Owner>_getInstance()` 的一次调用（见下），不生成就会在链接期
+            // `undefined symbol: Mutex_getInstance`。无字段时它只分配 16 字节
+            // 空壳，代价可忽略。
+            this.synthesizeSingletonGetter(src, sname, lty, ci)
+            ci = ci + 1
+        }
+
+        this.memHead = savedMem
+        this.curBlock = savedBlock
+        this.curClass = savedClass
+        this.varMap = savedVarMap
+        this.curParams = savedParams
+        this.localTypes = savedLocalTypes
+    }
+
+    /// 合成单个单例的惰性实例访问器（见 `synthesizeSingletons`）。
+    private fun synthesizeSingletonGetter(src: Hir, sname: String, lty: Int, slot: Int) {
+        val fid: Int = this.program.addFunction(sname + "_getInstance", 0, lty, false)
+        val entry: Int = this.program.addBlock()
+        val thenBlock: Int = this.program.addBlock()
+        val elseBlock: Int = this.program.addBlock()
+
+        this.curBlock = entry
+        this.curClass = sname
+        this.memHead = -1
+        this.varMap = ""
+        this.curParams = ""
+        this.localTypes = ""
+
+        val i64: Int = this.types.intType(64)
+        val zero: Int = this.program.addValue("Const", i64, "", "0", this.curBlock)
+        val slotVal: Int = this.program.addValue("Const", i64, "", toStr(slot), this.curBlock)
+        val cur: Int = this.program.addValue("Call", lty, toStr(slotVal),
+                                             "__obj_slot_get", this.curBlock)
+        // `icmp eq(cur, 0)`：true = 尚未分配。为避免依赖 `i32_ne` 支持，
+        // 用 eq + **交换 CondBr 目标块**来表达「非空则返回缓存」。
+        val isNull: Int = this.program.addValue("ICmpEq", i64,
+                toStr(cur) + "," + toStr(zero), "i32_eq", this.curBlock)
+        this.program.setTerminator(entry, "CondBr", 0,
+                toStr(isNull) + "," + toStr(elseBlock) + "," + toStr(thenBlock), "")
+
+        // 已分配：直接返回缓存指针
+        this.curBlock = thenBlock
+        this.program.setTerminator(thenBlock, "Ret", lty, toStr(cur), "")
+
+        // 未分配：`Memory_alloc(size)` + 逐字段写默认值 + 回填槽
+        this.curBlock = elseBlock
+        val sizeVal: Int = this.program.addValue("Const", i64, "",
+                toStr(this.classSizeOf(sname)), this.curBlock)
+        val obj: Int = this.program.addValue("Call", lty, toStr(sizeVal),
+                                             "Memory_alloc", this.curBlock)
+        val total: Int = this.classFieldTotal(sname)
+        var fi: Int = 0
+        while (fi < total) {
+            val fty: String = this.fieldTypeOfIndex(sname, fi)
+            val defNode: Int = this.fieldDefaultOfIndex(sname, fi)
+            var dv: Int = -1
+            if (defNode >= 0) {
+                dv = this.buildExpr(src, defNode)
+            } else {
+                dv = this.zeroConstOf(fty)
+            }
+            this.emitFieldSet(obj, fi, dv)
+            fi = fi + 1
+        }
+        this.program.addValue("Call", lty, toStr(slotVal) + "," + toStr(obj),
+                              "__obj_slot_set", this.curBlock)
+        this.program.setTerminator(this.curBlock, "Ret", lty, toStr(obj), "")
+
+        this.program.functionOf(fid).entryBlock = entry
+        this.program.endFunction()
     }
 
     // ── 循环栈 ──

@@ -14,7 +14,7 @@ package aura.lang.concurrent
 // ```
 //
 // @since 0.6
-import aura.lang.native.thread.ThreadOps
+import aura.lang.native.ThreadOps
 object Thread {
 
     /// 创建新线程并执行给定函数
@@ -54,6 +54,13 @@ object Thread {
     ///
     /// - 返回：当前线程 ID
     fun id(): Int {
+        return ThreadOps.currentId()
+    }
+
+    /// 获取当前线程 ID（`id()` 的别名，P4 用例约定名）
+    ///
+    /// - 返回：当前线程 ID
+    fun currentThreadId(): Long {
         return ThreadOps.currentId()
     }
 

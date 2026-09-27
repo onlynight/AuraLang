@@ -4,6 +4,7 @@
 // Test: Exception creation and handling
 
 import aura.lang.std.String
+import aura.lang.errors.Throwable
 import aura.lang.errors.Exception
 import aura.lang.errors.ExceptionHandler
 

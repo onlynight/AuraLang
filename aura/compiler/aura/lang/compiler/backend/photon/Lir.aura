@@ -464,7 +464,9 @@ object LirUtils {
         var total: Int = 0
         var i: Int = 0
         var neg: Boolean = false
-        if (len > 0 && text.charAt(0).toString() == "-") {
+        // 见 `MachineDagUtils.strToInt` 的详细说明：`charAt(...).toString()`
+        // 在自举路径下检测不出负号，会导致栈偏移丢符号（`[rbp+8]` 覆盖返回地址）。
+        if (len > 0 && (text.charCodeAt(0) as Int) == 45) {
             neg = true
             i = 1
         }

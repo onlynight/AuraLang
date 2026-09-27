@@ -1,0 +1,26 @@
+// tests/photon/P4/probe_arena.aura
+// 诊断：ArenaAllocator 字段/方法读取在 native 链路上的实际值
+import aura.lang.std.String
+import aura.lang.native.Memory
+
+fun main() {
+    println("ok: " + toStr(ArenaAllocator.init(1024 * 1024)))
+    // 字段读取
+    println("F baseAddr: " + toStr(ArenaAllocator.baseAddr))
+    println("F currentPtr: " + toStr(ArenaAllocator.currentPtr))
+    println("F capacity: " + toStr(ArenaAllocator.capacity))
+    println("F usedSize: " + toStr(ArenaAllocator.usedSize))
+    // 方法读取（走同一个 getInstance，但经 __field_get）
+    println("M usedSize: " + toStr(ArenaAllocator.getUsedSize()))
+    println("M freeSize: " + toStr(ArenaAllocator.getFreeSize()))
+    val p: Long = ArenaAllocator.alloc(64)
+    println("alloc1: " + toStr(p))
+    println("F usedSize2: " + toStr(ArenaAllocator.usedSize))
+    println("M usedSize2: " + toStr(ArenaAllocator.getUsedSize()))
+    // MemoryManager 包一层
+    println("MM init: " + toStr(MemoryManager.init(1024 * 1024)))
+    val q: Long = MemoryManager.alloc(128)
+    println("MM alloc: " + toStr(q))
+    println("MM used: " + toStr(MemoryManager.getUsedSize()))
+    println("end")
+}

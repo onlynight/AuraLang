@@ -1,0 +1,18 @@
+// tests/photon/P4/probe_mem.aura
+// 诊断：Memory.alloc / write64 / read64 / atomicAdd
+import aura.lang.std.String
+import aura.lang.native.Memory
+
+fun main() {
+    println("start")
+    val a: Long = Memory.alloc(8L)
+    println("alloc: " + toStr(a))
+    Memory.write64(a, 0L)
+    println("wrote")
+    val v: Long = Memory.read64(a)
+    println("read: " + toStr(v))
+    val old: Long = Memory.atomicAdd(a, 1L)
+    println("atomicAdd: " + toStr(old))
+    println("read2: " + toStr(Memory.read64(a)))
+    println("end")
+}

@@ -8,8 +8,14 @@ open class Throwable {
     /// 异常消息
     var message: String = ""
 
+    /// 异常类型名（类名）。默认空串，需要时用 `typeof(this)` 取值。
+    var type: String = ""
+
     /// 引起此异常的根本原因（可为 null）
     var cause: Throwable? = null
+
+    /// 构造 Throwable——不带消息（message 保持默认空串）
+    constructor() { }
 
     /// 构造 Throwable——只带消息
     constructor(message: String) {

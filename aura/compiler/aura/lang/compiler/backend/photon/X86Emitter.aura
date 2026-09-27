@@ -179,6 +179,7 @@ class X86Emitter {
         this.funcOffsets = ""
         this.isMainFunc = (funcName == "main")
         this.savedRegs = ""
+        this.nodeStackDisp = arrayListOf<Int>()
         // 预扫每个函数的实际最大溢出槽（帧大小按函数收敛，见 `scanFunctionMaxSlots`）。
         this.scanFunctionMaxSlots(dag)
         this.fnIdx = 0
@@ -227,6 +228,8 @@ class X86Emitter {
                 // 模块级帧（自举 `Main.aura` = 528 KB）套给每个函数，既会一步跨过
                 // 守卫页导致 `0xC0000005`，两层调用又会撑爆默认 1 MB 栈。
                 var frame: Int = this.frameSize
+                // 本函数 RA 溢出区的字节数（额外槽必须从它**下方**开始，否则重叠）。
+                var spillBase: Int = 32
                 if (this.fnIdx < this.funcNames.size
                     && this.funcNames[this.fnIdx] == instrFunc) {
                     val ms: Int = this.funcMaxSlots[this.fnIdx]
@@ -234,13 +237,24 @@ class X86Emitter {
                         var fsz: Int = 32 + (ms + 1) * 8
                         if (fsz % 16 != 0) { fsz = fsz + (16 - fsz % 16) }
                         frame = fsz
+                        // ⚠️ 额外槽（发射器给调用结果分配的槽）**必须**避开 RA 溢出区：
+                        // RA 的溢出槽是 `getSpillOffset = 32 + slot*8` → 落在 `[rbp-32]` 起
+                        // 向下的区间；而额外槽旧实现从 `-16` 起 ⇒ 与 RA 首槽 `-32` 重叠。
+                        spillBase = fsz
                     } else {
                         // 该函数没有溢出槽 → 不需要为溢出区留空间
                         frame = 0x50
                     }
                     this.fnIdx = this.fnIdx + 1
                 }
+                // 额外槽计数按函数清零，并把基址交给 `slotForNode`。
+                this.extraSlotCount = 0
+                this.curSpillBase = spillBase
                 if (srParts.size % 2 == 1) { frame = frame + 8 }
+                // ⚠️ 为发射器额外分配的调用结果槽留余量（见 `extraSlotCount`）。
+                // 余量取「上限 256 槽 × 8B = 2KB」：既覆盖一个函数里可能出现的
+                // 调用结果数量，又不至于让帧过大（配合逐页下探是安全的）。
+                frame = frame + 2048
                 this.enc.emitPrologue(frame)
                 currentFunc = instrFunc
                 needPrologue = false
@@ -306,13 +320,13 @@ class X86Emitter {
             val instr: DagInstruction = dag.instrOf(j)
             if (instr.funcName != funcName) { break }
             if (instr.output >= 0) {
-                found = this.addSavedReg(found, this.regOfNode(dag.nodeOf(instr.output)))
+                found = this.addSavedReg(found, this.regNameOf(dag.nodeOf(instr.output)))
             }
             var k: Int = 0
             while (k < instr.nodeCount()) {
                 val nid: Int = instr.nodeAt(k)
                 if (nid >= 0) {
-                    found = this.addSavedReg(found, this.regOfNode(dag.nodeOf(nid)))
+                    found = this.addSavedReg(found, this.regNameOf(dag.nodeOf(nid)))
                 }
                 k = k + 1
             }
@@ -422,52 +436,63 @@ class X86Emitter {
 
     // ── ALU 指令发射 ──
 
-    private fun emitAddImm(nodes: List<String>, dag: MachineDag): Unit {
-        if (nodes.size >= 2) {
-            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
-            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
-            this.enc.emitAddRR(dst, src)
+    /// ALU 二元指令（add / sub / imul）的**统一发射**：`op` 0=Add 1=Sub 2=Imul。
+    ///
+    /// ⚠️ 两处必守规则：
+    ///   ① 源操作数可能是栈引用（`stack:-N`）⇒ 必须先 `resolveToReg` 取到寄存器；
+    ///   ② **目的操作数也可能是栈引用** ⇒ 必须「取槽 → 运算 → 写回槽」。
+    /// 旧实现把 `regOfNode` 的结果直接喂给编码器：`regNum("stack:-N")` = 0（= rax）
+    /// ⇒ 指令实际作用在 rax 上、**永不落槽**。
+    /// 实测自举 `Main.exe`：`var k: Int = 0` 的初始化（`mov %dst,@imm`）与
+    /// `k = k + 1` 都因此不落槽 ⇒ `while (k < s.length)` **死循环**
+    ///（表现：单核 CPU 占满、内存不涨）。
+    private fun emitAluBinary(nodes: List<String>, dag: MachineDag, op: Int): Unit {
+        if (nodes.size < 2) { return }
+        val dstRaw: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+        val srcRaw: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+        val src: String = this.resolveToReg(srcRaw, "r10")
+        if (this.isStackRef(dstRaw)) {
+            val off: Int = this.stackOffsetOf(dstRaw)
+            this.enc.emitStackLoad("r11", off)
+            if (op == 0) {
+                this.enc.emitAddRR("r11", src)
+            } else if (op == 1) {
+                this.enc.emitSubRR("r11", src)
+            } else {
+                this.enc.emitImulRR("r11", src)
+            }
+            this.enc.emitStackStore(off, "r11")
+        } else if (op == 0) {
+            this.enc.emitAddRR(dstRaw, src)
+        } else if (op == 1) {
+            this.enc.emitSubRR(dstRaw, src)
+        } else {
+            this.enc.emitImulRR(dstRaw, src)
         }
+    }
+
+    private fun emitAddImm(nodes: List<String>, dag: MachineDag): Unit {
+        this.emitAluBinary(nodes, dag, 0)
     }
 
     private fun emitAddRR(nodes: List<String>, dag: MachineDag): Unit {
-        if (nodes.size >= 2) {
-            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
-            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
-            this.enc.emitAddRR(dst, src)
-        }
+        this.emitAluBinary(nodes, dag, 0)
     }
 
     private fun emitSubImm(nodes: List<String>, dag: MachineDag): Unit {
-        if (nodes.size >= 2) {
-            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
-            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
-            this.enc.emitSubRR(dst, src)
-        }
+        this.emitAluBinary(nodes, dag, 1)
     }
 
     private fun emitSubRR(nodes: List<String>, dag: MachineDag): Unit {
-        if (nodes.size >= 2) {
-            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
-            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
-            this.enc.emitSubRR(dst, src)
-        }
+        this.emitAluBinary(nodes, dag, 1)
     }
 
     private fun emitImulImm(nodes: List<String>, dag: MachineDag): Unit {
-        if (nodes.size >= 2) {
-            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
-            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
-            this.enc.emitImulRR(dst, src)
-        }
+        this.emitAluBinary(nodes, dag, 2)
     }
 
     private fun emitImulRR(nodes: List<String>, dag: MachineDag): Unit {
-        if (nodes.size >= 2) {
-            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
-            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
-            this.enc.emitImulRR(dst, src)
-        }
+        this.emitAluBinary(nodes, dag, 2)
     }
 
     // ── MOV 指令发射 ──
@@ -476,9 +501,20 @@ class X86Emitter {
         if (nodes.size >= 1) {
             val nodeId: Int = MachineDagUtils.strToInt(nodes[0])
             val node: DagNode = dag.nodeOf(nodeId)
-            val dst: String = this.regOfNode(node)
+            val dstRaw: String = this.regOfNode(node)
             val imm: Int = MachineDagUtils.strToInt(node.aux)
-            this.enc.emitMovRI(dst, imm)
+            // ⚠️ `dst` 可能是栈引用（`stack:-N`）。直接喂给 `emitMovRI` 会被
+            // `regNum` 解析成 0（= rax）⇒ 生成 `mov $imm, %rax`，**永不落槽** ✗。
+            // 实测自举 `Main.exe` 的 `cliEnvArgCount`：`var n: Int = 0` /
+            // `var k: Int = 0` 都编成 `movq $0x0, %rax`（没有任何写槽指令），
+            // 槽里仍是垃圾 ⇒ 循环条件 `k < s.length` 读到垃圾下标 ⇒
+            // `s.charCodeAt(垃圾)` 越界 ⇒ `0xC0000005`（实测崩在 `CEA-2` 之后）。
+            if (this.isStackRef(dstRaw)) {
+                this.enc.emitMovRI("r10", imm)
+                this.enc.emitStackStore(this.stackOffsetOf(dstRaw), "r10")
+            } else {
+                this.enc.emitMovRI(dstRaw, imm)
+            }
         }
     }
 
@@ -492,18 +528,68 @@ class X86Emitter {
             if (srcNodes.size >= 1) {
                 val srcNodeId: Int = MachineDagUtils.strToInt(srcNodes[0])
                 val srcNode: DagNode = dag.nodeOf(srcNodeId)
-                val src: String = this.regOfNode(srcNode)
-                this.enc.emitMovRR(dst, src)
+                val srcRaw: String = this.regOfNode(srcNode)
+                val src: String = this.resolveToReg(srcRaw, "r10")
+                // 目的操作数可能是栈槽（同 `emitMovImm`）：必须真的写槽，
+                // 否则 `emitMovRR("stack:-N", src)` 会被解析成 `mov src, %rax`。
+                if (this.isStackRef(dst)) {
+                    this.enc.emitStackStore(this.stackOffsetOf(dst), src)
+                } else {
+                    this.enc.emitMovRR(dst, src)
+                }
             }
+        }
+    }
+
+    /// 取节点**可能占用的寄存器名**（不做任何槽分配、不返回栈引用）。
+    ///
+    /// ⚠️ 专供 prologue 之前的「需要保存哪些寄存器」扫描使用。那里只需要寄存器名，
+    /// 而 `regOfNode` 对「无寄存器」的节点会**分配一个额外槽** —— 那些槽会在
+    /// `curSpillBase` 尚未按函数更新之前就分配出来，落进本函数 **RA 溢出区**内 ✗，
+    /// 随后被 RA 的溢出写入覆写 ⇒ 表现为「某个局部量/参数在若干次调用后变成垃圾」，
+    /// 典型后果就是循环计数器不前进（死循环）✓。
+    private fun regNameOf(node: DagNode): String {
+        if (node == null) { return "" }
+        return node.reg
+    }
+
+    /// 取目的操作数到寄存器：栈槽 → 加载进 `tmpReg` 并返回 `tmpReg`；否则原样返回。
+    ///
+    /// ⚠️ 与 `storeDstReg` 配对使用。**所有写目的操作数的发射器都必须经过这两个
+    /// 函数**：`regOfNode` 对「无寄存器」的值返回 `stack:-N`，而编码器把任何非
+    /// 寄存器名字的 `regNum` 都算成 0（= rax）⇒ 指令实际作用在 rax 上、
+    /// **结果永不落槽** ✗。本会话已因此修掉一大批（`mov` / ALU / `setcc` /
+    /// `and`/`or` / `ret`），这两个函数用于收尾其余全部同类项。
+    private fun loadDstReg(dstRaw: String, tmpReg: String): String {
+        if (this.isStackRef(dstRaw)) {
+            this.enc.emitStackLoad(tmpReg, this.stackOffsetOf(dstRaw))
+            return tmpReg
+        }
+        return dstRaw
+    }
+
+    /// 把寄存器 `srcReg` 写入目的操作数（可能是栈槽 `stack:-N`）。
+    private fun storeDstReg(dstRaw: String, srcReg: String): Unit {
+        if (this.isStackRef(dstRaw)) {
+            this.enc.emitStackStore(this.stackOffsetOf(dstRaw), srcReg)
+        } else if (dstRaw != srcReg) {
+            this.enc.emitMovRR(dstRaw, srcReg)
         }
     }
 
     private fun emitMovLoad(instr: DagInstruction, dag: MachineDag): Unit {
         if (instr.output >= 0) {
             val dstNode: DagNode = dag.nodeOf(instr.output)
-            val dst: String = this.regOfNode(dstNode)
+            val dstRaw: String = this.regOfNode(dstNode)
+            // ⚠️ `mem` 为空时**不能**统一用 `-8`：那会让所有溢出/落地值共用一个槽，
+            // 后写者覆写先写者（实测 `Env.get` 的结果被 `streq` 的返回值 1 覆写 ⇒
+            // 随后 `strlen(1)` → `0xC0000005`）。改为**按节点各自分配**，
+            // 与写侧（`emitMovStore`）用同一函数 `slotForNode` 保证一致。
             val offset: Int = this.parseStackOffset(instr.mem)
-            this.enc.emitStackLoad(dst, offset)
+            this.cdMark("ld-movload", offset)
+            // 先在 r10 里取值，再按目的操作数形态落点（寄存器或槽）。
+            this.enc.emitStackLoad("r10", offset)
+            this.storeDstReg(dstRaw, "r10")
         }
     }
 
@@ -514,16 +600,23 @@ class X86Emitter {
             val srcNode: DagNode = dag.nodeOf(srcNodeId)
             val src: String = this.regOfNode(srcNode)
             val offset: Int = this.parseStackOffset(instr.mem)
-            this.enc.emitStackStore(offset, src)
+            this.cdMark("st-movstore", offset)
+            // 源操作数可能是栈引用（`stack:-N`）：必须先取到寄存器，否则
+            // `emitStackStore` 内部按 `regNum` 取号会落到 rax（脏值）✗。
+            val srcReg: String = this.resolveToReg(src, "r10")
+            this.enc.emitStackStore(offset, srcReg)
         }
     }
 
     private fun emitLea(instr: DagInstruction, dag: MachineDag): Unit {
         if (instr.output >= 0) {
             val dstNode: DagNode = dag.nodeOf(instr.output)
-            val dst: String = this.regOfNode(dstNode)
+            val dstRaw: String = this.regOfNode(dstNode)
             val offset: Int = this.parseStackOffset(instr.mem)
-            this.enc.emitLeaStack(dst, offset)
+            this.cdMark("lea", offset)
+            // 目的操作数可能是栈槽：先算进 r10 再落点。
+            this.enc.emitLeaStack("r10", offset)
+            this.storeDstReg(dstRaw, "r10")
         }
     }
 
@@ -531,10 +624,14 @@ class X86Emitter {
     private fun emitLeaSym(instr: DagInstruction, dag: MachineDag): Unit {
         if (instr.output >= 0) {
             val dstNode: DagNode = dag.nodeOf(instr.output)
-            val dst: String = this.regOfNode(dstNode)
+            val dstRaw: String = this.regOfNode(dstNode)
             // 从节点的 aux 字段获取符号名（@str.N）。
             val symbol: String = dstNode.aux
-            this.enc.emitLeaRIP(dst, symbol)
+            // ⚠️ 字符串常量到这里**全部**是这一形态（自举模块 9168 条）。目的可能是
+            // 栈槽，故同样先算进 r10 再落点 —— 否则 `lea` 的结果会被丢进 rax，
+            // 后续读到空指针（自举里表现为字符串参数/常量全变空 ✗）。
+            this.enc.emitLeaRIP("r10", symbol)
+            this.storeDstReg(dstRaw, "r10")
         }
     }
 
@@ -542,7 +639,17 @@ class X86Emitter {
 
     private fun emitCmpImm(nodes: List<String>, dag: MachineDag): Unit {
         if (nodes.size >= 2) {
-            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            // ⚠️ **必须**先把栈引用解析成寄存器。`regOfNode` 对「无寄存器」的值
+            // 返回 `stack:-N`，而 `emitCmpRI` 内部按 `regNum(str)` 取号 —— 非寄存器
+            // 名字一律得 0（= rax）⇒ 编出来是 `cmp rax, imm` ✗，与真正要比较的
+            // 操作数无关。实测自举 `Main.exe` 的 `cliEnvArgCount`：
+            //     cliEnvArgCount 的 `while (k < s.length)` 编成 `cmpq %rax, %rax`
+            //（恒假 ⇒ 循环体一次都不执行 ⇒ 返回 0）✓ 而 `c < 48 || c > 57`
+            // 编成 `movq $0x30,%rax; cmpq $0x30,%rax`（48 与 48 比 ⇒ 恒假），
+            // 于是 `Env.get("AURA_ARGV_COUNT")` 明明拿到 "6"（实测
+            // `CEA-2 L=1 C0=54 s=[6]`），参数个数却仍是 0。
+            val srcRaw: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.resolveToReg(srcRaw, "r10")
             val imm: Int = MachineDagUtils.strToInt(nodes[1])
             this.enc.emitCmpRI(src, imm)
         }
@@ -550,18 +657,32 @@ class X86Emitter {
 
     private fun emitCmpRR(nodes: List<String>, dag: MachineDag): Unit {
         if (nodes.size >= 2) {
-            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
-            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            // 同上：两侧都要解析成寄存器（用两个不同的易失寄存器 r10/r11，
+            // 两者之间没有调用，安全）。
+            val dstRaw: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val srcRaw: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            val dst: String = this.resolveToReg(dstRaw, "r10")
+            val src: String = this.resolveToReg(srcRaw, "r11")
             this.enc.emitCmpRR(dst, src)
         }
     }
 
     private fun emitSetcc(instr: DagInstruction, nodes: List<String>, dag: MachineDag): Unit {
         if (nodes.size >= 1) {
-            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
-            this.enc.emitSetcc(dst, instr.cond)
-            // SETcc 只写低 8 位：必须零扩展，否则高位脏值让 `cmp reg, 0` 误判
-            this.enc.emitMovzxRegReg8(dst, dst)
+            val dstRaw: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            // SETcc 只写低 8 位：必须零扩展，否则高位脏值让 `cmp reg, 0` 误判。
+            // ⚠️ 目的操作数可能是栈引用（`stack:-N`）：直接喂给 `emitSetcc` 会被
+            // `regNum` 解析成 0（= rax）⇒ **结果永不落槽** ✗。实测自举 `Main.exe`
+            // 的 `cliEnvArgCount`：`c < 48 || c > 57` 两个分支的 `setl/setg` 结果
+            // 都没落槽，随后 `or` 的分支判断读到**从未写过**的槽 ⇒ 数字校验失效。
+            if (this.isStackRef(dstRaw)) {
+                this.enc.emitSetcc("r10", instr.cond)
+                this.enc.emitMovzxRegReg8("r10", "r10")
+                this.enc.emitStackStore(this.stackOffsetOf(dstRaw), "r10")
+            } else {
+                this.enc.emitSetcc(dstRaw, instr.cond)
+                this.enc.emitMovzxRegReg8(dstRaw, dstRaw)
+            }
         }
     }
 
@@ -570,6 +691,19 @@ class X86Emitter {
     private fun emitCall(nodes: List<String>, dag: MachineDag): Unit {
         if (nodes.size >= 1) {
             val nodeId: Int = MachineDagUtils.strToInt(nodes[0])
+            // 诊断：`call %func` 模板里 `nodes[0]` 若非数字，`strToInt` 返回 -1 ⇒
+            // 所有调用结果都退到共用兜底槽 `-8`（实测反汇编：每条 call 后都是
+            // `movq %rax, -0x8(%rbp)`）。有界打印，定位调用结果的节点号到底长什么样。
+            if (nodeId < 0 && this.slotDiagCount < 40) {
+                this.slotDiagCount = this.slotDiagCount + 1
+                var s: String = ""
+                var j: Int = 0
+                while (j < nodes.size && j < 4) {
+                    s = s + "[" + nodes[j] + "]"
+                    j = j + 1
+                }
+                println("[X86] emitCall nodeId<0 nodes=" + s + " n=" + toStr(nodes.size))
+            }
             val node: DagNode = dag.nodeOf(nodeId)
             val funcName: String = node.aux
             // 先按 Win64 约定装载实参寄存器，再发 CALL。
@@ -583,22 +717,60 @@ class X86Emitter {
             // 使用者按 `node.reg` 取到的仍是**旧值**（实测 `"x = " + toStr(x)`
             // 里 strcat 的第二个实参读成第一个实参的寄存器；println 拿不到实参）。
             val dst: String = this.regOfNode(node)
+            // 诊断：打印调用结果的落点决策（有界）。
+            if (this.slotDiagCount < 24) {
+                this.slotDiagCount = this.slotDiagCount + 1
+                println("[CALLDST] aux=" + funcName + " nodeId=" + toStr(nodeId)
+                        + " node.id=" + toStr(node.id) + " reg=[" + node.reg + "] dst=[" + dst + "]"
+                        + " nodeSlot=" + toStr(this.nodeSlot(node.id))
+                        + " base=" + toStr(this.curSpillBase)
+                        + " n=" + toStr(this.extraSlotCount))
+            }
             // 返回值落地：无论 dst 是什么，都必须把 rax 搬到目标位置。
             // 若节点被 spill 到栈槽，直接存栈；否则 mov 到目标寄存器。
             // 若 dst == "rax"（默认 fallback），也必须存栈，否则后续 call 会覆写 rax。
             if (dst.startsWith("stack:")) {
-                this.enc.emitStackStore(this.stackOffsetOf(dst), "rax")
+                // ⚠️ 与读侧同一道归一化：偏移 0 是**非法**槽位 —— `[rbp+0]` 正是
+                // `push rbp` 保存下来的 rbp 本身，写坏它 `leave`/`ret` 必崩。
+                // 解析不出/为 0 时按**本调用节点**各自分配（见 `slotForNode`）。
+                // ⚠️ **不再**把偏移 0 改写成 `-8`（见 `regOfNode` 的说明）：
+                // 那会让所有调用结果共用 `-8`。正常路径 dst 已是本节点专有槽。
+                val dstOff: Int = this.stackOffsetOf(dst)
+                this.cdMark("st-call-stack", dstOff)
+                this.enc.emitStackStore(dstOff, "rax")
             } else if (dst != "" && dst != "rax") {
                 this.enc.emitMovRR(dst, "rax")
             } else {
                 // dst == "rax" 或 dst == "" - 必须保存到栈槽
-                val spillOffset: Int = if (this.allocator != null && this.allocator.isSpilled(nodeId)) {
-                    this.allocator.getSpillOffset(nodeId)
-                } else {
-                    // 节点未 spill 且无寄存器：分配默认栈槽 (rbp-8)
-                    8
-                }
-                this.enc.emitStackStore(spillOffset, "rax")
+                // ⚠️ 偏移必须是**负值**：`emitStackStore` 编码的是 `[rbp + offset]`，
+                // 而帧空间在 rbp **下方**（prologue = `push rbp; mov rbp,rsp; sub rsp,N`）。
+                //   旧代码：注释写「默认栈槽 (rbp-8)」，实际传的是 `8` ⇒ 落到
+                //   `[rbp+8]`，而 `[rbp+8]` 正是**返回地址槽**；`getSpillOffset`
+                //   返回的也是「自 rbp 向下的距离」正值，同样被直接当偏移用。
+                //   后果：**每次调用都把返还值写进返回地址槽** ⇒ 函数一被调用就崩。
+                //   实测自举 `Main.exe`：`BOOT-1 → BOOT-1a → CEA-1 → CEA-2 → 0xC0000005`
+                //（崩在 `Env.get` 返回之后的 `streq(s, "")`；反汇编可见每条 call 后都是
+                // `movq %rax, 0x8(%rbp)`）。
+                // ⚠️ 必须同时校验 `getSpillOffset != 0`：RA 会出现「`isSpilled` 为真
+                // 但偏移为 0」的不一致状态，此时直接取负会写出 `[rbp+0]`
+                //（= **保存的 rbp 本身**）而不是帧槽 —— 实测正是如此：
+                // `movq %rax, (%rbp)`，随后读回也是 0，`streq` 对垃圾指针比较而崩。
+                // 偏移为 0 时退回与读侧一致的确定性兜底槽 `-8`。
+                // ⚠️ 每个节点**各自**一个槽（`slotForNode` 首次分配、按 nodeId 记忆）。
+                //
+                // 绝不能让所有调用结果共用同一个槽：实测自举 `Main.exe` 里
+                // `Env.get` 的结果先写入，随即被 `streq` 的返回值 `1` 覆写 ⇒
+                // 后面读回的 `s` 变成 `1` ⇒ `strlen(1)` → `0xC0000005`。
+                //
+                // ⚠️ **绝不可**在此处再登记 `setNodeSlot(nodeId, spillOffset)`：
+                // 旧实现正是在这里把 `slotForNode` 刚分配的槽（如 `-16`）**覆盖**成
+                // 兜底的 `-8`（未 spill 时 `spillOffset` 恒为 -8）⇒ 写侧落 `-16`、
+                // 读侧（`regOfNodeRaw` 按 `nodeSlot` 取）落 `-8` ⇒ **两端不一致且
+                // 所有调用结果共用 `-8`**。实测崩溃序列：`Env.get` 结果写 `-16`，
+                // `streq` 的返回值写 `-8`，读回 `-8` 得 `1`，`strlen(1)` → 崩。
+                val storeOff: Int = this.slotForNode(nodeId)
+                this.cdMark("st-call-else", storeOff)
+                this.enc.emitStackStore(storeOff, "rax")
             }
         }
     }
@@ -669,7 +841,14 @@ class X86Emitter {
             val valNodeId: Int = MachineDagUtils.strToInt(nodes[0])
             val valNode: DagNode = dag.nodeOf(valNodeId)
             val reg: String = this.regOfNode(valNode)
-            if (reg != "" && reg != "rax") {
+            // ⚠️ 返回值可能在栈槽里（`stack:-N`）：必须**加载**进 rax ✗ 否则
+            // `emitMovRR("rax","stack:-N")` 会被解析成 `mov rax, %rax`（空操作），
+            // rax 里留的是上一条指令的残留值。实测自举 `Main.exe` 的
+            // `cliEnvArgCount`：`return n` 编成 `leave; pop r15; retq`，
+            // rax 从未被设为 n ⇒ 返回值是垃圾（`cnt` 错误的一半原因）。
+            if (this.isStackRef(reg)) {
+                this.enc.emitStackLoad("rax", this.stackOffsetOf(reg))
+            } else if (reg != "" && reg != "rax") {
                 this.enc.emitMovRR("rax", reg)
             }
         } else {
@@ -713,14 +892,122 @@ class X86Emitter {
     /// 从地址模式字符串中解析栈偏移。
     /// 格式: "stack:N" → N, "offset:N" → N, "" → 0
     private fun parseStackOffset(mem: String): Int {
-        if (mem == "") { return 0 }
+        if (mem == "") {
+            return -8
+        }
         if (mem.startsWith("stack:")) {
-            return MachineDagUtils.strToInt(mem.substring(6, mem.length))
+            val v: Int = MachineDagUtils.strToInt(mem.substring(6, mem.length))
+            if (v == 0) {
+                return -8
+            }
+            return v
         }
         if (mem.startsWith("offset:")) {
-            return MachineDagUtils.strToInt(mem.substring(7, mem.length))
+            val v2: Int = MachineDagUtils.strToInt(mem.substring(7, mem.length))
+            if (v2 == 0) {
+                return -8
+            }
+            return v2
         }
         return 0
+    }
+
+    /// 「发射器自己分配的兜底栈槽」表：**按下标 = nodeId** 索引（0 = 未分配）。
+    ///
+    /// 为什么要按下标而不是 CSV/Map：CSV 方案会随调用结果数线性增长且每次查询
+    /// `indexOf` 全表 ⇒ O(N²) 字符串分配，实测把自举顶穿 8 GiB 闸门（退出码 70）。
+    /// 为什么不用 `DagNode` 字段：`dag.nodeOf(id)` 在不同时机可能返回**不同对象**
+    ///（实测写入不生效：读回偏移仍是 0），所以关联必须落在发射器自己的、按 id
+    /// 索引的表里。
+    private var nodeStackDisp: List<Int> = arrayListOf<Int>()
+
+    /// 本函数由发射器额外分配的槽数（见 `emitCall`）。
+    ///
+    /// 这些槽不在 RA 的统计里 ⇒ 帧必须为它们留余量，否则写得比 `rsp` 更低，
+    /// 会覆盖相邻数据。做法见 `emitPrologue` 调用处的帧计算。
+    private var extraSlotCount: Int = 0
+
+    /// 当前函数 RA 溢出区的字节数；额外槽从它下方开始分配（见 `slotForNode`）。
+    /// 在函数 prologue 处设置（见 `emitFunction`）。
+    private var curSpillBase: Int = 32
+
+    /// **临时诊断**：标记栈访问的发出路径（限次、纯观测、不改行为）。
+    ///
+    /// 目的：确定 `cliEnvArgCount` 里那些偏移为 `-8` 的存取究竟由哪条发射路径产生
+    ///（`emitStackStore/Load` 有多个调用方，共用兜底槽的正是其中之一）。
+    ///
+    /// ⚠️ 上一轮的教训：改动必须**可归因、有界**。曾试图「一次性」把**所有**
+    /// Store/Load 都改成按节点分配槽位 ⇒ 槽位数远超帧余量 ⇒ 写穿到 `rsp` 之下、
+    /// 崩溃反而提前。所以这里只做观测，不做行为改动。
+    private var cdCount: Int = 0
+
+    /// 诊断计数（见 `regOfNode`）。
+    private var rnCount: Int = 0
+
+    private fun cdMark(tag: String, off: Int): Unit {
+        if (this.cdCount >= 20) { return }
+        this.cdCount = this.cdCount + 1
+        println("[cd] " + tag + " off=" + toStr(off))
+    }
+
+    /// **该节点落栈时的槽偏移**（负值）—— 全发射器唯一的槽位来源。
+    ///
+    /// 优先级：① RA 的溢出槽（`isSpilled` 且偏移非 0）→ 取负；
+    /// ② 否则为「调用结果」这类 RA 没管的节点**各自分配**一个槽（首次分配，
+    ///    按 nodeId 记忆，循环里复用）。
+    ///
+    /// ⚠️ 绝不能让所有调用结果共用同一个固定槽（如 `-8`）：实测自举 `Main.exe`
+    /// 里 `Env.get` 的结果先写入，随即被 `streq` 的返回值 `1` 覆写 ⇒ 后面读回的
+    /// `s` 变成 `1` ⇒ `strlen(1)` → `0xC0000005`。
+    private fun slotForNode(nodeId: Int): Int {
+        var ra: Int = 0
+        var sp: Int = 0
+        if (this.allocator != null && nodeId >= 0) {
+            ra = this.allocator.getSpillOffset(nodeId)
+            if (this.allocator.isSpilled(nodeId)) { sp = 1 }
+            if (ra != 0 && sp == 1) {
+                return 0 - ra
+            }
+        }
+        if (nodeId < 0) {
+            if (this.slotDiagCount < 12) {
+                this.slotDiagCount = this.slotDiagCount + 1
+                println("[slot] id=-1 → -8")
+            }
+            return -8
+        }
+        var s: Int = this.nodeSlot(nodeId)
+        if (s == 0) {
+            this.extraSlotCount = this.extraSlotCount + 1
+            // 基址取 `curSpillBase`（本函数 RA 溢出区大小）⇒ 额外槽落在 RA 区**下方**，
+            // 不与之重叠（见 `emitFunction` 的 prologue 段）。
+            s = 0 - (this.curSpillBase + 8 + this.extraSlotCount * 8)
+            this.setNodeSlot(nodeId, s)
+        }
+        if (this.slotDiagCount < 12) {
+            this.slotDiagCount = this.slotDiagCount + 1
+            println("[slot] id=" + toStr(nodeId) + " ra=" + toStr(ra) + " sp=" + toStr(sp)
+                    + " → " + toStr(s))
+        }
+        return s
+    }
+
+    /// 诊断计数（见 `slotForNode`）。
+    private var slotDiagCount: Int = 0
+
+    /// 登记 nodeId → 兜底槽偏移（偏移为负；0 表示未分配）。
+    private fun setNodeSlot(id: Int, off: Int): Unit {
+        if (id < 0) { return }
+        while (this.nodeStackDisp.size <= id) {
+            this.nodeStackDisp.add(0)
+        }
+        this.nodeStackDisp[id] = off
+    }
+
+    /// 查询 nodeId 的兜底槽偏移（未分配返回 0）。
+    private fun nodeSlot(id: Int): Int {
+        if (id < 0 || id >= this.nodeStackDisp.size) { return 0 }
+        return this.nodeStackDisp[id]
     }
 
     /// 检查值是否为栈引用（"stack:N" 格式）。
@@ -728,17 +1015,51 @@ class X86Emitter {
         return v != "" && v.startsWith("stack:")
     }
 
-    /// 从栈引用中提取偏移。
+    /// 从栈引用中提取偏移（**必须支持负号**）。
+    ///
+    /// ⚠️ `MachineDagUtils.strToInt` **不认前导负号**（`strToInt("-48") == 0`）。
+    /// 而栈引用在本 emitter 里**一律是负值**（`stack:-8` / `stack:-48` …）。
+    /// 旧实现直接 `strToInt(v.substring(6))` ⇒ 每个栈引用都被解析成 **0** ✗ ⇒
+    /// `regOfNode` 的归一化判断「偏移 0 非法」成立 ⇒ 一律改写成 `stack:-8` ✗
+    /// ⇒ **所有调用结果/溢出槽塌成同一个 `-8`** ✓（实测自举 `Main.exe`：
+    /// `Env.get` 的结果与 `println` 的返回值共用 `-8`，随后 `streq` 里
+    /// `strlen(1)` → `0xC0000005`）。
+    ///
+    /// 诊断实证（一次发射内）：`[slot] id=13 … → -48` ✓、`nodeSlot=-48` ✓、
+    /// `base=32` ✓，但 `dst=[stack:-8]` ✗ —— 差异正出在这里。
     private fun stackOffsetOf(v: String): Int {
         if (!this.isStackRef(v)) { return 0 }
-        return MachineDagUtils.strToInt(v.substring(6))
+        // 完全手工解析（不用 `MachineDagUtils.strToInt`：它遇非数字即停，
+        // 于是 `"-48"` 解析成 **0**；也不依赖字符串比较，避免再引入同类问题）。
+        var i: Int = 6
+        var neg: Int = 0
+        if (i < v.length && (v.charCodeAt(i) as Int) == 45) {
+            neg = 1
+            i = i + 1
+        }
+        var acc: Int = 0
+        while (i < v.length) {
+            val c: Int = v.charCodeAt(i) as Int
+            if (c >= 48 && c <= 57) {
+                acc = acc * 10 + (c - 48)
+            }
+            i = i + 1
+        }
+        if (neg == 1) {
+            return 0 - acc
+        }
+        return acc
     }
 
     /// 将值加载到寄存器（如果是栈引用则加载到临时寄存器 r12）。
     /// 返回实际的寄存器名。
     private fun resolveToReg(v: String, tmpReg: String): String {
         if (this.isStackRef(v)) {
-            val offset: Int = this.stackOffsetOf(v)
+            var offset: Int = this.stackOffsetOf(v)
+            // ⚠️ **不再**把偏移 0 改写成 `-8`：那会让不同值的读侧共用 `-8`
+            //（与写侧塌成同一槽同源，见 `regOfNode`）。正常路径的槽都由
+            // `slotForNode` 分配为负值，不会为 0。
+            this.cdMark("ld-resolv", offset)
             this.enc.emitStackLoad(tmpReg, offset)
             return tmpReg
         }
@@ -748,9 +1069,49 @@ class X86Emitter {
     /// 从 DAG 节点获取寄存器名（如果未分配则用默认寄存器 rax）。
     /// 如果节点被 spill 到栈上，返回 "stack:N" 格式。
     private fun regOfNode(node: DagNode): String {
+        val r: String = this.regOfNodeRaw(node)
+        // 只在**返回栈引用**时打印（这正是共享兜底槽的来源），限次。
+        if (r.startsWith("stack:") && this.rnCount < 12) {
+            this.rnCount = this.rnCount + 1
+            var id: String = "null"
+            var rg: String = ""
+            if (node != null) {
+                id = toStr(node.id)
+                rg = node.reg
+            }
+            println("[rnSTK] id=" + id + " reg=[" + rg + "] → [" + r + "]")
+        }
+        // ⚠️ **不做**「偏移 0 → -8」的归一化：那会把**所有**栈引用塌成同一个 `-8`，
+        // 从而让不同调用结果互相覆写（实测自举 `Main.exe`：`Env.get` 的字符串结果
+        // 被 `println` 的返回值 `1` 覆写 ⇒ `streq` 里 `strlen(1)` ⇒ `0xC0000005`）。
+        // 每个节点都有**自己**的槽（`slotForNode` 分配，见诊断 `[slot] id=13 → -48`），
+        // 正常路径不会出现偏移 0；真出现也只应暴露问题，不该静默共用槽。
+        return r
+    }
+
+    private fun regOfNodeRaw(node: DagNode): String {
+        if (node != null && this.nodeSlot(node.id) != 0) {
+            return "stack:" + toStr(this.nodeSlot(node.id))
+        }
         if (this.allocator != null && node != null && this.allocator.isSpilled(node.id)) {
+            // ② RA 的溢出槽：`getSpillOffset` 返回「自 rbp 向下的**距离**」正值，
+            //    而 `emitStackLoad/Store` 编码的是 `[rbp + offset]` —— 必须取负，
+            //    否则读写在帧的**另一侧**（写 `[rbp-距]`、读 `[rbp+距]`）。
             val offset: Int = this.allocator.getSpillOffset(node.id)
-            return "stack:" + toStr(offset)
+            // ⚠️ `isSpilled` 为真但偏移为 0 ⇒ RA 的溢出状态与该节点不一致
+            //（实测自举 `Main.exe`：读回变成 `movq (%rbp), %r10`，取的是**保存的 rbp**
+            // 本身，于是 `streq` 对垃圾指针比较 → `0xC0000005`）。
+            // 此时不能返回 "stack:0"，退回下面的确定性兜底规则。
+            if (offset != 0) {
+                return "stack:" + toStr(0 - offset)
+            }
+        }
+        // ③ 确定性兜底：写入侧（见 `emitCall`）对**未 spill 的调用结果**固定用 `-8`，
+        //    这里对「着色为 `rax`/空串」的节点返回同一偏移 —— 两端一致，
+        //    **不依赖 nodeId 关联**（实测读回时的节点与写入时不是同一个 id）。
+        if (node != null && (node.reg == "" || node.reg == "rax")) {
+            // 每个节点**各自**一个槽（见 `slotForNode`），不可共用固定 `-8`。
+            return "stack:" + toStr(this.slotForNode(node.id))
         }
         if (node != null && node.reg != "") {
             return node.reg
@@ -845,17 +1206,21 @@ class X86Emitter {
 
     private fun emitShl(nodes: List<String>, dag: MachineDag, mem: String): Unit {
         if (nodes.size >= 1) {
-            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val dstRaw: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
             val shift: Int = MachineDagUtils.strToInt(mem)
-            this.enc.emitShlRI(dst, shift)
+            val d: String = this.loadDstReg(dstRaw, "r10")
+            this.enc.emitShlRI(d, shift)
+            this.storeDstReg(dstRaw, d)
         }
     }
 
     private fun emitShr(nodes: List<String>, dag: MachineDag, mem: String): Unit {
         if (nodes.size >= 1) {
-            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val dstRaw: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
             val shift: Int = MachineDagUtils.strToInt(mem)
-            this.enc.emitShrRI(dst, shift)
+            val d: String = this.loadDstReg(dstRaw, "r10")
+            this.enc.emitShrRI(d, shift)
+            this.storeDstReg(dstRaw, d)
         }
     }
 
@@ -880,20 +1245,22 @@ class X86Emitter {
         // div %dst, %src → cqo + idiv (商→rax, 余数→rdx)
         if (instr.output >= 0) {
             val dstNode: DagNode = dag.nodeOf(instr.output)
-            val dst: String = this.regOfNode(dstNode)
+            val dstRaw: String = this.regOfNode(dstNode)
             val srcNodeId: Int = this.divSrcNode(instr)
             if (srcNodeId >= 0) {
                 val srcNode: DagNode = dag.nodeOf(srcNodeId)
-                val src: String = this.regOfNode(srcNode)
-                if (dst != "rax") {
-                    this.enc.emitMovRR("rax", dst)
+                val srcRaw: String = this.regOfNode(srcNode)
+                val src: String = this.resolveToReg(srcRaw, "r10")
+                // ⚠️ 被除数可能来自栈槽，商也必须能写回栈槽（见 storeDstReg）。
+                if (this.isStackRef(dstRaw)) {
+                    this.enc.emitStackLoad("rax", this.stackOffsetOf(dstRaw))
+                } else if (dstRaw != "rax") {
+                    this.enc.emitMovRR("rax", dstRaw)
                 }
                 this.enc.emitCqo()
                 this.enc.emitIdiv(src)
-                // 商在 rax，如果需要则移动到 dst 寄存器
-                if (dst != "rax") {
-                    this.enc.emitMovRR(dst, "rax")
-                }
+                // 商在 rax → 落点（寄存器或槽）
+                this.storeDstReg(dstRaw, "rax")
             }
         }
     }
@@ -902,102 +1269,118 @@ class X86Emitter {
         // rem %dst, %src → cqo + idiv (余数→rdx)
         if (instr.output >= 0) {
             val dstNode: DagNode = dag.nodeOf(instr.output)
-            val dst: String = this.regOfNode(dstNode)
+            val dstRaw: String = this.regOfNode(dstNode)
             val srcNodeId: Int = this.divSrcNode(instr)
             if (srcNodeId >= 0) {
                 val srcNode: DagNode = dag.nodeOf(srcNodeId)
-                val src: String = this.regOfNode(srcNode)
-                if (dst != "rax") {
-                    this.enc.emitMovRR("rax", dst)
+                val srcRaw: String = this.regOfNode(srcNode)
+                val src: String = this.resolveToReg(srcRaw, "r10")
+                if (this.isStackRef(dstRaw)) {
+                    this.enc.emitStackLoad("rax", this.stackOffsetOf(dstRaw))
+                } else if (dstRaw != "rax") {
+                    this.enc.emitMovRR("rax", dstRaw)
                 }
                 this.enc.emitCqo()
                 this.enc.emitIdiv(src)
-                if (dst != "rdx") {
-                    this.enc.emitMovRR(dst, "rdx")
-                }
+                // 余数在 rdx → 落点（寄存器或槽）
+                this.storeDstReg(dstRaw, "rdx")
             }
         }
     }
 
     private fun emitAndRR(instr: DagInstruction, dag: MachineDag): Unit {
-        if (instr.output >= 0) {
-            val dstNode: DagNode = dag.nodeOf(instr.output)
-            val dst: String = this.regOfNode(dstNode)
-            val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
-            if (nodes.size >= 1) {
-                val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
-                val srcNode: DagNode = dag.nodeOf(srcNodeId)
-                val src: String = this.regOfNode(srcNode)
-                this.enc.emitAndRR(dst, src)
-            }
-        }
+        this.emitLogicBinary(instr, dag, 0)
     }
 
     private fun emitOrRR(instr: DagInstruction, dag: MachineDag): Unit {
-        if (instr.output >= 0) {
-            val dstNode: DagNode = dag.nodeOf(instr.output)
-            val dst: String = this.regOfNode(dstNode)
-            val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
-            if (nodes.size >= 1) {
-                val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
-                val srcNode: DagNode = dag.nodeOf(srcNodeId)
-                val src: String = this.regOfNode(srcNode)
-                this.enc.emitOrRR(dst, src)
+        this.emitLogicBinary(instr, dag, 1)
+    }
+
+    /// 逻辑按位运算（and / or）的统一发射：`op` 0=And 1=Or。
+    ///
+    /// 与 `emitAluBinary` 同一套规则：源操作数先 `resolveToReg`，
+    /// **目的操作数是栈槽时「取槽 → 运算 → 写回槽」**（否则 `regNum("stack:-N")`
+    /// 得 0 = rax，结果永不落槽 ✗）。
+    private fun emitLogicBinary(instr: DagInstruction, dag: MachineDag, op: Int): Unit {
+        if (instr.output < 0) { return }
+        val dstNode: DagNode = dag.nodeOf(instr.output)
+        val dstRaw: String = this.regOfNode(dstNode)
+        val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+        if (nodes.size < 1) { return }
+        val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+        val srcNode: DagNode = dag.nodeOf(srcNodeId)
+        val srcRaw: String = this.regOfNode(srcNode)
+        val src: String = this.resolveToReg(srcRaw, "r10")
+        if (this.isStackRef(dstRaw)) {
+            val off: Int = this.stackOffsetOf(dstRaw)
+            this.enc.emitStackLoad("r11", off)
+            if (op == 0) {
+                this.enc.emitAndRR("r11", src)
+            } else {
+                this.enc.emitOrRR("r11", src)
             }
+            this.enc.emitStackStore(off, "r11")
+        } else if (op == 0) {
+            this.enc.emitAndRR(dstRaw, src)
+        } else {
+            this.enc.emitOrRR(dstRaw, src)
         }
     }
 
     private fun emitXorRR(instr: DagInstruction, dag: MachineDag): Unit {
         if (instr.output >= 0) {
             val dstNode: DagNode = dag.nodeOf(instr.output)
-            val dst: String = this.regOfNode(dstNode)
+            val dstRaw: String = this.regOfNode(dstNode)
             val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
             if (nodes.size >= 1) {
                 val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
                 val srcNode: DagNode = dag.nodeOf(srcNodeId)
-                val src: String = this.regOfNode(srcNode)
-                this.enc.emitXorRR(dst, src)
+                val srcRaw: String = this.regOfNode(srcNode)
+                val src: String = this.resolveToReg(srcRaw, "r10")
+                // 与 and/or 同一规则：目的可能是栈槽（见 loadDstReg/storeDstReg）。
+                if (this.isStackRef(dstRaw)) {
+                    val off: Int = this.stackOffsetOf(dstRaw)
+                    this.enc.emitStackLoad("r11", off)
+                    this.enc.emitXorRR("r11", src)
+                    this.enc.emitStackStore(off, "r11")
+                } else {
+                    this.enc.emitXorRR(dstRaw, src)
+                }
             }
         }
     }
 
     private fun emitShlRR(instr: DagInstruction, dag: MachineDag): Unit {
-        if (instr.output >= 0) {
-            val dstNode: DagNode = dag.nodeOf(instr.output)
-            val dst: String = this.regOfNode(dstNode)
-            val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
-            if (nodes.size >= 1) {
-                val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
-                val srcNode: DagNode = dag.nodeOf(srcNodeId)
-                val src: String = this.regOfNode(srcNode)
-                // SHL 需要 CL 寄存器（64 位操作码使用 CL）
-                if (src != "rcx") {
-                    this.enc.emitMovRR("rcx", src)
-                }
-                // 使用 SHL r64, CL 形式 (0xC1 /4 with imm=CL? No, CL is special)
-                // Actually SHL r64, CL is 0xD3 /4
-                this.enc.emitShlRI(dst, 0)  // Simplified: use 0 shift for now
-                // TODO: proper SHL r64, CL encoding
-            }
-        }
+        this.emitShiftByReg(instr, dag, 4)
     }
 
     private fun emitShrRR(instr: DagInstruction, dag: MachineDag): Unit {
-        if (instr.output >= 0) {
-            val dstNode: DagNode = dag.nodeOf(instr.output)
-            val dst: String = this.regOfNode(dstNode)
-            val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
-            if (nodes.size >= 1) {
-                val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
-                val srcNode: DagNode = dag.nodeOf(srcNodeId)
-                val src: String = this.regOfNode(srcNode)
-                if (src != "rcx") {
-                    this.enc.emitMovRR("rcx", src)
-                }
-                this.enc.emitShrRI(dst, 0)
-                // TODO: proper SHR r64, CL encoding
-            }
+        this.emitShiftByReg(instr, dag, 5)
+    }
+
+    /// 变量位移 `x << n` / `x >> n`（移位量在寄存器里）。
+    ///
+    /// ⚠️ 旧实现把移位量放进 rcx 后只发 `emitShlRI(dst, 0)`（**零位移**，
+    /// 注释里写着 "Simplified" / "TODO: proper SHL r64, CL encoding"）✗ ——
+    /// 即 `x << n` **恒等于 x**。现在改用编码器已有的 `emitShiftCl`
+    /// （`REX.W D3 /ext` = 移位量取 CL）✓，并让目的操作数支持栈槽。
+    private fun emitShiftByReg(instr: DagInstruction, dag: MachineDag, ext: Int): Unit {
+        if (instr.output < 0) { return }
+        val dstNode: DagNode = dag.nodeOf(instr.output)
+        val dstRaw: String = this.regOfNode(dstNode)
+        val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+        if (nodes.size < 1) { return }
+        val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+        val srcNode: DagNode = dag.nodeOf(srcNodeId)
+        val srcRaw: String = this.regOfNode(srcNode)
+        // 移位量必须先在 rcx（用 r10 中转，避免与 CL 冲突）。
+        val amt: String = this.resolveToReg(srcRaw, "r10")
+        if (amt != "rcx") {
+            this.enc.emitMovRR("rcx", amt)
         }
+        val d: String = this.loadDstReg(dstRaw, "r11")
+        this.enc.emitShiftCl(d, ext)
+        this.storeDstReg(dstRaw, d)
     }
 
     // ── 辅助方法 ──

@@ -1,5 +1,5 @@
-// aura:///aura/lang/native/thread/ThreadOps.aura
-package aura.lang.native.thread
+// aura:///aura/lang/native/ThreadOps.aura
+package aura.lang.native
 // ─────────────────────────────────────────────────────────────────────────────
 // 线程桥原语（Layer 0-A）
 //
@@ -23,6 +23,12 @@ package aura.lang.native.thread
 //
 // 实现方：VM / 运行库（与 `aura.lang.native.Memory` 同层）。
 // AOT 路径下由运行库直接调用 `aura_thread_create/join/...` C 封装。
+//
+// ⚠️ 本文件原先放在 `aura/lang/native/thread/ThreadOps.aura`
+//（`package aura.lang.native.thread`），但该路径的 import 解析不到模块 ——
+// 实测 `Thread.currentThreadId()` 里的 `ThreadOps.currentId()` 落成裸名
+// `currentId`，链接期 `undefined symbol: currentId`（HAT 里 ThreadOps 整个
+// 不在模块列表）。挪到 `aura.lang.native` 下与 `Memory` / `Cpu` 同级后正常。
 // ─────────────────────────────────────────────────────────────────────────────
 
 extern interface ThreadOps {

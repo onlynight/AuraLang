@@ -39,7 +39,7 @@ object ARC {
 
     /// 增加引用计数
     fun retain(obj: Long): Unit {
-        if (obj == 0) { return }
+        if (obj == 0 || obj < 16) { return }  // 跳过无效地址
         // 使用 Memory.arcIncrement 原子操作
         Memory.arcIncrement(obj)
         ARC.totalRetain = ARC.totalRetain + 1
@@ -47,7 +47,7 @@ object ARC {
 
     /// 减少引用计数，返回是否已释放
     fun release(obj: Long): Boolean {
-        if (obj == 0) { return false }
+        if (obj == 0 || obj < 16) { return false }  // 跳过无效地址
         ARC.totalRelease = ARC.totalRelease + 1
         // 使用 Memory.arcDecrement 原子操作
         val rc: Long = Memory.arcDecrement(obj)

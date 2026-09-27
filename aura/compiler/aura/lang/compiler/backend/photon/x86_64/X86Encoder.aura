@@ -658,6 +658,9 @@ class X86Encoder {
 
     /// 编码 MOV reg, [rbp + disp32]（栈加载）。
     fun emitStackLoad(reg: String, offset: Int): Unit {
+        if (offset == 0) {
+            println("[stkload0] reg=" + reg)
+        }
         val r: Int = this.regNum(reg)
         this.writeByte(this.rexByte(true, r, 5))
         this.writeByte(0x8B)
@@ -743,11 +746,18 @@ class X86Encoder {
             this.writeByte(rex)
         }
         this.writeByte(0x88)  // MOV r/m8, r8
+        // ⚠️ ModRM 的 reg / rm 字段各只占 3 位，**必须**掩码到 7 位：
+        // 高 3 位由 REX 的 R/B 位承担。旧实现直接写 `(s << 3) + m`，当
+        // 寄存器号 ≥ 8（r8–r15）时 `<< 3` 会**溢出到 mod 字段** ⇒ mod 变成
+        // 01/10/11（要求位移字节）且 reg 字段错位 ⇒ 指令被解码成
+        // 完全不同的寻址（实测 `movzx r10, byte [r10]` 被编成
+        // `0x4D 0F B6 52 4D` ⇒ 反汇编成 `movzbq 0x4d(%r10), %r10`，
+        // 还吞掉了下一条指令的 REX 前缀）。
         if ((m & 7) == 5) {
-            this.writeByte(0x40 + (s << 3) + 5)  // mod=01, rm=101 (rbp/r13)
+            this.writeByte(0x40 + ((s & 7) << 3) + 5)  // mod=01, rm=101 (rbp/r13)
             this.writeByte(0)
         } else {
-            this.writeByte(0x00 + (s << 3) + m)  // mod=00, rm=memReg
+            this.writeByte(0x00 + ((s & 7) << 3) + (m & 7))  // mod=00, rm=memReg
         }
     }
 
@@ -763,11 +773,16 @@ class X86Encoder {
         this.writeByte(rex)
         this.writeByte(0x0F)
         this.writeByte(0xB6)  // MOVZX r64, r/m8
+        // ⚠️ 同 `emitMovByteMemReg`：reg / rm 字段必须掩码到 3 位（`& 7`），
+        // 高 3 位归 REX 的 R/B。旧实现对 r8–r15 会溢出到 mod 字段 ⇒ 该原语
+        // 产出的字节流整体错位（实测 `movzbl (%r10), %r9d` 变成
+        // `movzbq 0x4d(%r10), %r10` 并吞掉下一条的 REX）= PhotonRuntime 的
+        // PEB 环境块扫描恒失败、`charCodeAt`/`toInt` 一类字节读取不可信的根因。
         if ((m & 7) == 5) {
-            this.writeByte(0x40 + (d << 3) + 5)  // mod=01, rm=101 (rbp/r13)
+            this.writeByte(0x40 + ((d & 7) << 3) + 5)  // mod=01, rm=101 (rbp/r13)
             this.writeByte(0)
         } else {
-            this.writeByte(0x00 + (d << 3) + m)  // mod=00, rm=srcMemReg
+            this.writeByte(0x00 + ((d & 7) << 3) + (m & 7))  // mod=00, rm=srcMemReg
         }
     }
 

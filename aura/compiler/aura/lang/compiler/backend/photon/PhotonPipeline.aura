@@ -461,6 +461,18 @@ class PhotonPipeline {
             linker.addFlag("/NODEFAULTLIB")
         }
         linker.useDefaultLibs = false
+        // ⚠️ runtime **确实**需要 kernel32 了：`env_get` 走 `GetEnvironmentVariableA`
+        // （见 `PhotonRuntime.emitEnvGetWin32`，与既有的 `__imp_WriteFile` /
+        // `__imp_GetStdHandle` 同一导入机制）。不传该库就是
+        //     lld-link: error: undefined symbol: __declspec(dllimport) GetEnvironmentVariableA
+        // ⇒ 内置链接失败、产物不生成（实测自举流程一直靠手动链接绕过 ✓）。
+        // 路径优先取环境变量 `AURA_K32LIB`（便于切换 Windows SDK 版本），
+        // 否则退回本机默认位置。
+        val k32Lib: String = Env.get("AURA_K32LIB",
+                "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/kernel32.lib")
+        if (k32Lib != "") {
+            linker.libs = k32Lib
+        }
         // P2: runtime 使用 syscall 直接调用 Nt*，不再需要 kernel32 导入
         // linker.libs = ""  // 零依赖：无 DLL 导入
         // 输出名必须显式设置：`buildCommand()` 用的是 `this.outputName`，
@@ -793,6 +805,12 @@ class PhotonPipeline {
             linker.addFlag("/NODEFAULTLIB")
         }
         linker.useDefaultLibs = false
+        // 同另一条链接路径：`env_get` 需要 kernel32（见上）。
+        val k32Lib2: String = Env.get("AURA_K32LIB",
+                "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/kernel32.lib")
+        if (k32Lib2 != "") {
+            linker.libs = k32Lib2
+        }
         linker.outputName = this.outDir + "/" + this.moduleName
         val linkCmd = linker.buildCommand()
         result.linkCommand = linkCmd

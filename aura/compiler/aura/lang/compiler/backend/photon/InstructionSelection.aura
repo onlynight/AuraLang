@@ -66,8 +66,39 @@ class InstructionSelector {
     /// 字符串常量列表（逗号分隔的字符串内容）。
     var stringConstants: String = ""
 
+    /// Photon runtime（`aura_runtime.obj`）已导出的符号名表。
+    ///
+    /// **必须与 `PhotonRuntime.RUNTIME_SYMBOLS` 逐字一致**（见 `isRuntimeSymbol`
+    /// 的说明）：漏一项就会在链接期报 `duplicate symbol`。
+    /// 成员方法按本表的 `.` 拼写书写，比较时由 `dotToUnderscore` 归一化，
+    /// 因此 `Collections.getAt` 与 `Collections_getAt` 都能命中。
+    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.listRemove,Collections.count,Collections.clear,Collections.hashMapPut,Collections.indexOf,Collections.contains,Collections.mapContainsKey,Collections.getAt,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4"
+
     /// `computeReachable` 的列表形式结果（供 `select()` 免分配查表）。
     private var reachableNames: List<String> = arrayListOf<String>()
+
+    /// 强制纳入可达集合的符号清单（定义名）。
+    ///
+    /// ⚠️ 存在的理由：自举前端对**顶层工具函数 / 同名方法**常发**裸名**
+    ///（`mirNoKids`、`add`、`keys`），定义却带命名空间前缀
+    ///（`MirUtils_mirNoKids`、`Ast_add` / `Hir_add` / `Mir_add`、`EnvOps_keys`…）。
+    /// 按名字走图的 `computeReachable` 识别不出这条边 ⇒ 定义不进可达集合
+    /// ⇒ `select()` 不选它 ⇒ 链接期 `undefined symbol`。
+    /// 只改调用点映射（`mapStdlibFuncName`）**不够**：定义依然没被发射。
+    ///
+    /// 曾尝试「对所有被调名做 `_<name>` 后缀匹配」的**通用**回退，结论是**不可取**：
+    /// 常见裸名（`add` / `get` / `set` / `toString`）各能匹配到几十个定义，
+    /// 可达集合迅速膨胀到近乎整个模块；同时那是 O(N²) 的字符串累加。
+    /// 实测自举：43s → **394s**、内存 **破 10 GB**（被人工终止）。
+    /// 因此改为这份**显式小清单**：有界、确定、成本可忽略。
+    ///
+    /// ⚠️ 清单本身也要**克制**：这里每加一个名字，都会连带拉进它的**传递闭包**
+    ///（它们调用的函数、再下一层……）。实测把 `Ast_add`/`Hir_add`/`Mir_add`/
+    /// `ArrayList_add`/`HashMap_keys`/`EnvOps_keys` 一起加进来后，自举耗时
+    /// 43s → **265s**、`Main.obj` 1.11MB → 1.73MB —— 收益为零（`add`/`keys`
+    /// 的调用点仍未被映射，仍是未定义），代价却是 6 倍编译时间。
+    /// 只保留**确实解决未定义**的三个（且都是叶子小函数）。
+    private var forceReachable: String = "MirUtils_mirNoKids,MirUtils_mirKidsAdd,Linearizer_mirNoKids,Linearizer_mirKidsAdd,FileSystem_mkdir,ArrayList_add,HashMap_keys,Ast_add,Hir_add,Mir_add"
 
     /// Phase C 定位探针（见 `selProbe` 的说明）。
     private var probePath: String = ""
@@ -320,7 +351,25 @@ class InstructionSelector {
     ///
     /// 见 `select()` 里的说明：不可达函数会被编进 .text 并引入 runtime 未提供的
     /// 外部符号（`toStr` 等），让链接直接失败。
+    ///
+    /// 入口队列除 `entry` 外还会并入 `forceReachable` 的显式清单（见其说明）。
+    /// 最后一个实参是否为内存链 token（`MemToken`）。见 `mapStdlibFuncName`
+    /// 中集合版 `add` 的判据说明。
+    private fun lastArgIsMemToken(args: List<String>): Boolean {
+        if (args.size < 1) {
+            return false
+        }
+        val li: Int = LirUtils.strToInt(args[args.size - 1])
+        if (li < 0) {
+            return false
+        }
+        return this.lir.valueOf(li).op == "MemToken"
+    }
+
     private fun computeReachable(src: LirProgram, entry: String): String {
+        // 注：这里曾放过「按 `_<callee>` 后缀匹配定义名」的通用回退 + 记忆化缓存，
+        // 因可达集合爆炸（近乎全模块）与 O(N²) 缓存拼接而回退 —— 见 `forceReachable`。
+
         // 为什么用**列表队列 + 列表去重**，而不是「逗号串 + `splitArgs` 出队」：
         // 旧实现把待处理队列存成一个字符串，每展开一次就 `splitArgs` 出队、再
         // 把该函数**所有调用点**的被调名（含大量重复）`pending = pending + "," + …`
@@ -335,6 +384,16 @@ class InstructionSelector {
         val queue: List<String> = arrayListOf<String>()
         queue.add(entry)
         var head: Int = 0
+
+        // 强制纳入清单（见 `forceReachable` 的说明）：有界、确定、成本可忽略。
+        val forced: List<String> = LirUtils.splitArgs(this.forceReachable)
+        var fq: Int = 0
+        while (fq < forced.size) {
+            if (forced[fq] != "" && !this.listContains(queue, forced[fq])) {
+                queue.add(forced[fq])
+            }
+            fq = fq + 1
+        }
 
         while (head < queue.size) {
             val cur: String = queue[head]
@@ -450,11 +509,43 @@ class InstructionSelector {
     /// 与 `PhotonRuntime.RUNTIME_SYMBOLS` 必须保持同步；调用点已由
     /// `mapStdlibFuncName` 映射到这些名字，因此跳过定义不会产生 undefined symbol。
     private fun isRuntimeSymbol(name: String): Boolean {
-        if (name == "println" || name == "print" || name == "puts") { return true }
-        if (name == "toStr" || name == "strcat" || name == "toInt") { return true }
-        if (name == "toFloat" || name == "toString" || name == "charCodeAt") { return true }
-        if (name == "strlen" || name == "exit") { return true }
+        if (name == "") { return false }
+        // ⚠️ 名单**必须与 `PhotonRuntime.RUNTIME_SYMBOLS` 逐字一致**。
+        // 旧实现只列了 println/toStr/strlen 这一小撮，而标准库里
+        // `Memory.aura` / `Collections` 的方法体同样会被编译进用户目标文件
+        //（自举 `Main.aura` 实测）：
+        //     lld-link: error: duplicate symbol: Memory_write
+        //     >>> defined at Main.obj / aura_runtime.obj
+        // 即这份名单一旦漏项，就是「链接期重复符号」，与调用点映射无关。
+        //
+        // 成员方法有两种拼写形态（`Collections.getAt` / `Collections_getAt`），
+        // 这里把 `.` 统一成 `_` 后比较，两边都命中。
+        val n: String = this.dotToUnderscore(name)
+        val parts: List<String> = LirUtils.splitArgs(this.runtimeSymbolNames)
+        var i: Int = 0
+        while (i < parts.size) {
+            if (this.dotToUnderscore(parts[i]) == n) {
+                return true
+            }
+            i = i + 1
+        }
         return false
+    }
+
+    /// 把 `.` 统一为 `_`（成员方法的两种拼写形态归一）。
+    private fun dotToUnderscore(s: String): String {
+        var out: String = ""
+        var i: Int = 0
+        val len: Int = s.length
+        while (i < len) {
+            if ((s.charCodeAt(i) as Int) == 46) {
+                out = out + "_"
+            } else {
+                out = out + s.substring(i, i + 1)
+            }
+            i = i + 1
+        }
+        return out
     }
 
     /// 逗号分隔名表中是否包含指定名字。
@@ -1338,14 +1429,24 @@ class InstructionSelector {
     ///     `equals`）—— 裸名落到 `undefined symbol: length`（实测 P2/04）。
     /// 与下方 `Collections.set` 的三种拼法（全限定 / `Collections.` / `.Collections.`）
     /// 是同一策略：按接收者类型把裸名补齐。
-    private fun mapStdlibFuncName(name: String, recvTy: String): String {
+    private fun mapStdlibFuncName(name: String, recvTy: String, argCount: Int,
+                                  lastIsMem: Boolean): String {
         if (name == "String.length" || name == "String.size") { return "strlen" }
-        // `Env.get(name[, default])`（`Hir.aura` 已阻止它被集合重写）：
-        // 落到运行库的 `Collections.getAt` —— 其实现是「查不到 = 空串」，
-        // 正是环境变量的期望语义（找不到 → ""）。**不能**让它落到
-        // `__list_get`：那是集合下标取值，null 容器会返回空指针并导致
-        // `streq(0, "")` 解引用地址 0（自举 Main.exe 启动崩溃的根因）。
-        if (name == "Env.get") { return "Collections.getAt" }
+        // `Env.get(name[, default])` → 运行库的 `env_get`（**真正的**环境变量读取）。
+        //
+        // ⚠️ 这里曾被**刻意**改写成占位实现 `Collections.getAt`（恒返回空串），
+        // 原因是当时运行库那份 `env_get` 是 **PEB 链实现**：它靠逐字节扫描 UTF-16
+        // 环境块，依赖 `emitMovzxRegMemByte`，而该原语在当前编码器上产出的字节流
+        // 是错的（实测 `movzbq 0x4d(%r10), %r10` —— REX 前缀被当成位移）⇒ 扫描
+        // 必然失败、恒返回空缓冲（`envProbe` 里 `V=[] L=0`）。
+        //
+        // 现在运行库改用 `emitEnvGetWin32`（`GetEnvironmentVariableA`，与运行库既有
+        // 的 `__imp_WriteFile` 同一导入机制，链接器从 `kernel32.lib` 解析 ✓ 实测
+        // `link=0`），已实测可用 ⇒ 映射切回 `env_get`。
+        //
+        // ⚠️ 前端发的是**限定后**的名字（`@call @Env_get(...)`），两种拼法都要映射；
+        // 并把 `Env_get` 留在跳过名单里，避免 stdlib 那份（光子路径恒返回空串）被发射。
+        if (name == "Env.get" || name == "Env_get") { return "env_get" }
         if (name == "String.charCodeAt" || name == "charCodeAt") { return "charCodeAt" }
         if (name == "Any.toString") { return "toString" }
         if (name == "Any.equals") { return "streq" }
@@ -1395,6 +1496,84 @@ class InstructionSelector {
         if (name == "open") { return "io_open" }
         if (name == "close") { return "io_close" }
         if (name == "access") { return "io_access" }
+        // ⚠️ 前端有两种拼法：裸成员名（`open`，本方法上半段按 `recvTy` 分流）
+        // 与**限定下划线名**（`FileOps_open`）。后者命不中上面的裸名规则，
+        // 会原样透传 → `lld-link: error: undefined symbol: FileOps_open`
+        //（实测自举 `Main.exe`）。这里补上限定形态的别名。
+        if (name == "FileOps_open" || name == "FileOps.access") { return "io_open" }
+        if (name == "FileOps_close") { return "io_close" }
+        if (name == "FileOps_read") { return "io_read" }
+        if (name == "FileOps_write") { return "io_write" }
+        if (name == "FileOps_access") { return "io_access" }
+        // `FileSystem.mkdir(path)` → 模块内**已编译**的 `FileSystem_mkdir`
+        //（签名一致：1 个 String 参数）。前端把它发成限定名 `FileOps_mkdir`，
+        // 而 runtime 没有 `io_mkdir`，直接映射到模块内实现最省事且语义正确。
+        if (name == "FileOps_mkdir" || name == "FileSystem_mkdir" || name == "mkdir") { return "FileSystem_mkdir" }
+        // ── 编译器自身的**同名工具函数**：两套定义，靠**元数**区分 ──
+        //
+        // HAT 实测（自举 Main.aura）：
+        //     @fn MirUtils_mirNoKids() -> String                  ← 0 参（顶层函数）
+        //     @fn MirUtils_mirKidsAdd(@list, @child) -> String     ← 2 参
+        //     @fn Linearizer_mirNoKids(@this: Long) -> String      ← 1 参（方法形态）
+        //     @fn Linearizer_mirKidsAdd(@this, @list, @child) -> String ← 3 参
+        // 而调用点全是**裸名**（`@call @mirNoKids(...)` ×35、`@call @mirKidsAdd(...)` ×3）
+        // 且带接收者（1 参 / 3 参）⇒ 应落到 `Linearizer_*`。此前一律映射到
+        // `MirUtils_*`，元数对不上 ⇒ 仍报 `undefined symbol`（实测）。
+        if (name == "mirNoKids") {
+            if (argCount >= 1) { return "Linearizer_mirNoKids" }
+            return "MirUtils_mirNoKids"
+        }
+        if (name == "mirKidsAdd") {
+            if (argCount >= 3) { return "Linearizer_mirKidsAdd" }
+            return "MirUtils_mirKidsAdd"
+        }
+        // ── 三类「arena add」同名方法：靠**接收者类型**消歧（与上面
+        //    `Memory.write`（Long）/ `FileOps.write` 同一手法）──
+        if (name == "add" && recvTy == "Ast") { return "Ast_add" }
+        if (name == "add" && recvTy == "Hir") { return "Hir_add" }
+        if (name == "add" && recvTy == "Mir") { return "Mir_add" }
+        // ── 集合方法（裸名）：接收者类型**带类型参数**（`List<Any>`、
+        //    `Map<String,Int>`），按等值匹配必然失手，必须用**前缀**判定 ──
+        //
+        // 定义名取自 HAT：`ArrayList_add(@this, @item)`、`HashMap_keys(@this)`。
+        // 实测自举 `Main.exe` 的两个残留未定义符号正是这两个：`add` ←
+        // `VmStack_push`（`__field_get(this,0) : List<Any>` 后接 `.add(v)`）、
+        // `keys` ← `Codegen_varTableStr`。用 `recvTy == "List"` 之类的等值判断
+        // 永远命中不了（类型名里有 `<...>`），这是上一次改造没生效的原因。
+        if (name == "add" && recvTy.indexOf("List") >= 0) { return "ArrayList_add" }
+        // ⚠️ 集合的 `add` 还有一种**三参**形态：`add(this, item, memToken)`
+        //（调用点把内存链 token 作为最后一个实参，见 HAT 的 `@MemToken`）。
+        // 这时**不能用类型判定**：接收者常来自 `arrayListOf(...)`，HAT 把它的类型
+        // 标注成 `Basic`（不是 `List<...>`）⇒ 按类型的前缀/包含判定必然失手
+        //（实测自举 `Main.exe` 最后的未定义符号 `add` 就来自
+        // `HashMap_keys` 与 `AucLoaderUtils_loadModule` 里的这种调用）。
+        //
+        // 判据是**末实参为内存链 token**（`MemToken`），而不是单纯的「元数 ≥3」：
+        // 后者会把 `Lexer_emit` 等处的同名三参 `add` 也映射成集合版 ——
+        // 实测导致自举 `Main.exe` 在 `BOOT-1` 之后直接 `0xC0000005`。
+        //
+        // 集合版形如 `add(this, item, memToken)`；HAT 实测两处残余未定义
+        //（`HashMap_keys`、`AucLoaderUtils_loadModule`）的第 3 实参正是
+        // `@MemToken(...)` ✓，而 `Lexer_emit` 那处不是 ✓ —— 判据可精确区分。
+        // `VmOps_add(@a, @b)`（VM 算术 `+`）两参、无 mem token，天然不受影响。
+        // 目标 `ArrayList_add(@this, @item)` 只用 rcx/rdx，多传的 r8 被忽略，
+        // 因此三参调用点绑到它**语义与 ABI 都安全**。
+        if (name == "add" && lastIsMem) { return "ArrayList_add" }
+        if (name == "keys" && recvTy.indexOf("HashMap") >= 0) { return "HashMap_keys" }
+        if (name == "keys" && recvTy.indexOf("Map") >= 0) { return "HashMap_keys" }
+        // ── 元数兜底（判据来自**全量实测**，不是猜测）──
+        //
+        // HAT 实测自举 `Main.aura`：
+        //     `@call @add(...)`  共 **217 处，全部 3 参**
+        //     `@call @keys(...)` 共 **1 处，2 参**
+        // 而候选实现在元数上是**唯一**的：
+        //     `ArrayList_add(@this, @item)` 2 参 / `Ast_add`/`Hir_add`/`Mir_add` 各 **6 参**
+        //     `HashMap_keys(@this)` 1 参 / `EnvOps_keys()` 0 参
+        // ⇒ 3 参的 `add` 只可能是「集合 add + 内存链 token」，2 参的 `keys` 只可能是
+        // `HashMap_keys`。前面基于接收者类型/MemToken 的判定在这些调用点上都不命中
+        //（接收者类型常被标注成 `Basic`，见 HAT），故在此按元数兜底。
+        if (name == "add" && argCount >= 3) { return "ArrayList_add" }
+        if (name == "keys" && argCount >= 2) { return "HashMap_keys" }
         // Collections.listRemove(list, idx) → 运行时移除元素
         if (name == "aura.lang.std.Collections.listRemove" || name == "Collections.listRemove"
             || name == ".Collections.listRemove" || name == "remove") { return "Collections.listRemove" }
@@ -1480,7 +1659,8 @@ class InstructionSelector {
         // 接收者类型（仅用于裸名补齐，见 `mapStdlibFuncName`）。
         // 只 `valueOf` 读类型，**不能** `resolveNode`（见上面的 ⚠️）。
         val recvTy: String = this.callReceiverTypeName(args)
-        val funcName: String = this.mapStdlibFuncName(val.aux, recvTy)
+        val funcName: String = this.mapStdlibFuncName(val.aux, recvTy, args.size,
+                                                      this.lastArgIsMemToken(args))
 
         // ── 特例：`toStr(<Bool 常量>)` ──
         //

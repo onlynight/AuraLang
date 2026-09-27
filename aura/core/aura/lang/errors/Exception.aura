@@ -5,6 +5,7 @@ package aura.lang.errors
 open class Exception : Throwable() {
     /// 占位字段（避免 LLVM 空结构体 GEP 错误）
     var _phantom: Int = 0
+    constructor() : super() { }
     constructor(message: String) : super(message) { }
     constructor(message: String, cause: Throwable?) : super(message, cause) { }
 }
@@ -12,6 +13,7 @@ open class Exception : Throwable() {
 /// 非受检异常基类——编译期不强制捕获
 open class RuntimeException : Exception() {
     var _phantom: Int = 0
+    constructor() : super() { }
     constructor(message: String) : super(message) { }
     constructor(message: String, cause: Throwable?) : super(message, cause) { }
 }
@@ -33,6 +35,7 @@ open class IllegalStateException : RuntimeException() {
 /// 空指针异常
 open class NullPointerException : RuntimeException() {
     var _phantom: Int = 0
+    constructor() : super() { }
     constructor(message: String) : super(message) { }
     constructor(message: String, cause: Throwable?) : super(message, cause) { }
 }
@@ -40,6 +43,7 @@ open class NullPointerException : RuntimeException() {
 /// 索引越界异常
 open class IndexOutOfBoundsException : RuntimeException() {
     var _phantom: Int = 0
+    constructor() : super() { }
     constructor(message: String) : super(message) { }
     constructor(message: String, cause: Throwable?) : super(message, cause) { }
 }
@@ -47,8 +51,12 @@ open class IndexOutOfBoundsException : RuntimeException() {
 /// 数组索引越界异常
 open class ArrayIndexOutOfBoundsException : IndexOutOfBoundsException() {
     var _phantom: Int = 0
+    constructor() : super() { }
     constructor(message: String) : super(message) { }
     constructor(message: String, cause: Throwable?) : super(message, cause) { }
+
+    /// 按索引与长度构造，消息自动描述越界情况
+    constructor(index: Int, size: Int) : super("Array index " + toStr(index) + " out of bounds for length " + toStr(size)) { }
 }
 
 /// 空列表异常

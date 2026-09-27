@@ -111,21 +111,18 @@ extern interface Syscalls {
     /// rax = 0x02
     @native(0x02) fun ntReleaseSemaphore(): Long
 
-    /// NtReadFile — 读取文件
-    /// rax = 0x03
-    @native(0x03) fun ntReadFile(handle: Long, event: Long, apc: Long, context: Long, buffer: Long, length: Long, key: Long, ioStatusBlock: Long): Long
+    /// NtReadFile — 读取文件（本机 ntdll stub 实测 0x06，不是 0x03）
+    @native(0x06) fun ntReadFile(handle: Long, event: Long, apc: Long, context: Long, buffer: Long, length: Long, key: Long, ioStatusBlock: Long): Long
 
-    /// NtCreateFile — 创建/打开文件
-    /// rax = 0x05
-    @native(0x05) fun ntCreateFile(handle: Long, desiredAccess: Int, objectAttributes: Long, ioStatus: Long, allocationSize: Long, fileAttributes: Long, shareAccess: Int, createDisposition: Int, createOptions: Int, eap: Long, eapLength: Long): Long
+    /// NtCreateFile — 创建/打开文件（本机 ntdll stub 实测 0x55，不是 0x05）
+    @native(0x55) fun ntCreateFile(handle: Long, desiredAccess: Int, objectAttributes: Long, ioStatus: Long, allocationSize: Long, fileAttributes: Long, shareAccess: Int, createDisposition: Int, createOptions: Int, eap: Long, eapLength: Long): Long
 
     /// NtProtectVirtualMemory — 修改虚拟内存保护
     /// rax = 0x08
     @native(0x08) fun ntProtectVirtualMemory(): Long
 
-    /// NtClose — 关闭句柄
-    /// rax = 0x0B
-    @native(0x0B) fun ntClose(handle: Long): Long
+    /// NtClose — 关闭句柄（本机 ntdll stub 实测 0x0F，不是 0x0B）
+    @native(0x0F) fun ntClose(handle: Long): Long
 
     /// NtCreateEvent — 创建事件
     /// rax = 0x10
@@ -144,16 +141,18 @@ extern interface Syscalls {
     @native(0x0F) fun ntSetInformationFile(): Long
 
     /// NtAllocateVirtualMemory — 分配虚拟内存
-    /// rax = 0x18
-    /// rcx = processHandle, rdx = address, r8 = zeroBits, r9 = regionSize
-    /// stack = allocationProtect (PAGE_READWRITE=4), allocationType (MEM_COMMIT|MEM_RESERVE=0x3000)
-    @native(0x18) fun ntAllocateVirtualMemory(processHandle: Long, address: Long, zeroBits: Long, regionSize: Long, allocationProtect: Int, state: Int): Long
+    /// rcx = processHandle(必须 NtCurrentProcess() = -1), rdx = *baseAddress(指针),
+    ///      r8 = zeroBits, r9 = *regionSize(指针)
+    /// stack = arg5 allocationType(MEM_RESERVE|MEM_COMMIT=0x3000),
+    ///         arg6 allocationProtect(PAGE_READWRITE=0x04)
+    /// 注意 arg2/arg4 是 IN OUT 指针，不能传值；栈槽相对 `syscall` 当刻的 rsp
+    /// 固定为 [rsp+0x28]/[rsp+0x30]，与本函数栈帧大小无关。
+    @native(0x18) fun ntAllocateVirtualMemory(processHandle: Long, address: Long, zeroBits: Long, regionSize: Long, allocationType: Int, allocationProtect: Int): Long
 
-    /// NtWriteFile — 写入文件
-    /// rax = 0x15
+    /// NtWriteFile — 写入文件（本机 ntdll stub 实测 0x08，不是 0x15）
     /// rcx = handle, rdx = event, r8 = apc, r9 = context
-    /// stack = IoStatusBlock, buffer, length, key, eaBuffer
-    @native(0x15) fun ntWriteFile(handle: Long, event: Long, apc: Long, context: Long, buffer: Long, length: Long, key: Long, ioStatusBlock: Long, eaBuffer: Long): Long
+    /// stack = IoStatusBlock, buffer, length, byteOffset, key, eaBuffer, eaLength
+    @native(0x08) fun ntWriteFile(handle: Long, event: Long, apc: Long, context: Long, buffer: Long, length: Long, key: Long, ioStatusBlock: Long, eaBuffer: Long): Long
 
     /// NtQueryVirtualMemory — 查询虚拟内存信息
     /// rax = 0x1A
