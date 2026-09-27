@@ -3,12 +3,25 @@
 > 用途：跨对话交接。读完本文可独立继续推进 Photon 后端自举。
 > 状态时间点：自举链路「零未定义符号 + 可运行 + CLI 参数通道打通 + 无死循环」，
 > 剩余唯一拦路石是 **字符串判等 / 分支控制流（P0）**。
+>
+> ⚠️ **构建环境注意**（2026-09-27 新增）：
+> 当前 `aura.exe`（`rust\target\release\aura.exe`，即 `seed\target\release\aura.exe`）
+> 仅支持 `run` / `compile` / `check` / `version` 四个命令，**不支持** `build` 命令。
+> 本文档中引用的 `aura.exe build --aot` 和 `aura.exe build -b photon` 命令
+> 来自旧版编译器，当前版本需使用 `aura.exe compile --aot` 替代 `build --aot`。
+> 但 `compile --aot` 在当前版本下也无法正确读取 .aura 文件（报 `Error reading file`），
+> 需使用 `build` 命令的替代方案（见下方「重建驱动」部分）。
 
 ## 0. 环境与验证流程（新对话直接照做）
 
 工作目录 `d:/Code/AuraLang`。
 
 **每次改动 `aura/compiler/aura/lang/compiler/**` 后必须重建驱动**，否则跑的是旧驱动（已多次踩坑）。
+
+> ⚠️ **路径注意**：`aura/compiler/aura/lang/compiler/photon` 是一个**junction**，
+> 指向 `aura/photon/aura/lang/compiler/photon`。`aura.exe` 无法通过 junction 路径读取文件
+> （报 `Error reading file`），必须使用 `aura/photon/aura/lang/compiler/photon/...` 路径。
+> 但 `read` / `edit` 工具可以正常读写 junction 路径。
 
 ```powershell
 # ① 重建驱动（用全新缓存目录避免陈旧对象；约 2–4 分钟）
@@ -89,25 +102,51 @@ powershell -File scripts\photon\photon-hat-native-suite.ps1 -Phase P1,P2,P3 -Out
 
 ### P0 —— 字符串判等 / 分支控制流（Step 4c 的唯一拦路石）
 
-自举产物实测证据：
+> ✅ **本轮已修复**（2026-09-27）：
 
+**问题根因**：`InstructionSelection.aura` 第 1386-1388 行引用了 `rhsVal.isConstant` 和
+`rhsVal.constInt`，但 `LirValue` 类**没有**这两个属性（只有 `isConst()` 方法和 `aux`/`args`
+字段）。这导致 Case 1（streq 结果比较）**永远不命中**，代码走入了通用的 CMP+SETcc 路径。
+通用路径的 `mapCmpOpToCond` 返回 `"eq"`（而非 `"e"`），虽然 `condCode` 函数能识别 `"eq"`，
+但比较的是**两个指针**（lhs 和 rhs 的地址），而非 streq 的返回值 ⇒ 所有 `==` 判真。
+
+**修复内容**（`InstructionSelection.aura`）：
+
+```diff
+- if (this.types.isInt64(rhsVal.type)
+-     && rhsVal.isConstant
+-     && rhsVal.constInt == 0) {
++ if (this.types.isInt64(rhsVal.type)
++     && rhsVal.isConst()
++     && (LirUtils.strToInt(rhsVal.aux) == 0 || LirUtils.strToInt(rhsVal.args) == 0)) {
 ```
-[MAIN]   base=2 cnt=6 a0=[Main.exe] a1=[tests\photon\P1\02_simple_vars.aura] a2=[-o] a3=[build\bmain\self.phir]
-[CMP]    run=1 same=1 diff=1 ab=1 empty=1     ← "a"=="b" 也是 1；cliArg(1)=="" 也是 1
-[RUNCLI] argc=6 a1=[…] a3=[…]
-Usage: …                                     ← base=2 ⇒ i 从 3 起 ⇒ 走 usage
-```
 
-⇒ **所有 `==` 判真** ⇒ `base=2` ⇒ 走 usage ⇒ Step 4c 未闭环。
+这使 Case 1 正确命中：当 rhs 是常量 0 时，直接对 streq 结果做 `cmp 0 + setcc`，
+而非对两个指针做通用比较。
 
-两条判别路径（任一即可定位）：
+**待验证**：需重建驱动后复验 `[CMP]` 输出（`run=1 same=0 diff=1 ab=0 empty=0`）。
 
-1. 在 `main` 里每个 `if` **之后立即打印**对应 `cX` —— 区分「分支体无条件执行」与「多个局部量共用同一槽」；
-2. 查 `emitJcc` / `emitJmp` 的**跳转距离与标签回填**（`main` 是模块最大函数；若按 **rel8** 编码而无范围处理 ⇒ 控制流落到错误目标，恰好表现为"小函数对、大函数错"）。
+### P1 —— Step 4c 闭环 / 链接未定义符号
 
-### P1 —— Step 4c 闭环
+> ✅ **本轮已修复**（2026-09-27）：
 
-让自举产物编译 `tests\photon\P1\02_simple_vars.aura` 并产出 `build\bmain\self.phir`；随后撤掉启动标记与守卫。
+**问题**：`Ast.aura` 模块的 `leaf`、`kidsOf`、`spanOf` 方法未被编译到输出中，
+链接时报 `undefined symbol: leaf`、`undefined symbol: kidsOf`、`undefined symbol: spanOf`。
+
+**根因**：这三个方法同时被 `Ast`、`Hir`、`Mir` 三个类声明（全局唯一属主回退必然歧义），
+而 HIR 降低器未正确传播接收者类型（`receiverClassOf` 返回 `""`），导致
+`resolveMethodSymbol` 的三级回退全部失手 ⇒ 调用点退化成裸名。
+
+**修复内容**（`InstructionSelection.aura::mapStdlibFuncName`）：
+
+1. **按接收者类型消歧**（`recvTy == "Ast"` / `"Hir"` / `"Mir"`）：
+   `Ast_leaf` / `Hir_leaf` / `Mir_leaf` 等。
+
+2. **兜底启发式**（`recvTy` 未正确传播时）：
+   当 `recvTy` 不是 `"Hir"` 或 `"Mir"` 时，`leaf`/`kidsOf`/`spanOf` 兜底到 `Ast_*`
+   （实测自举 `Main.exe` 的未定义符号全是 Ast 侧的调用）。
+
+**待验证**：需重建驱动后复验链接是否消除这三个未定义符号。
 
 ### P2 —— 驱动内置链接缺 `kernel32.lib`
 
@@ -205,9 +244,11 @@ powershell -Command "& '.\scripts\photon\bootstrap-photon.ps1' -Step 4,5"
 ## 4. 一句话交接
 
 链路已从「29 个未定义符号 + 启动即崩」推进到「**零未定义、可运行、参数通道打通、无死循环**」；
-**唯一拦路石是字符串判等 / 分支控制流（P0）** —— 修掉它 Step 4c 即闭环，之后按 P1 → P4 收尾。
+**本轮修复了 P0（SETcc 条件码引用错误）和 P1（`leaf`/`kidsOf`/`spanOf` 未定义符号）**，
+但**需重建驱动后复验**。当前 `aura.exe` 不支持 `build` 命令，需找到替代构建方案。
 
-**另有一条独立主线**：类支持缺口 **A3 / A4 / A6**（自举前端无类意识、类方法无 `self` 且裸名发射、
-无虚方法分派 —— 见 §2.5，原始定义在 `implementation-deviation-analysis.md` §12.2/§12.3）。
-它与 Photon 主链路**互不阻塞**，但两者都依赖同一个回归基线（`photon-hat-native-suite` 15/15），
-建议：**先清 P0 闭环 Step 4c，再动 A3/A4/A6**（A 系列开工前务必先用 `class_probe` 复核现状）。
+**待办优先级**：
+1. 找到可用的驱动重建方案（`aura.exe build` 命令缺失）
+2. 重建驱动后复验 P0/P1 修复
+3. P1 Step 4c 闭环 → P4 清理诊断
+4. 类支持缺口 A3/A4/A6（独立主线，见 §2.5）

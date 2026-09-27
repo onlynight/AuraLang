@@ -7,7 +7,7 @@ import aura.lang.collection.HashMap
 import aura.lang.collection.ArrayList
 
 // ── Sibling module imports ──
-import "DebugVm.aura"
+import aura.lang.debugger.DebugVm
 
 // ═══════════════════════════════════════════════════════════════
 // BreakpointManager — manages breakpoint set

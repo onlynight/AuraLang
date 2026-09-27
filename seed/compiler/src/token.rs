@@ -41,6 +41,7 @@ pub enum TokenKind {
     Public,
     Private,
     Protected,
+    Internal,
     Null,
     This,
     Super,

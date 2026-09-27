@@ -10,10 +10,8 @@ package aura.lang.compiler.mir
 import aura.lang.std.String
 import aura.lang.std.Env
 import aura.lang.collection.ArrayList
-// 同包依赖：TypeRegistry 为字段依赖，MirUtils（mirSplit）为同包助手。
-// 同包符号需显式导入才进入编译单元（否则退化为未解析调用 #65535）。
-import "TypeRegistry.aura"
-import "Mir.aura"
+import aura.lang.compiler.mir.TypeRegistry
+import aura.lang.compiler.mir.Mir
 
 // ─────────────────────────────────────────────────────────────
 // MirValue — SSA 值节点

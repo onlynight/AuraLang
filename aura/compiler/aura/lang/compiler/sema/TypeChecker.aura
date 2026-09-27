@@ -216,43 +216,94 @@ class TypeChecker {
     /// 收集函数声明。
     fun tcCollectFunDecl(ast: Ast, id: Int) {
         val name: String = ast.textOf(id)
-        val ty: String = ast.tyOf(id)
-        this.st.stInsert(name, "Fn", "public", false, "", ty)
+        val rawTy: String = ast.tyOf(id)
+        val vis: String = this.tcExtractVis(rawTy)
+        val ty: String = this.tcExtractTy(rawTy)
+        this.st.stInsert(name, "Fn", vis, false, "", ty)
     }
 
     /// 收集类型声明（struct/class/object）。
     fun tcCollectTypeDecl(ast: Ast, id: Int) {
         val name: String = ast.textOf(id)
-        this.st.stInsert(name, "Type", "public", false, "", name)
+        val rawTy: String = ast.tyOf(id)
+        val vis: String = this.tcExtractVis(rawTy)
+        val parentTy: String = this.tcExtractTy(rawTy)
+        this.st.stInsert(name, "Type", vis, false, "", name)
     }
 
     /// 收集枚举声明。
     fun tcCollectEnumDecl(ast: Ast, id: Int) {
         val name: String = ast.textOf(id)
-        this.st.stInsert(name, "Type", "public", false, "", name)
+        val rawTy: String = ast.tyOf(id)
+        val vis: String = this.tcExtractVis(rawTy)
+        this.st.stInsert(name, "Type", vis, false, "", name)
     }
 
     /// 收集全局变量声明。
     fun tcCollectGlobalVar(ast: Ast, id: Int) {
         val name: String = ast.textOf(id)
-        val ty: String = ast.tyOf(id)
+        val rawTy: String = ast.tyOf(id)
+        val vis: String = this.tcExtractVis(rawTy)
+        val ty: String = this.tcExtractTy(rawTy)
         val mutable: Boolean = ast.kindOf(id) == "VarDecl"
-        this.st.stInsert(name, "Var", "public", mutable, "", ty)
+        this.st.stInsert(name, "Var", vis, mutable, "", ty)
     }
 
     /// 收集类型别名。
     fun tcCollectTypealias(ast: Ast, id: Int) {
         val name: String = ast.textOf(id)
+        val rawTy: String = ast.tyOf(id)
+        val vis: String = this.tcExtractVis(rawTy)
+        val baseTy: String = this.tcExtractTy(rawTy)
         // 取子节点（类型表达式）
         val kids: String = ast.kidsOf(id)
         val kCount: Int = kidsCount(kids)
         if (kCount > 0) {
             val childId: Int = kidsAt(kids, 0)
             val ty: String = ast.textOf(childId)
-            this.st.stInsert(name, "Type", "public", false, "", ty)
+            this.st.stInsert(name, "Type", vis, false, "", ty)
         } else {
-            this.st.stInsert(name, "Type", "public", false, "", "Any")
+            this.st.stInsert(name, "Type", vis, false, "", "Any")
         }
+    }
+
+    /// 从 `#vis|ty` 格式的类型字段中提取可见性修饰符。
+    fun tcExtractVis(rawTy: String): String {
+        if (rawTy.length > 0 && rawTy.charAt(0) == "#") {
+            val pipeIdx: Int = this.tcIndexOf(rawTy, "|")
+            if (pipeIdx > 0) {
+                return rawTy.substring(1, pipeIdx)
+            }
+            return rawTy.substring(1)
+        }
+        return "public"
+    }
+
+    /// 从 `#vis|ty` 格式的类型字段中提取实际类型。
+    fun tcExtractTy(rawTy: String): String {
+        if (rawTy.length > 0 && rawTy.charAt(0) == "#") {
+            val pipeIdx: Int = this.tcIndexOf(rawTy, "|")
+            if (pipeIdx >= 0) {
+                return rawTy.substring(pipeIdx + 1)
+            }
+            return ""
+        }
+        return rawTy
+    }
+
+    /// 在字符串中查找子串的索引（返回 -1 表示未找到）。
+    fun tcIndexOf(s: String, sub: String): Int {
+        if (s == "" || sub == "") {
+            return -1
+        }
+        var i: Int = 0
+        while (i + sub.length <= s.length) {
+            if (s.substring(i, i + sub.length) == sub) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
     }
 
     // ── 阶段 2：检查函数体 ──

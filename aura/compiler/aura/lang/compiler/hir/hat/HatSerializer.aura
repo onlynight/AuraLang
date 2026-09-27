@@ -8,8 +8,8 @@ package aura.lang.compiler.hir.hat
 
 import aura.lang.std.String
 import aura.lang.collection.ArrayList
-import "../../mir/SsaMir.aura"
-import "../../mir/TypeRegistry.aura"
+import aura.lang.compiler.mir.SsaMir
+import aura.lang.compiler.mir.TypeRegistry
 
 /// HAT 序列化器：将 SSA MIR 程序序列化为 HAT 文本。
 class HatSerializer {

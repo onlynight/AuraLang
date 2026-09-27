@@ -5,12 +5,12 @@ import aura.lang.std.Collections
 import aura.lang.std.FileSystem
 import aura.lang.std.Process
 
-import "Task.aura"
-import "Manifest.aura"
-import "BuildCache.aura"
-import "LoomError.aura"
-import "TaskType.aura"
-import "FileIO.aura"
+import aura.lang.loom.Task
+import aura.lang.loom.Manifest
+import aura.lang.loom.BuildCache
+import aura.lang.loom.LoomError
+import aura.lang.loom.TaskType
+import aura.lang.loom.FileIO
 
 // ═══════════════════════════════════════════════════════════════
 // TaskExecutor（任务执行器 — 纯 Aura，编译委托外部 aura 编译器）

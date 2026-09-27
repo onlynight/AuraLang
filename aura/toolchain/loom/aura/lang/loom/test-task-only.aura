@@ -1,8 +1,8 @@
 // aura:///test/task-only.aura
 package test
 
-import "Task.aura"
-import "TaskType.aura"
+import aura.lang.loom.Task
+import aura.lang.loom.TaskType
 
 fun testTask(): Int {
     println("creating task...")

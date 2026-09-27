@@ -7,7 +7,7 @@ package aura.lang.compiler.hir
 import aura.lang.std.String
 import aura.lang.std.FileSystem
 import aura.lang.compiler.lexer.Span
-import "HirSerializer.aura"
+import aura.lang.compiler.hir.HirSerializer
 
 /// HIR 序列化器工具类。
 object HirSerializerUtils {

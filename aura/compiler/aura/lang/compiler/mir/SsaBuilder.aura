@@ -20,14 +20,12 @@ package aura.lang.compiler.mir
 
 import aura.lang.std.String
 import aura.lang.std.Env
-import "../hir/Hir.aura"
-import "../lexer/Span.aura"
-// 同包依赖：输出程序类型 / 类型注册表 / 扁平字符串助手。
-// 同包符号需显式导入才进入编译单元（否则退化为未解析调用 #65535）。
-import "SsaMir.aura"
-import "TypeRegistry.aura"
-import "Mir.aura"
-import "Linearizer.aura"
+import aura.lang.compiler.hir.Hir
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.mir.SsaMir
+import aura.lang.compiler.mir.TypeRegistry
+import aura.lang.compiler.mir.Mir
+import aura.lang.compiler.mir.Linearizer
 
 /// HIR → SSA MIR 构建器。
 class SsaBuilder {

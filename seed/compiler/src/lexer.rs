@@ -50,6 +50,7 @@ const KEYWORDS: &[(&str, TokenKind)] = &[
     ("public", TokenKind::Public),
     ("private", TokenKind::Private),
     ("protected", TokenKind::Protected),
+    ("internal", TokenKind::Internal),
     ("null", TokenKind::Null),
     ("this", TokenKind::This),
     ("super", TokenKind::Super),

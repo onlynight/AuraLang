@@ -12,11 +12,11 @@ package aura.lang.compiler.mir
 // 运行：aura run aura/compiler/aura/lang/compiler/mir/MirSsaTest.aura
 // ─────────────────────────────────────────────────────────────
 
-import "../test/TestRunner.aura"
-import "TypeRegistry.aura"
-import "SsaMir.aura"
-import "SsaBuilder.aura"
-import "Linearizer.aura"
+import aura.lang.compiler.test.TestRunner
+import aura.lang.compiler.mir.TypeRegistry
+import aura.lang.compiler.mir.SsaMir
+import aura.lang.compiler.mir.SsaBuilder
+import aura.lang.compiler.mir.Linearizer
 
 fun main() {
     val t: TestRunner = TestRunner()

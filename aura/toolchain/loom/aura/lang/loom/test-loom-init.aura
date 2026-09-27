@@ -4,10 +4,10 @@ package test
 import aura.lang.std.String
 import aura.lang.std.Process
 
-import "LoomMain.aura"
-import "Manifest.aura"
-import "TaskGraph.aura"
-import "Task.aura"
+import aura.lang.loom.LoomMain
+import aura.lang.loom.Manifest
+import aura.lang.loom.TaskGraph
+import aura.lang.loom.Task
 
 fun testLoomInit(): Int {
     println("starting loom init test")

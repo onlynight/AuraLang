@@ -1820,13 +1820,34 @@ class HirLowerer {
                 // 必须降级「成员节点的接收者子节点」本身，而不是成员节点：若降级成员节点，
                 // kids[0] 会变成一次成员访问（求值得到 0/null），方法调用丢失接收者，
                 // 生成 `toString(i32 0)` 这类错误 IR。
-                calleeName = ast.textOf(calleeId)
                 val mKids: String = ast.kidsOf(calleeId)
                 if (HirUtils.hirKidsCount(mKids) > 0) {
-                    val recvHir: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(mKids, 0))
+                    val recvId: Int = HirUtils.hirKidsAt(mKids, 0)
+                    // P1 fix: 若接收者是简单标识符且大写开头（类名约定），
+                    // 生成限定名 ClassName_method 以匹配 functionSignature 的限定方法名。
+                    // 小写开头视为变量，保留裸名由 Emit.aura 回退逻辑解析。
+                    if (ast.kindOf(recvId) == "Ident") {
+                        val recvName: String = ast.textOf(recvId)
+                        if (recvName.length() > 0) {
+                            val first: String = recvName.substring(0, 1)
+                            val fc: Int = first.charCodeAt(0)
+                            if (fc >= 65 && fc <= 90) {  // 'A'..'Z'
+                                calleeName = recvName + "_" + ast.textOf(calleeId)
+                            } else {
+                                calleeName = ast.textOf(calleeId)
+                            }
+                        } else {
+                            calleeName = ast.textOf(calleeId)
+                        }
+                    } else {
+                        calleeName = ast.textOf(calleeId)
+                    }
+                    val recvHir: Int = this.lowerExpr(ast, recvId)
                     if (recvHir >= 0) {
                         hirKids = HirUtils.hirKidsAdd(hirKids, recvHir)
                     }
+                } else {
+                    calleeName = ast.textOf(calleeId)
                 }
                 argStart = 1
             } else {

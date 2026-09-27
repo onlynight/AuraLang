@@ -20,6 +20,7 @@ impl Visibility {
         match t.kind {
             TokenKind::Public => Some(Visibility::Public),
             TokenKind::Protected => Some(Visibility::Protected),
+            TokenKind::Internal => Some(Visibility::Internal),
             _ => None,
         }
     }

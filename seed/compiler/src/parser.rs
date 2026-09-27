@@ -678,7 +678,11 @@ impl Parser {
             self.advance();
             return Visibility::Private;
         }
-        // internal：模块级可见性（上下文关键字，AST 已有 Visibility::Internal 变体）
+        if self.check(TokenKind::Internal) {
+            self.advance();
+            return Visibility::Internal;
+        }
+        // internal：上下文关键字兜底（兼容旧路径）
         if self.is_internal_visibility() {
             self.advance();
             return Visibility::Internal;
@@ -857,13 +861,14 @@ impl Parser {
         if i < self.tokens.len()
             && matches!(
                 self.tokens[i].kind,
-                TokenKind::Public | TokenKind::Private | TokenKind::Protected
+                TokenKind::Public | TokenKind::Private | TokenKind::Protected | TokenKind::Internal
             )
         {
             vis = match self.tokens[i].kind {
                 TokenKind::Public => Visibility::Public,
                 TokenKind::Private => Visibility::Private,
                 TokenKind::Protected => Visibility::Protected,
+                TokenKind::Internal => Visibility::Internal,
                 _ => unreachable!(),
             };
             i += 1;

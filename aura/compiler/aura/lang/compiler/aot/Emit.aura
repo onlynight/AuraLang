@@ -7259,6 +7259,29 @@ class LlvmEmitter {
                 userSig = fs
             }
         }
+        // 3.1) 裸名类方法回退：`leaf` / `kidsOf` / `spanOf` 等裸方法名
+        //      在签名表中是 `ClassName_methodName`（见 `functionSignature`），
+        //      但 `lowerCall` 只取成员名 → 裸名查不到。
+        //      扫描 fMethodNodes 寻找匹配的方法名，用限定名解析。
+        if (userSig == "" && aotIndexOfSub(fname, "_") < 0) {
+            var mnIdx: Int = 0
+            var foundMn: String = ""
+            val mnLines: Int = aotLineCount(this.fMethodNodes)
+            while (mnIdx < mnLines) {
+                val mnLine: String = aotLineAt(this.fMethodNodes, mnIdx)
+                if (aotFieldAt(mnLine, 1, "|") == fname) {
+                    foundMn = aotFieldAt(mnLine, 0, "|") + "_" + fname
+                    break
+                }
+                mnIdx = mnIdx + 1
+            }
+            if (foundMn != "") {
+                val mnSig: String = this.funcSignatureOf(foundMn)
+                if (mnSig != "") {
+                    userSig = mnSig
+                }
+            }
+        }
 
         if (userSig != "") {
             retTy = aotFieldAt(userSig, 1, "|")

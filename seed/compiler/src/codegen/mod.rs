@@ -344,6 +344,33 @@ fn resolve_aura_imports_rec(
 ) -> String {
     let mut result = String::new();
 
+    // ── 同包名自动导入：提取 package 声明，自动内联同目录下所有 .aura 文件 ──
+    let pkg_name = extract_package_from_source(source);
+    if let Some(pkg) = &pkg_name {
+        if !pkg.is_empty() {
+            let siblings = find_same_package_files(pkg, base_dir);
+            for sib_path in siblings {
+                let canon = std::fs::canonicalize(&sib_path).unwrap_or_else(|_| sib_path.clone());
+                if visited.contains(&canon) {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&sib_path) {
+                    visited.insert(canon);
+                    let child_base = sib_path.parent().unwrap_or(base_dir);
+                    let resolved = resolve_aura_imports_rec(
+                        &content,
+                        compiler_pkg_root,
+                        photon_pkg_root,
+                        collection_pkg_root,
+                        child_base,
+                        visited,
+                    );
+                    result.push_str(&resolved);
+                }
+            }
+        }
+    }
+
     for line in source.lines() {
         let trimmed = line.trim_start();
         // 包声明（如 `package aura.lang.compiler.lexer`）由编译器消费，
@@ -490,6 +517,80 @@ fn pkg_to_aura_path(pkg: &str) -> String {
         }
         _ => format!("{}.aura", pkg),
     }
+}
+
+/// 从源代码中提取 `package` 声明（返回 `Some(package_name)` 或 `None`）。
+fn extract_package_from_source(source: &str) -> Option<String> {
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("package ") {
+            let pkg = rest.trim().split_whitespace().next().unwrap_or("").to_string();
+            return Some(pkg);
+        }
+    }
+    None
+}
+
+/// 查找同包下的所有 .aura 文件（排除自身）。
+/// 使用预生成的索引文件 `aura/.aura_index.txt`（格式：`package|relativePath`），
+/// 避免运行时目录遍历。
+fn find_same_package_files(pkg_name: &str, base_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    // 确定 aura/ 根目录
+    let aura_root = find_aura_root(base_dir);
+    if aura_root.is_none() {
+        return Vec::new();
+    }
+    let aura_root = aura_root.unwrap();
+    // 读取索引文件
+    let index_path = aura_root.join(".aura_index.txt");
+    if !index_path.is_file() {
+        return Vec::new();
+    }
+    let index_content = match std::fs::read_to_string(&index_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    // 遍历索引，收集同包文件
+    let mut results = Vec::new();
+    for line in index_content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let sep = match line.find('|') {
+            Some(i) => i,
+            None => continue,
+        };
+        let pkg = &line[..sep];
+        let rel_path = &line[sep + 1..];
+        if pkg == pkg_name {
+            let full_path = aura_root.join(rel_path);
+            results.push(full_path);
+        }
+    }
+    results
+}
+
+/// 从路径中提取 aura/ 根目录。
+/// 例如：`aura/compiler/...` → `aura`
+///       `D:\Code\AuraLang\aura\compiler\...` → `D:\Code\AuraLang\aura`
+fn find_aura_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let path_str = path.to_string_lossy();
+    let mut pos = 0;
+    let len = path_str.len();
+    while pos + 4 <= len {
+        if &path_str[pos..pos + 4] == "aura" {
+            if pos + 4 >= len {
+                return Some(std::path::PathBuf::from(&path_str[..pos + 4]));
+            }
+            let next = path_str.as_bytes()[pos + 4];
+            if next == b'/' || next == b'\\' {
+                return Some(std::path::PathBuf::from(&path_str[..pos + 4]));
+            }
+        }
+        pos += 1;
+    }
+    None
 }
 
 /// 从 `start` 向上查找项目根目录（包含 `Cargo.toml` 的目录）。

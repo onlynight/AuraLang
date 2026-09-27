@@ -6,14 +6,14 @@ import aura.lang.std.Collections
 import aura.lang.std.IO
 import aura.lang.std.FileSystem
 
-import "Manifest.aura"
-import "TaskGraph.aura"
-import "BuildCache.aura"
-import "TaskExecutor.aura"
-import "Task.aura"
-import "LoomError.aura"
-import "TaskType.aura"
-import "FileIO.aura"
+import aura.lang.loom.Manifest
+import aura.lang.loom.TaskGraph
+import aura.lang.loom.BuildCache
+import aura.lang.loom.TaskExecutor
+import aura.lang.loom.Task
+import aura.lang.loom.LoomError
+import aura.lang.loom.TaskType
+import aura.lang.loom.FileIO
 
 // Loom — main class
 class Loom {

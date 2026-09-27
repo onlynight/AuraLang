@@ -29,7 +29,7 @@ object TokenUtils {
             + "\nenum|Enum\nactor|Actor\nsealed|Sealed\nreturn|Return\nif|If\nelse|Else\nwhen|When"
             + "\nfor|For\nin|In\nwhile|While\ndo|Do\nbreak|Break\ncontinue|Continue\ntry|Try"
             + "\ncatch|Catch\nfinally|Finally\nthrow|Throw\nis|Is\nas|As\npublic|Public"
-            + "\nprivate|Private\nprotected|Protected\nnull|Null\nthis|This\nsuper|Super"
+            + "\nprivate|Private\nprotected|Protected\ninternal|Internal\nnull|Null\nthis|This\nsuper|Super"
             + "\nobject|Object\nunit|Unit\ntypealias|Typealias\noverride|Override\nsuspend|Suspend"
             + "\ninline|Inline\nconst|Const\ncomptime|Comptime\ndefer|Defer\nextern|Extern"
             + "\nimport|Import\npackage|Package\nlazy|Lazy\nlateinit|Lateinit\ndata|Data\nvalue|Value\nawait|Await"

@@ -6,8 +6,8 @@ import aura.lang.std.String
 import aura.lang.std.IO
 
 // ── Sibling module imports ──
-import "DebugSession.aura"
-import "DebugVm.aura"
+import aura.lang.debugger.DebugSession
+import aura.lang.debugger.DebugVm
 
 // ═══════════════════════════════════════════════════════════════
 // DebugRepl — interactive debugger command interpreter

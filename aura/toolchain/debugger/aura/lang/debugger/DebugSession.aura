@@ -18,10 +18,10 @@ import aura.lang.compiler.mir.MirLower
 import aura.lang.compiler.codegen.Codegen
 
 // ── Sibling module imports ──
-import "DebugVm.aura"
-import "SourceMap.aura"
-import "BreakpointManager.aura"
-import "FileIO.aura"
+import aura.lang.debugger.DebugVm
+import aura.lang.debugger.SourceMap
+import aura.lang.debugger.BreakpointManager
+import aura.lang.debugger.FileIO
 
 // ═══════════════════════════════════════════════════════════════
 // DebugSession — orchestrates the debugging lifecycle:

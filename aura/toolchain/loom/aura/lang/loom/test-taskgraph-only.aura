@@ -1,9 +1,9 @@
 // aura:///test/taskgraph-only.aura
 package test
 
-import "TaskGraph.aura"
-import "Task.aura"
-import "TaskType.aura"
+import aura.lang.loom.TaskGraph
+import aura.lang.loom.Task
+import aura.lang.loom.TaskType
 
 fun testTaskGraph(): Int {
     println("creating taskgraph...")

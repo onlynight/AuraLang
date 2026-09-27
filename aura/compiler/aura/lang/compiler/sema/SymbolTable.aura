@@ -238,6 +238,12 @@ class SymbolTable {
         return this.stField(line, 1, "|")
     }
 
+    /// 取符号条目的可见性修饰符。
+    fun stEntryVisibility(idx: Int): String {
+        val line: String = this.stLineAt(this.entries, idx)
+        return this.stField(line, 2, "|")
+    }
+
     /// 取符号条目的类型。
     fun stEntryType(idx: Int): String {
         val line: String = this.stLineAt(this.entries, idx)

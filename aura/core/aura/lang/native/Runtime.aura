@@ -15,8 +15,8 @@ import aura.lang.native.Cpu
 import aura.lang.native.memory.Allocator
 import aura.lang.std.string.StringOps
 import aura.lang.native.console.Console
-import "Memory.aura"
-import "GC.aura"
+import aura.lang.native.Memory
+import aura.lang.native.GC
 
 /// Runtime - declarations
 extern interface Runtime {

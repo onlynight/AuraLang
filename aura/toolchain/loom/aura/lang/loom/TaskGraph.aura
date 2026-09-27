@@ -3,9 +3,9 @@ package aura.lang.loom
 
 import aura.lang.std.Collections
 
-import "Task.aura"
-import "LoomError.aura"
-import "TaskExecutor.aura"
+import aura.lang.loom.Task
+import aura.lang.loom.LoomError
+import aura.lang.loom.TaskExecutor
 
 // TaskGraph — uses string-based storage (VM List/Map bugs)
 class TaskGraph {

@@ -1,4 +1,4 @@
-import ""DebugVm.aura""
+import aura.lang.debugger.DebugVm
 
 class Wrapper {
     var vm: DebugVm = DebugVm()

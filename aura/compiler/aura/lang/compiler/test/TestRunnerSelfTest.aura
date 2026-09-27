@@ -11,7 +11,7 @@ package aura.lang.compiler.test
 //       import 时不会产生 main 冲突；本文件是它的可运行驱动。
 // ─────────────────────────────────────────────────────────────
 
-import "TestRunner.aura"
+import aura.lang.compiler.test.TestRunner
 
 fun main() {
     println("TestRunner self-test")

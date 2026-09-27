@@ -8,7 +8,7 @@ package aura.lang.native
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import "Memory.aura"
+import aura.lang.native.Memory
 
 /// ARC 对象头
 /// [0..7]: 引用计数 (Int64)

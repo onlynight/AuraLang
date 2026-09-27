@@ -6,6 +6,10 @@ edition.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "aura"
+path = "src/main.rs"
+
 [dependencies]
 cranelift = { version = "0.116", optional = true }
 cranelift-jit = { version = "0.116", optional = true }

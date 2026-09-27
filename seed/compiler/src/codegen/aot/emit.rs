@@ -2724,10 +2724,11 @@ fn emit_expr_val(
                         resolved = cand;
                     }
                 }
+                // 回退：若仍无法解析，扫描 func_ret_types 寻找 `*.name` 候选
                 if resolved == *name {
                     let suffix = format!(".{}", name);
-                    if let Some(k) =
-                        ctx.func_ret_types.keys().find(|k| k.ends_with(&suffix)).cloned()
+                    if let Some(k) = ctx
+                        .func_ret_types.keys().find(|k| k.ends_with(&suffix)).cloned()
                     {
                         resolved = k;
                     }

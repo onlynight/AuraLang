@@ -23,7 +23,7 @@ import aura.lang.std.Time
 import aura.lang.native.Memory
 import aura.lang.native.Cpu
 import aura.lang.native.time.Clock
-import aura.lang.native.thread.ThreadOps
+import aura.lang.native.ThreadOps
 import aura.lang.collection.HashMap
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.vm.Opcodes
