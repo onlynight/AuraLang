@@ -1,14 +1,14 @@
 // aura:///aura/lang/compiler/photon/PhotonPipeline.aura
 package aura.lang.compiler.photon
 // ─────────────────────────────────────────────────────────────
-// Photon 编译管线 �?Phase A-E 全流程集�?(S1.1)
+// Photon 编译管线 — Phase A-E 全流程集成 (S1.1)
 //
-// 按照 docs/Lir2MacCode/参考go rust设计新的编译后端.md 第九�?
-// 完整 AOT 管线�?
-//   HIR �?MIR (SSA) �?LIR �?Machine DAG �?RegAlloc �?Peephole
-//     �?X86Emitter �?PhotonObjectWriter (COFF) �?PhotonSystemLinker �?Executable
+// 按照 docs/Lir2MacCode/参考go rust设计新的编译后端.md 第九章
+// 完整 AOT 管线：
+//   HIR → MIR (SSA) → LIR → Machine DAG → RegAlloc → Peephole
+//     → X86Emitter → PhotonObjectWriter (COFF) → PhotonSystemLinker → Executable
 //
-// S1 修复：compileHir() 真正串上 8 步数据流，不再使用硬编码机器码�?
+// S1 修复：compileHir() 真正串上 8 步数据流，不再使用硬编码机器码。
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
@@ -39,7 +39,7 @@ import "PhotonObjectWriter.aura"
 import "PhotonSystemLinker.aura"
 import "PhotonLldConfig.aura"
 import "PhotonRuntime.aura"
-// 原生二进制落盘（hex �?malloc 缓冲 �?FileOps.write；VM/AOT 通用�?
+// 原生二进制落盘（hex → malloc 缓冲 → FileOps.write；VM/AOT 通用）
 import "PhotonNativeWriter.aura"
 import "X86Emitter.aura"
 import "x86_64/X86Encoder.aura"
@@ -51,7 +51,7 @@ import "../../hir/Hir.aura"
 import "../../hir/hat/HatParser.aura"
 import "../../hir/hat/HatSerializer.aura"
 
-/// 新后端编译结果�?
+/// 新后端编译结果。
 class BackendResult {
     var success: Boolean = false
     var errorMessage: String = ""
@@ -67,39 +67,39 @@ class BackendResult {
     var linkExitCode: Int = -1
 }
 
-/// Photon 编译管线：集�?Phase A-E 全部阶段�?
+/// Photon 编译管线：集成 Phase A-E 全部阶段。
 class PhotonPipeline {
 
-    /// 目标三元组�?
+    /// 目标三元组。
     private var targetTriple: String = "x86_64-pc-windows-msvc"
 
-    /// 优化级别�?
+    /// 优化级别。
     private var optLevel: Int = 1
 
-    /// 输出目录�?
+    /// 输出目录。
     var outDir: String = "."
 
-    /// 模块名�?
+    /// 模块名。
     var moduleName: String = "program"
 
-    /// 输出类型�?exe" / "dll" / "so" / "dylib" / "lib"）�?
+    /// 输出类型（"exe" / "dll" / "so" / "dylib" / "lib"）。
     private var outputType: String = "exe"
 
-    // ── .phir 递归下降解析器状�?──
+    // ── .phir 递归下降解析器状态 ──
 
-    /// 当前模块的全部行（按 '\n' 切分）�?
+    /// 当前模块的全部行（按 '\n' 切分）。
     private var phirLines: List<String> = arrayListOf<String>()
 
-    /// 当前解析到的行号�?
+    /// 当前解析到的行号。
     private var phirPos: Int = 0
 
-    /// 函数签名表（扁平字符�?"name=retType\n"）�?
+    /// 函数签名表（扁平字符串 "name=retType\n"）。
     private var phirSigs: String = ""
 
-    /// 当前函数的变量类型环境（扁平字符�?"name=ty\n"）�?
+    /// 当前函数的变量类型环境（扁平字符串 "name=ty\n"）。
     private var phirEnv: String = ""
 
-    // ── 临时性能探针（定位解析阶段内�?时间黑洞）──
+    // ── 临时性能探针（定位解析阶段内存/时间黑洞）──
     private var phirScanSig: Int = 0
     private var phirScanEnv: Int = 0
     private var phirScanCalls: Int = 0
@@ -117,15 +117,15 @@ class PhotonPipeline {
         this.phirEnv = ""
     }
 
-    /// 设置输出类型�?exe" / "dll" / "so" / "dylib" / "lib"）�?
+    /// 设置输出类型（"exe" / "dll" / "so" / "dylib" / "lib"）。
     fun setOutputType(t: String): Unit {
         this.outputType = t
     }
 
     // ── 主入口（保留旧签名兼容）──
 
-    /// 编译源码为可执行文件（完整管线）�?
-    /// S1 修复：保留旧签名但不再使用硬编码机器码�?
+    /// 编译源码为可执行文件（完整管线）。
+    /// S1 修复：保留旧签名但不再使用硬编码机器码。
     fun compile(source: String, outDir: String, moduleName: String): BackendResult {
         this.outDir = outDir
         this.moduleName = moduleName
@@ -133,54 +133,54 @@ class PhotonPipeline {
         val result = BackendResult()
 
         this.readVerboseFlag()
-        this.vprintln("[photon] compile() legacy mode �?use compileHir() for real data flow")
+        this.vprintln("[photon] compile() legacy mode — use compileHir() for real data flow")
 
         result.success = true
         return result
     }
 
-    // ── S1.1 真实数据流入�?──
+    // ── S1.1 真实数据流入口 ──
 
-    /// �?HIR 编译为可执行文件（S1 真实数据流）�?
+    /// 从 HIR 编译为可执行文件（S1 真实数据流）。
     ///
-    /// 数据流：HIR �?SSA MIR �?LIR �?MachineDag �?RegAlloc �?Encode �?COFF �?Link
-    /// 调试轨迹缓冲（AURA_PHOTON_TRACE=1 时落盘）�?
+    /// 数据流：HIR → SSA MIR → LIR → MachineDag → RegAlloc → Encode → COFF → Link
+    /// 调试轨迹缓冲（AURA_PHOTON_TRACE=1 时落盘）。
     private var traceBuf: String = ""
 
-    /// 轨迹起始时刻（毫秒），用于给每条轨迹打相对时间�?
+    /// 轨迹起始时刻（毫秒），用于给每条轨迹打相对时间。
     private var traceT0: Long = 0
 
-    // ── Phase E 定位探针（有界截断，�?`peProbe` 的说明）──
+    // ── Phase E 定位探针（有界截断，见 `peProbe` 的说明）──
     private var probePath: String = ""
     private var probeStep: Int = 0
     private var probeBuf: String = ""
 
-    /// 人类可读�?*阶段进度/心跳**输出是否开启（默认关闭）�?
+    /// 人类可读的**阶段进度/心跳**输出是否开启（默认关闭）。
     ///
-    /// 为什么默认关：HAT 独立链路�?stdout 应当**只有** `===...===` 协议标记
+    /// 为什么默认关：HAT 独立链路的 stdout 应当**只有** `===...===` 协议标记
     /// （构建脚本逐行解析 COFF hex / RESULT / ERR）。`[Phase X]` / `Step N` /
-    /// 机器码长度这类阶段进度是调试信息，实测每个用例白�?~40 行，把真正的
-    /// 错误淹没；在大工程（自举 `Main.aura`）下这些字符串拼接还是持续分配源�?
+    /// 机器码长度这类阶段进度是调试信息，实测每个用例白刷 ~40 行，把真正的
+    /// 错误淹没；在大工程（自举 `Main.aura`）下这些字符串拼接还是持续分配源。
     ///
     /// 调试开关一览（互不隐含，除 `TRACE` 隐含 `VERBOSE`）：
-    ///   `AURA_PHOTON_VERBOSE=1`   �?阶段进度/心跳（`[Phase A-E]`、`Step N`�?
-    ///                              函数/�?字节计数、前�?`[hat-front]`�?
-    ///   `AURA_PHOTON_TRACE=1`     �?上�?+ 节点级崩溃诊断（`[isel]`/`[bf*]`/
-    ///                              `[DAG]`�? `<out>/photon_trace.log` 落盘
-    ///   `AURA_HAT_TRACE=1`        �?HAT 解析器心跳（`[hat-parse]`，长任务�?
+    ///   `AURA_PHOTON_VERBOSE=1`   → 阶段进度/心跳（`[Phase A-E]`、`Step N`、
+    ///                              函数/值/字节计数、前端 `[hat-front]`）
+    ///   `AURA_PHOTON_TRACE=1`     → 上者 + 节点级崩溃诊断（`[isel]`/`[bf*]`/
+    ///                              `[DAG]`）+ `<out>/photon_trace.log` 落盘
+    ///   `AURA_HAT_TRACE=1`        → HAT 解析器心跳（`[hat-parse]`，长任务时
     ///                              区分「慢」与「卡死」）
-    ///   `AURA_PHOTON_DEBUG_HIR=1` �?SSA / LIR / DAG 全量转储
-    ///   `AURA_PHOTON_STOP=A|B|C|D` �?阶段短路（性能二分用）
+    ///   `AURA_PHOTON_DEBUG_HIR=1` → SSA / LIR / DAG 全量转储
+    ///   `AURA_PHOTON_STOP=A|B|C|D` → 阶段短路（性能二分用）
     ///
-    /// 真正需要用户看到的失败/告警（目标文件落盘失败、链接失败、`===ERR===`�?
-    /// **不走本开�?*，始终输出�?
+    /// 真正需要用户看到的失败/告警（目标文件落盘失败、链接失败、`===ERR===`）
+    /// **不走本开关**，始终输出。
     ///
-    /// �?必须在入口处算一次并缓存到字段：`Env.get` 每次调用都要重新读一�?
-    /// environ 缓冲（`EnvOps.readEnviron` + `Allocator.free`），放进循环�?
-    /// 持续分配源（�?`phirSigLookup` 的分配治理同理）�?
+    /// ⚠ 必须在入口处算一次并缓存到字段：`Env.get` 每次调用都要重新读一遍
+    /// environ 缓冲（`EnvOps.readEnviron` + `Allocator.free`），放进循环是
+    /// 持续分配源（与 `phirSigLookup` 的分配治理同理）。
     private var verboseOn: Boolean = false
 
-    /// 临时性能探针：类型环�?签名表的查询次数与累计扫描字符数�?
+    /// 临时性能探针：类型环境/签名表的查询次数与累计扫描字符数。
     private var dbgEnvGet: Int = 0
     private var dbgEnvSet: Int = 0
     private var dbgEnvScanned: Int = 0
@@ -188,23 +188,23 @@ class PhotonPipeline {
     private var dbgSigCalls: Int = 0
     private var dbgSigScanned: Int = 0
 
-    /// 追加一条调试轨迹并**立即落盘**�?
+    /// 追加一条调试轨迹并**立即落盘**。
     ///
-    /// 为什么落盘而不�?`println`：VM �?stdout 是带缓冲的，进程�?OOM killer
-    /// 终止时缓冲区内容整体丢失（实测大工程编译崩溃时终端一行都看不到）�?
-    /// 无法定位崩溃点。文件写入每条都同步，崩溃前的进度得以保留�?
+    /// 为什么落盘而不是 `println`：VM 的 stdout 是带缓冲的，进程被 OOM killer
+    /// 终止时缓冲区内容整体丢失（实测大工程编译崩溃时终端一行都看不到），
+    /// 无法定位崩溃点。文件写入每条都同步，崩溃前的进度得以保留。
     private fun traceMark(msg: String): Unit {
         if (Env.get("AURA_PHOTON_TRACE") != "1") { return }
-        // 注意：不要用 Clock.timeMs() —�?该原生在 VM 路径�?*未注�?*
-        //（`[bytecode] error: 未解析的函数调用 'Clock.timeMs'`），会让驱动直接失败�?
+        // 注意：不要用 Clock.timeMs() —— 该原生在 VM 路径下**未注册**
+        //（`[bytecode] error: 未解析的函数调用 'Clock.timeMs'`），会让驱动直接失败。
         this.traceBuf = this.traceBuf + msg + "\n"
         FileSystem.writeText(this.outDir + "/photon_trace.log", this.traceBuf)
     }
 
-    /// 读取 Phase E 探针输出路径；空串表示关闭�?
+    /// 读取 Phase E 探针输出路径；空串表示关闭。
     ///
-    /// �?Phase C/D 同一套开关：`AURA_PE_PROBE=1` / `AURA_SEL_PROBE=1` /
-    /// `AURA_MEM_STATS=1`；`AURA_PE_PROBE_PATH` 可覆盖输出文件�?
+    /// 与 Phase C/D 同一套开关：`AURA_PE_PROBE=1` / `AURA_SEL_PROBE=1` /
+    /// `AURA_MEM_STATS=1`；`AURA_PE_PROBE_PATH` 可覆盖输出文件。
     private fun readProbePath(): String {
         if (Env.get("AURA_PE_PROBE", "") != "1" &&
             Env.get("AURA_SEL_PROBE", Env.get("AURA_MEM_STATS", "")) != "1") {
@@ -217,12 +217,12 @@ class PhotonPipeline {
         return dir + "/pe_probe.log"
     }
 
-    /// Phase E **定位探针**：把当前上下文立即落盘（锁定内存失控点）�?
+    /// Phase E **定位探针**：把当前上下文立即落盘（锁定内存失控点）。
     ///
-    /// �?`InstructionSelection.selProbe` / `RegisterAllocator.raProbe` 同法�?
-    /// 有界截断（只保留尾部 2.5KB，每次重写一�?�?KB 小文件）——累积式落盘
-    /// 本身就会成为持续分配源，那正是我们要抓的病。OOM 时本文件的最后几�?
-    /// 就是出事的精确上下文�?
+    /// 与 `InstructionSelection.selProbe` / `RegisterAllocator.raProbe` 同法：
+    /// 有界截断（只保留尾部 2.5KB，每次重写一个 ≤3KB 小文件）——累积式落盘
+    /// 本身就会成为持续分配源，那正是我们要抓的病。OOM 时本文件的最后几行
+    /// 就是出事的精确上下文。
     private fun peProbe(msg: String): Unit {
         if (this.probePath == "") { return }
         this.probeStep = this.probeStep + 1
@@ -233,16 +233,16 @@ class PhotonPipeline {
         FileSystem.writeText(this.probePath, this.probeBuf)
     }
 
-    /// 读取一次进度开关并缓存�?`verboseOn`（见字段说明）�?
+    /// 读取一次进度开关并缓存到 `verboseOn`（见字段说明）。
     private fun readVerboseFlag(): Unit {
         this.verboseOn = Env.get("AURA_PHOTON_VERBOSE", "") == "1"
                 || Env.get("AURA_PHOTON_TRACE", "") == "1"
     }
 
-    /// 阶段进度/心跳输出：`verboseOn` 为假时直接丢弃�?
+    /// 阶段进度/心跳输出：`verboseOn` 为假时直接丢弃。
     ///
-    /// 所有「进度类」输出统一走这里，保持默认输出只有 `===...===` 协议标记�?
-    /// 真正的失�?告警（落盘失败、链接失败、`===ERR===`）仍用裸 `println`�?
+    /// 所有「进度类」输出统一走这里，保持默认输出只有 `===...===` 协议标记。
+    /// 真正的失败/告警（落盘失败、链接失败、`===ERR===`）仍用裸 `println`。
     private fun vprintln(msg: String): Unit {
         if (this.verboseOn) {
             println(msg)
@@ -258,20 +258,20 @@ class PhotonPipeline {
         this.readVerboseFlag()
         this.probePath = this.readProbePath()
         this.vprintln("╔══════════════════════════════════════════════╗")
-        this.vprintln("�?  Photon AOT 编译管线 �?S1 真实数据�?       �?)
+        this.vprintln("║   Photon AOT 编译管线 — S1 真实数据流        ║")
         this.vprintln("╚══════════════════════════════════════════════╝")
 
-        // 输出目录必须先存在�?
+        // 输出目录必须先存在。
         //
-        // VM 路径�?`FileSystem.writeText` **不会**自动创建父目�?�?目录缺失�?
-        // 写目标文�?runtime 对象全部静默失败，随后链接必然报 rc=-1
-        //（实测：`build/photon_test` 曾被一个同�?.phir 文件占位，于是整�?
-        //  Phase E 的落盘都「失败」而没有任何报错）�?
+        // VM 路径下 `FileSystem.writeText` **不会**自动创建父目录 → 目录缺失时
+        // 写目标文件/runtime 对象全部静默失败，随后链接必然报 rc=-1
+        //（实测：`build/photon_test` 曾被一个同名 .phir 文件占位，于是整条
+        //  Phase E 的落盘都「失败」而没有任何报错）。
         FileSystem.mkdirP(this.outDir)
 
-        // ── Phase A: HIR �?SSA MIR ──
+        // ── Phase A: HIR → SSA MIR ──
         this.traceMark("phaseA")
-        this.vprintln("[Phase A] HIR �?SSA MIR (SsaBuilder)")
+        this.vprintln("[Phase A] HIR → SSA MIR (SsaBuilder)")
         val ssaBuilder = SsaBuilderUtils.build(hir)
         this.vprintln("  functions=" + ssaBuilder.functionCount +
                 " values=" + ssaBuilder.valueCount +
@@ -285,9 +285,9 @@ class PhotonPipeline {
             return result
         }
 
-        // ── Phase B: MIR �?LIR ──
+        // ── Phase B: MIR → LIR ──
         this.traceMark("phaseB")
-        this.vprintln("[Phase B] MIR �?LIR (Lowering)")
+        this.vprintln("[Phase B] MIR → LIR (Lowering)")
         val lowering = Lowering()
         val lir = lowering.lower(ssaBuilder)
         this.vprintln("  LIR functions=" + lir.functionCount +
@@ -301,9 +301,9 @@ class PhotonPipeline {
             return result
         }
 
-        // ── Phase C: LIR �?Machine DAG ──
+        // ── Phase C: LIR → Machine DAG ──
         this.traceMark("phaseC")
-        this.vprintln("[Phase C] LIR �?Machine DAG (InstructionSelection)")
+        this.vprintln("[Phase C] LIR → Machine DAG (InstructionSelection)")
         val selector = InstructionSelectorUtils.emptySelector()
         val dag = selector.select(lir)
         this.vprintln("  DAG nodes=" + dag.nodeCount +
@@ -312,7 +312,7 @@ class PhotonPipeline {
             result.errorMessage = "STOPPED_AFTER_PHASE_C"
             return result
         }
-        // ── Phase D: 寄存器分�?+ 窥孔 ──
+        // ── Phase D: 寄存器分配 + 窥孔 ──
         this.traceMark("phaseD")
         this.vprintln("[Phase D] Register Allocation + Peephole")
         val allocator = RegisterAllocatorUtils.emptyAllocator()
@@ -353,14 +353,14 @@ class PhotonPipeline {
             }
         }
 
-        // ── Phase E: 指令编码 �?目标文件 �?链接 ──
+        // ── Phase E: 指令编码 → 目标文件 → 链接 ──
         this.traceMark("phaseE")
         this.peProbe("phaseE enter instrs=" + toStr(dag.instrCount) +
                 " nodes=" + toStr(dag.nodeCount))
-        this.vprintln("[Phase E] Instruction Encoding �?Object �?Link")
+        this.vprintln("[Phase E] Instruction Encoding → Object → Link")
 
         // Step 4: 指令编码
-        this.vprintln("  Step 4: X86Emitter �?指令编码")
+        this.vprintln("  Step 4: X86Emitter — 指令编码")
         val emitter = X86EmitterUtils.emptyEmitter()
         emitter.setAllocator(allocator)
         emitter.emitFunction(dag, moduleName)
@@ -371,35 +371,35 @@ class PhotonPipeline {
         val relocRecords: String = emitter.getRelocRecords()
         result.machineCodeHex = machineCodeHex
         result.encodedByteCount = machineCodeHex.length / 2
-        this.vprintln("    机器�? " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
-        this.vprintln("    字节�? " + result.encodedByteCount)
+        this.vprintln("    机器码: " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
+        this.vprintln("    字节数: " + result.encodedByteCount)
 
         // Step 5: 目标文件组装
-        this.vprintln("  Step 5: PhotonObjectWriter �?COFF 目标文件组装")
+        this.vprintln("  Step 5: PhotonObjectWriter — COFF 目标文件组装")
         val writer = PhotonObjectWriterUtils.emptyBackend()
 
-        // 获取函数偏移表（多函数发射支持）�?
+        // 获取函数偏移表（多函数发射支持）。
         val funcOffsets: String = emitter.getFuncOffsets()
         this.vprintln("    函数偏移: " + funcOffsets)
 
-        // 获取字符串常量列表�?
+        // 获取字符串常量列表。
         val stringConsts: String = selector.stringConstants
         if (stringConsts != "") {
-            this.vprintln("    字符串常�? " + stringConsts)
+            this.vprintln("    字符串常量: " + stringConsts)
         }
 
-        // 设置 COFF 写入器的多函数数据�?
+        // 设置 COFF 写入器的多函数数据。
         writer.textSection = machineCodeHex
         writer.relocs = relocRecords
         writer.stringConsts = stringConsts
         writer.functionOffsets = funcOffsets
 
-        // 从函数偏移表解析函数名列表�?
+        // 从函数偏移表解析函数名列表。
         val funcNames: List<String> = this.parseFuncNames(funcOffsets)
         writer.functions = this.joinComma(funcNames)
         this.vprintln("    函数列表: " + writer.functions)
 
-        // 构建符号表和 COFF/ELF 文件（按 OS 分派）�?
+        // 构建符号表和 COFF/ELF 文件（按 OS 分派）。
         writer.buildSymbols(writer.functions, writer.stringConsts)
         this.peProbe("buildSymbols done symChars=" + toStr(writer.symbols.length) +
                 " relocChars=" + toStr(writer.relocs.length))
@@ -417,20 +417,20 @@ class PhotonPipeline {
         val wroteObj: Boolean = PhotonNativeWriter.writeObjectFile(objPath, coffHex)
         this.vprintln("    [pipe1] wroteObj=" + wroteObj)
         if (!wroteObj) {
-            println("    �?二进制落盘失败，回退 hex 文本（需外部脚本转换）：" + objPath + ".hex")
+            println("    ⚠ 二进制落盘失败，回退 hex 文本（需外部脚本转换）：" + objPath + ".hex")
             writer.writeObjectBinaryFile(objPath)
         }
 
-        // Step 6: 系统链接（S1.6：链�?main 对象；共享库不链�?runtime 入口对象�?
-        this.vprintln("  Step 6: PhotonSystemLinker �?系统链接")
+        // Step 6: 系统链接（S1.6：链接 main 对象；共享库不链接 runtime 入口对象）
+        this.vprintln("  Step 6: PhotonSystemLinker — 系统链接")
         this.peProbe("preLinkStep runtimeObjPath=empty")
 
-        // 生成 runtime 目标文件（定�?println，供 main 引用）；Unix 共享库不需�?runtime 入口对象
+        // 生成 runtime 目标文件（定义 println，供 main 引用）；Unix 共享库不需要 runtime 入口对象
         var runtimeObjPath: String = ""
         if (this.outputType != "so" && this.outputType != "dylib") {
             runtimeObjPath = this.outDir + "/aura_runtime.obj"
             this.peProbe("genRuntimeObj path=" + runtimeObjPath)
-            // 同主目标文件：优�?*原生二进�?*落盘（VM/AOT 通用），失败才回退 hex�?
+            // 同主目标文件：优先**原生二进制**落盘（VM/AOT 通用），失败才回退 hex。
             val runtimeHex: String = PhotonRuntime.buildRuntimeObject()
             this.peProbe("runtimeObjHex chars=" + this.toStr(runtimeHex.length))
             var runtimeResult: Boolean =
@@ -440,13 +440,13 @@ class PhotonPipeline {
             }
             this.peProbe("writeRuntimeObj ok=" + this.toStr(runtimeResult))
             this.vprintln("    runtime 对象: " + runtimeObjPath +
-                    (if (runtimeResult) " �? else " �?写入失败"))
+                    (if (runtimeResult) " ✓" else " ⚠ 写入失败"))
         } else {
             this.peProbe("skipRuntimeObj outputType=" + this.outputType)
-            this.vprintln("    runtime 对象: 跳过（Unix 共享库输出不链接 runtime�?)
+            this.vprintln("    runtime 对象: 跳过（Unix 共享库输出不链接 runtime）")
         }
 
-        // 设置链接器：main 对象 + 可�?runtime 对象
+        // 设置链接器：main 对象 + 可选 runtime 对象
         val linker = PhotonSystemLinkerUtils.defaultLinker()
         linker.setOutputType(this.outputType)
         if (runtimeObjPath == "") {
@@ -461,29 +461,29 @@ class PhotonPipeline {
             linker.addFlag("/NODEFAULTLIB")
         }
         linker.useDefaultLibs = false
-        // ⚠️ runtime **确实**需�?kernel32 了：`env_get` �?`GetEnvironmentVariableA`
-        // （见 `PhotonRuntime.emitEnvGetWin32`，与既有�?`__imp_WriteFile` /
-        // `__imp_GetStdHandle` 同一导入机制）。不传该库就�?
+        // ⚠️ runtime **确实**需要 kernel32 了：`env_get` 走 `GetEnvironmentVariableA`
+        // （见 `PhotonRuntime.emitEnvGetWin32`，与既有的 `__imp_WriteFile` /
+        // `__imp_GetStdHandle` 同一导入机制）。不传该库就是
         //     lld-link: error: undefined symbol: __declspec(dllimport) GetEnvironmentVariableA
-        // �?内置链接失败、产物不生成（实测自举流程一直靠手动链接绕过 ✓）�?
-        // 路径优先取环境变�?`AURA_K32LIB`（便于切�?Windows SDK 版本），
-        // 否则退回本机默认位置�?
+        // ⇒ 内置链接失败、产物不生成（实测自举流程一直靠手动链接绕过 ✓）。
+        // 路径优先取环境变量 `AURA_K32LIB`（便于切换 Windows SDK 版本），
+        // 否则退回本机默认位置。
         val k32Lib: String = Env.get("AURA_K32LIB",
                 "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/kernel32.lib")
         if (k32Lib != "") {
             linker.libs = k32Lib
         }
-        // P2: runtime 使用 syscall 直接调用 Nt*，不再需�?kernel32 导入
-        // linker.libs = ""  // 零依赖：�?DLL 导入
-        // 输出名必须显式设置：`buildCommand()` 用的�?`this.outputName`�?
-        // 不设置时为空�?�?`/OUT:` 会退化成 `/OUT:.exe`（把产物写到当前目录�?
-        // 一个名�?".exe" 的文件里），�?`result.executablePath` 却报
-        // `build/photon_test/<module>.exe`，两者不一致�?
+        // P2: runtime 使用 syscall 直接调用 Nt*，不再需要 kernel32 导入
+        // linker.libs = ""  // 零依赖：无 DLL 导入
+        // 输出名必须显式设置：`buildCommand()` 用的是 `this.outputName`，
+        // 不设置时为空串 → `/OUT:` 会退化成 `/OUT:.exe`（把产物写到当前目录下
+        // 一个名为 ".exe" 的文件里），而 `result.executablePath` 却报
+        // `build/photon_test/<module>.exe`，两者不一致。
         linker.outputName = this.outDir + "/" + this.moduleName
         val linkCmd = linker.buildCommand()
         result.linkCommand = linkCmd
         this.peProbe("linkCmd len=" + this.toStr(linkCmd.length))
-        // 根据输出类型设置可执行文件路�?
+        // 根据输出类型设置可执行文件路径
         if (this.outputType == "exe") {
             result.executablePath = this.outDir + "/" + this.moduleName + ".exe"
         } else if (this.outputType == "dll") {
@@ -499,13 +499,13 @@ class PhotonPipeline {
         }
         this.vprintln("    链接命令: " + linkCmd)
 
-        // Step 6b: 执行链接（如果链接器可用�?
+        // Step 6b: 执行链接（如果链接器可用）
         this.peProbe("preLink cmdLen=" + toStr(linkCmd.length))
         val linkRc: Int = linker.runLinker(linkCmd)
         if (linkRc == 0) {
-            this.vprintln("    �?链接成功: " + result.executablePath)
+            this.vprintln("    ✓ 链接成功: " + result.executablePath)
         } else {
-            println("    �?链接失败 (rc=" + this.toStr(linkRc) + ")")
+            println("    ⚠ 链接失败 (rc=" + this.toStr(linkRc) + ")")
         }
 
         result.functionCount = lir.functionCount
@@ -513,7 +513,7 @@ class PhotonPipeline {
 
         this.vprintln("")
         this.vprintln("══════════════════════════════════════════════")
-        this.vprintln("Photon 管线完成 �?目标文件已生�?)
+        this.vprintln("Photon 管线完成 — 目标文件已生成")
         this.vprintln("══════════════════════════════════════════════")
 
         return result
@@ -521,9 +521,9 @@ class PhotonPipeline {
 
     // ── .phir 入口 ──
 
-    /// �?.phir 文本文件编译为可执行文件�?
+    /// 从 .phir 文本文件编译为可执行文件。
     ///
-    /// 数据流：读取 .phir �?解析�?HIR �?调用 compileHir()
+    /// 数据流：读取 .phir → 解析为 HIR → 调用 compileHir()
     fun compilePhir(phirPath: String): BackendResult {
         this.readVerboseFlag()
         this.vprintln("[photon] compilePhir: " + phirPath)
@@ -537,7 +537,7 @@ class PhotonPipeline {
         }
         this.vprintln("  .phir size: " + phirText.length + " chars")
 
-        // Step 2: 解析 .phir �?HIR
+        // Step 2: 解析 .phir → HIR
         val hir: Hir = this.parsePhirText(phirText)
         this.traceMark("hir nodes=" + hir.count)
         this.vprintln("  HIR nodes: " + hir.count)
@@ -555,10 +555,10 @@ class PhotonPipeline {
 
     // ── .hat 入口 (HAT v2.0) ──
 
-    /// �?.hat 文本文件编译为可执行文件�?
+    /// 从 .hat 文本文件编译为可执行文件。
     ///
-    /// 数据流：读取 .hat �?解析�?SSA MIR �?LIR �?MachineDag �?RegAlloc �?Encode �?COFF �?Link
-    /// 注意：HAT 路径跳过 HIR �?SSA 转换，直接从 SSA MIR 开始管线�?
+    /// 数据流：读取 .hat → 解析为 SSA MIR → LIR → MachineDag → RegAlloc → Encode → COFF → Link
+    /// 注意：HAT 路径跳过 HIR → SSA 转换，直接从 SSA MIR 开始管线。
     fun compileHat(hatPath: String): BackendResult {
         this.readVerboseFlag()
         this.vprintln("[photon] compileHat: " + hatPath)
@@ -572,7 +572,7 @@ class PhotonPipeline {
         }
         this.vprintln("  .hat size: " + hatText.length + " chars")
 
-        // Step 2: 解析 .hat �?SSA MIR
+        // Step 2: 解析 .hat → SSA MIR
         val parser = HatParserUtils.emptyParser()
         val ssaMIR: MirSsaProgram = parser.parse(hatText)
         this.traceMark("ssa functions=" + ssaMIR.functionCount + " values=" + ssaMIR.valueCount)
@@ -583,17 +583,17 @@ class PhotonPipeline {
             this.photonDumpSsa(ssaMIR)
         }
 
-        // Step 3: �?SSA MIR 继续管线（Phase B-E�?
+        // Step 3: 从 SSA MIR 继续管线（Phase B-E）
         return this.compileFromSsa(ssaMIR)
     }
 
-    /// �?.phir 文本转换�?.hat 文本（PHIR �?HIR �?SSA MIR �?HAT）�?
+    /// 将 .phir 文本转换为 .hat 文本（PHIR → HIR → SSA MIR → HAT）。
     ///
-    /// 用途：Rust 前端目前只产�?.phir，HAT 管线需�?.hat 输入。本方法把既�?
-    /// 用例（P1/P2/P3）的 .phir 转成 HAT 文本落盘，再�?compileHat() �?HAT 路径�?
-    /// 从而让两条管线处理同一份程序、可比对产物�?
+    /// 用途：Rust 前端目前只产出 .phir，HAT 管线需要 .hat 输入。本方法把既有
+    /// 用例（P1/P2/P3）的 .phir 转成 HAT 文本落盘，再由 compileHat() 走 HAT 路径，
+    /// 从而让两条管线处理同一份程序、可比对产物。
     ///
-    /// 注意：调用方需保证 hatPath 的父目录已存在（FileSystem.writeText 不建父目录）�?
+    /// 注意：调用方需保证 hatPath 的父目录已存在（FileSystem.writeText 不建父目录）。
     fun phirToHat(phirPath: String, hatPath: String, moduleName: String): Boolean {
         this.readVerboseFlag()
         val phirText: String = FileSystem.readText(phirPath)
@@ -613,20 +613,20 @@ class PhotonPipeline {
         return true
     }
 
-    /// �?SSA MIR 继续管线（Phase B-E）�?
+    /// 从 SSA MIR 继续管线（Phase B-E）。
     ///
-    /// 数据流：SSA MIR �?LIR �?MachineDag �?RegAlloc �?Peephole �?Encode �?COFF �?Link
+    /// 数据流：SSA MIR → LIR → MachineDag → RegAlloc → Peephole → Encode → COFF → Link
     private fun compileFromSsa(ssaMIR: MirSsaProgram): BackendResult {
         this.readVerboseFlag()
         this.probePath = this.readProbePath()
         this.traceMark("compileFromSsa")
-        this.vprintln("[Phase B-E] SSA MIR �?LIR �?... �?Executable")
+        this.vprintln("[Phase B-E] SSA MIR → LIR → ... → Executable")
 
         val result = BackendResult()
 
-        // ── Phase B: MIR �?LIR ──
+        // ── Phase B: MIR → LIR ──
         this.traceMark("phaseB")
-        this.vprintln("[Phase B] MIR �?LIR (Lowering)")
+        this.vprintln("[Phase B] MIR → LIR (Lowering)")
         val lowering = Lowering()
         val lir = lowering.lower(ssaMIR)
         this.vprintln("  LIR functions=" + lir.functionCount +
@@ -640,9 +640,9 @@ class PhotonPipeline {
             return result
         }
 
-        // ── Phase C: LIR �?Machine DAG ──
+        // ── Phase C: LIR → Machine DAG ──
         this.traceMark("phaseC")
-        this.vprintln("[Phase C] LIR �?Machine DAG (InstructionSelection)")
+        this.vprintln("[Phase C] LIR → Machine DAG (InstructionSelection)")
         val selector = InstructionSelectorUtils.emptySelector()
         val dag = selector.select(lir)
         this.vprintln("  DAG nodes=" + dag.nodeCount +
@@ -652,7 +652,7 @@ class PhotonPipeline {
             return result
         }
 
-        // ── Phase D: 寄存器分�?+ 窥孔 ──
+        // ── Phase D: 寄存器分配 + 窥孔 ──
         this.traceMark("phaseD")
         this.vprintln("[Phase D] Register Allocation + Peephole")
         val allocator = RegisterAllocatorUtils.emptyAllocator()
@@ -693,14 +693,14 @@ class PhotonPipeline {
             }
         }
 
-        // ── Phase E: 指令编码 �?目标文件 �?链接 ──
+        // ── Phase E: 指令编码 → 目标文件 → 链接 ──
         this.traceMark("phaseE")
         this.peProbe("phaseE enter instrs=" + toStr(dag.instrCount) +
                 " nodes=" + toStr(dag.nodeCount))
-        this.vprintln("[Phase E] Instruction Encoding �?Object �?Link")
+        this.vprintln("[Phase E] Instruction Encoding → Object → Link")
 
         // Step 4: 指令编码
-        this.vprintln("  Step 4: X86Emitter �?指令编码")
+        this.vprintln("  Step 4: X86Emitter — 指令编码")
         val emitter = X86EmitterUtils.emptyEmitter()
         emitter.setAllocator(allocator)
         emitter.emitFunction(dag, moduleName)
@@ -711,35 +711,35 @@ class PhotonPipeline {
         val relocRecords: String = emitter.getRelocRecords()
         result.machineCodeHex = machineCodeHex
         result.encodedByteCount = machineCodeHex.length / 2
-        this.vprintln("    机器�? " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
-        this.vprintln("    字节�? " + result.encodedByteCount)
+        this.vprintln("    机器码: " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
+        this.vprintln("    字节数: " + result.encodedByteCount)
 
         // Step 5: 目标文件组装
-        this.vprintln("  Step 5: PhotonObjectWriter �?COFF 目标文件组装")
+        this.vprintln("  Step 5: PhotonObjectWriter — COFF 目标文件组装")
         val writer = PhotonObjectWriterUtils.emptyBackend()
 
-        // 获取函数偏移表（多函数发射支持）�?
+        // 获取函数偏移表（多函数发射支持）。
         val funcOffsets: String = emitter.getFuncOffsets()
         this.vprintln("    函数偏移: " + funcOffsets)
 
-        // 获取字符串常量列表�?
+        // 获取字符串常量列表。
         val stringConsts: String = selector.stringConstants
         if (stringConsts != "") {
-            this.vprintln("    字符串常�? " + stringConsts)
+            this.vprintln("    字符串常量: " + stringConsts)
         }
 
-        // 设置 COFF 写入器的多函数数据�?
+        // 设置 COFF 写入器的多函数数据。
         writer.textSection = machineCodeHex
         writer.relocs = relocRecords
         writer.stringConsts = stringConsts
         writer.functionOffsets = funcOffsets
 
-        // 从函数偏移表解析函数名列表�?
+        // 从函数偏移表解析函数名列表。
         val funcNames: List<String> = this.parseFuncNames(funcOffsets)
         writer.functions = this.joinComma(funcNames)
         this.vprintln("    函数列表: " + writer.functions)
 
-        // 构建符号表和 COFF/ELF 文件（按 OS 分派）�?
+        // 构建符号表和 COFF/ELF 文件（按 OS 分派）。
         writer.buildSymbols(writer.functions, writer.stringConsts)
         this.peProbe("buildSymbols done symChars=" + toStr(writer.symbols.length) +
                 " relocChars=" + toStr(writer.relocs.length))
@@ -753,20 +753,20 @@ class PhotonPipeline {
         val objPath = this.outDir + "/" + this.moduleName + ".obj"
         result.objectFilePath = objPath
 
-        // 落盘�?*二进�?* COFF�?
+        // 落盘为**二进制** COFF。
         this.peProbe("preWriteObj path=" + objPath + " chars=" + toStr(coffHex.length))
         val wroteObj: Boolean = PhotonNativeWriter.writeObjectFile(objPath, coffHex)
         this.peProbe("writeObj ok=" + this.toStr(wroteObj))
         if (!wroteObj) {
-            println("    �?二进制落盘失败，回退 hex 文本（需外部脚本转换）：" + objPath + ".hex")
+            println("    ⚠ 二进制落盘失败，回退 hex 文本（需外部脚本转换）：" + objPath + ".hex")
             writer.writeObjectBinaryFile(objPath)
         }
 
         // Step 6: 系统链接
-        this.vprintln("  Step 6: PhotonSystemLinker �?系统链接")
+        this.vprintln("  Step 6: PhotonSystemLinker — 系统链接")
         this.peProbe("preLinkStep runtimeObjPath=empty")
 
-        // 生成 runtime 目标文件（定�?println，供 main 引用）；Unix 共享库不需�?runtime 入口对象
+        // 生成 runtime 目标文件（定义 println，供 main 引用）；Unix 共享库不需要 runtime 入口对象
         var runtimeObjPath: String = ""
         if (this.outputType != "so" && this.outputType != "dylib") {
             runtimeObjPath = this.outDir + "/aura_runtime.obj"
@@ -784,13 +784,13 @@ class PhotonPipeline {
             }
             this.peProbe("writeRuntimeObj ok=" + this.toStr(runtimeResult))
             this.vprintln("    runtime 对象: " + runtimeObjPath +
-                    (if (runtimeResult) " �? else " �?写入失败"))
+                    (if (runtimeResult) " ✓" else " ⚠ 写入失败"))
         } else {
             this.peProbe("skipRuntimeObj outputType=" + this.outputType)
-            this.vprintln("    runtime 对象: 跳过（Unix 共享库输出不链接 runtime�?)
+            this.vprintln("    runtime 对象: 跳过（Unix 共享库输出不链接 runtime）")
         }
 
-        // 设置链接器：main 对象 + 可�?runtime 对象
+        // 设置链接器：main 对象 + 可选 runtime 对象
         val linker = PhotonSystemLinkerUtils.defaultLinker()
         linker.setOutputType(this.outputType)
         if (runtimeObjPath == "") {
@@ -805,7 +805,7 @@ class PhotonPipeline {
             linker.addFlag("/NODEFAULTLIB")
         }
         linker.useDefaultLibs = false
-        // 同另一条链接路径：`env_get` 需�?kernel32（见上）�?
+        // 同另一条链接路径：`env_get` 需要 kernel32（见上）。
         val k32Lib2: String = Env.get("AURA_K32LIB",
                 "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/kernel32.lib")
         if (k32Lib2 != "") {
@@ -816,7 +816,7 @@ class PhotonPipeline {
         result.linkCommand = linkCmd
         this.peProbe("linkCmd len=" + this.toStr(linkCmd.length))
 
-        // 根据输出类型设置可执行文件路�?
+        // 根据输出类型设置可执行文件路径
         if (this.outputType == "exe") {
             result.executablePath = this.outDir + "/" + this.moduleName + ".exe"
         } else if (this.outputType == "dll") {
@@ -832,13 +832,13 @@ class PhotonPipeline {
         }
         this.vprintln("    链接命令: " + linkCmd)
 
-        // Step 6b: 执行链接（如果链接器可用�?
+        // Step 6b: 执行链接（如果链接器可用）
         this.peProbe("preLink cmdLen=" + toStr(linkCmd.length))
         val linkRc: Int = linker.runLinker(linkCmd)
         if (linkRc == 0) {
-            this.vprintln("    �?链接成功: " + result.executablePath)
+            this.vprintln("    ✓ 链接成功: " + result.executablePath)
         } else {
-            println("    �?链接失败 (rc=" + this.toStr(linkRc) + ")")
+            println("    ⚠ 链接失败 (rc=" + this.toStr(linkRc) + ")")
         }
 
         result.functionCount = lir.functionCount
@@ -846,13 +846,13 @@ class PhotonPipeline {
 
         this.vprintln("")
         this.vprintln("══════════════════════════════════════════════")
-        this.vprintln("Photon 管线完成 (HAT) �?目标文件已生�?)
+        this.vprintln("Photon 管线完成 (HAT) — 目标文件已生成")
         this.vprintln("══════════════════════════════════════════════")
 
         return result
     }
 
-    /// 调试：转�?SSA MIR（设 AURA_PHOTON_DEBUG_HIR=1）�?
+    /// 调试：转储 SSA MIR（设 AURA_PHOTON_DEBUG_HIR=1）。
     private fun photonDumpSsa(p: MirSsaProgram): Unit {
         println("  [SSA] functions=" + p.functionCount + " values=" + p.valueCount)
         var fi: Int = 0
@@ -870,7 +870,7 @@ class PhotonPipeline {
         }
     }
 
-    /// 调试：转�?LIR（设 AURA_PHOTON_DEBUG_HIR=1）�?
+    /// 调试：转储 LIR（设 AURA_PHOTON_DEBUG_HIR=1）。
     private fun photonDumpLir(p: LirProgram): Unit {
         println("  [LIR] functions=" + p.functionCount + " values=" + p.valueCount)
         var fi: Int = 0
@@ -888,12 +888,12 @@ class PhotonPipeline {
         }
     }
 
-    /// 解析 .phir 文本�?HIR�?
+    /// 解析 .phir 文本为 HIR。
     ///
-    /// 采用**递归下降 + 花括号嵌�?*解析（旧实现是逐行平铺，`if` / `while` /
-    /// `fun` 参数全部丢失 —�?�?04_control_flow / 05_functions 的失败）�?
-    /// 同时做一�?*类型推断**：把 `val x: Int` / 函数签名 / 字面量的类型写进
-    /// HIR 节点，供 SSA/指令选择判定「字符串拼接」等语义�?
+    /// 采用**递归下降 + 花括号嵌套**解析（旧实现是逐行平铺，`if` / `while` /
+    /// `fun` 参数全部丢失 —— 见 04_control_flow / 05_functions 的失败）。
+    /// 同时做一次**类型推断**：把 `val x: Int` / 函数签名 / 字面量的类型写进
+    /// HIR 节点，供 SSA/指令选择判定「字符串拼接」等语义。
     private fun parsePhirText(text: String): Hir {
         val hir: Hir = Hir()
         this.phirLines = text.split("\n")
@@ -935,10 +935,10 @@ class PhotonPipeline {
         return hir
     }
 
-    /// 预扫描：收集所�?`[native] fun NAME(...) -> RET` 的返回类型�?
+    /// 预扫描：收集所有 `[native] fun NAME(...) -> RET` 的返回类型。
     ///
-    /// 产出�?`\n` 开头（`"\nname=ret\n�?`），�?`phirSigLookup` �?
-    /// `indexOf("\n" + name + "=")` 能精确匹�?*每一�?*（含首项）�?
+    /// 产出以 `\n` 开头（`"\nname=ret\n…"`），使 `phirSigLookup` 的
+    /// `indexOf("\n" + name + "=")` 能精确匹配**每一项**（含首项）。
     private fun phirCollectSigs(): String {
         var sigs: String = "\n"
         var i: Int = 0
@@ -975,10 +975,10 @@ class PhotonPipeline {
         return sigs
     }
 
-    /// 查找字符�?`start` 之后第一次出现的位置�?1 表示未找到）�?
+    /// 查找字符在 `start` 之后第一次出现的位置（-1 表示未找到）。
     ///
-    /// ⚠️ 必须�?`charCodeAt` 比较码点，不�?`s.substring(i, i+1) == ch`�?
-    /// 后者每步分配一�?1 字符串，�?*�?GC** 运行时是持续的分配源�?
+    /// ⚠️ 必须用 `charCodeAt` 比较码点，不能 `s.substring(i, i+1) == ch`：
+    /// 后者每步分配一个 1 字符串，在**无 GC** 运行时是持续的分配源。
     private fun phirFindChar(s: String, start: Int, ch: String): Int {
         if (ch == "") { return -1 }
         val code: Int = ch.charCodeAt(0)
@@ -991,7 +991,7 @@ class PhotonPipeline {
         return -1
     }
 
-    /// 去掉字符串末尾的 `{` �?trim�?
+    /// 去掉字符串末尾的 `{` 并 trim。
     private fun phirStripBrace(s: String): String {
         var r: String = s.trim()
         if (r.length > 0 && r.substring(r.length - 1, r.length) == "{") {
@@ -1000,11 +1000,11 @@ class PhotonPipeline {
         return r
     }
 
-    /// 查询类型环境：返�?"name=ty" 中的 ty（未找到返回 ""）�?
+    /// 查询类型环境：返回 "name=ty" 中的 ty（未找到返回 ""）。
     ///
-    /// 环境串的不变式：形如 `"\nname=ty\nname2=ty2\n"`�?*�?`\n` 开�?*），
-    /// 因此可用 `indexOf("\n" + name + "=")` 做整名精确匹�?—�?若不�?`\n`
-    /// 开头，首项永远匹配不到，且 `x` 会误命中 `foo=…x=…` 的中间片段�?
+    /// 环境串的不变式：形如 `"\nname=ty\nname2=ty2\n"`（**以 `\n` 开头**），
+    /// 因此可用 `indexOf("\n" + name + "=")` 做整名精确匹配 —— 若不以 `\n`
+    /// 开头，首项永远匹配不到，且 `x` 会误命中 `foo=…x=…` 的中间片段。
     private fun phirEnvGet(name: String): String {
         if (name == "") { return "" }
         this.dbgEnvGet = this.dbgEnvGet + 1
@@ -1019,10 +1019,10 @@ class PhotonPipeline {
         return this.phirEnv.substring(start, e)
     }
 
-    /// 写入类型环境（覆盖同名项）�?
+    /// 写入类型环境（覆盖同名项）。
     ///
-    /// 逐字符用 `charCodeAt` 而非 `substring(pos, pos+1)`：旧写法每字符分配一�?
-    /// 临时串，而本函数**每个声明/参数**都会调用一次，是另一处无 GC 分配源�?
+    /// 逐字符用 `charCodeAt` 而非 `substring(pos, pos+1)`：旧写法每字符分配一个
+    /// 临时串，而本函数**每个声明/参数**都会调用一次，是另一处无 GC 分配源。
     private fun phirEnvSet(name: String, ty: String): Unit {
         this.dbgEnvSet = this.dbgEnvSet + 1
         this.dbgEnvSetScanned = this.dbgEnvSetScanned + this.phirEnv.length
@@ -1046,19 +1046,19 @@ class PhotonPipeline {
         this.phirEnv = out + name + "=" + ty + "\n"
     }
 
-    /// 查询函数签名返回类型�?
+    /// 查询函数签名返回类型。
     ///
-    /// ⚠️ 这是解析阶段**最大的**分配热点，也是「内存疯狂上涨直到溢出」的直接原因�?
-    /// 旧实现对整张签名表逐字�?`substring(pos, pos+1)`，每次查询分�?�?表长
-    /// 个临时字符串。实测编�?`Main.aura`�?345 个函数，签名�?�?100 KB）时�?
-    /// �?34 个函数就产生 117 万次分配，�?VM/�?GC 运行时不会回�?—�?内存
-    /// 线性冲�?4 GB �?OOM�?
+    /// ⚠️ 这是解析阶段**最大的**分配热点，也是「内存疯狂上涨直到溢出」的直接原因：
+    /// 旧实现对整张签名表逐字符 `substring(pos, pos+1)`，每次查询分配 ≈ 表长
+    /// 个临时字符串。实测编译 `Main.aura`（2345 个函数，签名表 ≈ 100 KB）时，
+    /// 每 34 个函数就产生 117 万次分配，而 VM/无 GC 运行时不会回收 —— 内存
+    /// 线性冲向 4 GB 后 OOM。
     ///
     /// 现改为：
-    ///   * `indexOf(key)` —�?走原生实现（C �?`memmem`），**零分�?*�?
-    ///   * 从命中点�?`charCodeAt` 扫到行尾取返回类型（该行 �?数十字符）�?
+    ///   * `indexOf(key)` —— 走原生实现（C 级 `memmem`），**零分配**；
+    ///   * 从命中点用 `charCodeAt` 扫到行尾取返回类型（该行 ≤ 数十字符）。
     ///
-    /// `phirSigs` 的不变式：以 `\n` 开头（�?`phirCollectSigs`），保证首项也能命中�?
+    /// `phirSigs` 的不变式：以 `\n` 开头（见 `phirCollectSigs`），保证首项也能命中。
     private fun phirSigLookup(name: String): String {
         if (name == "") { return "" }
         this.dbgSigCalls = this.dbgSigCalls + 1
@@ -1073,7 +1073,7 @@ class PhotonPipeline {
         return this.phirSigs.substring(start, e)
     }
 
-    /// 二元运算的结果类型推断�?
+    /// 二元运算的结果类型推断。
     private fun phirBinaryResultType(op: String, lhsTy: String, rhsTy: String): String {
         if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">="
             || op == "&&" || op == "||" || op == "is") {
@@ -1085,7 +1085,7 @@ class PhotonPipeline {
         return rhsTy
     }
 
-    /// 解析 .phir 函数定义（phirPos 指向 `fun ... {` 行）�?
+    /// 解析 .phir 函数定义（phirPos 指向 `fun ... {` 行）。
     private fun phirParseFunc(hir: Hir): Int {
         this.phirFuncNo = this.phirFuncNo + 1
         val line: String = this.phirLines[this.phirPos].trim()
@@ -1103,14 +1103,14 @@ class PhotonPipeline {
             if (t != "") { retTy = t }
         }
 
-        // 参数�?
+        // 参数表
         val paramsEnd: Int = this.phirFindChar(line, nameEnd, ")")
         var paramsStr: String = ""
         if (paramsEnd > nameEnd + 1) {
             paramsStr = line.substring(nameEnd + 1, paramsEnd)
         }
 
-        // 类型环境重置为参数（保持「以 \n 开头」的不变式，�?phirEnvGet�?
+        // 类型环境重置为参数（保持「以 \n 开头」的不变式，见 phirEnvGet）
         this.phirEnv = "\n"
         var paramKids: String = ""
         if (paramsStr.trim() != "") {
@@ -1134,11 +1134,11 @@ class PhotonPipeline {
             }
         }
 
-        this.phirPos = this.phirPos + 1          // 跳过 "fun ... {" �?
+        this.phirPos = this.phirPos + 1          // 跳过 "fun ... {" 行
         if (this.phirFuncNo % 25 == 0) { this.vprintln("      [s3] n=" + this.phirFuncNo + " " + funcName) }
         val bodyId: Int = this.phirParseBlock(hir)
         if (this.phirPos < this.phirLines.size) {
-            this.phirPos = this.phirPos + 1      // 吃掉函数体结�?"}"
+            this.phirPos = this.phirPos + 1      // 吃掉函数体结束 "}"
         }
         if (this.phirFuncNo % 25 == 0) { this.vprintln("      [s4] n=" + this.phirFuncNo + " " + funcName) }
 
@@ -1146,8 +1146,8 @@ class PhotonPipeline {
         return hir.add("HirFunction", funcName, retTy, Span(0, 0, 1, 1, 1, 1), funcKids)
     }
 
-    /// 解析一�?`{ ... }` 块（phirPos 指向块内第一行），返�?HirBlock 节点 id�?
-    /// 停在块的结束�?`}` 上（**不消�?*）�?
+    /// 解析一个 `{ ... }` 块（phirPos 指向块内第一行），返回 HirBlock 节点 id。
+    /// 停在块的结束行 `}` 上（**不消费**）。
     private fun phirParseBlock(hir: Hir): Int {
         var stmtKids: String = ""
         while (this.phirPos < this.phirLines.size) {
@@ -1165,7 +1165,7 @@ class PhotonPipeline {
         return hir.add("HirBlock", "", "", Span(0, 0, 1, 1, 1, 1), stmtKids)
     }
 
-    /// 解析一条语句（消费 1..n 行）�?
+    /// 解析一条语句（消费 1..n 行）。
     private fun phirParseStatement(hir: Hir): Int {
         val t: String = this.phirLines[this.phirPos].trim()
 
@@ -1218,7 +1218,7 @@ class PhotonPipeline {
             return inner
         }
 
-        // 赋值：`name = expr`（排�?`==` / `<=` 等比较）
+        // 赋值：`name = expr`（排除 `==` / `<=` 等比较）
         val eq: Int = this.phirFindAssignEq(t)
         if (eq > 0) {
             val target: String = t.substring(0, eq).trim()
@@ -1232,14 +1232,14 @@ class PhotonPipeline {
                 HirUtils.hirKidsAdd("", valId))
         }
 
-        // 表达式语�?
+        // 表达式语句
         val exprId: Int = this.parsePhirExpr(hir, t)
         this.phirPos = this.phirPos + 1
         return hir.add("HirExprStmt", "", "", Span(0, 0, 1, 1, 1, 1),
             HirUtils.hirKidsAdd("", exprId))
     }
 
-    /// 解析 `val/var NAME[: TY] = EXPR`（消�?1 行）�?
+    /// 解析 `val/var NAME[: TY] = EXPR`（消费 1 行）。
     private fun phirParseDecl(hir: Hir, text: String): Int {
         val isVal: Boolean = text.startsWith("val ")
         var nameEnd: Int = 4
@@ -1279,7 +1279,7 @@ class PhotonPipeline {
         return hir.add(kind, name, ty, Span(0, 0, 1, 1, 1, 1), initKids)
     }
 
-    /// 解析 `if COND { ... } [else ...]`（phirPos 已越�?`if ... {` 行）�?
+    /// 解析 `if COND { ... } [else ...]`（phirPos 已越过 `if ... {` 行）。
     private fun phirParseIf(hir: Hir, condText: String): Int {
         val condId: Int = this.parsePhirExpr(hir, condText)
         val thenId: Int = this.phirParseBlock(hir)
@@ -1311,7 +1311,7 @@ class PhotonPipeline {
         return hir.add("HirIf", "", "", Span(0, 0, 1, 1, 1, 1), kids)
     }
 
-    /// 在深�?0、字符串外查找赋值等�?`=`（排�?`==`/`!=`/`<=`/`>=`），返回位置�?-1�?
+    /// 在深度 0、字符串外查找赋值等号 `=`（排除 `==`/`!=`/`<=`/`>=`），返回位置或 -1。
     private fun phirFindAssignEq(text: String): Int {
         var depth: Int = 0
         var inStr: Boolean = false
@@ -1342,7 +1342,7 @@ class PhotonPipeline {
         return -1
     }
 
-    /// 查找�?`openPos` �?`(` 匹配�?`)`（跳过字符串），返回位置�?-1�?
+    /// 查找与 `openPos` 处 `(` 匹配的 `)`（跳过字符串），返回位置或 -1。
     private fun phirMatchingParen(s: String, openPos: Int): Int {
         var depth: Int = 0
         var inStr: Boolean = false
@@ -1367,7 +1367,7 @@ class PhotonPipeline {
         return -1
     }
 
-    /// 查找�?`openPos` �?`[` 匹配�?`]`�?
+    /// 查找与 `openPos` 处 `[` 匹配的 `]`。
     private fun phirMatchingBracket(s: String, openPos: Int): Int {
         var depth: Int = 0
         var inStr: Boolean = false
@@ -1392,7 +1392,7 @@ class PhotonPipeline {
         return -1
     }
 
-    /// 按优先级从低到高查找顶层二元运算符，返回 [op, posStr] �?["", "-1"]�?
+    /// 按优先级从低到高查找顶层二元运算符，返回 [op, posStr] 或 ["", "-1"]。
     private fun phirSplitBinary(t: String): List<String> {
         var r: List<String> = this.phirFindTopOp(t, listOf("||"))
         if (r[0] != "") { return r }
@@ -1411,11 +1411,11 @@ class PhotonPipeline {
         return listOf("", "-1")
     }
 
-    /// 查找最右侧的顶层运算符（跳过括�?中括号内与字符串内的内容）�?
+    /// 查找最右侧的顶层运算符（跳过括号/中括号内与字符串内的内容）。
     ///
-    /// 单趟前向扫描，命中即覆盖记录 �?最后一次命中即最右侧。避免构�?
-    /// `List<Boolean>`：本 VM �?`arrayListOf()` + `add()` 的元素会变成 null
-    /// （实�?`arrayListOf<String>()` + add 得到 `[null]`），会让判定恒假�?
+    /// 单趟前向扫描，命中即覆盖记录 → 最后一次命中即最右侧。避免构造
+    /// `List<Boolean>`：本 VM 下 `arrayListOf()` + `add()` 的元素会变成 null
+    /// （实测 `arrayListOf<String>()` + add 得到 `[null]`），会让判定恒假。
     private fun phirFindTopOp(text: String, ops: List<String>): List<String> {
         val n: Int = text.length
         var depth: Int = 0
@@ -1463,7 +1463,7 @@ class PhotonPipeline {
         return listOf(bestOp, "" + bestPos)
     }
 
-    /// 顶层逗号分隔的参数个数�?
+    /// 顶层逗号分隔的参数个数。
     private fun phirArgCount(s: String): Int {
         if (s.trim() == "") { return 0 }
         var count: Int = 1
@@ -1488,7 +1488,7 @@ class PhotonPipeline {
         return count
     }
 
-    /// �?index 个顶层逗号分隔参数（已 trim；越界返�?""）�?
+    /// 第 index 个顶层逗号分隔参数（已 trim；越界返回 ""）。
     private fun phirArgAt(s: String, index: Int): String {
         var depth: Int = 0
         var inStr: Boolean = false
@@ -1518,28 +1518,28 @@ class PhotonPipeline {
         return ""
     }
 
-    /// 是否�?ASCII 十进制数字字符�?
+    /// 是否为 ASCII 十进制数字字符。
     ///
-    /// 这里**不能**�?`ch.matches("\\d")`：`String.matches` 依赖正则运行时，
-    /// �?VM（字节码）模式下未链接（`[vm] Unlinked external function 'matches'`），
-    /// 每次调用都会返回默认�?false 并向 stderr 打一行告�?—�?既让解析结果
-    /// 恒错，又会在循环里把 stderr 刷到无限增长（实�?2.7 MB/分钟）�?
+    /// 这里**不能**用 `ch.matches("\\d")`：`String.matches` 依赖正则运行时，
+    /// 在 VM（字节码）模式下未链接（`[vm] Unlinked external function 'matches'`），
+    /// 每次调用都会返回默认值 false 并向 stderr 打一行告警 —— 既让解析结果
+    /// 恒错，又会在循环里把 stderr 刷到无限增长（实测 2.7 MB/分钟）。
     private fun phirIsDigitChar(ch: String): Boolean {
         if (ch.length != 1) { return false }
         val c: Int = ch.charCodeAt(0)
         return c >= 48 && c <= 57
     }
 
-    /// 是否�?ASCII 标识符字符（字母 / 数字 / 下划线）。理由同上�?
+    /// 是否为 ASCII 标识符字符（字母 / 数字 / 下划线）。理由同上。
     private fun phirIsWordChar(ch: String): Boolean {
         if (ch.length != 1) { return false }
         return this.phirIsWordCode(ch.charCodeAt(0))
     }
 
-    /// 码点版字符合法性判断（**零分�?*）�?
+    /// 码点版字符合法性判断（**零分配**）。
     ///
-    /// 逐字符扫描一律用本函数，不要 `substring(i, i+1)` 后再比较字符�?—�?
-    /// 后者每步分配一�?1 字符串，在无 GC 运行时随输入规模线性堆积�?
+    /// 逐字符扫描一律用本函数，不要 `substring(i, i+1)` 后再比较字符串 ——
+    /// 后者每步分配一个 1 字符串，在无 GC 运行时随输入规模线性堆积。
     private fun phirIsWordCode(c: Int): Boolean {
         if (c >= 48 && c <= 57) { return true }
         if (c >= 65 && c <= 90) { return true }
@@ -1547,15 +1547,15 @@ class PhotonPipeline {
         return c == 95
     }
 
-    /// 按逗号切分 `.phir` 的实参表�?*不切分双引号内的逗号**�?
+    /// 按逗号切分 `.phir` 的实参表，**不切分双引号内的逗号**。
     ///
     /// 为什么不能直接用 `String.split(",")`（原实现）：
-    /// 字符串字面量本身可以含逗号 —�?`println("Hello, World!")` 会被切成
-    /// `"Hello` �?` World!"` 两个实参。后果是字符串常量表里出现被污染的条�?
-    /// （实测打印为 `"Hello,World!",if self,null {,...`），�?.rdata 里同一句话
-    /// 被拆成两段、`@str.N` 偏移全部错位�?
+    /// 字符串字面量本身可以含逗号 —— `println("Hello, World!")` 会被切成
+    /// `"Hello` 与 ` World!"` 两个实参。后果是字符串常量表里出现被污染的条目
+    /// （实测打印为 `"Hello,World!",if self,null {,...`），且 .rdata 里同一句话
+    /// 被拆成两段、`@str.N` 偏移全部错位。
     ///
-    /// 单次扫描：跟�?`"` 开闭状态；`\` 后一个字符整体跳过（转义引号不改变状态）�?
+    /// 单次扫描：跟踪 `"` 开闭状态；`\` 后一个字符整体跳过（转义引号不改变状态）。
     private fun splitPhirArgs(text: String): List<String> {
         val out: List<String> = arrayListOf<String>()
         if (text == "") { return out }
@@ -1566,7 +1566,7 @@ class PhotonPipeline {
         while (i < len) {
             val c: Int = text.charCodeAt(i)
             if (c == 92) {
-                // 反斜杠转义：连同下一个字符一起跳�?
+                // 反斜杠转义：连同下一个字符一起跳过
                 i = i + 2
             } else {
                 if (c == 34) {
@@ -1585,12 +1585,12 @@ class PhotonPipeline {
         return out
     }
 
-    /// 反转�?.phir 字符串字面量内容（`\n` `\r` `\t` `\\` `\"`）�?
+    /// 反转义 .phir 字符串字面量内容（`\n` `\r` `\t` `\\` `\"`）。
     ///
-    /// �?Rust �?`hir_to_phir` 的转义互逆：那边把控制字符写成转义序列，
-    /// 这里还原成真实字符�?
+    /// 与 Rust 侧 `hir_to_phir` 的转义互逆：那边把控制字符写成转义序列，
+    /// 这里还原成真实字符。
     private fun phirUnescape(s: String): String {
-        // 常见情形：完全没有转�?�?直接复用原串（零分配）�?
+        // 常见情形：完全没有转义 → 直接复用原串（零分配）。
         if (s.indexOf("\\") < 0) { return s }
         var out: String = ""
         var start: Int = 0
@@ -1625,17 +1625,17 @@ class PhotonPipeline {
         return out
     }
 
-    /// 解析 .phir 表达式为 HIR 节点，返回节�?id�?
+    /// 解析 .phir 表达式为 HIR 节点，返回节点 id。
     ///
-    /// 与前代的区别�?*递归下降 + 运算符优先级 + 类型推断** —�?
+    /// 与前代的区别：**递归下降 + 运算符优先级 + 类型推断** ——
     /// 每个节点都带上推断出的类型（`"x = " + toStr(x)` 才能被识别为
-    /// String 拼接而不是整数加法；`add(3,4)` 的参数才能按 ABI 传入）�?
+    /// String 拼接而不是整数加法；`add(3,4)` 的参数才能按 ABI 传入）。
     private fun parsePhirExpr(hir: Hir, text: String): Int {
         val t: String = text.trim()
         if (t == "") { return -1 }
 
-        // 数字字面�?
-        // （逐字符用 charCodeAt：`.`=46 `-`=45，零分配�?
+        // 数字字面量
+        // （逐字符用 charCodeAt：`.`=46 `-`=45，零分配）
         var isNumber: Boolean = true
         var j: Int = 0
         val tLen: Int = t.length
@@ -1649,7 +1649,7 @@ class PhotonPipeline {
             return hir.add("HirLit", t, ty, Span(0, 0, 1, 1, 1, 1), "")
         }
 
-        // 字符串字面量：必须以 " 开头且�?" 结尾，且中间无未转义引号（零分配扫描�?
+        // 字符串字面量：必须以 " 开头且以 " 结尾，且中间无未转义引号（零分配扫描）
         if (t.startsWith("\"") && tLen >= 2 && t.charCodeAt(tLen - 1) == 34) {
             var valid: Boolean = true
             var esc: Boolean = false
@@ -1662,29 +1662,29 @@ class PhotonPipeline {
                 k = k + 1
             }
             if (valid) {
-                // ⚠️ 必须**反转�?*：Rust 侧序列化器把控制字符写成 `\n` / `\r` /
-                // `\t` / `\\` / `\"`（否则原�?CR/LF 会把 .phir 的行截断）�?
-                // 这里还原成真实字符后仍保**带引�?*的形�?—�?下游
-                //（`emitConst` �?StringConstants �?`PhotonObjectWriter.unquote`�?
-                // 的口径是「带引号存放、写 .rdata 时去引号」�?
+                // ⚠️ 必须**反转义**：Rust 侧序列化器把控制字符写成 `\n` / `\r` /
+                // `\t` / `\\` / `\"`（否则原始 CR/LF 会把 .phir 的行截断）。
+                // 这里还原成真实字符后仍保**带引号**的形式 —— 下游
+                //（`emitConst` → StringConstants → `PhotonObjectWriter.unquote`）
+                // 的口径是「带引号存放、写 .rdata 时去引号」。
                 val inner: String = this.phirUnescape(t.substring(1, t.length - 1))
                 return hir.add("HirLit", "\"" + inner + "\"", "String",
                                Span(0, 0, 1, 1, 1, 1), "")
             }
         }
 
-        // 布尔/�?
+        // 布尔/空
         if (t == "true" || t == "false" || t == "null") {
             val ty: String = if (t == "null") "Any" else "Boolean"
             return hir.add("HirLit", t, ty, Span(0, 0, 1, 1, 1, 1), "")
         }
 
-        // 整体括号�? expr ) �?去掉括号递归
+        // 整体括号：( expr ) → 去掉括号递归
         if (t.startsWith("(") && this.phirMatchingParen(t, 0) == t.length - 1) {
             return this.parsePhirExpr(hir, t.substring(1, t.length - 1))
         }
 
-        // 二元表达式（按优先级�?
+        // 二元表达式（按优先级）
         val split: List<String> = this.phirSplitBinary(t)
         if (split[0] != "") {
             val op: String = split[0]
@@ -1714,7 +1714,7 @@ class PhotonPipeline {
                 HirUtils.hirKidsAdd("", innerId))
         }
 
-        // 函数调用：callee 必须是合法标识符（可�?. �?:�?
+        // 函数调用：callee 必须是合法标识符（可含 . 或 :）
         val parenPos: Int = this.phirFindChar(t, 0, "(")
         if (parenPos > 0 && this.phirMatchingParen(t, parenPos) == t.length - 1) {
             val callee: String = t.substring(0, parenPos).trim()
@@ -1732,8 +1732,8 @@ class PhotonPipeline {
                 val argsStr: String = t.substring(parenPos + 1, t.length - 1).trim()
                 var callKids: String = ""
                 if (argsStr != "") {
-                    // 不用 splitPhirArgs：它内部 `arrayListOf()+add()` 在本 VM �?
-                    // 元素会变�?null（见 phirFindTopOp 注释）�?
+                    // 不用 splitPhirArgs：它内部 `arrayListOf()+add()` 在本 VM 下
+                    // 元素会变成 null（见 phirFindTopOp 注释）。
                     val argc: Int = this.phirArgCount(argsStr)
                     var k: Int = 0
                     while (k < argc) {
@@ -1745,7 +1745,7 @@ class PhotonPipeline {
                         k = k + 1
                     }
                 }
-                // 返回类型来自签名表（native fun / fun 声明�?
+                // 返回类型来自签名表（native fun / fun 声明）
                 val retTy: String = this.phirSigLookup(callee)
                 return hir.add("HirCall", callee, retTy, Span(0, 0, 1, 1, 1, 1), callKids)
             }
@@ -1771,7 +1771,7 @@ class PhotonPipeline {
             return hir.add("HirIndex", "", "", Span(0, 0, 1, 1, 1, 1), kids)
         }
 
-        // 变量引用（带类型环境查询�?
+        // 变量引用（带类型环境查询）
         var isVar: Boolean = t != ""
         j = 0
         while (j < tLen) {
@@ -1782,11 +1782,11 @@ class PhotonPipeline {
             return hir.add("HirVar", t, this.phirEnvGet(t), Span(0, 0, 1, 1, 1, 1), "")
         }
 
-        // 默认：字符串字面�?
+        // 默认：字符串字面量
         return hir.add("HirLit", t, "String", Span(0, 0, 1, 1, 1, 1), "")
     }
 
-    /// 查找深度 0、字符串外的第一�?`[`�?
+    /// 查找深度 0、字符串外的第一个 `[`。
     private fun phirFindTopBracket(t: String): Int {
         var depth: Int = 0
         var inStr: Boolean = false
@@ -1809,12 +1809,12 @@ class PhotonPipeline {
         return -1
     }
 
-    // ── JIT 专用：仅编码（不�?COFF/link�?──
+    // ── JIT 专用：仅编码（不做 COFF/link） ──
 
-    /// �?HIR 编译为机器码（仅编码，不�?COFF 组装与链接）�?
+    /// 从 HIR 编译为机器码（仅编码，不做 COFF 组装与链接）。
     ///
-    /// JIT 路径专用：只需要裸机器�?hex，不需要目标文件或链接�?
-    /// 数据流：HIR �?SSA MIR �?LIR �?MachineDag �?RegAlloc �?Peephole �?Encode
+    /// JIT 路径专用：只需要裸机器码 hex，不需要目标文件或链接。
+    /// 数据流：HIR → SSA MIR → LIR → MachineDag → RegAlloc → Peephole → Encode
     fun compileEncodeOnly(hir: Hir, outDir: String, moduleName: String): BackendResult {
         this.outDir = outDir
         this.moduleName = moduleName
@@ -1823,31 +1823,31 @@ class PhotonPipeline {
 
         this.readVerboseFlag()
         this.vprintln("╔══════════════════════════════════════════════╗")
-        this.vprintln("�?  Photon JIT 编码管线（仅编码，无 COFF/link�? �?)
+        this.vprintln("║   Photon JIT 编码管线（仅编码，无 COFF/link）  ║")
         this.vprintln("╚══════════════════════════════════════════════╝")
 
-        // ── Phase A: HIR �?SSA MIR ──
-        this.vprintln("[Phase A] HIR �?SSA MIR (SsaBuilder)")
+        // ── Phase A: HIR → SSA MIR ──
+        this.vprintln("[Phase A] HIR → SSA MIR (SsaBuilder)")
         val ssaBuilder = SsaBuilderUtils.build(hir)
         this.vprintln("  functions=" + ssaBuilder.functionCount +
                 " values=" + ssaBuilder.valueCount +
                 " blocks=" + ssaBuilder.blockCount)
 
-        // ── Phase B: MIR �?LIR ──
-        this.vprintln("[Phase B] MIR �?LIR (Lowering)")
+        // ── Phase B: MIR → LIR ──
+        this.vprintln("[Phase B] MIR → LIR (Lowering)")
         val lowering = Lowering()
         val lir = lowering.lower(ssaBuilder)
         this.vprintln("  LIR functions=" + lir.functionCount +
                 " values=" + lir.valueCount +
                 " blocks=" + lir.blockCount)
 
-        // ── Phase C: LIR �?Machine DAG ──
-        this.vprintln("[Phase C] LIR �?Machine DAG (InstructionSelection)")
+        // ── Phase C: LIR → Machine DAG ──
+        this.vprintln("[Phase C] LIR → Machine DAG (InstructionSelection)")
         val selector = InstructionSelectorUtils.emptySelector()
         val dag = selector.select(lir)
         this.vprintln("  DAG nodes=" + dag.nodeCount +
                 " instrs=" + dag.instrCount)
-        // ── Phase D: 寄存器分�?+ 窥孔 ──
+        // ── Phase D: 寄存器分配 + 窥孔 ──
         this.vprintln("[Phase D] Register Allocation + Peephole")
         val allocator = RegisterAllocatorUtils.emptyAllocator()
         allocator.allocate(dag)
@@ -1857,7 +1857,7 @@ class PhotonPipeline {
         peephole.optimize(dag)
         this.vprintln("  peephole passes=" + peephole.getPassCount())
 
-        // ── Phase E Step 4: 指令编码（仅此一步，不做 COFF/link�?──
+        // ── Phase E Step 4: 指令编码（仅此一步，不做 COFF/link） ──
         this.vprintln("[Phase E] Instruction Encoding only")
         val emitter = X86EmitterUtils.emptyEmitter()
         emitter.setAllocator(allocator)
@@ -1865,49 +1865,49 @@ class PhotonPipeline {
         val machineCodeHex: String = emitter.getOutputHex()
         result.machineCodeHex = machineCodeHex
         result.encodedByteCount = machineCodeHex.length / 2
-        this.vprintln("  机器�?hex（前 80 字符�? " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
-        this.vprintln("  字节�? " + result.encodedByteCount)
+        this.vprintln("  机器码 hex（前 80 字符）: " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
+        this.vprintln("  字节数: " + result.encodedByteCount)
 
         result.functionCount = lir.functionCount
         result.success = true
 
         this.vprintln("")
         this.vprintln("══════════════════════════════════════════════")
-        this.vprintln("Photon JIT 编码完成 �?机器码已生成")
+        this.vprintln("Photon JIT 编码完成 — 机器码已生成")
         this.vprintln("══════════════════════════════════════════════")
 
         return result
     }
 
-    // ── JIT 专用入口（VM 安全�?──
+    // ── JIT 专用入口（VM 安全） ──
 
-    /// �?HIR 编译为裸机器码（JIT 出口，不组装 COFF、不链接）�?
+    /// 从 HIR 编译为裸机器码（JIT 出口，不组装 COFF、不链接）。
     ///
-    /// �?[`compileEncodeOnly`] 等价的命名入口。此入口**不触�?`Memory`**�?
-    /// 因此�?VM（种子）与原生（AOT / 自举）两种环境下都可调用�?
+    /// 与 [`compileEncodeOnly`] 等价的命名入口。此入口**不触碰 `Memory`**，
+    /// 因此在 VM（种子）与原生（AOT / 自举）两种环境下都可调用：
     ///
-    ///   - VM 模式：返回的机器�?hex 仅作为数据（供诊�?/ 桥接测试）；
-    ///   - 原生模式：hex 交给 `JitBackend.emitFunction` 写入 W^X 可执行内存�?
+    ///   - VM 模式：返回的机器码 hex 仅作为数据（供诊断 / 桥接测试）；
+    ///   - 原生模式：hex 交给 `JitBackend.emitFunction` 写入 W^X 可执行内存。
     fun compileJit(hir: Hir, moduleName: String): BackendResult {
         return this.compileEncodeOnly(hir, this.outDir, moduleName)
     }
 
     // ── 辅助方法 ──
 
-    /// 字符串截取�?
+    /// 字符串截取。
     private fun substring(s: String, start: Int, end: Int): String {
         if (start >= s.length) { return "" }
         if (end >= s.length) { return s.substring(start) }
         return s.substring(start, end)
     }
 
-    /// 返回两个整数中的较小值�?
+    /// 返回两个整数中的较小值。
     private fun min(a: Int, b: Int): Int {
         if (a < b) { return a }
         return b
     }
 
-    /// 整数转字符串�?
+    /// 整数转字符串。
     private fun toStr(n: Int): String {
         if (n == 0) { return "0" }
         var neg: Boolean = false
@@ -1921,7 +1921,7 @@ class PhotonPipeline {
         return result
     }
 
-    /// 将单个数字转为字符串�?
+    /// 将单个数字转为字符串。
     private fun digitChar(d: Int): String {
         if (d == 0) { return "0" }
         if (d == 1) { return "1" }
@@ -1936,7 +1936,7 @@ class PhotonPipeline {
         return ""
     }
 
-    /// 从函数偏移表解析函数名列表（格式 "funcName|offset;;funcName|offset"）�?
+    /// 从函数偏移表解析函数名列表（格式 "funcName|offset;;funcName|offset"）。
     private fun parseFuncNames(funcOffsets: String): List<String> {
         val result: List<String> = arrayListOf<String>()
         if (funcOffsets == "") { return result }
@@ -1953,12 +1953,12 @@ class PhotonPipeline {
         return result
     }
 
-    /// 将列表用逗号连接�?
+    /// 将列表用逗号连接。
     ///
-    /// ⚠️ 旧实现是 `result = result + items[i]`：自�?`Main.aura` �?2,647 �?
-    /// 函数（总长�?106KB），逐条拼接的理论拷贝量�?140 MB。现改为
-    /// 「片段列�?+ 两两归并」（追加 O(1)、归�?O(总长 · log 片段�?），�?
-    /// `X86Encoder.joinBytes` / `PhotonObjectWriter.coffJoinList` 同一手法�?
+    /// ⚠️ 旧实现是 `result = result + items[i]`：自举 `Main.aura` 有 2,647 个
+    /// 函数（总长约 106KB），逐条拼接的理论拷贝量约 140 MB。现改为
+    /// 「片段列表 + 两两归并」（追加 O(1)、归并 O(总长 · log 片段数)），与
+    /// `X86Encoder.joinBytes` / `PhotonObjectWriter.coffJoinList` 同一手法。
     private fun joinComma(items: List<String>): String {
         val parts: List<String> = arrayListOf<String>()
         var i: Int = 0
@@ -1970,7 +1970,7 @@ class PhotonPipeline {
         return this.joinPairwise(parts)
     }
 
-    /// 把片段列表两两归并成单个字符串（每层拷贝总量 O(总长)，共 O(log �?）�?
+    /// 把片段列表两两归并成单个字符串（每层拷贝总量 O(总长)，共 O(log 层)）。
     private fun joinPairwise(parts: List<String>): String {
         if (parts.size == 0) {
             return ""
@@ -1992,7 +1992,7 @@ class PhotonPipeline {
         return cur[0]
     }
 
-    /// �?`;;` 分隔字符串�?
+    /// 按 `;;` 分隔字符串。
     private fun splitDoubleSemi(text: String): List<String> {
         val result: List<String> = arrayListOf<String>()
         if (text == "") { return result }
@@ -2012,7 +2012,7 @@ class PhotonPipeline {
         return result
     }
 
-    /// 查找字符在字符串中的位置（返�?-1 表示未找到）�?
+    /// 查找字符在字符串中的位置（返回 -1 表示未找到）。
     private fun indexOf(text: String, ch: String): Int {
         var i: Int = 0
         while (i < text.length) {
@@ -2031,22 +2031,22 @@ class PhotonPipeline {
 
 object PhotonPipelineUtils {
 
-    /// 创建默认管线�?
+    /// 创建默认管线。
     fun emptyPipeline(): PhotonPipeline {
         return PhotonPipeline()
     }
 
-    /// 检测操作系统�?
+    /// 检测操作系统。
     fun detectOS(): String {
         return "windows"
     }
 
-    /// 检测架构�?
+    /// 检测架构。
     fun detectArch(): String {
         return "x86_64"
     }
 
-    /// 构建目标三元组�?
+    /// 构建目标三元组。
     fun buildTriple(os: String, arch: String): String {
         if (os == "windows") {
             return arch + "-pc-windows-msvc"
@@ -2054,7 +2054,7 @@ object PhotonPipelineUtils {
         return arch + "-unknown-linux-gnu"
     }
 
-    /// Phase 列表�?
+    /// Phase 列表。
     fun phaseList(): String {
         return "A:MIR SSA,B:LIR,C:MachineDag,D:RegAlloc+Peephole,E:X86Emitter+ObjectWriter+SystemLinker"
     }

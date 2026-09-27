@@ -1,26 +1,29 @@
-﻿// aura:///aura/lang/compiler/photon/JitBackend.aura
+// aura:///aura/lang/compiler/backend/JitBackend.aura
 package aura.lang.compiler.photon
 // ─────────────────────────────────────────────────────────────
-// JIT 后端 �?W^X mmap + 分派�?�?Phase E (任务 E.3)
+// JIT 后端 — W^X mmap + 分派表 — Phase E (任务 E.3)
 //
-// 对应后端 JIT 编译阶段。在运行时将机器码写入可执行内存�?// 通过分派表管理函数入口点�?//
+// 对应后端 JIT 编译阶段。在运行时将机器码写入可执行内存，
+// 通过分派表管理函数入口点。
+//
 // ── W^X 内存安全 ──
 //
 // 写时不可执行（Write eXecute / W^X）：
-//   - 内存区域在同一时刻只能为可读可写（写入时）或可执行（执行时�?//   - 写入代码后必须调�?mprotect/VirtualProtect 切换为可执行
+//   - 内存区域在同一时刻只能为可读可写（写入时）或可执行（执行时）
+//   - 写入代码后必须调用 mprotect/VirtualProtect 切换为可执行
 //   - 防止缓冲区溢出导致的任意代码执行
 //
 // ── 系统调用 ──
 //
 //   Windows:
-//     VirtualAlloc(size, MEM_COMMIT, PAGE_READWRITE)   �?分配 RW 内存
-//     VirtualProtect(base, size, PAGE_EXECUTE_READ)    �?切换为可执行
-//     VirtualFree(base, size, MEM_RELEASE)             �?释放
+//     VirtualAlloc(size, MEM_COMMIT, PAGE_READWRITE)   — 分配 RW 内存
+//     VirtualProtect(base, size, PAGE_EXECUTE_READ)    — 切换为可执行
+//     VirtualFree(base, size, MEM_RELEASE)             — 释放
 //
 //   Unix (Linux/macOS):
-//     mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) �?分配 RW
-//     mprotect(base, size, PROT_READ|PROT_EXEC)       �?切换为可执行
-//     munmap(base, size)                               �?释放
+//     mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) — 分配 RW
+//     mprotect(base, size, PROT_READ|PROT_EXEC)       — 切换为可执行
+//     munmap(base, size)                               — 释放
 //
 // ── 分派表布局 ──
 //
@@ -30,19 +33,19 @@ package aura.lang.compiler.photon
 //   dispatchTable[n-1] = lastFunction entry point address
 //
 //   分派存根（Dispatch Stub）：
-//     jmp [dispatchTable + slot * 8]    �?间接跳转
+//     jmp [dispatchTable + slot * 8]    — 间接跳转
 //
 // ── JIT 代码布局 ──
 //
-//   codeBase        �?可执行内存基址
-//   codeSize        �?代码区域大小
-//   textStart       �?.text 节起始地址
-//   textEnd         �?.text 节结束地址
-//   dataStart       �?.data 节起始地址
-//   dataEnd         �?.data 节结束地址
-//   entryPoint      �?入口点地址
-//   dispatchTable   �?分派表基址
-//   functionCount   �?JIT 编译函数数量
+//   codeBase        — 可执行内存基址
+//   codeSize        — 代码区域大小
+//   textStart       — .text 节起始地址
+//   textEnd         — .text 节结束地址
+//   dataStart       — .data 节起始地址
+//   dataEnd         — .data 节结束地址
+//   entryPoint      — 入口点地址
+//   dispatchTable   — 分派表基址
+//   functionCount   — JIT 编译函数数量
 //
 // ─────────────────────────────────────────────────────────────
 
@@ -54,49 +57,75 @@ import "../../hir/Hir.aura"
 import "PhotonPipeline.aura"
 
 // ─────────────────────────────────────────────────────────────
-// JitBackend �?JIT 后端：W^X 内存 + 分派�?// ─────────────────────────────────────────────────────────────
+// JitBackend — JIT 后端：W^X 内存 + 分派表
+// ─────────────────────────────────────────────────────────────
 
-/// JIT 后端：管理可执行内存分配、机器码写入、分派表构建�?class JitBackend {
+/// JIT 后端：管理可执行内存分配、机器码写入、分派表构建。
+class JitBackend {
 
     const val PROT_READ: Int = 1
     const val PROT_WRITE: Int = 2
     const val PROT_EXEC: Int = 4
 
-    /// 可执行内存基址（VirtualAlloc/mmap 返回值；多函数共享同一块）�?    var codeBase: Int = 0
+    /// 可执行内存基址（VirtualAlloc/mmap 返回值；多函数共享同一块）。
+    var codeBase: Int = 0
 
-    /// 可执行内存区域大小（字节）�?    var codeSize: Int = 0
+    /// 可执行内存区域大小（字节）。
+    var codeSize: Int = 0
 
-    /// 已使用的代码字节数（多函数顺序追加时使用）�?    var usedSize: Int = 0
+    /// 已使用的代码字节数（多函数顺序追加时使用）。
+    var usedSize: Int = 0
 
-    /// 已发射（编码 + 写入）的函数数量�?    private var funcCount: Int = 0
+    /// 已发射（编码 + 写入）的函数数量。
+    private var funcCount: Int = 0
 
-    /// 最近一次注册的函数名（�?`lookupFunction` / `deoptimize` 按名定位）�?    ///
-    /// 说明：VM 运行时的字符�?stdlib（`split` / `substring` / `indexOf` /
-    /// `charAt` 等）不可用，无法维护「名�?�?槽位」的通用映射；这里记录最�?    /// 一次注册的名字，覆�?JIT 的常见单函数场景。原生运行时可在此基础上扩�?    /// 为完整映射�?    private var lastFuncName: String = ""
+    /// 最近一次注册的函数名（供 `lookupFunction` / `deoptimize` 按名定位）。
+    ///
+    /// 说明：VM 运行时的字符串 stdlib（`split` / `substring` / `indexOf` /
+    /// `charAt` 等）不可用，无法维护「名字 → 槽位」的通用映射；这里记录最近
+    /// 一次注册的名字，覆盖 JIT 的常见单函数场景。原生运行时可在此基础上扩展
+    /// 为完整映射。
+    private var lastFuncName: String = ""
 
-    /// 最近一次注册的分派条目值�?    private var dispatchEntryValue: Int = 0
+    /// 最近一次注册的分派条目值。
+    private var dispatchEntryValue: Int = 0
 
-    /// 最近一次注册的分派槽位�?    private var lastDispatchSlot: Int = -1
+    /// 最近一次注册的分派槽位。
+    private var lastDispatchSlot: Int = -1
 
-    /// 槽位 0 的分派条目值�?    private var firstDispatchEntry: Int = 0
+    /// 槽位 0 的分派条目值。
+    private var firstDispatchEntry: Int = 0
 
-    /// 已分配的分派槽位数量�?    private var dispatchCount: Int = 0
+    /// 已分配的分派槽位数量。
+    private var dispatchCount: Int = 0
 
-    /// 总分配字节数（累计）�?    var allocatedSize: Int = 0
+    /// 总分配字节数（累计）。
+    var allocatedSize: Int = 0
 
-    /// 系统页粒度（通常 4096 字节）�?    var pageGranularity: Int = 4096
+    /// 系统页粒度（通常 4096 字节）。
+    var pageGranularity: Int = 4096
 
-    /// VM 模式标志：为 true 时跳过所�?Memory 外部调用（模拟分配）�?    ///
-    /// 默认 **true** —�?`Memory` �?`extern interface`，只�?AOT / 自举（原生）
+    /// VM 模式标志：为 true 时跳过所有 Memory 外部调用（模拟分配）。
+    ///
+    /// 默认 **true** —— `Memory` 是 `extern interface`，只在 AOT / 自举（原生）
     /// 运行时才会被降低为真实调用；种子 VM 的字节码后端无法解析
-    /// （`未解析的函数调用 'Memory.alloc'`），运行时会�?    /// `call to undefined function #65535` 崩溃�?    ///
-    /// 因此默认走「VM 安全」路径：地址与写入均为模拟�?    /// �?AOT / 自举（原生）运行时调�?[`enableNativeExec`] 关闭模拟�?    /// 才会真实分配 W^X 内存并写入机器码�?    var vmMode: Boolean = true
+    /// （`未解析的函数调用 'Memory.alloc'`），运行时会以
+    /// `call to undefined function #65535` 崩溃。
+    ///
+    /// 因此默认走「VM 安全」路径：地址与写入均为模拟。
+    /// 在 AOT / 自举（原生）运行时调用 [`enableNativeExec`] 关闭模拟，
+    /// 才会真实分配 W^X 内存并写入机器码。
+    var vmMode: Boolean = true
 
-    /// 是否运行在原生（AOT / 自举）运行时�?    var nativeRuntime: Boolean = false
+    /// 是否运行在原生（AOT / 自举）运行时。
+    var nativeRuntime: Boolean = false
 
-    /// vmMode 下用于模拟分配的假地址计数器（`0x100000` = 1048576）�?    ///
-    /// **必须写十进制**：发射器�?`var` 字段初始值按原文写进 LLVM IR�?    /// �?`i32 0x100000` 会被 LLVM 当作十六进制浮点字面量而报
-    /// `floating point constant invalid for type`�?    var simNextAddr: Int = 1048576
+    /// vmMode 下用于模拟分配的假地址计数器（`0x100000` = 1048576）。
+    ///
+    /// **必须写十进制**：发射器把 `var` 字段初始值按原文写进 LLVM IR，
+    /// 而 `i32 0x100000` 会被 LLVM 当作十六进制浮点字面量而报
+    /// `floating point constant invalid for type`。
+    var simNextAddr: Int = 1048576
 
     init() {
         this.codeBase = 0
@@ -115,22 +144,32 @@ import "PhotonPipeline.aura"
         this.simNextAddr = 1048576
     }
 
-    /// 启用原生执行：关�?VM 模拟，真实分�?W^X 内存并写入机器码�?    ///
-    /// **仅可�?AOT / 自举（原生）运行时调�?*；种�?VM 下调用会在首�?    /// 触碰 `Memory` 时崩溃�?    fun enableNativeExec(): Unit {
+    /// 启用原生执行：关闭 VM 模拟，真实分配 W^X 内存并写入机器码。
+    ///
+    /// **仅可在 AOT / 自举（原生）运行时调用**；种子 VM 下调用会在首次
+    /// 触碰 `Memory` 时崩溃。
+    fun enableNativeExec(): Unit {
         this.vmMode = false
         this.nativeRuntime = true
     }
 
-    /// 当前是否处于 VM 模拟模式�?    fun isVmMode(): Boolean {
+    /// 当前是否处于 VM 模拟模式。
+    fun isVmMode(): Boolean {
         return this.vmMode
     }
 
     // ── 真实执行 ──
 
-    /// 调用 `entry` 处已发射的机器码，返回结果（`rax`）�?    ///
-    /// 通过 [`JitExec.callI64`]（AOT 发射器降级为 `inttoptr` + 间接 `call`�?    /// 把控制权交给 JIT 代码�?*仅原生模式可�?*�?    ///
-    ///   * `vmMode == true`（种�?VM / 默认）→ 直接返回 0，绝不触�?`JitExec`�?    ///   * `vmMode == false`（AOT / 自举，已 `enableNativeExec()`）→ 真实调用�?    ///
-    /// 目标函数按平�?C ABI（Windows x64：`arg0` �?`rcx`，返回�?`rax`）�?    fun executeNative(entry: Int, arg0: Int): Int {
+    /// 调用 `entry` 处已发射的机器码，返回结果（`rax`）。
+    ///
+    /// 通过 [`JitExec.callI64`]（AOT 发射器降级为 `inttoptr` + 间接 `call`）
+    /// 把控制权交给 JIT 代码。**仅原生模式可用**：
+    ///
+    ///   * `vmMode == true`（种子 VM / 默认）→ 直接返回 0，绝不触碰 `JitExec`；
+    ///   * `vmMode == false`（AOT / 自举，已 `enableNativeExec()`）→ 真实调用。
+    ///
+    /// 目标函数按平台 C ABI（Windows x64：`arg0` → `rcx`，返回值 `rax`）。
+    fun executeNative(entry: Int, arg0: Int): Int {
         if (this.vmMode || entry == 0) {
             return 0
         }
@@ -138,7 +177,8 @@ import "PhotonPipeline.aura"
         return r as Int
     }
 
-    /// 调用无参 JIT 函数，返回结果（`rax`）。语义同 [`executeNative`]�?    fun executeNative0(entry: Int): Int {
+    /// 调用无参 JIT 函数，返回结果（`rax`）。语义同 [`executeNative`]。
+    fun executeNative0(entry: Int): Int {
         if (this.vmMode || entry == 0) {
             return 0
         }
@@ -148,22 +188,25 @@ import "PhotonPipeline.aura"
 
     // ── 内存管理 ──
 
-    /// 分配 W^X 可执行内存�?    ///
+    /// 分配 W^X 可执行内存。
+    ///
     /// Windows: VirtualAlloc(NULL, size, MEM_COMMIT, PAGE_READWRITE)
     /// Unix:    mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
     ///
-    /// 返回基址地址�? 表示失败）�?    fun allocateExecMemory(size: Int): Int {
+    /// 返回基址地址（0 表示失败）。
+    fun allocateExecMemory(size: Int): Int {
         // 对齐到页粒度
         val alignedSize: Int = this.alignToPage(size)
 
-        // VM 模式：模拟分配，不实际调�?Memory（仅用于 VM 测试�?        if (this.vmMode) {
+        // VM 模式：模拟分配，不实际调用 Memory（仅用于 VM 测试）
+        if (this.vmMode) {
             val base: Int = this.simNextAddr
             this.simNextAddr = this.simNextAddr + alignedSize
             this.allocatedSize = this.allocatedSize + alignedSize
             return base
         }
 
-        // AOT / 自举模式：真实调�?Memory
+        // AOT / 自举模式：真实调用 Memory
         val base: Int = Memory.alloc(alignedSize as Long) as Int
         if (base == 0) {
             return 0
@@ -173,7 +216,8 @@ import "PhotonPipeline.aura"
         return base
     }
 
-    /// 释放可执行内存�?    ///
+    /// 释放可执行内存。
+    ///
     /// Windows: VirtualFree(base, size, MEM_RELEASE)
     /// Unix:    munmap(base, size)
     fun freeExecMemory(base: Int, size: Int): Unit {
@@ -186,7 +230,8 @@ import "PhotonPipeline.aura"
         this.allocatedSize = this.allocatedSize - size
     }
 
-    /// 将内存标记为可执行（只读+执行）�?    ///
+    /// 将内存标记为可执行（只读+执行）。
+    ///
     /// Windows: VirtualProtect(base, size, PAGE_EXECUTE_READ)
     /// Unix:    mprotect(base, size, PROT_READ|PROT_EXEC)
     fun setExecutable(base: Int, size: Int): Unit {
@@ -198,7 +243,8 @@ import "PhotonPipeline.aura"
         Memory.mprotect(base as Long, size as Long, PROT_READ | PROT_EXEC)
     }
 
-    /// 将内存标记为可写（读+写，不可执行）�?    ///
+    /// 将内存标记为可写（读+写，不可执行）。
+    ///
     /// Windows: VirtualProtect(base, size, PAGE_READWRITE)
     /// Unix:    mprotect(base, size, PROT_READ|PROT_WRITE)
     fun setWritable(base: Int, size: Int): Unit {
@@ -210,15 +256,20 @@ import "PhotonPipeline.aura"
         Memory.mprotect(base as Long, size as Long, PROT_READ | PROT_WRITE)
     }
 
-    /// 将机器码写入可执行内存�?    ///
-    /// �?hex 编码的字节流写入指定偏移处�?    /// 调用前内存必须为可写状态，调用后可切换为可执行�?    fun writeCode(base: Int, offset: Int, bytes: String): Unit {
+    /// 将机器码写入可执行内存。
+    ///
+    /// 将 hex 编码的字节流写入指定偏移处。
+    /// 调用前内存必须为可写状态，调用后可切换为可执行。
+    fun writeCode(base: Int, offset: Int, bytes: String): Unit {
         if (base == 0 || bytes == "") {
             return
         }
-        // VM 模式：跳过实际写入（仅用�?VM 测试�?        if (this.vmMode) {
+        // VM 模式：跳过实际写入（仅用于 VM 测试）
+        if (this.vmMode) {
             return
         }
-        // �?hex 字符串转换为字节数组并写入内�?        val hexLen: Int = bytes.length
+        // 将 hex 字符串转换为字节数组并写入内存
+        val hexLen: Int = bytes.length
         var i: Int = 0
         while (i < hexLen) {
             // 逐字节写入（简化实现）
@@ -232,15 +283,17 @@ import "PhotonPipeline.aura"
         }
     }
 
-    // ── 分派表管�?──
+    // ── 分派表管理 ──
 
-    /// 在分派表中分配一个新槽位，返回槽位索引�?    fun allocateDispatchSlot(): Int {
+    /// 在分派表中分配一个新槽位，返回槽位索引。
+    fun allocateDispatchSlot(): Int {
         val slot: Int = this.dispatchCount
         this.dispatchCount = slot + 1
         return slot
     }
 
-    /// 设置分派表条目�?    fun setDispatchEntry(slot: Int, entry: Int): Unit {
+    /// 设置分派表条目。
+    fun setDispatchEntry(slot: Int, entry: Int): Unit {
         if (slot == 0) {
             this.firstDispatchEntry = entry
         }
@@ -253,7 +306,8 @@ import "PhotonPipeline.aura"
         }
     }
 
-    /// 获取分派表条目（0 表示空槽 / 未分配）�?    fun getDispatchEntry(slot: Int): Int {
+    /// 获取分派表条目（0 表示空槽 / 未分配）。
+    fun getDispatchEntry(slot: Int): Int {
         if (slot == this.lastDispatchSlot) {
             return this.dispatchEntryValue
         }
@@ -265,97 +319,122 @@ import "PhotonPipeline.aura"
 
     // ── 存根构建 ──
 
-    /// 构建分派存根（Dispatch Stub）�?    ///
-    /// 分派存根用于间接跳转到分派表中的函数入口点�?    ///
-    /// x86_64 机器码：
-    ///   mov rax, [dispatchTable + slot * 8]   �?48 8B 05 xx xx xx xx (modRM+disp32)
-    ///   jmp rax                                �?FF E0
+    /// 构建分派存根（Dispatch Stub）。
     ///
-    /// 返回 hex 编码的机器码�?    fun buildDispatchStub(slot: Int): String {
+    /// 分派存根用于间接跳转到分派表中的函数入口点。
+    ///
+    /// x86_64 机器码：
+    ///   mov rax, [dispatchTable + slot * 8]   — 48 8B 05 xx xx xx xx (modRM+disp32)
+    ///   jmp rax                                — FF E0
+    ///
+    /// 返回 hex 编码的机器码。
+    fun buildDispatchStub(slot: Int): String {
         var out: String = ""
-        // mov rax, [rip + offset]  �?间接通过 RIP 寻址
-        // 实际编码需要链接器修正重定�?        // 简化：使用 RIP 相对寻址的占位符
-        // 0x48 0x8B 0x05 0x00 0x00 0x00 0x00  �?mov rax, [rip+0]
+        // mov rax, [rip + offset]  — 间接通过 RIP 寻址
+        // 实际编码需要链接器修正重定位
+        // 简化：使用 RIP 相对寻址的占位符
+        // 0x48 0x8B 0x05 0x00 0x00 0x00 0x00  — mov rax, [rip+0]
         out = out + "48" + "8B" + "05" + "00" + "00" + "00" + "00"
-        // jmp rax �?FF E0
+        // jmp rax — FF E0
         out = out + "FF" + "E0"
         return out
     }
 
-    /// 构建去优化蹦床（Deoptimization Trampoline）�?    ///
-    /// 去优化蹦床用于从 JIT 编译代码跳回 VM 解释器�?    /// 它保�?JIT 帧状态，恢复 VM 帧上下文，然后跳转回解释器入口�?    ///
-    /// 参数�?    ///   targetFrame �?VM 帧地址（Int�?    ///
-    /// 返回 hex 编码的机器码�?    fun buildDeoptTrampoline(targetFrame: Int): String {
+    /// 构建去优化蹦床（Deoptimization Trampoline）。
+    ///
+    /// 去优化蹦床用于从 JIT 编译代码跳回 VM 解释器。
+    /// 它保存 JIT 帧状态，恢复 VM 帧上下文，然后跳转回解释器入口。
+    ///
+    /// 参数：
+    ///   targetFrame — VM 帧地址（Int）
+    ///
+    /// 返回 hex 编码的机器码。
+    fun buildDeoptTrampoline(targetFrame: Int): String {
         var out: String = ""
-        // 保存寄存器到�?        // push rbp �?55
+        // 保存寄存器到栈
+        // push rbp — 55
         out = out + "55"
-        // push rbx �?53
+        // push rbx — 53
         out = out + "53"
-        // mov rbp, rsp �?48 89 E5
+        // mov rbp, rsp — 48 89 E5
         out = out + "48" + "89" + "E5"
-        // sub rsp, 32 (shadow space) �?48 83 EC 20
+        // sub rsp, 32 (shadow space) — 48 83 EC 20
         out = out + "48" + "83" + "EC" + "20"
-        // lea rax, [rip + trampoline_target] �?48 8D 05 xx xx xx xx
+        // lea rax, [rip + trampoline_target] — 48 8D 05 xx xx xx xx
         // 指向去优化处理函数（VM 解释器入口）
         out = out + "48" + "8D" + "05"
         // 位移占位符（链接时修正）
         out = out + "00" + "00" + "00" + "00"
-        // mov [rbp - 8], rax �?48 89 45 F8
+        // mov [rbp - 8], rax — 48 89 45 F8
         out = out + "48" + "89" + "45" + "F8"
-        // 恢复 VM 帧指�?        // lea rdi, [rip + vm_frame] �?48 8D 3D xx xx xx xx
+        // 恢复 VM 帧指针
+        // lea rdi, [rip + vm_frame] — 48 8D 3D xx xx xx xx
         out = out + "48" + "8D" + "3D"
         out = out + "00" + "00" + "00" + "00"
-        // 调用 VM 解释器入�?        // call rax �?FF D0
+        // 调用 VM 解释器入口
+        // call rax — FF D0
         out = out + "FF" + "D0"
         return out
     }
 
-    /// 构建调用存根（Call Stub）�?    ///
-    /// 调用存根用于�?JIT 代码调用另一个已编译函数�?    ///
-    /// x86_64 机器码：
-    ///   jmp targetAddr                    �?E9 xx xx xx xx (jmp rel32)
-    ///   �?    ///   mov rax, targetAddr               �?48 B8 xx xx xx xx xx xx xx xx
-    ///   jmp rax                           �?FF E0
+    /// 构建调用存根（Call Stub）。
     ///
-    /// 返回 hex 编码的机器码�?    fun buildCallStub(targetAddr: Int): String {
+    /// 调用存根用于从 JIT 代码调用另一个已编译函数。
+    ///
+    /// x86_64 机器码：
+    ///   jmp targetAddr                    — E9 xx xx xx xx (jmp rel32)
+    ///   或
+    ///   mov rax, targetAddr               — 48 B8 xx xx xx xx xx xx xx xx
+    ///   jmp rax                           — FF E0
+    ///
+    /// 返回 hex 编码的机器码。
+    fun buildCallStub(targetAddr: Int): String {
         var out: String = ""
-        // mov rax, imm64 �?48 B8 [8 bytes of targetAddr]
+        // mov rax, imm64 — 48 B8 [8 bytes of targetAddr]
         out = out + "48" + "B8"
         out = out + this.intToHexLe(targetAddr, 8)
-        // jmp rax �?FF E0
+        // jmp rax — FF E0
         out = out + "FF" + "E0"
         return out
     }
 
-    /// 构建返回存根（Return Stub）�?    ///
-    /// 返回存根用于函数返回时清理栈帧�?    ///
+    /// 构建返回存根（Return Stub）。
+    ///
+    /// 返回存根用于函数返回时清理栈帧。
+    ///
     /// x86_64 机器码：
-    ///   mov rsp, rbp �?48 89 EC
-    ///   pop rbp      �?5D
-    ///   ret          �?C3
+    ///   mov rsp, rbp — 48 89 EC
+    ///   pop rbp      — 5D
+    ///   ret          — C3
     fun buildReturnStub(): String {
         var out: String = ""
-        // mov rsp, rbp �?48 89 EC
+        // mov rsp, rbp — 48 89 EC
         out = out + "48" + "89" + "EC"
-        // pop rbp �?5D
+        // pop rbp — 5D
         out = out + "5D"
-        // ret �?C3
+        // ret — C3
         out = out + "C3"
         return out
     }
 
     // ── 函数发射 ──
 
-    /// 将函数机器码写入可执行内存，返回入口点地址�?    ///
-    /// 多个函数**共享同一�?*可执行内存（见设�?10.3.2）：首次调用时按�?    /// 粒度分配一块内存，后续调用�?`usedSize` 处按 16 字节对齐顺序追加�?    /// 因此入口地址�?`codeBase + offset` 而非基址�?    ///
-    /// VM 模式下地址为模拟值、写入被跳过；原生模式下真实 W^X 写入�?    fun emitFunction(funcName: String, machineCode: String): Int {
+    /// 将函数机器码写入可执行内存，返回入口点地址。
+    ///
+    /// 多个函数**共享同一块**可执行内存（见设计 10.3.2）：首次调用时按页
+    /// 粒度分配一块内存，后续调用在 `usedSize` 处按 16 字节对齐顺序追加，
+    /// 因此入口地址是 `codeBase + offset` 而非基址。
+    ///
+    /// VM 模式下地址为模拟值、写入被跳过；原生模式下真实 W^X 写入。
+    fun emitFunction(funcName: String, machineCode: String): Int {
         if (machineCode == "") {
             return 0
         }
 
         val codeBytes: Int = machineCode.length / 2
 
-        // 首次调用：分配一块共享可执行内存�?        var base: Int = this.codeBase
+        // 首次调用：分配一块共享可执行内存。
+        var base: Int = this.codeBase
         if (base == 0) {
             val reserve: Int = this.alignToPage(codeBytes + 64) // 64 字节余量
             base = this.allocateExecMemory(reserve)
@@ -367,7 +446,8 @@ import "PhotonPipeline.aura"
             this.usedSize = 0
         } else if (this.usedSize + codeBytes + 16 > this.codeSize) {
             // 需要更大的内存；VM 模式直接扩容（模拟），原生模式无法就地扩容，
-            // 本次发射失败（调用方可先分配足够大的空间）�?            if (!this.vmMode) {
+            // 本次发射失败（调用方可先分配足够大的空间）。
+            if (!this.vmMode) {
                 return 0
             }
             this.codeSize = this.alignToPage(this.usedSize + codeBytes + 64)
@@ -376,11 +456,14 @@ import "PhotonPipeline.aura"
         val offset: Int = this.usedSize
         val entry: Int = base + offset
 
-        // 写入机器码（VM 模式�?writeCode 内部跳过）�?        this.writeCode(base, offset, machineCode)
+        // 写入机器码（VM 模式下 writeCode 内部跳过）。
+        this.writeCode(base, offset, machineCode)
 
-        // 切换为可执行权限（VM 模式�?setExecutable 内部跳过）�?        this.setExecutable(base, this.codeSize)
+        // 切换为可执行权限（VM 模式下 setExecutable 内部跳过）。
+        this.setExecutable(base, this.codeSize)
 
-        // 16 字节对齐追加�?        this.usedSize = offset + codeBytes
+        // 16 字节对齐追加。
+        this.usedSize = offset + codeBytes
         val rem: Int = this.mod16(codeBytes)
         if (rem != 0) {
             this.usedSize = this.usedSize + (16 - rem)
@@ -391,27 +474,37 @@ import "PhotonPipeline.aura"
         return entry
     }
 
-    /// 使用 Photon 管线�?HIR 编译为机器码（hex），�?JIT 侧直接消费�?    ///
-    /// 这是 JIT 路径�?Photon 机器码后端的最小接缝：
-    /// 调用方拿�?`machineCodeHex` 后可交给 `emitFunction` 写入可执行内存，
-    /// 或直接参与派�?回退决策�?    ///
-    /// 注意：使�?`compileEncodeOnly` 而非 `compileHir`�?    /// 因为 JIT 不需�?COFF 目标文件组装和链接�?    fun compileMachineCode(hir: Hir, outDir: String, moduleName: String): String {
+    /// 使用 Photon 管线把 HIR 编译为机器码（hex），供 JIT 侧直接消费。
+    ///
+    /// 这是 JIT 路径与 Photon 机器码后端的最小接缝：
+    /// 调用方拿到 `machineCodeHex` 后可交给 `emitFunction` 写入可执行内存，
+    /// 或直接参与派发/回退决策。
+    ///
+    /// 注意：使用 `compileEncodeOnly` 而非 `compileHir`，
+    /// 因为 JIT 不需要 COFF 目标文件组装和链接。
+    fun compileMachineCode(hir: Hir, outDir: String, moduleName: String): String {
         val pipeline = PhotonPipeline()
         val result = pipeline.compileEncodeOnly(hir, outDir, moduleName)
         return result.machineCodeHex
     }
 
-    /// 将函数注册到分派表，返回槽位索引�?    ///
-    /// 记录函数名，�?[`lookupFunction`] / [`deoptimize`] 可按名定位最近注册的
-    /// 函数（VM 运行时无法维护通用名字映射，见 `lastFuncName` 说明）�?    fun registerFunction(funcName: String, entryPoint: Int): Int {
+    /// 将函数注册到分派表，返回槽位索引。
+    ///
+    /// 记录函数名，使 [`lookupFunction`] / [`deoptimize`] 可按名定位最近注册的
+    /// 函数（VM 运行时无法维护通用名字映射，见 `lastFuncName` 说明）。
+    fun registerFunction(funcName: String, entryPoint: Int): Int {
         val slot: Int = this.allocateDispatchSlot()
         this.setDispatchEntry(slot, entryPoint)
         this.lastFuncName = funcName
         return slot
     }
 
-    /// 查找函数的入口点地址（按函数名）�?    ///
-    /// VM 运行时字符串 stdlib 不可用，无法维护「名�?�?槽位」通用映射�?    /// 这里按最近一次注册的函数名匹配（覆盖单函�?JIT 场景）�?    /// 未找到返�?0（调用方应回退解释器）�?    fun lookupFunction(funcName: String): Int {
+    /// 查找函数的入口点地址（按函数名）。
+    ///
+    /// VM 运行时字符串 stdlib 不可用，无法维护「名字 → 槽位」通用映射；
+    /// 这里按最近一次注册的函数名匹配（覆盖单函数 JIT 场景）。
+    /// 未找到返回 0（调用方应回退解释器）。
+    fun lookupFunction(funcName: String): Int {
         if (funcName == this.lastFuncName) {
             if (this.lastDispatchSlot >= 0) {
                 return this.getDispatchEntry(this.lastDispatchSlot)
@@ -420,23 +513,30 @@ import "PhotonPipeline.aura"
         return 0
     }
 
-    /// 已发射函数数量�?    fun functionCount(): Int {
+    /// 已发射函数数量。
+    fun functionCount(): Int {
         return this.funcCount
     }
 
-    /// 已分配的（非空）分派槽位数量�?    fun slotCount(): Int {
+    /// 已分配的（非空）分派槽位数量。
+    fun slotCount(): Int {
         return this.dispatchCount
     }
 
-    /// 去优化函数：将函数从 JIT 编译代码回退�?VM 解释执行�?    ///
-    /// 流程�?    ///   1. 按函数名定位分派槽位（最近注册者）
-    ///   2. 将分派表条目置零（禁用入口点�?    ///   3. VM 回退解释执行
+    /// 去优化函数：将函数从 JIT 编译代码回退到 VM 解释执行。
+    ///
+    /// 流程：
+    ///   1. 按函数名定位分派槽位（最近注册者）
+    ///   2. 将分派表条目置零（禁用入口点）
+    ///   3. VM 回退解释执行
     fun deoptimize(functionName: String): Unit {
-        // 1. 最近注册�?�?其槽�?        if (functionName == this.lastFuncName && this.lastDispatchSlot >= 0) {
+        // 1. 最近注册者 → 其槽位
+        if (functionName == this.lastFuncName && this.lastDispatchSlot >= 0) {
             this.setDispatchEntry(this.lastDispatchSlot, 0)
             return
         }
-        // 2. 兜底：名字未知时禁用第一个非空槽位（兼容旧调用）�?        var i: Int = 0
+        // 2. 兜底：名字未知时禁用第一个非空槽位（兼容旧调用）。
+        var i: Int = 0
         while (i < this.dispatchCount) {
             val entry: Int = this.getDispatchEntry(i)
             if (entry != 0) {
@@ -449,8 +549,10 @@ import "PhotonPipeline.aura"
 
     // ── 布局查询 ──
 
-    /// 返回 JIT 代码布局信息字符串�?    ///
-    /// 格式�?    ///   base=<hex> size=<hex> used=<hex> textStart=<hex> textEnd=<hex>
+    /// 返回 JIT 代码布局信息字符串。
+    ///
+    /// 格式：
+    ///   base=<hex> size=<hex> used=<hex> textStart=<hex> textEnd=<hex>
     ///   dataStart=<hex> dataEnd=<hex> entryPoint=<hex>
     ///   dispatchTable=<hex> functionCount=<int> mode=<vm|native>
     fun getJitCodeLayout(): String {
@@ -475,14 +577,16 @@ import "PhotonPipeline.aura"
 
     // ── 内部辅助 ──
 
-    /// �?16 取模（非负）�?    fun mod16(n: Int): Int {
+    /// 对 16 取模（非负）。
+    fun mod16(n: Int): Int {
         if (n <= 0) {
             return 0
         }
         return n - (n / 16) * 16
     }
 
-    /// 将值对齐到页粒度（向上取整）�?    fun alignToPage(value: Int): Int {
+    /// 将值对齐到页粒度（向上取整）。
+    fun alignToPage(value: Int): Int {
         if (value <= 0) {
             return this.pageGranularity
         }
@@ -493,7 +597,8 @@ import "PhotonPipeline.aura"
         return value + (this.pageGranularity - remainder)
     }
 
-    /// 将整数编码为 16 �?hex 字符串�?    fun intToHex(value: Int): String {
+    /// 将整数编码为 16 位 hex 字符串。
+    fun intToHex(value: Int): String {
         var out: String = ""
         var remaining: Int = value
         while (remaining > 0) {
@@ -504,7 +609,8 @@ import "PhotonPipeline.aura"
         if (out == "") {
             return "00000000"
         }
-        // 填充�?8 个字�?        var i: Int = 0
+        // 填充到 8 个字符
+        var i: Int = 0
         while (i < 8 - out.length) {
             out = "0" + out
             i = i + 1
@@ -512,7 +618,8 @@ import "PhotonPipeline.aura"
         return out
     }
 
-    /// 将整数编码为小端 hex 字符串�?    fun intToHexLe(value: Int, byteCount: Int): String {
+    /// 将整数编码为小端 hex 字符串。
+    fun intToHexLe(value: Int, byteCount: Int): String {
         var out: String = ""
         var remaining: Int = value
         var i: Int = 0
@@ -525,13 +632,15 @@ import "PhotonPipeline.aura"
         return out
     }
 
-    /// 将单个字节编码为 2 字符 hex 字符串�?    fun byteToHex(byte: Int): String {
+    /// 将单个字节编码为 2 字符 hex 字符串。
+    fun byteToHex(byte: Int): String {
         val hi: Int = (byte >> 4) & 0x0F
         val lo: Int = byte & 0x0F
         return this.hexChar(hi) + this.hexChar(lo)
     }
 
-    /// �?0-15 的数值转换为 hex 字符�?    fun hexChar(n: Int): String {
+    /// 将 0-15 的数值转换为 hex 字符。
+    fun hexChar(n: Int): String {
         if (n == 0) { return "0" }
         if (n == 1) { return "1" }
         if (n == 2) { return "2" }
@@ -550,7 +659,8 @@ import "PhotonPipeline.aura"
         return "F"
     }
 
-    /// 将整数转为十进制字符串�?    fun intToStr(n: Int): String {
+    /// 将整数转为十进制字符串。
+    fun intToStr(n: Int): String {
         if (n == 0) {
             return "0"
         }
@@ -572,43 +682,54 @@ import "PhotonPipeline.aura"
 }
 
 // ─────────────────────────────────────────────────────────────
-// JitBackendUtils �?顶层辅助函数
+// JitBackendUtils — 顶层辅助函数
 // ─────────────────────────────────────────────────────────────
 
 object JitBackendUtils {
 
-    /// 默认页粒度（字节）�?    fun defaultPageGranularity(): Int {
+    /// 默认页粒度（字节）。
+    fun defaultPageGranularity(): Int {
         return 4096
     }
 
-    /// 最小可执行内存分配大小（字节）�?    fun minCodeAllocation(): Int {
+    /// 最小可执行内存分配大小（字节）。
+    fun minCodeAllocation(): Int {
         return 65536 // 64 KB
     }
 
-    /// 默认 JIT 后端配置（VM 安全：模拟分配，不触�?Memory）�?    fun defaultJitBackend(): JitBackend {
+    /// 默认 JIT 后端配置（VM 安全：模拟分配，不触碰 Memory）。
+    fun defaultJitBackend(): JitBackend {
         return JitBackend()
     }
 
-    /// 原生 JIT 后端配置（关�?VM 模拟，真�?W^X 分配）�?    ///
-    /// **仅可�?AOT / 自举（原生）运行时使�?*；种�?VM 下会�?    /// `Memory` 不可解析而崩溃，请改�?[`defaultJitBackend`]�?    fun nativeJitBackend(): JitBackend {
+    /// 原生 JIT 后端配置（关闭 VM 模拟，真实 W^X 分配）。
+    ///
+    /// **仅可在 AOT / 自举（原生）运行时使用**；种子 VM 下会因
+    /// `Memory` 不可解析而崩溃，请改用 [`defaultJitBackend`]。
+    fun nativeJitBackend(): JitBackend {
         val b: JitBackend = JitBackend()
         b.enableNativeExec()
         return b
     }
 
-    /// 判断当前运行环境是否具备原生内存能力（`Memory` extern）�?    ///
-    /// �?Aura 无法在运行期可靠探测（探测本身就会触发不可解析调用）�?    /// 因此由入口显式传入：默认返回 false（VM 安全）�?    fun nativeRuntimeAvailable(): Boolean {
+    /// 判断当前运行环境是否具备原生内存能力（`Memory` extern）。
+    ///
+    /// 纯 Aura 无法在运行期可靠探测（探测本身就会触发不可解析调用），
+    /// 因此由入口显式传入：默认返回 false（VM 安全）。
+    fun nativeRuntimeAvailable(): Boolean {
         return false
     }
 
     // ── 整数解析 ──
 
-    /// 简单整数解析（不使�?charCodeAt）�?    fun parseSimpleInt(text: String): Int {
+    /// 简单整数解析（不使用 charCodeAt）。
+    fun parseSimpleInt(text: String): Int {
         var result: Int = 0
         var neg: Boolean = false
         var i: Int = 0
         val len = text.length
-        // 检查负�?        if (i < len && text.substring(i, i + 1) == "-") {
+        // 检查负号
+        if (i < len && text.substring(i, i + 1) == "-") {
             neg = true
             i = i + 1
         }
@@ -631,23 +752,28 @@ object JitBackendUtils {
         return result
     }
 
-    /// x86_64 分派存根大小（字节）�?    fun dispatchStubSize(): Int {
+    /// x86_64 分派存根大小（字节）。
+    fun dispatchStubSize(): Int {
         return 9 // mov rax,[rip+0] (7) + jmp rax (2)
     }
 
-    /// x86_64 调用存根大小（字节）�?    fun callStubSize(): Int {
+    /// x86_64 调用存根大小（字节）。
+    fun callStubSize(): Int {
         return 11 // mov rax,imm64 (10) + jmp rax (2) = 12? no, 48 B8 + 8 bytes + FF E0 = 11
     }
 
-    /// x86_64 返回存根大小（字节）�?    fun returnStubSize(): Int {
+    /// x86_64 返回存根大小（字节）。
+    fun returnStubSize(): Int {
         return 5 // mov rsp,rbp (3) + pop rbp (1) + ret (1)
     }
 
-    /// x86_64 去优化蹦床大小（字节）�?    fun deoptTrampolineSize(): Int {
+    /// x86_64 去优化蹦床大小（字节）。
+    fun deoptTrampolineSize(): Int {
         return 48
     }
 
-    /// �?hex 字符转换�?0-15 的数值�?    fun hexToNibble(c: String): Int {
+    /// 将 hex 字符转换为 0-15 的数值。
+    fun hexToNibble(c: String): Int {
         val code: Int = c.charCodeAt(0)
         if (code >= 48 && code <= 57) { // '0' - '9'
             return code - 48
@@ -661,19 +787,23 @@ object JitBackendUtils {
         return 0
     }
 
-    /// 统计 hex 字符串中的字节数�?    fun hexByteCount(hex: String): Int {
+    /// 统计 hex 字符串中的字节数。
+    fun hexByteCount(hex: String): Int {
         return hex.length / 2
     }
 
-    /// 判断地址是否为页对齐的�?    fun isPageAligned(addr: Int): Boolean {
+    /// 判断地址是否为页对齐的。
+    fun isPageAligned(addr: Int): Boolean {
         return addr % 4096 == 0
     }
 
-    /// 获取地址所在页的基址�?    fun pageBase(addr: Int): Int {
+    /// 获取地址所在页的基址。
+    fun pageBase(addr: Int): Int {
         return addr - (addr % 4096)
     }
 
-    /// 计算覆盖指定地址和大小所需的页数�?    fun pageCount(addr: Int, size: Int): Int {
+    /// 计算覆盖指定地址和大小所需的页数。
+    fun pageCount(addr: Int, size: Int): Int {
         if (size <= 0) {
             return 0
         }
@@ -683,7 +813,8 @@ object JitBackendUtils {
         return (endPage - startPage) / 4096 + 1
     }
 
-    /// 将大小对齐到页粒度�?    fun alignToPage(value: Int): Int {
+    /// 将大小对齐到页粒度。
+    fun alignToPage(value: Int): Int {
         if (value <= 0) {
             return 4096
         }
@@ -694,7 +825,8 @@ object JitBackendUtils {
         return value + (4096 - remainder)
     }
 
-    /// 将值转�?Int（十六进制字符串）�?    fun hexToInt(text: String): Int {
+    /// 将值转为 Int（十六进制字符串）。
+    fun hexToInt(text: String): Int {
         if (text == "") {
             return 0
         }
@@ -708,7 +840,8 @@ object JitBackendUtils {
         return total
     }
 
-    /// �?Int 转为 hex 字符串�?    fun intToHexStr(n: Int): String {
+    /// 将 Int 转为 hex 字符串。
+    fun intToHexStr(n: Int): String {
         if (n == 0) {
             return "0"
         }
@@ -725,7 +858,8 @@ object JitBackendUtils {
         return result
     }
 
-    /// �?0-15 转为 hex 字符字符串�?    fun hexCharStr(n: Int): String {
+    /// 将 0-15 转为 hex 字符字符串。
+    fun hexCharStr(n: Int): String {
         if (n == 10) { return "A" }
         if (n == 11) { return "B" }
         if (n == 12) { return "C" }
@@ -734,7 +868,8 @@ object JitBackendUtils {
         return "F"
     }
 
-    /// 将整数转为十进制字符串�?    fun intToStr(n: Int): String {
+    /// 将整数转为十进制字符串。
+    fun intToStr(n: Int): String {
         if (n == 0) {
             return "0"
         }
@@ -746,7 +881,8 @@ object JitBackendUtils {
         return result
     }
 
-    /// 从逗号分隔字符串中取第 index 个字段值�?    fun intFromFieldAt(text: String, index: Int): Int {
+    /// 从逗号分隔字符串中取第 index 个字段值。
+    fun intFromFieldAt(text: String, index: Int): Int {
         var fieldIdx: Int = 0
         var fieldStart: Int = 0
         var i: Int = 0
@@ -755,7 +891,8 @@ object JitBackendUtils {
             val c: Int = if (i < len) text.charCodeAt(i) else 44 // 44 = ','
             if (c == 44) {
                 if (fieldIdx == index) {
-                    // 解析 fieldStart..i 为整�?                    var result: Int = 0
+                    // 解析 fieldStart..i 为整数
+                    var result: Int = 0
                     var neg: Boolean = false
                     var j: Int = fieldStart
                     if (j < i && text.charCodeAt(j) == 45) { // 45 = '-'
@@ -780,11 +917,13 @@ object JitBackendUtils {
         return 0
     }
 
-    /// 判断地址是否有效（非零）�?    fun isValidAddress(addr: Int): Boolean {
+    /// 判断地址是否有效（非零）。
+    fun isValidAddress(addr: Int): Boolean {
         return addr != 0
     }
 
-    /// 判断是否为可执行地址（已注册到分派表）�?    fun isDispatchable(entry: Int): Boolean {
+    /// 判断是否为可执行地址（已注册到分派表）。
+    fun isDispatchable(entry: Int): Boolean {
         return entry != 0
     }
 }

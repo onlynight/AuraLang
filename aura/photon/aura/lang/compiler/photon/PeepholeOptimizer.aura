@@ -1,20 +1,27 @@
-﻿// aura:///aura/lang/compiler/photon/PeepholeOptimizer.aura
+// aura:///aura/lang/compiler/backend/PeepholeOptimizer.aura
 package aura.lang.compiler.photon
 // ─────────────────────────────────────────────────────────────
-// 窥孔优化（PeepholeOptimizer）�?Phase D (任务 D.2)
+// 窥孔优化（PeepholeOptimizer）— Phase D (任务 D.2)
 //
-// �?Machine DAG 中连续指令序列进行局部优化�?// 支持多趟迭代直至无变化�?// ─────────────────────────────────────────────────────────────
+// 对 Machine DAG 中连续指令序列进行局部优化。
+// 支持多趟迭代直至无变化。
+// ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-// 本文件直接使�?`MachineDag` / `DagInstruction` 类型，必须显式导入�?import "MachineDag.aura"
+// 本文件直接使用 `MachineDag` / `DagInstruction` 类型，必须显式导入。
+import "MachineDag.aura"
 
-/// 窥孔优化器：�?Machine DAG 进行局部优化�?class PeepholeOptimizer {
+/// 窥孔优化器：对 Machine DAG 进行局部优化。
+class PeepholeOptimizer {
 
-    /// DAG 引用�?    private var dag: MachineDag = null
+    /// DAG 引用。
+    private var dag: MachineDag = null
 
-    /// 已应用的优化数量�?    private var optimized: Int = 0
+    /// 已应用的优化数量。
+    private var optimized: Int = 0
 
-    /// 已执行的优化趟数�?    private var passCount: Int = 0
+    /// 已执行的优化趟数。
+    private var passCount: Int = 0
 
     init() {
         this.dag = null
@@ -22,12 +29,14 @@ import aura.lang.std.String
         this.passCount = 0
     }
 
-    /// 主入口：执行窥孔优化�?    fun optimize(d: MachineDag): Unit {
+    /// 主入口：执行窥孔优化。
+    fun optimize(d: MachineDag): Unit {
         this.dag = d
         this.optimized = 0
         this.passCount = 0
 
-        // 多趟优化直至无变�?        var changed: Boolean = true
+        // 多趟优化直至无变化
+        var changed: Boolean = true
         while (changed) {
             changed = this.runPass()
             this.passCount = this.passCount + 1
@@ -35,18 +44,25 @@ import aura.lang.std.String
         }
     }
 
-    /// 执行一趟优化�?    ///
-    /// ⚠️ **当前整趟禁用（返�?false，不做任何改写）**�?    ///
+    /// 执行一趟优化。
+    ///
+    /// ⚠️ **当前整趟禁用（返回 false，不做任何改写）**。
+    ///
     /// 原因：本文件里的若干趟是「跨整个 DAG、按节点 ID 全局重写」的启发式，
     /// 没有按函数隔离、也没有校验被替换的节点是否真的是同一处的操作数，实测
-    /// 会破坏代码正确性。最典型的是 `optimizeCopyPropagate`：它�?*所�?*
-    /// `mov dst, src` 收进一张全局表，然后�?`src �?dst` 去替�?*所�?*指令�?    /// 操作�?—�?连定义这�?mov 的指令本身、以及其它函数里的同名节�?ID 也一�?    /// 换掉。实�?`mov rbx,10`（Const 10）的操作数被换成后面某个乘法结果节点�?     /// 发射出来变成 `mov rdi,0`，`println("a + b = " + toStr(a+b))` 输出 ` b =`�?    ///
+    /// 会破坏代码正确性。最典型的是 `optimizeCopyPropagate`：它把**所有**
+    /// `mov dst, src` 收进一张全局表，然后拿 `src → dst` 去替换**所有**指令的
+    /// 操作数 —— 连定义这条 mov 的指令本身、以及其它函数里的同名节点 ID 也一起
+    /// 换掉。实测 `mov rbx,10`（Const 10）的操作数被换成后面某个乘法结果节点，
+     /// 发射出来变成 `mov rdi,0`，`println("a + b = " + toStr(a+b))` 输出 ` b =`。
+    ///
     /// 这些趟需要按「基本块内、单函数、单次使用」重写后才能重新启用
-    /// （属于后续优化工作项，不影响 Phase D 的寄存器分配正确性）�?    private fun runPass(): Boolean {
+    /// （属于后续优化工作项，不影响 Phase D 的寄存器分配正确性）。
+    private fun runPass(): Boolean {
         return false
     }
 
-    /// 优化 MOV 链：mov r1, r2; mov r3, r1 �?mov r3, r2
+    /// 优化 MOV 链：mov r1, r2; mov r3, r1 → mov r3, r2
     private fun optimizeMovChain(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
@@ -54,7 +70,8 @@ import aura.lang.std.String
         while (i < instrs.size - 1) {
             val instr: DagInstruction = instrs[i]
             val next: DagInstruction = instrs[i + 1]
-            // 检�?mov r1, r2 后跟 mov r3, r1（模板与 X86Emitter 一致：$imm 格式�?            if (instr.template == "mov %dst, %src" && next.template == "mov %dst, %src") {
+            // 检查 mov r1, r2 后跟 mov r3, r1（模板与 X86Emitter 一致：$imm 格式）
+            if (instr.template == "mov %dst, %src" && next.template == "mov %dst, %src") {
                 val src1: Int = instr.nodeAt(0)
                 val dst1: Int = instr.output
                 val src2: Int = next.nodeAt(0)
@@ -70,7 +87,7 @@ import aura.lang.std.String
         return changed
     }
 
-    /// 自移动消除：mov r, r �?nop
+    /// 自移动消除：mov r, r → nop
     private fun optimizeSelfMove(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
@@ -92,7 +109,8 @@ import aura.lang.std.String
         return changed
     }
 
-    /// 死代码消除：移除结果未被使用的指令�?    private fun optimizeDeadCode(): Boolean {
+    /// 死代码消除：移除结果未被使用的指令。
+    private fun optimizeDeadCode(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
         var i: Int = instrs.size - 1
@@ -115,7 +133,8 @@ import aura.lang.std.String
         return changed
     }
 
-    /// 公共子表达式消除：合并重复计算�?    private fun optimizeCommonSubexpression(): Boolean {
+    /// 公共子表达式消除：合并重复计算。
+    private fun optimizeCommonSubexpression(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
         var i: Int = 0
@@ -128,7 +147,8 @@ import aura.lang.std.String
                 val next: DagInstruction = instrs[j]
                 if (next.template == "nop") { j = j + 1; continue }
                 if (next.template == instr.template && next.nodes == instr.nodes) {
-                    // 合并：使用相同输�?                    next.output = instr.output
+                    // 合并：使用相同输出
+                    next.output = instr.output
                     next.template = "nop"
                     next.nodes = ""
                     this.optimized = this.optimized + 1
@@ -142,7 +162,7 @@ import aura.lang.std.String
         return changed
     }
 
-    /// 常量折叠：add r1, r2, 0 �?NOP, imul r1, r2, 1 �?NOP
+    /// 常量折叠：add r1, r2, 0 → NOP, imul r1, r2, 1 → NOP
     private fun optimizeConstantFold(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
@@ -175,7 +195,7 @@ import aura.lang.std.String
         return changed
     }
 
-    /// 强度削减：imul by 2^n �?shl, div by 2^n �?shr
+    /// 强度削减：imul by 2^n → shl, div by 2^n → shr
     private fun optimizeStrengthReduce(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
@@ -185,14 +205,14 @@ import aura.lang.std.String
             val mem: String = instr.mem
             if (mem != "" && this.isPowerOfTwo(mem)) {
                 val shift: Int = this.log2(this.strToInt(mem))
-                // imul by 2^n �?shl
+                // imul by 2^n → shl
                 if (instr.template == "imul %dst, %src, @imm" && shift >= 1 && shift <= 63) {
                     instr.template = "shl %dst, @shift"
                     instr.mem = toStr(shift)
                     this.optimized = this.optimized + 1
                     changed = true
                 }
-                // div by 2^n �?shr
+                // div by 2^n → shr
                 if (instr.template == "div %dst, %src" && shift >= 1 && shift <= 63) {
                     instr.template = "shr %dst, @shift"
                     instr.mem = toStr(shift)
@@ -205,12 +225,14 @@ import aura.lang.std.String
         return changed
     }
 
-    /// 复制传播：如�?mov r1, r2 已执行，�?r2 的用途替换为 r1�?    private fun optimizeCopyPropagate(): Boolean {
+    /// 复制传播：如果 mov r1, r2 已执行，将 r2 的用途替换为 r1。
+    private fun optimizeCopyPropagate(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
         val copyMap: List<String> = arrayListOf<String>()
 
-        // 第一趟：收集所有复制关�?        var i: Int = 0
+        // 第一趟：收集所有复制关系
+        var i: Int = 0
         while (i < instrs.size) {
             val instr: DagInstruction = instrs[i]
             if (instr.template == "mov %dst, %src" && instr.output >= 0) {
@@ -234,7 +256,7 @@ import aura.lang.std.String
                 var j: Int = 0
                 while (j < nodes.size) {
                     if (this.strToInt(nodes[j]) == src) {
-                        // 替换�?dst
+                        // 替换为 dst
                         nodes[j] = toStr(dst)
                         changed = true
                     }
@@ -248,14 +270,16 @@ import aura.lang.std.String
         return changed
     }
 
-    /// 冗余 Load/Store 消除�?    /// 冗余 load/store 消除�?    private fun optimizeRedundantLoadStore(): Boolean {
+    /// 冗余 Load/Store 消除。
+    /// 冗余 load/store 消除。
+    private fun optimizeRedundantLoadStore(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
         var i: Int = 0
         while (i < instrs.size - 1) {
             val instr: DagInstruction = instrs[i]
             val next: DagInstruction = instrs[i + 1]
-            // mov r1, [mem]; mov [mem], r1 �?NOP (redundant load-store)
+            // mov r1, [mem]; mov [mem], r1 → NOP (redundant load-store)
             if (instr.template == "mov %dst, [mem]" && next.template == "mov [mem], %src"
                 && instr.output >= 0 && next.nodeAt(0) == instr.output) {
                 instr.template = "nop"
@@ -270,14 +294,16 @@ import aura.lang.std.String
         return changed
     }
 
-    /// NOP 消除�?    private fun optimizeNoOp(): Boolean {
+    /// NOP 消除。
+    private fun optimizeNoOp(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
         // 移除连续 NOP
         var i: Int = 0
         while (i < instrs.size - 1) {
             if (instrs[i].template == "nop" && instrs[i + 1].template == "nop") {
-                // 保留一�?                i = i + 2
+                // 保留一个
+                i = i + 2
                 this.optimized = this.optimized + 1
                 changed = true
             } else {
@@ -287,7 +313,8 @@ import aura.lang.std.String
         return changed
     }
 
-    /// 立即数折叠�?    private fun optimizeImmediateFold(): Boolean {
+    /// 立即数折叠。
+    private fun optimizeImmediateFold(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
         var i: Int = 0
@@ -305,7 +332,7 @@ import aura.lang.std.String
         return changed
     }
 
-    /// 标志复用：cmp; jcc; cmp; jcc �?cmp; jcc; jcc
+    /// 标志复用：cmp; jcc; cmp; jcc → cmp; jcc; jcc
     private fun optimizeFlagReuse(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
@@ -331,9 +358,11 @@ import aura.lang.std.String
 
     // ── 辅助方法 ──
 
-    /// 检查节点输出是否未被使用�?    private fun isUnused(nodeId: Int): Boolean {
+    /// 检查节点输出是否未被使用。
+    private fun isUnused(nodeId: Int): Boolean {
         if (nodeId < 0) { return true }
-        // 简化检查：检查是否有指令引用此节�?        val instrs: List<DagInstruction> = this.dag.instrs
+        // 简化检查：检查是否有指令引用此节点
+        val instrs: List<DagInstruction> = this.dag.instrs
         var i: Int = 0
         while (i < instrs.size) {
             val instr: DagInstruction = instrs[i]
@@ -349,13 +378,15 @@ import aura.lang.std.String
         return true
     }
 
-    /// 检查是否为 2 的幂�?    private fun isPowerOfTwo(text: String): Boolean {
+    /// 检查是否为 2 的幂。
+    private fun isPowerOfTwo(text: String): Boolean {
         val n: Int = this.strToInt(text)
         if (n <= 0) { return false }
         return (n & (n - 1)) == 0
     }
 
-    /// 计算 log2�?    private fun log2(n: Int): Int {
+    /// 计算 log2。
+    private fun log2(n: Int): Int {
         var result: Int = 0
         var temp: Int = n
         while (temp > 1) {
@@ -365,7 +396,8 @@ import aura.lang.std.String
         return result
     }
 
-    /// 字符串转整数�?    private fun strToInt(text: String): Int {
+    /// 字符串转整数。
+    private fun strToInt(text: String): Int {
         if (text == "") { return 0 }
         val len: Int = text.length
         var total: Int = 0
@@ -381,7 +413,8 @@ import aura.lang.std.String
         return total
     }
 
-    /// 整数转字符串�?    private fun toStr(n: Int): String {
+    /// 整数转字符串。
+    private fun toStr(n: Int): String {
         if (n == 0) { return "0" }
         var neg: Boolean = false
         if (n < 0) { neg = true; n = -n }
@@ -396,7 +429,8 @@ import aura.lang.std.String
         return result
     }
 
-    /// 将单个数字转为字符串�?    private fun digitChar(d: Int): String {
+    /// 将单个数字转为字符串。
+    private fun digitChar(d: Int): String {
         if (d == 0) { return "0" }
         if (d == 1) { return "1" }
         if (d == 2) { return "2" }
@@ -410,7 +444,8 @@ import aura.lang.std.String
         return ""
     }
 
-    /// 按分隔符分割字符串�?    private fun splitStr(text: String, sep: String): List<String> {
+    /// 按分隔符分割字符串。
+    private fun splitStr(text: String, sep: String): List<String> {
         val out: List<String> = arrayListOf<String>()
         if (text == "") { return out }
         val len: Int = text.length
@@ -427,7 +462,8 @@ import aura.lang.std.String
         return out
     }
 
-    /// 连接列表�?    private fun joinList(list: List<String>, sep: String): String {
+    /// 连接列表。
+    private fun joinList(list: List<String>, sep: String): String {
         var result: String = ""
         var i: Int = 0
         while (i < list.size) {
@@ -438,11 +474,13 @@ import aura.lang.std.String
         return result
     }
 
-    /// 获取已应用的优化数量�?    fun getOptimizedCount(): Int {
+    /// 获取已应用的优化数量。
+    fun getOptimizedCount(): Int {
         return this.optimized
     }
 
-    /// 获取已执行的趟数�?    fun getPassCount(): Int {
+    /// 获取已执行的趟数。
+    fun getPassCount(): Int {
         return this.passCount
     }
 }
@@ -453,7 +491,8 @@ import aura.lang.std.String
 
 object PeepholeOptimizerUtils {
 
-    /// 创建空的窥孔优化器�?    fun emptyOptimizer(): PeepholeOptimizer {
+    /// 创建空的窥孔优化器。
+    fun emptyOptimizer(): PeepholeOptimizer {
         return PeepholeOptimizer()
     }
 }

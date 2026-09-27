@@ -1,10 +1,12 @@
 // aura:///aura/lang/compiler/photon/PhirSerializer.aura
 package aura.lang.compiler.photon
 // ─────────────────────────────────────────────────────────────
-// PhirSerializer �?HIR �?Photon IR (.phir) 文本格式序列化器
+// PhirSerializer — HIR → Photon IR (.phir) 文本格式序列化器
 //
-// 直接读取 Aura 源码，经 Lexer/Parser/HirLowerer 生成 HIR�?// 然后遍历 HIR 树序列化�?.phir 伪代码文本（§2.5 缩进语法）�?//
-// 用法（通过环境变量�?
+// 直接读取 Aura 源码，经 Lexer/Parser/HirLowerer 生成 HIR，
+// 然后遍历 HIR 树序列化为 .phir 伪代码文本（§2.5 缩进语法）。
+//
+// 用法（通过环境变量）:
 //   AURA_PHIR_SOURCE=<source.aura>
 //   AURA_PHIR_OUTPUT=<out.phir>
 //   AURA_PHIR_MODULE=<module_name>
@@ -34,15 +36,20 @@ import aura.lang.compiler.hir.Hir
 
 // HirLowerer is defined in Hir.aura
 
-/// Photon IR (.phir) 文本格式序列化器�?class PhirSerializer {
+/// Photon IR (.phir) 文本格式序列化器。
+class PhirSerializer {
 
-    /// 输出缓冲区�?    var output: String = ""
+    /// 输出缓冲区。
+    var output: String = ""
 
-    /// 模块名�?    var moduleName: String = ""
+    /// 模块名。
+    var moduleName: String = ""
 
-    /// 源码路径�?    var sourcePath: String = ""
+    /// 源码路径。
+    var sourcePath: String = ""
 
-    /// 当前缩进级别�?    var indent: Int = 0
+    /// 当前缩进级别。
+    var indent: Int = 0
 
     init() {
         this.output = ""
@@ -51,22 +58,24 @@ import aura.lang.compiler.hir.Hir
         this.indent = 0
     }
 
-    // ── 主入�?──
+    // ── 主入口 ──
 
-    /// 从源码字符串序列化为 .phir 文本�?    fun serializeFromSource(source: String): String {
+    /// 从源码字符串序列化为 .phir 文本。
+    fun serializeFromSource(source: String): String {
         this.output = ""
         this.indent = 0
 
-        // 解析源码�?AST
+        // 解析源码为 AST
         val parser: Parser = Parser(source)
         parser.parseProgram()
 
-        // AST �?HIR
+        // AST → HIR
         val hirLowerer: HirLowerer = HirLowerer()
         hirLowerer.lower(parser.ast)
         val hir: Hir = hirLowerer.hir
 
-        // 写入模块�?        this.writeModuleHeader()
+        // 写入模块头
+        this.writeModuleHeader()
 
         // 遍历 Program 的子节点（函数）
         val rootKids: String = hir.kidsOf(hir.rootId)
@@ -84,7 +93,7 @@ import aura.lang.compiler.hir.Hir
         return this.output
     }
 
-    // ── 模块�?──
+    // ── 模块头 ──
 
     private fun writeModuleHeader(): Unit {
         this.output = "# module " + this.moduleName + " target x86_64\n"
@@ -94,13 +103,14 @@ import aura.lang.compiler.hir.Hir
         this.output = this.output + "\n"
     }
 
-    // ── 函数序列�?──
+    // ── 函数序列化 ──
 
     private fun serializeFunction(hir: Hir, id: Int): Unit {
         val name: String = hir.textOf(id)
         val retType: String = hir.tyOf(id)
 
-        // 获取子节�?        val kids: String = hir.kidsOf(id)
+        // 获取子节点
+        val kids: String = hir.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         // 构建参数列表和函数体
@@ -126,7 +136,8 @@ import aura.lang.compiler.hir.Hir
             i = i + 1
         }
 
-        // 写函数签�?        this.output = this.output + "fun " + name + "(" + paramsStr + ") -> " + retType + " {\n"
+        // 写函数签名
+        this.output = this.output + "fun " + name + "(" + paramsStr + ") -> " + retType + " {\n"
         this.indent = 1
 
         // 写函数体
@@ -152,7 +163,7 @@ import aura.lang.compiler.hir.Hir
         }
     }
 
-    // ── 语句序列�?──
+    // ── 语句序列化 ──
 
     private fun serializeStatement(hir: Hir, id: Int): Unit {
         val kind: String = hir.kindOf(id)
@@ -436,7 +447,7 @@ import aura.lang.compiler.hir.Hir
             this.output = this.output + ")"
 
         } else {
-            // 默认：输�?text
+            // 默认：输出 text
             if (text != "") {
                 this.output = this.output + text
             }
@@ -504,11 +515,13 @@ import aura.lang.compiler.hir.Hir
 
 object PhirSerializerUtils {
 
-    /// 创建序列化器�?    fun emptySerializer(): PhirSerializer {
+    /// 创建序列化器。
+    fun emptySerializer(): PhirSerializer {
         return PhirSerializer()
     }
 
-    /// 从源码序列化�?.phir 文本�?    fun serialize(source: String, module: String, path: String): String {
+    /// 从源码序列化为 .phir 文本。
+    fun serialize(source: String, module: String, path: String): String {
         val ser: PhirSerializer = PhirSerializer()
         ser.moduleName = module
         ser.sourcePath = path

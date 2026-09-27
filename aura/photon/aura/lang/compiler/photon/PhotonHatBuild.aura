@@ -1,5 +1,5 @@
 // aura:///aura/lang/compiler/photon/PhotonHatBuild.aura
-// HAT v2.0 端到端编译驱�?�?.hat �?SSA MIR �?LIR �?X86 �?COFF �?Link �?.exe
+// HAT v2.0 端到端编译驱动 — .hat → SSA MIR → LIR → X86 → COFF → Link → .exe
 //
 // 用法: aura run aura/photon/aura/lang/compiler/photon/PhotonHatBuild.aura
 //
@@ -25,7 +25,7 @@ fun main() {
     pipeline.outDir = outDir
     pipeline.moduleName = moduleName
 
-    // 可选前置步骤：�?.phir 转成 .hat（复�?PHIR 用例源），再�?HAT 管线
+    // 可选前置步骤：把 .phir 转成 .hat（复用 PHIR 用例源），再走 HAT 管线
     if (phirPath != "") {
         if (!pipeline.phirToHat(phirPath, hatPath, moduleName)) {
             println("===RESULT===fail")
@@ -36,10 +36,12 @@ fun main() {
 
     val result = pipeline.compileHat(hatPath)
 
-    // 输出 COFF hex（主对象�?    println("===COFF-MAIN===")
+    // 输出 COFF hex（主对象）
+    println("===COFF-MAIN===")
     println(result.coffHex)
 
-    // 输出 COFF hex（runtime 对象�?    val rtHex: String = PhotonRuntime.buildRuntimeObject()
+    // 输出 COFF hex（runtime 对象）
+    val rtHex: String = PhotonRuntime.buildRuntimeObject()
     println("===COFF-RUNTIME===")
     println(rtHex)
 

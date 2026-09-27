@@ -11,14 +11,17 @@ object PhotonNativeWriter {
 
     val O_WRONLY_CREAT_TRUNC: Int = 1 | 0x40 | 0x200
 
-    /// �?COFF hex 文本解码为字节并写入 path�?    /// 单次大缓冲区写入，避免循环中�?FileOps.write 崩溃�?    fun writeObjectFile(path: String, coffHex: String): Boolean {
+    /// 把 COFF hex 文本解码为字节并写入 path。
+    /// 单次大缓冲区写入，避免循环中的 FileOps.write 崩溃。
+    fun writeObjectFile(path: String, coffHex: String): Boolean {
         val hexLen: Int = coffHex.length
         val total: Int = hexLen / 2
         if (total <= 0) {
             return false
         }
 
-        // 分配路径缓冲�?        val pathLen: Int = path.length
+        // 分配路径缓冲区
+        val pathLen: Int = path.length
         val pathBuf: Long = Memory.alloc((pathLen + 1) as Long)
         if (pathBuf == 0) {
             return false
@@ -64,7 +67,8 @@ object PhotonNativeWriter {
             hi = hi + 2
         }
 
-        // 一次性写�?        val n: Long = FileOps.write(fd, dataBuf, total as Long)
+        // 一次性写入
+        val n: Long = FileOps.write(fd, dataBuf, total as Long)
 
         FileOps.close(fd)
         Memory.free(dataBuf)
@@ -72,12 +76,14 @@ object PhotonNativeWriter {
         return n == total as Long
     }
 
-    /// �?hex 文本中第 index 个字节的值（0..255）�?    fun hexByteAt(hex: String, index: Int): Int {
+    /// 取 hex 文本中第 index 个字节的值（0..255）。
+    fun hexByteAt(hex: String, index: Int): Int {
         return PhotonNativeWriter.hexNibble(hex, index * 2) * 16
             + PhotonNativeWriter.hexNibble(hex, index * 2 + 1)
     }
 
-    /// 单个 hex 字符 �?半字节（非法字符�?0 处理）�?    fun hexNibble(hex: String, at: Int): Int {
+    /// 单个 hex 字符 → 半字节（非法字符按 0 处理）。
+    fun hexNibble(hex: String, at: Int): Int {
         if (at < 0 || at >= hex.length) {
             return 0
         }

@@ -1,14 +1,16 @@
-﻿// aura:///aura/lang/compiler/photon/x86_64/X86EncoderTest.aura
+// aura:///aura/lang/compiler/backend/X86EncoderTest.aura
 package aura.lang.compiler.photon.x86_64
 // ─────────────────────────────────────────────────────────────
-// X86Encoder 指令编码测试 �?验证 x86_64 机器码生�?// ─────────────────────────────────────────────────────────────
+// X86Encoder 指令编码测试 — 验证 x86_64 机器码生成
+// ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
 import "X86Encoder.aura"
 
-/// 测试入口�?fun main() {
+/// 测试入口。
+fun main() {
     println("╔══════════════════════════════════════════════════╗")
-    println("�?  X86Encoder 指令编码测试                         �?)
+    println("║   X86Encoder 指令编码测试                         ║")
     println("╚══════════════════════════════════════════════════╝")
     println("")
 
@@ -22,12 +24,12 @@ import "X86Encoder.aura"
     enc1.emitPrologue(48)
     enc1.emitEpilogue()
     val hex1 = enc1.toHex()
-    println("  机器�? " + hex1)
-    println("  字节�? " + enc1.byteCount())
+    println("  机器码: " + hex1)
+    println("  字节数: " + enc1.byteCount())
     if (hex1 != "") {
-        println("  �?PASS")
+        println("  ✓ PASS")
     } else {
-        println("  �?FAIL")
+        println("  ✗ FAIL")
         failures = failures + 1
     }
 
@@ -38,12 +40,12 @@ import "X86Encoder.aura"
     enc2.emitMovRR("rax", "rcx")
     enc2.emitMovRI("rdx", 42)
     val hex2 = enc2.toHex()
-    println("  机器�? " + hex2)
-    println("  字节�? " + enc2.byteCount())
+    println("  机器码: " + hex2)
+    println("  字节数: " + enc2.byteCount())
     if (hex2 != "") {
-        println("  �?PASS")
+        println("  ✓ PASS")
     } else {
-        println("  �?FAIL")
+        println("  ✗ FAIL")
         failures = failures + 1
     }
 
@@ -55,31 +57,31 @@ import "X86Encoder.aura"
     enc3.emitSubRR("rax", "rdx")
     enc3.emitCmpRI("rax", 0)
     val hex3 = enc3.toHex()
-    println("  机器�? " + hex3)
-    println("  字节�? " + enc3.byteCount())
+    println("  机器码: " + hex3)
+    println("  字节数: " + enc3.byteCount())
     if (hex3 != "") {
-        println("  �?PASS")
+        println("  ✓ PASS")
     } else {
-        println("  �?FAIL")
+        println("  ✗ FAIL")
         failures = failures + 1
     }
 
-    // ── 测试 4: 控制流指�?──
+    // ── 测试 4: 控制流指令 ──
     tests = tests + 1
-    println("[Test 4] 控制流指�?(RET/NOP/CALL)")
+    println("[Test 4] 控制流指令 (RET/NOP/CALL)")
     val enc4 = X86EncoderUtils.emptyEncoder()
     enc4.emitRet()
     enc4.emitNop()
     enc4.emitCallRel("println")
     val hex4 = enc4.toHex()
     val reloc4 = enc4.getRelocations()
-    println("  机器�? " + hex4)
-    println("  字节�? " + enc4.byteCount())
+    println("  机器码: " + hex4)
+    println("  字节数: " + enc4.byteCount())
     println("  重定位数: " + reloc4.size)
     if (hex4 != "" && reloc4.size == 1) {
-        println("  �?PASS")
+        println("  ✓ PASS")
     } else {
-        println("  �?FAIL")
+        println("  ✗ FAIL")
         failures = failures + 1
     }
 
@@ -91,18 +93,18 @@ import "X86Encoder.aura"
     enc5.emitSetcc("bl", "ne")
     enc5.emitSetcc("cl", "lt")
     val hex5 = enc5.toHex()
-    println("  机器�? " + hex5)
-    println("  字节�? " + enc5.byteCount())
+    println("  机器码: " + hex5)
+    println("  字节数: " + enc5.byteCount())
     if (hex5 != "") {
-        println("  �?PASS")
+        println("  ✓ PASS")
     } else {
-        println("  �?FAIL")
+        println("  ✗ FAIL")
         failures = failures + 1
     }
 
-    // ── 测试 6: 完整 helloworld 机器�?──
+    // ── 测试 6: 完整 helloworld 机器码 ──
     tests = tests + 1
-    println("[Test 6] 完整 helloworld 机器�?)
+    println("[Test 6] 完整 helloworld 机器码")
     val enc6 = X86EncoderUtils.emptyEncoder()
 
     // main 函数
@@ -118,8 +120,8 @@ import "X86Encoder.aura"
 
     val hex6 = enc6.toHex()
     val reloc6 = enc6.getRelocations()
-    println("  机器�? " + hex6)
-    println("  字节�? " + enc6.byteCount())
+    println("  机器码: " + hex6)
+    println("  字节数: " + enc6.byteCount())
     println("  重定位数: " + reloc6.size)
     var i: Int = 0
     while (i < reloc6.size) {
@@ -127,9 +129,9 @@ import "X86Encoder.aura"
         i = i + 1
     }
     if (hex6 != "" && reloc6.size == 2) {
-        println("  �?PASS")
+        println("  ✓ PASS")
     } else {
-        println("  �?FAIL")
+        println("  ✗ FAIL")
         failures = failures + 1
     }
 
@@ -142,21 +144,21 @@ import "X86Encoder.aura"
     enc7.emitAddRI("rax", 1)
     val hex7 = enc7.toHex()
     val reloc7 = enc7.getRelocations()
-    println("  机器�? " + hex7)
+    println("  机器码: " + hex7)
     println("  重定位数: " + reloc7.size)
     if (hex7 != "" && reloc7.size == 1) {
-        println("  �?PASS")
+        println("  ✓ PASS")
     } else {
-        println("  �?FAIL")
+        println("  ✗ FAIL")
         failures = failures + 1
     }
 
-    // ── 汇�?──
+    // ── 汇总 ──
     println("")
     println("══════════════════════════════════════════════════")
     println("测试结果: " + (tests - failures) + "/" + tests + " 通过")
     if (failures == 0) {
-        println("RESULT: PASS �?X86Encoder 全部测试通过")
+        println("RESULT: PASS — X86Encoder 全部测试通过")
     } else {
         println("RESULT: FAIL (" + failures + " 失败)")
     }
