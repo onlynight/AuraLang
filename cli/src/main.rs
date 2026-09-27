@@ -367,7 +367,7 @@ fn cmd_build_photon(args: &[String]) {
         eprintln!("Error: native Photon driver not found: {}", native_driver.display());
         eprintln!("       build it with:");
         eprintln!("         cargo run -p cli --features llvm -- build --aot \\");
-        eprintln!("             aura/compiler/aura/lang/compiler/backend/photon/PhotonHatCompile.aura \\");
+        eprintln!("             aura/photon/aura/lang/compiler/photon/PhotonHatCompile.aura \\");
         eprintln!("             --output build/hat-native/PhotonHatCompile.exe");
         exit(1);
     }

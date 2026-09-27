@@ -230,6 +230,11 @@ pub fn compile_source(source: &str) -> Result<BytecodeModule, String> {
 /// `aura.lang.compiler.lexer.Span` → `lexer/Span.aura`（相对包根目录）。
 const COMPILER_PKG_ROOT: &str = "aura.lang.compiler.";
 
+/// `aura.lang.compiler.photon.` 包根前缀：映射到 `aura/photon/aura/lang/compiler/`。
+/// 注意：必须放在 `COMPILER_PKG_ROOT` **之前**检查，因为 `aura.lang.compiler.photon.*`
+/// 也以 `aura.lang.compiler.` 为前缀，先匹配更精确的 photon 根才不会落到 compiler 根。
+const PHOTON_PKG_ROOT: &str = "aura.lang.compiler.photon.";
+
 /// `aura.lang.collection.` 包根前缀：映射到 `aura/core/aura/lang/collection/`。
 const COLLECTION_PKG_ROOT: &str = "aura.lang.collection.";
 
@@ -269,6 +274,10 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
     let compiler_pkg_root: Option<std::path::PathBuf> = project_root
         .as_ref()
         .map(|pr| pr.join("aura").join("compiler").join("aura").join("lang").join("compiler"));
+    // `photon_pkg_root`：`aura.lang.compiler.photon` 包根目录。
+    let photon_pkg_root: Option<std::path::PathBuf> = project_root
+        .as_ref()
+        .map(|pr| pr.join("aura").join("photon").join("aura").join("lang").join("compiler"));
     // `collection_pkg_root`：`aura.lang.collection` 包根目录。
     let collection_pkg_root: Option<std::path::PathBuf> = project_root
         .as_ref()
@@ -277,6 +286,7 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
     let mut out = resolve_aura_imports_rec(
         source,
         &compiler_pkg_root,
+        &photon_pkg_root,
         &collection_pkg_root,
         &base_dir,
         &mut visited,
@@ -298,6 +308,7 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
                 out.push_str(&resolve_aura_imports_rec(
                     &content,
                     &compiler_pkg_root,
+                    &photon_pkg_root,
                     &collection_pkg_root,
                     child_base,
                     &mut visited,
@@ -326,6 +337,7 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
 fn resolve_aura_imports_rec(
     source: &str,
     compiler_pkg_root: &Option<std::path::PathBuf>,
+    photon_pkg_root: &Option<std::path::PathBuf>,
     collection_pkg_root: &Option<std::path::PathBuf>,
     base_dir: &std::path::Path,
     visited: &mut std::collections::HashSet<std::path::PathBuf>,
@@ -351,6 +363,14 @@ fn resolve_aura_imports_rec(
                 let (path, _suffix) = split_at_quote(path_str);
                 if path.ends_with(".aura") {
                     Some(base_dir.join(path))
+                } else if path.starts_with(PHOTON_PKG_ROOT) {
+                    if let Some(root) = photon_pkg_root {
+                        let rel =
+                            pkg_to_aura_path(path.strip_prefix(PHOTON_PKG_ROOT).unwrap_or(path));
+                        Some(root.join(rel))
+                    } else {
+                        None
+                    }
                 } else if path.starts_with(COMPILER_PKG_ROOT) {
                     if let Some(root) = compiler_pkg_root {
                         let rel =
@@ -368,6 +388,13 @@ fn resolve_aura_imports_rec(
                     } else {
                         None
                     }
+                } else {
+                    None
+                }
+            } else if let Some(pkg) = rest.strip_prefix(PHOTON_PKG_ROOT) {
+                if let Some(root) = photon_pkg_root {
+                    let rel = pkg_to_aura_path(pkg);
+                    Some(root.join(rel))
                 } else {
                     None
                 }
@@ -424,6 +451,7 @@ fn resolve_aura_imports_rec(
                     let resolved = resolve_aura_imports_rec(
                         &content,
                         compiler_pkg_root,
+                        photon_pkg_root,
                         collection_pkg_root,
                         child_base,
                         visited,
