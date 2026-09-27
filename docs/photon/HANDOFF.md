@@ -4,13 +4,14 @@
 > 状态时间点：自举链路「零未定义符号 + 可运行 + CLI 参数通道打通 + 无死循环」，
 > 剩余唯一拦路石是 **字符串判等 / 分支控制流（P0）**。
 >
-> ⚠️ **构建环境注意**（2026-09-27 新增）：
-> 当前 `aura.exe`（`rust\target\release\aura.exe`，即 `seed\target\release\aura.exe`）
+> ⚠️ **构建环境注意**（2026-09-27 更新）：
+> 当前 `aura.exe`（`seed/target/release/aura.exe`，6.5 MB，所有副本均相同）
 > 仅支持 `run` / `compile` / `check` / `version` 四个命令，**不支持** `build` 命令。
+> `seed/compiler/src/main.rs` 是一个简化版 CLI（72 行），无 `build` 命令实现。
 > 本文档中引用的 `aura.exe build --aot` 和 `aura.exe build -b photon` 命令
-> 来自旧版编译器，当前版本需使用 `aura.exe compile --aot` 替代 `build --aot`。
-> 但 `compile --aot` 在当前版本下也无法正确读取 .aura 文件（报 `Error reading file`），
-> 需使用 `build` 命令的替代方案（见下方「重建驱动」部分）。
+> 来自完整版本编译器（需 `llvm` feature + 完整 CLI），当前版本不可用。
+> **后果**：无法重建 `PhotonHatCompile.exe` 驱动，P0/P1 修复无法通过驱动复验。
+> 已有驱动（旧代码构建）可运行但输出为旧版诊断，不含 `[MAIN]`/`[CMP]`/`[RUNCLI]` 标记。
 
 ## 0. 环境与验证流程（新对话直接照做）
 
@@ -244,11 +245,28 @@ powershell -Command "& '.\scripts\photon\bootstrap-photon.ps1' -Step 4,5"
 ## 4. 一句话交接
 
 链路已从「29 个未定义符号 + 启动即崩」推进到「**零未定义、可运行、参数通道打通、无死循环**」；
-**本轮修复了 P0（SETcc 条件码引用错误）和 P1（`leaf`/`kidsOf`/`spanOf` 未定义符号）**，
-但**需重建驱动后复验**。当前 `aura.exe` 不支持 `build` 命令，需找到替代构建方案。
+**本轮修复了 P0（SETcc 条件码引用错误）和 P1（`leaf`/`kidsOf`/`spanOf` 未定义符号）**。
 
-**待办优先级**：
-1. 找到可用的驱动重建方案（`aura.exe build` 命令缺失）
-2. 重建驱动后复验 P0/P1 修复
-3. P1 Step 4c 闭环 → P4 清理诊断
-4. 类支持缺口 A3/A4/A6（独立主线，见 §2.5）
+### 本轮验证结果（2026-09-27）
+
+**驱动重建受阻**：当前 `aura.exe`（`seed/target/release/aura.exe`，6.5 MB）仅支持
+`run`/`compile`/`check`/`version` 四个命令，**不支持** `build` 命令。
+`main.rs` 源码中无 `build` 命令实现，`build-aura-compiler.ps1` 等脚本引用的
+`aura.exe build --aot` 在当前版本下不可用。
+
+**已有驱动实测**：`build/hat-native/PhotonHatCompile.exe`（1.2 MB，旧代码构建）
+可运行并产出 `Main.obj`（2.5 MB）+ `aura_runtime.obj`（1 MB）+ `Main.exe`（2.9 MB），
+但输出为旧版诊断（`BOOT-1/1a/1b/2` + usage），**不含** `[MAIN]`/`[CMP]`/`[RUNCLI]`
+标记，无法验证 P0/P1 修复效果。
+
+**结论**：P0/P1 的代码修复已写入源码，但**需等待兼容的 `aura.exe`（含 `build --aot`
+命令）才能重建驱动并复验**。当前 `seed/compiler/src/main.rs` 是一个简化版 CLI，
+缺少 AOT 构建能力。
+
+### 待办优先级
+
+1. **[阻塞]** 找到/构建含 `build --aot` 命令的 `aura.exe`（需 `llvm` feature + 完整 CLI）
+2. 重建 `PhotonHatCompile.exe` 驱动
+3. 复验 P0（`[CMP]` 输出）和 P1（链接无未定义符号）
+4. P1 Step 4c 闭环 → P4 清理诊断
+5. 类支持缺口 A3/A4/A6（独立主线，见 §2.5）

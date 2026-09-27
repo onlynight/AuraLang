@@ -1,4 +1,4 @@
-# StringBuilder 重构方案
+﻿# StringBuilder 重构方案
 
 > **核心约束**：纯 Aura 实现，仅使用 `Memory.*`（编译器内置）+ `String.charCodeAt` / `fromCharCode` / `String.join`（已有标准库）。**不依赖 CString / ReadCStr / 任何 C FFI**。
 > 状态：**方案设计**
@@ -1041,9 +1041,9 @@ fun main(): Int {
 | 文件 | 变更 |
 |------|------|
 | `aura/core/aura/lang/native/StrOps.aura` | 新增 extern interface |
-| `rust/compiler/src/codegen/aot/emit.rs` | 添加 StrOps 的 LLVM 发射 |
-| `rust/compiler/src/vm/interp.rs` | 添加 StrOps 的 VM 实现 |
-| `rust/compiler/src/vm/native.rs` | 注册 StrOps 原生函数 |
+| `seed/compiler/src/codegen/aot/emit.rs` | 添加 StrOps 的 LLVM 发射 |
+| `seed/compiler/src/vm/interp.rs` | 添加 StrOps 的 VM 实现 |
+| `seed/compiler/src/vm/native.rs` | 注册 StrOps 原生函数 |
 
 **实现**：
 
@@ -1341,9 +1341,9 @@ time /tmp/phase7_new.exe
 
 | 文件 | 变更 |
 |------|------|
-| `rust/compiler/src/codegen/hir.rs` | 新增 STR_CONCAT / STR_CHARAT opcode |
-| `rust/compiler/src/vm/jit.rs` | JIT 白名单 + 发射逻辑 |
-| `rust/compiler/src/vm/jit_opt.rs` | JIT 优化规则 |
+| `seed/compiler/src/codegen/hir.rs` | 新增 STR_CONCAT / STR_CHARAT opcode |
+| `seed/compiler/src/vm/jit.rs` | JIT 白名单 + 发射逻辑 |
+| `seed/compiler/src/vm/jit_opt.rs` | JIT 优化规则 |
 | `aura/compiler/aura/lang/compiler/jit/JitLower.aura` | 字节码 → Clif 映射 |
 
 **新增 opcode**：

@@ -1,4 +1,4 @@
-# Photon 后端完整迁移方案
+﻿# Photon 后端完整迁移方案
 
 ## 执行摘要
 
@@ -125,7 +125,7 @@ List, Map, Math...         Memory.aura
 ### 任务清单
 
 #### 1.1 修改 `cmd_build_photon` (3-5 天)
-**文件**: `rust/cli/src/main.rs`
+**文件**: `seed/compiler/src/main.rs`
 
 **当前状态**:
 ```rust

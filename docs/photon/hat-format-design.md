@@ -1,4 +1,4 @@
-# HAT 格式设计文档 v2.0 (SSA 结构化 IR)
+﻿# HAT 格式设计文档 v2.0 (SSA 结构化 IR)
 
 > **版本**: 2.0
 > **状态**: 设计提案
@@ -1291,8 +1291,8 @@ compileHat:   HAT text ───────────────────
 | 任务 | 文件 |
 |------|------|
 | `HatSerializer.aura`（Aura 侧） | `aura/lang/compiler/hir/hat/HatSerializer.aura` |
-| `hir_to_hat()`（Rust 侧） | `rust/cli/src/main.rs` |
-| Rust SSA 构造器 | `rust/compiler/src/codegen/ssa.rs` |
+| `hir_to_hat()`（Rust 侧） | `seed/compiler/src/main.rs` |
+| Rust SSA 构造器 | `seed/compiler/src/codegen/ssa.rs` |
 | 序列化器单测 | Rust + Aura 双向测试 |
 
 ### 阶段 4：管线集成（1 天）

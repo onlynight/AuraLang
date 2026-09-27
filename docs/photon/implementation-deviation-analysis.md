@@ -1,7 +1,7 @@
-# Photon 后端实现偏差分析报告
+﻿# Photon 后端实现偏差分析报告
 
 > **分析日期**：2026-09-22
-> **分析范围**：`aura/compiler/aura/lang/compiler/backend/photon/` + `rust/cli/src/main.rs` + 构建脚本
+> **分析范围**：`aura/compiler/aura/lang/compiler/backend/photon/` + `seed/compiler/src/main.rs` + 构建脚本
 > **参考文档**：
 > - `docs/Lir2MacCode/参考go rust设计新的编译后端.md` (v2.1)
 > - `docs/Lir2MacCode/photon-self-contained-design-v3.md` (v3)
@@ -29,7 +29,7 @@
   │
   ▼
 ┌─────────────────────────────────────────────────────┐
-│  rust/cli/main.rs (Rust CLI — 前端编译器)              │
+│  seed/compiler/main.rs (Rust CLI — 前端编译器)              │
 │  ┌─────────────────────────────────────────────┐    │
 │  │ cmd_build (-b photon)                       │    │
 │  │   Rust: Lex → Parse → Sema → HIR           │    │
@@ -439,12 +439,12 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 
 | 项 | 状态 | 证据 |
 |----|------|------|
-| `.phir` 序列化（保留 Photon IR，**非 JSON**） | ✅ | `rust/cli/src/main.rs::hir_to_phir()` @888；`PhirSerializer.aura` |
+| `.phir` 序列化（保留 Photon IR，**非 JSON**） | ✅ | `seed/compiler/src/main.rs::hir_to_phir()` @888；`PhirSerializer.aura` |
 | Driver 环境变量接收 | ✅ | `AURA_PHOTON_PHIR`/`AURA_PHOTON_OUT`/`AURA_PHOTON_MODULE` |
 | 多函数符号 | ✅ | `PhotonPipeline.splitDoubleSemi` 端点 bug（`i-start`→`i`） |
 | runtime stdlib | ✅ | `aura_runtime.obj` 导出 8 个 `T` 符号 |
 
-**已修复的真实编译器 bug**：`rust/cli/src/main.rs::first_positional` 对**无值标志**（`--output`/`--aot`/`-b`/`--target`…）执行 `i += 2`，把下一个**输入文件**当成选项值吃掉。新增 `OPTS_WITH_VALUE` 白名单：带值选项跳 2，纯标志跳 1。
+**已修复的真实编译器 bug**：`seed/compiler/src/main.rs::first_positional` 对**无值标志**（`--output`/`--aot`/`-b`/`--target`…）执行 `i += 2`，把下一个**输入文件**当成选项值吃掉。新增 `OPTS_WITH_VALUE` 白名单：带值选项跳 2，纯标志跳 1。
 
 **验证**：
 ```powershell
@@ -461,7 +461,7 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 | Step 5 COFF 确定性 | ✅ PASS | TimeDateStamp=0；两次构建 SHA256 一致 |
 | Step 3/4 编译器自举 | ❌ 未达成 | 多文件编译器工程超出单文件 Photon 管线 |
 
-**新增文件**：`aura/runtime/cffi/aura_syscalls.c`（42 KB，59 符号）——`rust/compiler/src/codegen/aot/linker.rs` 硬引用该路径却不存在，导致 AOT 完全不可用。
+**新增文件**：`aura/runtime/cffi/aura_syscalls.c`（42 KB，59 符号）——`seed/compiler/src/codegen/aot/linker.rs` 硬引用该路径却不存在，导致 AOT 完全不可用。
 
 ### 9.3 P2：零外部依赖（偏差 #6）
 
@@ -506,7 +506,7 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
   实测解析速率 **≈50 ms/函数**（线性，非平方）：2345 个函数仅解析就 ≈2 min，Phase A–E 量级相同 ⇒ 全量自举
   ≈10 min 级。要在 1 分钟内完成，必须让管线**原生执行**。
 - 🟡 **`aura build --aot <驱动>`：已推进到「最终链接」阶段（2026-09-24）**。此前卡在 LLVM IR
-  生成，现已修掉 8 类真实 codegen 缺陷（`rust/compiler/src/codegen/aot/emit.rs` 等）：
+  生成，现已修掉 8 类真实 codegen 缺陷（`seed/compiler/src/codegen/aot/emit.rs` 等）：
   1. **混合类型比较生成非法 IR**：`icmp slt i8* %x, %int`（`l_ty.starts_with("i")` 把 `i8*` 当整型；
      且指针/整数未统一）。现统一 `ptrtoint → i64` 并把字面量宽度对齐到 i64。
   2. **幽灵命名空间首参**：`StringOps.strlen(msg)` 的 HIR 是 `strlen(StringOps, msg)`（裸名 +
@@ -882,14 +882,14 @@ dst = heapArena + base                      ; 每次调用都是新地址 → �
 #### 10.4.2 数组/列表端到端（修复 03）
 
 **根因（前端）**：`Int[5] = [1, 2, 3, 4, 5]` 里类型 `Int[5]`（`Type::Array`）能解析，
-但**数组字面量表达式 `[...]` 没有产生式** —— `rust/compiler/src/parser.rs` 只把 `[`
+但**数组字面量表达式 `[...]` 没有产生式** —— `seed/compiler/src/parser.rs` 只把 `[`
 当作**后缀**索引（`Expr::Index`）。于是 `[`、`,`、`]` 被当成裸字面量，参考实现自己
 也只是输出残骸（`arr[0] = null`、`sum = 0.0`，并伴随 `unresolved reference '['`）。
 所以先补前端，再补 Photon 侧；**不能**让 Photon 去复刻 `null`/`0.0`。
 
 | 层 | 改动 | 文件 |
 |----|------|------|
-| 前端（Rust） | 新增前缀产生式 `[e1, e2, …]`（支持尾随逗号）→ 降级为 `arrayListOf(...)`，再走既有 `arrayListOf → __list_new` 降级；允许后续后缀（`[1,2][0]`） | `rust/compiler/src/parser.rs` |
+| 前端（Rust） | 新增前缀产生式 `[e1, e2, …]`（支持尾随逗号）→ 降级为 `arrayListOf(...)`，再走既有 `arrayListOf → __list_new` 降级；允许后续后缀（`[1,2][0]`） | `seed/compiler/src/parser.rs` |
 | Photon HIR→SSA | `__list_new(e0…)`（**n 元**）拆成 `__list_alloc(count)` + N×`__list_setat(list,i,ei)` —— 全部 ≤3 元，**避开 Photon 调用约定只支持 4 个寄存器实参的限制**；`HirIndex` 由 `Load` 改为 runtime 调用 `__list_get(list,idx)`（Load/Store 路径当前不登记进 `block.instrs`，DAG 里没有加载指令） | `mir/SsaBuilder.aura` |
 | 名称映射 | `.Collections.set` → `__list_setat`、`Collections.get` → `__list_get`、`Syscalls.exit` → `exit` | `InstructionSelection.aura` |
 | Photon runtime | 新增 `__list_alloc` / `__list_setat` / `__list_get`；列表布局 `[count][e0][e1]…`（元素 i 在 `[8+i*8]`），与字符串共用 `.data` 的 bump 堆（`heapArena:16384` + `heapBump:8`） | `PhotonRuntime.aura` |
@@ -976,7 +976,7 @@ powershell -File scripts\photon-try.ps1 -Src tests\photon\P2\03_array_ops.aura -
 llvm-readobj --coff-imports build\suite\03_array_ops\03_array_ops.exe
 
 # 前端改动后重建 CLI（种子编译器，AOT 需要 llvm 特性）
-cd rust; cargo build -p cli --features llvm --release
+cd seed; cargo build -p compiler --features llvm --release
 ```
 
 ### 10.8 调试开关一览（stdout 默认只留协议标记）
@@ -1164,7 +1164,7 @@ Main.exe（1,657,344 B）启动时崩溃（0xC0000005），根因分析：
 ### 12.1 B：Rust CLI 降级（✅ 完成）
 
 **改动**：
-- `rust/cli/src/main.rs::cmd_build_photon` 重写为**纯编排**：只做「参数解析 → 计算模块名/产物目录 →
+- `seed/compiler/src/main.rs::cmd_build_photon` 重写为**纯编排**：只做「参数解析 → 计算模块名/产物目录 →
   调原生 `PhotonHatCompile.exe` → 解析 `===COFF-MAIN===`/`===COFF-RUNTIME===`/`===LINK===` 协议后处理」。
   删除 Rust 侧 Lex/Parse/Sema/HIR→`.phir` 全部前端代码（约 720 行死代码：`hir_to_phir` / `stmt_to_phir` /
   `expr_to_phir` / `hir_to_aura_json` / `*_to_json` / `hir_type_name_helper` / `escape_json` /

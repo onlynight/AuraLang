@@ -3,7 +3,7 @@
 > **文档编号**：VM-PA-00（v3）
 > **日期**：2026-09-25
 > **状态**：技术方案（决策已定，待评审）
-> **目标**：将目前由 Rust 实现的虚拟机（`rust/compiler/src/vm/`）全部改用 Aura 自实现（`aura/compiler/aura/lang/compiler/vm/`）
+> **目标**：将目前由 Rust 实现的虚拟机（`seed/compiler/src/vm/`）全部改用 Aura 自实现（`aura/compiler/aura/lang/compiler/vm/`）
 > **结论**：**可行**——核实发现 `bootstrap/` 是孤立死代码（全仓库 0 生产引用），因此「新 VM 不引用 bootstrap」这一隔离要求**今天已天然满足**，隔离成本近乎为零。建议分 5 个阶段推进，总工期 **14–22 周（3.5–5.5 个月）**，JIT/Photon 作为独立任务并行跟踪。
 
 ---
@@ -12,7 +12,7 @@
 
 | # | 决策 | 内容 | 影响 |
 |---|------|------|------|
-| D1 | **`bootstrap/` 保留但不引用** | `rust/compiler/src/bootstrap/`（2,759 行 / 10 文件）**保留在库中不删除**，但**新的 Aura VM 实现不得引用它**。Rust 侧 VM 与 bootstrap 保持现状，不做清理 | 见 §1.1 核实：该层当前已 0 生产引用，隔离要求天然满足；见 §2.5 的隔离守卫机制 |
+| D1 | **`bootstrap/` 保留但不引用** | `seed/compiler/src/bootstrap/`（2,759 行 / 10 文件）**保留在库中不删除**，但**新的 Aura VM 实现不得引用它**。Rust 侧 VM 与 bootstrap 保持现状，不做清理 | 见 §1.1 核实：该层当前已 0 生产引用，隔离要求天然满足；见 §2.5 的隔离守卫机制 |
 | D2 | **纯 Aura 实现 + Photon 后端** | 下沉部分**仅保留无法用 Aura 实现的部分**，不再使用 Rust | VM 指令集压到最小（~30 条），其余全部 Aura 代码 |
 | D3 | **JIT 走纯 Aura + Photon** | 不纳入本方案本地范围，用其他任务跟踪 | 本方案 P0–P4 产出**纯解释执行**的 VM，JIT 是独立并行任务 |
 | D4 | **Rust 当前仅为种子** | 主要还是 Aura 自举实现 VM | 迁移后 Rust 编译器是**一次性冻结种子**，完成自举即可彻底移除 |
@@ -30,20 +30,20 @@
 
 | # | 实现 | 位置 | 规模 | 指令数 | 生产使用 |
 |---|------|------|------|--------|---------|
-| A | **Rust 主 VM** | `rust/compiler/src/vm/` | **15,172 行 / 26 文件** | **106** | ✅ CLI `main.rs:1769/2445/2979` 三处调用 |
-| B | **Bootstrap 迷你 VM** | `rust/compiler/src/bootstrap/` | **2,759 行 / 10 文件** | **15–17** | ❌ **完全孤立** |
+| A | **Rust 主 VM** | `seed/compiler/src/vm/` | **15,172 行 / 26 文件** | **106** | ✅ CLI `main.rs:1769/2445/2979` 三处调用 |
+| B | **Bootstrap 迷你 VM** | `seed/compiler/src/bootstrap/` | **2,759 行 / 10 文件** | **15–17** | ❌ **完全孤立** |
 | C | **Aura VM** | `aura/compiler/aura/lang/compiler/vm/` | **4,419 行 / 13 文件** | **~65** | ⚠️ CLI 部分命令 + 少量测试 |
 
 **B 的孤立性经 grep 全面核实**：
 
 | 引用源 | 对 `bootstrap` 的引用 |
 |--------|----------------------|
-| `rust/cli/src/main.rs`（实际 CLI 入口） | **0 处** |
-| `rust/cli/src/` 其他文件 | **0 处** |
-| `rust/loom/src/` | **0 处**（仅 `ffi/aot.rs:12`、`stdlib/mod.rs:20` 两处**注释**提及） |
-| `rust/compiler/src/` 其他模块 | **0 处** |
-| `rust/compiler/src/lib.rs:3` | `pub mod bootstrap;`（**唯一挂载点**） |
-| `rust/compiler/tests/bootstrap_test.rs` | 20+ 处（**唯一使用者，测试文件**） |
+| `seed/compiler/src/main.rs`（实际 CLI 入口） | **0 处** |
+| `seed/compiler/src/` 其他文件 | **0 处** |
+| `seed/compiler/src/` | **0 处**（仅 `ffi/aot.rs:12`、`stdlib/mod.rs:20` 两处**注释**提及） |
+| `seed/compiler/src/` 其他模块 | **0 处** |
+| `seed/compiler/src/lib.rs:3` | `pub mod bootstrap;`（**唯一挂载点**） |
+| `seed/compiler/tests/bootstrap_test.rs` | 20+ 处（**唯一使用者，测试文件**） |
 | `bootstrap/` 内部自引用 | 13 处 |
 
 **关键推论**：`bootstrap/` 从未接入任何生产路径。`docs/pure_aura_jit/README.md:86-88` 将其描述为"最小引导层保留边界"，这是**规划意图，不是代码事实**。
@@ -337,12 +337,12 @@ println(d1.name)   // 输出 "Fido" —— 而非 "Rex"
 | VM 解释器 | ✅ 纯 Aura |
 | 标准库运行时语义 | ✅ 纯 Aura |
 | 编译器前端/后端、CLI、LSP、调试器、loom | ✅ 纯 Aura（已大体完成） |
-| **`rust/compiler/src/bootstrap/`**（2,759 行） | 🟡 **保留但不引用**（已核实为孤立死代码，见 §1.1；新 VM 与 JIT 任务均不得使用，见 §2.5） |
+| **`seed/compiler/src/bootstrap/`**（2,759 行） | 🟡 **保留但不引用**（已核实为孤立死代码，见 §1.1；新 VM 与 JIT 任务均不得使用，见 §2.5） |
 | **Rust 编译器** | 🟡 **一次性冻结种子**——编译 Aura 编译器为原生 exe，完成自举后彻底移除 |
 | OS 系统调用（mmap/malloc/NT_CreateFile/线程原语） | 🟡 **保留**——不可避免的物理边界 |
 | LLVM / Cranelift | 🟡 **目标态由 Photon 替换**（独立任务） |
 
-**迁移后残留 Rust**：`rust/` 下的种子编译器（含 `bootstrap/`，保留但不引用）——用于编译 Aura 编译器自身，自举闭环建立后可整体移除。**不再有任何常驻的 Rust VM 运行时被新 VM 引用**。
+**迁移后残留 Rust**：`seed/` 下的种子编译器（含 `bootstrap/`，保留但不引用）——用于编译 Aura 编译器自身，自举闭环建立后可整体移除。**不再有任何常驻的 Rust VM 运行时被新 VM 引用**。
 
 ### 2.5 bootstrap 隔离守卫（按 D1 新增）
 
@@ -352,10 +352,10 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 
 1. **CI 静态检查**：新增检查脚本，断言以下约束，任一违反即失败：
    - `aura/compiler/` 全目录内 `grep -r "bootstrap"` **0 命中**（Aura 侧代码不得引用 bootstrap 符号）
-   - `rust/compiler/src/vm/` 内 `grep -r "bootstrap"` **0 命中**（Rust 主 VM 不得引用 bootstrap）
-   - `rust/cli/`、`rust/loom/src/` 内 `grep -r "bootstrap"` 仅允许**注释命中**
+   - `seed/compiler/src/vm/` 内 `grep -r "bootstrap"` **0 命中**（Rust 主 VM 不得引用 bootstrap）
+   - `seed/compiler/`、`seed/compiler/src/` 内 `grep -r "bootstrap"` 仅允许**注释命中**
 2. **依赖方向声明**：在 ADR 中明确依赖方向单向性——`bootstrap/` 是**叶子模块**，允许被 `tests/` 引用，**禁止被 `src/vm/`、`src/codegen/`、CLI、loom 生产代码引用**。
-3. **注释标记**：在 `rust/compiler/src/bootstrap/mod.rs` 头部加显著标记，说明"此层为遗留孤立代码，保留但不引用，新 VM 与 JIT 不得接入"。
+3. **注释标记**：在 `seed/compiler/src/bootstrap/mod.rs` 头部加显著标记，说明"此层为遗留孤立代码，保留但不引用，新 VM 与 JIT 不得接入"。
 
 **为何仍需守卫**：`bootstrap/` 中的 `jit_core.rs`/`jit_ffi.rs` 与 JIT 需求高度重叠，独立 JIT/Photon 任务在排期压力下**最容易的选择就是把现成的 328 行 `jit_ffi.rs` 接回来**。守卫必须在 JIT 任务启动前就位。
 
@@ -380,7 +380,7 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 
 **P0 验收标准**：
 - ✅ `bootstrap/` 隔离守卫生效：新增 CI 检查脚本并在当前代码库上**通过**（证明 0 生产引用是可持续的）
-- ✅ `git grep "bootstrap" -- aura/compiler/` 与 `-- rust/compiler/src/vm/` 均 **0 命中**
+- ✅ `git grep "bootstrap" -- aura/compiler/` 与 `-- seed/compiler/src/vm/` 均 **0 命中**
 - ✅ `Vm.aura` 分派器无字符串 `else if` 链，无执行期字符串解析
 - ✅ 以下程序在 Aura VM 下正确运行：
   ```aura
@@ -473,14 +473,14 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 |------|------|
 | P4.1 自举闭环 | Aura VM 执行 Aura 编译器自编译产物（`Main.aura` 自举）；Stage-1/2/3 全通 |
 | P4.2 全量差分回归 | Rust VM vs Aura VM 对 `tests/` 全量 + `examples/` 全量做差分 |
-| P4.3 **删除 Rust VM** | 删除 `rust/compiler/src/vm/`（15,172 行 / 26 文件） |
-| P4.4 CLI 切换 | `rust/cli/src/main.rs` 中 3 处 `Vm::new`（`1769`/`2445`/`2979`）改为 Aura VM 路径；Rust CLI 退化为纯种子 |
+| P4.3 **删除 Rust VM** | 删除 `seed/compiler/src/vm/`（15,172 行 / 26 文件） |
+| P4.4 CLI 切换 | `seed/compiler/src/main.rs` 中 3 处 `Vm::new`（`1769`/`2445`/`2979`）改为 Aura VM 路径；Rust CLI 退化为纯种子 |
 
 **P4 验收标准**：
 - ✅ 自举链 Stage-1/2/3 全部成功
 - ✅ 差分回归 100% 一致
 - ✅ `git grep "compiler::vm\|use.*vm::"` 无生产代码命中
-- ✅ 删除 `rust/compiler/src/vm/` 后全部测试仍通过
+- ✅ 删除 `seed/compiler/src/vm/` 后全部测试仍通过
 
 **P4 工作量**：~1,500 行改动 + 15,172 行删除，2–3 周
 
@@ -495,7 +495,7 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 | **OS 系统调用**（mmap/malloc/NT_CreateFile/线程原语/epoll） | 必须与内核二进制接口交互，语言层无法替代 | `aura_syscalls.c`（43,074 字节）+ `aura/lang/native/arch/*/Syscalls.aura` |
 | **Rust 种子编译器** | 自举的第一推动力——Aura 编译器自身需被某物编译 | 迁移后**仅用于编译 Aura 编译器**，自举闭环建立后可整体删除 |
 | LLVM / Cranelift | 由 Photon 替换（**独立任务**，不在本方案范围） | 当前仍在用，Photon 成熟后移除 |
-| **`rust/compiler/src/bootstrap/`**（2,759 行） | 已核实为孤立死代码（§1.1），**不属于"不可 Aura 化"，而是"已不需要但按 D1 保留"** | 保留在库中不删除；新 VM 与 JIT 任务均不得引用；P0.1 建立隔离守卫（§2.5） |
+| **`seed/compiler/src/bootstrap/`**（2,759 行） | 已核实为孤立死代码（§1.1），**不属于"不可 Aura 化"，而是"已不需要但按 D1 保留"** | 保留在库中不删除；新 VM 与 JIT 任务均不得引用；P0.1 建立隔离守卫（§2.5） |
 
 **对比 v1 方案**：v1 把 `bootstrap/` 列为常驻引导层边界；**v2 将其从"功能边界"降级为"遗留保留代码"**——它不构成新 VM 的能力来源，只被 P0.1 的隔离守卫约束。迁移后常驻 Rust 代码从「bootstrap + JIT FFI（功能边界）」收敛为「种子编译器（含孤立保留的 bootstrap）」。
 
@@ -531,7 +531,7 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 | P1 | `tests/classes/` + `tests/HashMap/` + `tests/language-test/` 全部通过；ARC 泄漏检测归零 | 🔴 是 |
 | P2 | `.auc` 直接执行（无文本翻译）；差分测试与 Rust VM 输出一致 | 🔴 是 |
 | P3 | `tests/concurrent/` + FFI demo + Actor/Channel 全部通过 | 🔴 是 |
-| P4 | 自举 Stage-1/2/3 全通；删除 `rust/compiler/src/vm/`（15,172 行）后全量测试通过 | — |
+| P4 | 自举 Stage-1/2/3 全通；删除 `seed/compiler/src/vm/`（15,172 行）后全量测试通过 | — |
 
 **跨方案验收（由独立 JIT/Photon 任务负责，本方案不阻塞）**：热点 JIT 生效、AOT 段可执行、Photon 替换 LLVM/Cranelift。
 
@@ -549,9 +549,9 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 | **合计** | **14–22 周（3.5–5.5 个月）** | **~16,500–20,500 行** | **~15,200 行** | 1–2 人主力 |
 
 **迁移后残留 Rust**：
-- ✅ **删除**：`rust/compiler/src/vm/`（15,172 行 / 26 文件）
-- 🟡 **保留但不引用**：`rust/compiler/src/bootstrap/`（2,759 行 / 10 文件）+ `bootstrap_test.rs` —— 遗留孤立代码，按 D1 保留，受 P0.1 隔离守卫约束
-- 🟡 **保留（临时）**：`rust/` 其余部分——种子编译器，自举闭环建立后可整体移除
+- ✅ **删除**：`seed/compiler/src/vm/`（15,172 行 / 26 文件）
+- 🟡 **保留但不引用**：`seed/compiler/src/bootstrap/`（2,759 行 / 10 文件）+ `bootstrap_test.rs` —— 遗留孤立代码，按 D1 保留，受 P0.1 隔离守卫约束
+- 🟡 **保留（临时）**：`seed/` 其余部分——种子编译器，自举闭环建立后可整体移除
 - 🟡 **保留（物理边界）**：`aura/runtime/cffi/aura_syscalls.c`
 
 **与 v1 方案对比**：工期 18–27 周 → **14–22 周**（-4 至 -5 周）；残留常驻 Rust 从「bootstrap + JIT FFI（功能边界）」收敛为「种子编译器 + 孤立保留的 bootstrap（非功能）」。
@@ -562,11 +562,11 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 
 | 结论 | 证据位置 |
 |------|---------|
-| 三套 VM 并存 | `rust/compiler/src/vm/mod.rs:18-45`（26 模块）/ `rust/compiler/src/bootstrap/mod.rs` / `aura/compiler/aura/lang/compiler/vm/` |
+| 三套 VM 并存 | `seed/compiler/src/vm/mod.rs:18-45`（26 模块）/ `seed/compiler/src/bootstrap/mod.rs` / `aura/compiler/aura/lang/compiler/vm/` |
 | Rust VM 15,172 行 | 26 文件行数汇总，`interp.rs` 2346 最大 |
 | Aura VM 4,419 行 | 13 文件行数汇总，`Vm.aura` 1897 最大 |
-| **bootstrap 完全孤立** | `grep -r "bootstrap" rust/` 命中 43 处，其中 CLI 0、loom 0（仅 2 处注释）、compiler/src 非 bootstrap 模块 0、唯一使用者 `tests/bootstrap_test.rs` |
-| bootstrap 唯一挂载点 | `rust/compiler/src/lib.rs:3`（`pub mod bootstrap;`） |
+| **bootstrap 完全孤立** | `grep -r "bootstrap" seed/` 命中 43 处，其中 CLI 0、loom 0（仅 2 处注释）、compiler/src 非 bootstrap 模块 0、唯一使用者 `tests/bootstrap_test.rs` |
+| bootstrap 唯一挂载点 | `seed/compiler/src/lib.rs:3`（`pub mod bootstrap;`） |
 | bootstrap 规模 | 10 文件 / 2,759 行（`vm_core.rs` 756 + `aot_core.rs` 665 + `jit_ffi.rs` 328 + `jit_core.rs` 268 + `runtime.rs` 203 + `memory.rs` 176 + `type_core.rs` 119 + `mod.rs` 76 + `value_check.rs` 71 + `any_core.rs` 97） |
 | bootstrap 内嵌迷你 VM | `bootstrap/vm_core.rs:28-29`（Value 6 变体）、`:127-153`（15–17 指令） |
 | **`jit_ffi.rs` 从未接入生产** | `bootstrap/jit_ffi.rs:69/158/297` 定义 `jit_compile/jit_load/jit_call`；主 VM JIT 走 `vm/jit.rs:388/408/1456` 的 `jit_compile_cranelift`（不同函数）；唯一调用者 `tests/bootstrap_test.rs:217/622` |
@@ -583,11 +583,11 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 | 三个死代码模块 | `grep "Opcodes\." Vm.aura` → 0；`grep "TailCall" Vm.aura` → 0；`grep "Closures" Vm.aura` → 0 |
 | 测试已无法编译 | `tests/phase5_vm_tests.aura:334-407`（旧 API） |
 | 无示例调用 VM | `grep "VmRunner\|loadAucAndRun" examples/` → 0 |
-| Rust Value 10 变体 | `rust/compiler/src/vm/value.rs:14-37` |
-| Rust HeapData 7 变体 | `rust/compiler/src/vm/heap.rs:19-54` |
-| Rust 106 指令 | `rust/compiler/src/codegen/opcode.rs:30-274` |
-| Rust ~93 原生函数 | `rust/compiler/src/vm/native.rs:50-340` |
-| Rust CLI 3 处 VM 调用 | `rust/cli/src/main.rs:1769`/`2445`/`2979` |
+| Rust Value 10 变体 | `seed/compiler/src/vm/value.rs:14-37` |
+| Rust HeapData 7 变体 | `seed/compiler/src/vm/heap.rs:19-54` |
+| Rust 106 指令 | `seed/compiler/src/codegen/opcode.rs:30-274` |
+| Rust ~93 原生函数 | `seed/compiler/src/vm/native.rs:50-340` |
+| Rust CLI 3 处 VM 调用 | `seed/compiler/src/main.rs:1769`/`2445`/`2979` |
 | 时间线 | git log `436c16b`（09-22 实现 VM）/ `4f91c84`（09-23 删 Rust）/ `036ab65`（09-23 回滚） |
 
 ## 附录 B：相关文档可信度

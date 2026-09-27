@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Aura std C FFI — 标准库 C ABI 实现
  *
  * 供 AOT 编译后端链接使用。
@@ -1010,7 +1010,7 @@ int64_t aura_string_length(const char *s) {
  *
  * AOT 下 Aura `String` **就是** NUL 结尾的 `i8*`（项目既定 ABI），所以这里是
  * 恒等返回 —— 与旧的零拷贝路径行为完全一致，不产生任何复制。
- * VM（字节码）路径下由 `rust/compiler/src/vm/native.rs::native_builtin_read_cstr`
+ * VM（字节码）路径下由 `seed/compiler/src/vm/native.rs::native_builtin_read_cstr`
  * 实现（拷出一份真 `String`，带类型标签），二者语义对齐。
  *
  * 用途：`EmitBuffer.sbBuild()` 用它把原生缓冲区的字节显式变成 `String`。 */

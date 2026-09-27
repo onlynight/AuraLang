@@ -1,13 +1,13 @@
-# Aura VM 功能规格清单
+﻿# Aura VM 功能规格清单
 
-> 分析时间：2026-06-12 | 分析范围：`rust/compiler/src/vm/` 全部 26 个子模块
+> 分析时间：2026-06-12 | 分析范围：`seed/compiler/src/vm/` 全部 26 个子模块
 > 用途：作为「用纯 Aura 重写 VM」的目标规范，可直接用作验收清单。
 
 ---
 
 ## 1. 指令集完整枚举（Instr Enum）
 
-**文件**：`rust/compiler/src/vm/mod.rs` 行 196–388
+**文件**：`seed/compiler/src/vm/mod.rs` 行 196–388
 **总变体数**：**106**
 
 ### 按语义分组
@@ -51,7 +51,7 @@
 ## 2. 值表示（Value）与堆（Heap）
 
 ### 2.1 Value 枚举
-**文件**：`rust/compiler/src/vm/value.rs` 行 1–140
+**文件**：`seed/compiler/src/vm/value.rs` 行 1–140
 **结构**：`#[derive(Clone, Debug)] enum Value`
 
 | 变体 | 类型 | 说明 |
@@ -77,7 +77,7 @@
 **复杂度**：低（纯数据结构定义）
 
 ### 2.2 Heap 堆管理器
-**文件**：`rust/compiler/src/vm/heap.rs` 行 1–498
+**文件**：`seed/compiler/src/vm/heap.rs` 行 1–498
 
 **堆对象类型（HeapData enum）**：
 | 变体 | 说明 |
@@ -105,7 +105,7 @@
 
 ## 3. 解释执行循环
 
-**文件**：`rust/compiler/src/vm/interp.rs` 行 1–2468
+**文件**：`seed/compiler/src/vm/interp.rs` 行 1–2468
 **主循环**：`Vm::run()` → `Vm::step()` → `Vm::exec_instr()`
 
 ### 3.1 主循环结构（行72-150）
@@ -178,7 +178,7 @@ pub struct Handler {
 
 ## 4. 原生/内置函数
 
-**文件**：`rust/compiler/src/vm/native.rs` 行 1–1454
+**文件**：`seed/compiler/src/vm/native.rs` 行 1–1454
 **注册表**：`NativeRegistry`（HashMap<String, NativeFn> + DynamicLoader）
 **NativeFn 签名**：`fn(&[Value]) -> Value`
 
@@ -487,7 +487,7 @@ pub struct AotRuntime {
 ## 8. FFI 机制
 
 ### 8.1 回调蹦床（ffi.rs，396行）
-**文件**：`rust/compiler/src/vm/ffi.rs`
+**文件**：`seed/compiler/src/vm/ffi.rs`
 **机制**：
 - `CallbackRegistry`：全局回调注册表（Mutex<Vec<CallbackEntry>>）
   - `register(func_idx)` → 返回 callback_id（1-based）
@@ -557,7 +557,7 @@ pub struct AotRuntime {
 ## 10. 模块与 ABI
 
 ### 10.1 跨模块调用（multi_module.rs，266行）
-**文件**：`rust/compiler/src/vm/multi_module.rs`
+**文件**：`seed/compiler/src/vm/multi_module.rs`
 **MultiModuleVm 结构**：
 ```rust
 pub struct MultiModuleVm {
@@ -584,7 +584,7 @@ pub struct MultiModuleVm {
 - UUID = 16字节数组，标识模块唯一身份
 
 ### 10.3 调用约定 ABI（abi.rs，210行）
-**文件**：`rust/compiler/src/vm/abi.rs`
+**文件**：`seed/compiler/src/vm/abi.rs`
 **JitValue**（`#[repr(C)]` 双字段结构）：
 ```rust
 pub struct JitValue {

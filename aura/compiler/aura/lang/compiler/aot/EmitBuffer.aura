@@ -54,7 +54,7 @@ class EmitBuffer {
         // 死循环的触发源）。
         //
         // `ReadCStr(ptr)` 是 `CString` 的逆操作：
-        //   * VM 侧 —— `native_builtin_read_cstr`（`rust/.../vm/native.rs`）按 NUL
+        //   * VM 侧 —— `native_builtin_read_cstr`（`seed/.../vm/native.rs`）按 NUL
         //     结尾**拷出一份真 `String`**（`Value::Str`），类型标签正确；
         //   * AOT 侧 —— 恒等（`String` 本就是 `i8*`，见 `aura_std_cffi.c` 的
         //     `ReadCStr`），与旧的零拷贝行为完全一致。

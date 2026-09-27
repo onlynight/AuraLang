@@ -1,4 +1,4 @@
-# Aura 隐式 this 语法糖优化设计方案
+﻿# Aura 隐式 this 语法糖优化设计方案
 
 > **状态**：设计方案（未实施） | **优先级**：P0（语言核心） | **目标版本**：v0.6 引入 → v1.0 稳定
 > **分析日期**：2026-10
@@ -65,7 +65,7 @@ class Counter {
 
 **关键发现**：Rust 编译器里隐式字段/方法访问的**基础设施已经存在**，只是没被推广成语法糖主路径。
 
-#### Rust 侧（`rust/compiler/src/codegen/hir.rs`）
+#### Rust 侧（`seed/compiler/src/codegen/hir.rs`）
 
 ```rust
 // hir.rs:73 —— 当前正在降级的类/结构体上下文
@@ -578,18 +578,18 @@ class Builder<T> {
 
 | 文件 | 修改性质 | 修改量估计 |
 |------|----------|-----------|
-| `rust/compiler/src/ast.rs` | 新增 `Expr::Self` 别名节点（可选） | +3 行 |
-| `rust/compiler/src/lexer.rs` | 无修改（`self` 通过 `is_keyword` 检测） | 0 |
-| `rust/compiler/src/token.rs` | 新增 `TokenKind::Self_`（可选，或复用 Ident） | +1 行 |
-| `rust/compiler/src/parser.rs` | 支持 `self` 关键字（`Expr::This` 别名） | +5 行 |
-| `rust/compiler/src/sema/checker.rs` | **主修改**：新增 `resolve_ident_in_class_scope` | +200 行 |
-| `rust/compiler/src/sema/symbol.rs` | 类成员查找辅助（可能无需改） | 0 |
-| `rust/compiler/src/sema/ty.rs` | 无 | 0 |
-| `rust/compiler/src/codegen/hir.rs` | 提前插入 `this.x` 改写的时机：在 sema 完成后**主动改写** AST，而非仅在兜底时改写 | +300 行 |
-| `rust/compiler/src/codegen/mir.rs` | 无（MIR 消费 HIR，不受影响） | 0 |
-| `rust/compiler/src/codegen/emit.rs` | 无 | 0 |
-| `rust/compiler/src/lsp.rs` | 补全候选增加隐式字段/方法 | +100 行 |
-| `rust/compiler/src/docgen.rs` | 文档生成时识别隐式访问（可选） | +50 行 |
+| `seed/compiler/src/ast.rs` | 新增 `Expr::Self` 别名节点（可选） | +3 行 |
+| `seed/compiler/src/lexer.rs` | 无修改（`self` 通过 `is_keyword` 检测） | 0 |
+| `seed/compiler/src/token.rs` | 新增 `TokenKind::Self_`（可选，或复用 Ident） | +1 行 |
+| `seed/compiler/src/parser.rs` | 支持 `self` 关键字（`Expr::This` 别名） | +5 行 |
+| `seed/compiler/src/sema/checker.rs` | **主修改**：新增 `resolve_ident_in_class_scope` | +200 行 |
+| `seed/compiler/src/sema/symbol.rs` | 类成员查找辅助（可能无需改） | 0 |
+| `seed/compiler/src/sema/ty.rs` | 无 | 0 |
+| `seed/compiler/src/codegen/hir.rs` | 提前插入 `this.x` 改写的时机：在 sema 完成后**主动改写** AST，而非仅在兜底时改写 | +300 行 |
+| `seed/compiler/src/codegen/mir.rs` | 无（MIR 消费 HIR，不受影响） | 0 |
+| `seed/compiler/src/codegen/emit.rs` | 无 | 0 |
+| `seed/compiler/src/lsp.rs` | 补全候选增加隐式字段/方法 | +100 行 |
+| `seed/compiler/src/docgen.rs` | 文档生成时识别隐式访问（可选） | +50 行 |
 
 **总代码增量估计**：~650 行 Rust，主要在 sema 和 codegen/hir。
 
@@ -718,7 +718,7 @@ fn rewrite_expr(e: &mut Expr, ctx: &mut ClassCtx) {
 
 ### 6.6 Diagnostics 修改
 
-新增诊断消息（`rust/compiler/src/errors.rs`）：
+新增诊断消息（`seed/compiler/src/errors.rs`）：
 
 ```rust
 pub enum CompileErrorKind {
@@ -930,7 +930,7 @@ fun lowerProgram(ast: Ast, program: Int): Int {
 
 ### 8.1 单元测试
 
-在 `rust/compiler/tests/` 下新增：
+在 `seed/compiler/tests/` 下新增：
 
 ```rust
 // tests/implicit_this_tests.rs
@@ -1160,7 +1160,7 @@ diff before.auc after.auc || echo "❌ 老代码行为发生变化，需修复"
 
 ### 9.1 补全候选
 
-`rust/compiler/src/lsp.rs` 修改：
+`seed/compiler/src/lsp.rs` 修改：
 
 ```rust
 fn complete_ident(&self, position: Position) -> Vec<CompletionItem> {
@@ -1188,7 +1188,7 @@ fn complete_ident(&self, position: Position) -> Vec<CompletionItem> {
 
 ### 9.2 跳转（Go To Definition）
 
-`rust/compiler/src/lsp.rs` 修改：
+`seed/compiler/src/lsp.rs` 修改：
 - `x` 在类内被点击 → 跳转到字段声明（或伴生字段）
 - `x()` → 跳转到方法声明
 
@@ -1248,7 +1248,7 @@ implicit-this = "preserve"   # 默认：不改动既有 this.
 
 ### 10.5 实现位置
 
-`rust/compiler/src/codegen/opt.rs`（或新增 `src/format.rs`），在 `loom fmt` 命令中调用。
+`seed/compiler/src/codegen/opt.rs`（或新增 `src/format.rs`），在 `loom fmt` 命令中调用。
 
 **注意**：`preserve` 模式下，Formatter 的 AST 遍历**必须跳过**所有 `Expr::This` 节点（保持原样）；只有 `implicit` 模式才会触发改写逻辑。
 

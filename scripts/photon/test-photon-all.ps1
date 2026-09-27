@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 # Photon P1-P4 Test Suite (Simplified)
 # ============================================================
 #
@@ -25,7 +25,7 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 # ---- Find tools ----
 function Find-Aura {
     foreach ($c in @(
-        'rust/target/release/aura.exe', 'build/bin/aura.exe',
+        'seed/target/release/aura.exe', 'build/bin/aura.exe',
         'aura/seed/aura.exe', 'target/release/aura.exe', 'target/debug/aura.exe'
     )) {
         if (Test-Path $c) { return (Resolve-Path $c).Path }

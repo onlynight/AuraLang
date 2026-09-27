@@ -1,4 +1,4 @@
-﻿# -------------------------------------------------------------
+# -------------------------------------------------------------
 # Build the Aura core standard library (Aura → .auc bytecode)
 #
 # Compiles all .aura files under aura/core/ into .auc bytecode,
@@ -41,7 +41,7 @@ if ($Help) {
     Write-Host "structure so each class gets its own .auc file (package)."
     Write-Host ""
     Write-Host "Bootstrap compiler resolution:"
-    Write-Host "  1. rust/target/{release,debug}/aura.exe"
+    Write-Host "  1. seed/target/{release,debug}/aura.exe"
     Write-Host "  2. build/bin/aura.exe"
     Write-Host "  3. aura/seed/aura.exe"
     Write-Host ""
@@ -52,12 +52,12 @@ if ($Help) {
 
 # ---- locate bootstrap compiler -------------------------------------------
 $SeedPath = ''
-foreach ($c in @('rust/target/release/aura.exe', 'rust/target/debug/aura.exe', 'build/bin/aura.exe', 'aura/seed/aura.exe')) {
+foreach ($c in @('seed/target/release/aura.exe', 'seed/target/debug/aura.exe', 'build/bin/aura.exe', 'aura/seed/aura.exe')) {
     if (Test-Path $c) { $SeedPath = $c; break }
 }
 if ($SeedPath -eq '') {
     Write-Host "[build-aura-core] ERROR: no bootstrap compiler found" -ForegroundColor Red
-    Write-Host "  Build it with:  cd rust; cargo build -p cli --features llvm --release"
+    Write-Host "  Build it with:  cd seed; cargo build -p compiler --features llvm --release"
     exit 1
 }
 Write-Host "[build-aura-core] compiler: $SeedPath"

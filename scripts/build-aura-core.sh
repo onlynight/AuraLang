@@ -30,8 +30,8 @@ OUT_DIR="build/aura_core_auc"
 # ---- locate bootstrap compiler -------------------------------------------
 find_aura() {
     for candidate in \
-        "rust/target/release/aura" "rust/target/release/aura.exe" \
-        "rust/target/debug/aura"   "rust/target/debug/aura.exe" \
+        "seed/target/release/aura" "seed/target/release/aura.exe" \
+        "seed/target/debug/aura"   "seed/target/debug/aura.exe" \
         "build/bin/aura"           "build/bin/aura.exe" \
         "aura/seed/aura"           "aura/seed/aura.exe"; do
         if [ -x "$candidate" ]; then
@@ -50,7 +50,7 @@ if [ "$#" -gt 0 ] && [ "$1" = "--help" ]; then
     echo "structure so each class gets its own .auc file (package)."
     echo ""
     echo "Bootstrap compiler resolution:"
-    echo "  1. rust/target/{release,debug}/aura"
+    echo "  1. seed/target/{release,debug}/aura"
     echo "  2. build/bin/aura"
     echo "  3. aura/seed/aura"
     echo ""
@@ -63,7 +63,7 @@ AURA="$(find_aura || true)"
 
 if [ -z "$AURA" ]; then
     echo "[build-aura-core] ERROR: no bootstrap compiler found" >&2
-    echo "  Build it with:  cd rust && cargo build -p cli --features llvm --release" >&2
+    echo "  Build it with:  cd seed && cargo build -p compiler --features llvm --release" >&2
     exit 1
 fi
 

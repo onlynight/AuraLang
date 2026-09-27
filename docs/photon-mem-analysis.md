@@ -1,4 +1,4 @@
-# Photon 编译后端内存分析：根因诊断与优化方案（含 20GB 死循环分析）
+﻿# Photon 编译后端内存分析：根因诊断与优化方案（含 20GB 死循环分析）
 
 > **定位**：50k 行源码编译，常规内存 >1 GB，极端情况可达 20 GB。本分析从代码级定位全部根因，给出按投入/产出排序的优化路线。
 
@@ -31,7 +31,7 @@ Photon 编译管线分为两大执行域，二者通过子进程边界串联：
 
 ### 2.1 对象字段用 `HashMap<u16, Value>` 存储 —— 最大浪费源
 
-**代码位置**：`rust/compiler/src/vm/heap.rs:26`
+**代码位置**：`seed/compiler/src/vm/heap.rs:26`
 
 ```rust
 pub enum HeapData {
@@ -82,7 +82,7 @@ N 字段对象 → HashMap 容量 = N × 1.5（向上取 2 的幂）
 
 ### 2.2 `Value` 枚举的递归克隆 —— 隐藏的内存放大器
 
-**代码位置**：`rust/compiler/src/vm/value.rs:14-37`
+**代码位置**：`seed/compiler/src/vm/value.rs:14-37`
 
 ```rust
 #[derive(Clone, Debug)]
@@ -117,7 +117,7 @@ pub enum Value {
 
 ### 2.3 `pop()` 无条件克隆函数名 —— 热路径上的无谓分配
 
-**代码位置**：`rust/compiler/src/vm/interp.rs:1957-1966`
+**代码位置**：`seed/compiler/src/vm/interp.rs:1957-1966`
 
 ```rust
 fn pop(&mut self, top: usize) -> Result<Value, VmError> {
@@ -141,7 +141,7 @@ fn pop(&mut self, top: usize) -> Result<Value, VmError> {
 
 ### 2.4 `step()` 每条指令都克隆 Instr —— 解释循环的固有开销
 
-**代码位置**：`rust/compiler/src/vm/interp.rs:147`
+**代码位置**：`seed/compiler/src/vm/interp.rs:147`
 
 ```rust
 let instr = self.module.funcs[func].code[ip].clone();  // ← 每条指令都clone
@@ -155,7 +155,7 @@ self.exec_instr(top, func, instr)
 
 ### 2.5 `do_call_native()` 克隆整个原生函数描述符
 
-**代码位置**：`rust/compiler/src/vm/interp.rs:1451`
+**代码位置**：`seed/compiler/src/vm/interp.rs:1451`
 
 ```rust
 let native = self.module.natives[idx].clone();  // ← 含 Vec<u8> + Option<String>
@@ -165,7 +165,7 @@ let native = self.module.natives[idx].clone();  // ← 含 Vec<u8> + Option<Stri
 
 ### 2.6 `const_to_value()` 双重字符串分配
 
-**代码位置**：`rust/compiler/src/vm/interp.rs:2313-2320`
+**代码位置**：`seed/compiler/src/vm/interp.rs:2313-2320`
 
 ```rust
 fn const_to_value(c: &crate::codegen::opcode::Const) -> Value {
@@ -184,7 +184,7 @@ fn const_to_value(c: &crate::codegen::opcode::Const) -> Value {
 
 ### 2.7 `Value::as_string()` 无条件分配
 
-**代码位置**：`rust/compiler/src/vm/value.rs:118-123`
+**代码位置**：`seed/compiler/src/vm/value.rs:118-123`
 
 ```rust
 pub fn as_string(&self) -> String {
@@ -199,7 +199,7 @@ pub fn as_string(&self) -> String {
 
 ### 2.8 `bin_add()` 字符串拼接用 `format!`
 
-**代码位置**：`rust/compiler/src/vm/interp.rs:2331-2335`
+**代码位置**：`seed/compiler/src/vm/interp.rs:2331-2335`
 
 ```rust
 fn bin_add(a: Value, b: Value) -> Value {
@@ -214,7 +214,7 @@ fn bin_add(a: Value, b: Value) -> Value {
 
 ### 2.9 `Heap.allocated: Vec<usize>` 泄漏检测追踪
 
-**代码位置**：`rust/compiler/src/vm/heap.rs:75`
+**代码位置**：`seed/compiler/src/vm/heap.rs:75`
 
 ```rust
 pub struct Heap {
@@ -238,7 +238,7 @@ pub struct Heap {
 
 ### 🔴 3.1 无条件 `eprintln!` 在原生调用热路径 —— 已知 23 GB 事故的同源 bug
 
-**代码位置**：`rust/compiler/src/vm/interp.rs:1559-1562` 和 `1746-1749`
+**代码位置**：`seed/compiler/src/vm/interp.rs:1559-1562` 和 `1746-1749`
 
 ```rust
 // 位置1: do_call_native (line 1559)
@@ -274,7 +274,7 @@ if let Some((std_func_idx, needs_self)) = args_std_lookup {
 
 ### 🔴 3.2 `native.name.clone()` 在每次原生调用中执行 —— 隐藏的热路径分配
 
-**代码位置**：`rust/compiler/src/vm/interp.rs:1451` 和 `1649`
+**代码位置**：`seed/compiler/src/vm/interp.rs:1451` 和 `1649`
 
 ```rust
 // do_call_native (line 1451)
@@ -290,7 +290,7 @@ let native = self.module.natives[idx].clone();  // ← 同上
 
 ### 🔴 3.3 `IncRef`/`DecRef`/`DropRef` 克隆栈顶 —— 每条指令都克隆
 
-**代码位置**：`rust/compiler/src/vm/interp.rs:442-458`
+**代码位置**：`seed/compiler/src/vm/interp.rs:442-458`
 
 ```rust
 Instr::DropRef => {
@@ -328,7 +328,7 @@ Instr::IncRef => {
 
 ### 🔴 3.4 `allocated` 向量永不缩容 —— 单调增长到数百万条
 
-**代码位置**：`rust/compiler/src/vm/heap.rs:199`
+**代码位置**：`seed/compiler/src/vm/heap.rs:199`
 
 ```rust
 pub fn alloc(&mut self, data: HeapData) -> usize {
@@ -363,7 +363,7 @@ pub fn dec_ref(&mut self, handle: usize) {
 
 ### 4.1 `Frame` 每次调用分配两个独立 Vec
 
-**代码位置**：`rust/compiler/src/vm/mod.rs:884-895`
+**代码位置**：`seed/compiler/src/vm/mod.rs:884-895`
 
 ```rust
 pub struct Frame {
@@ -381,7 +381,7 @@ pub struct Frame {
 
 ### 4.2 `push_frame` 诊断日志中的 `to_string()` 无界分配
 
-**代码位置**：`rust/compiler/src/vm/mod.rs:1730-1738`
+**代码位置**：`seed/compiler/src/vm/mod.rs:1730-1738`
 
 ```rust
 if let Some(pat) = filter {
@@ -405,7 +405,7 @@ if let Some(pat) = filter {
 
 ### 4.3 `step()` 看门狗中的 `to_string()` 无界分配
 
-**代码位置**：`rust/compiler/src/vm/interp.rs:124-131`
+**代码位置**：`seed/compiler/src/vm/interp.rs:124-131`
 
 ```rust
 if let Some(fr) = self.frames.last() {
@@ -427,7 +427,7 @@ if let Some(fr) = self.frames.last() {
 
 ### 5.1 主执行循环无指令计数上限
 
-**代码位置**：`rust/compiler/src/vm/mod.rs:1494-1496`
+**代码位置**：`seed/compiler/src/vm/mod.rs:1494-1496`
 
 ```rust
 while !self.frames.is_empty() && !self.halt {
@@ -444,7 +444,7 @@ while !self.frames.is_empty() && !self.halt {
 
 ### 5.2 递归调用深度限制
 
-**代码位置**：`rust/compiler/src/vm/mod.rs:1714-1718`
+**代码位置**：`seed/compiler/src/vm/mod.rs:1714-1718`
 
 ```rust
 fn push_frame(&mut self, func_idx: usize, args: Vec<Value>) -> Result<(), VmError> {
@@ -501,7 +501,7 @@ HIR desugar（`hir.rs:1715-7593`）对 AST 进行递归降级。递归深度等�
 
 #### 6.1 移除热路径无条件 `eprintln!`
 
-**文件**：`rust/compiler/src/vm/interp.rs:1559, 1746`
+**文件**：`seed/compiler/src/vm/interp.rs:1559, 1746`
 
 ```rust
 // 修复前：无条件打印
@@ -518,7 +518,7 @@ if trace_call_enabled(&native.name) {
 
 #### 6.2 `do_call_native()` 避免克隆 BytecodeNative
 
-**文件**：`rust/compiler/src/vm/interp.rs:1451`
+**文件**：`seed/compiler/src/vm/interp.rs:1451`
 
 ```rust
 // 修复前
@@ -532,7 +532,7 @@ let native = &self.module.natives[idx];  // 借用，避免clone
 
 #### 6.3 `pop()` 函数名克隆移至错误路径
 
-**文件**：`rust/compiler/src/vm/interp.rs:1957-1966`
+**文件**：`seed/compiler/src/vm/interp.rs:1957-1966`
 
 ```rust
 // 修复前
@@ -557,7 +557,7 @@ fn pop(&mut self, top: usize) -> Result<Value, VmError> {
 
 #### 6.4 `const_to_value()` 消除双重字符串分配
 
-**文件**：`rust/compiler/src/vm/interp.rs:2313-2320`
+**文件**：`seed/compiler/src/vm/interp.rs:2313-2320`
 
 ```rust
 // 修复前
@@ -571,7 +571,7 @@ Const::Str(s) => Value::Str(Rc::clone(s)),
 
 #### 6.5 `IncRef`/`DecRef`/`DropRef` 改用 `.copied()` 代替 `.cloned()`
 
-**文件**：`rust/compiler/src/vm/interp.rs:442-458`
+**文件**：`seed/compiler/src/vm/interp.rs:442-458`
 
 ```rust
 // 修复前
@@ -589,7 +589,7 @@ if let Value::Ref(h) = self.frames[top].stack.last().copied() {
 
 #### 6.6 对象字段从 `HashMap<u16, Value>` 改为 `Vec<(u16, Value)>`
 
-**文件**：`rust/compiler/src/vm/heap.rs:26`
+**文件**：`seed/compiler/src/vm/heap.rs:26`
 
 ```rust
 // 修复前
@@ -632,7 +632,7 @@ allocated: Vec<usize>,
 
 #### 6.9 添加 VM 执行指令计数上限
 
-**文件**：`rust/compiler/src/vm/mod.rs:1494-1496`
+**文件**：`seed/compiler/src/vm/mod.rs:1494-1496`
 
 ```rust
 // 修复前
@@ -764,23 +764,23 @@ cargo test -p cli
 
 | 问题 | 文件 | 行号 |
 |------|------|------|
-| 对象字段 HashMap | `rust/compiler/src/vm/heap.rs` | 26 |
-| Value::List/Map 内联 | `rust/compiler/src/vm/value.rs` | 34-36 |
-| pop() clone func_name | `rust/compiler/src/vm/interp.rs` | 1957-1966 |
-| step() clone Instr | `rust/compiler/src/vm/interp.rs` | 147 |
-| do_call_native() clone | `rust/compiler/src/vm/interp.rs` | 1451 |
-| **无条件 eprintln (热路径)** | **`rust/compiler/src/vm/interp.rs`** | **1559, 1746** |
-| const_to_value() double alloc | `rust/compiler/src/vm/interp.rs` | 2313-2320 |
-| Value::as_string() alloc | `rust/compiler/src/vm/value.rs` | 118-123 |
-| bin_add() format! alloc | `rust/compiler/src/vm/interp.rs` | 2331-2335 |
-| Heap.allocated tracking | `rust/compiler/src/vm/heap.rs` | 75, 199 |
-| Frame locals/stack Vec | `rust/compiler/src/vm/mod.rs` | 884-895 |
-| pop_n() split_off | `rust/compiler/src/vm/interp.rs` | 1969-1984 |
-| Const::Str(String) | `rust/compiler/src/vm/opcode.rs` | 21 |
-| IncRef/DecRef clone stack top | `rust/compiler/src/vm/interp.rs` | 442-458 |
-| **主循环无指令上限** | **`rust/compiler/src/vm/mod.rs`** | **1494-1496** |
-| push_frame 诊断 to_string | `rust/compiler/src/vm/mod.rs` | 1738 |
-| step() watchdog to_string | `rust/compiler/src/vm/interp.rs` | 129-131 |
-| warn_unlinked_once 23GB 注释 | `rust/compiler/src/vm/interp.rs` | 13-16 |
-| max_call_depth=4096 | `rust/compiler/src/vm/mod.rs` | 164 |
-| dec_ref 不更新 allocated | `rust/compiler/src/vm/heap.rs` | 229-239 |
+| 对象字段 HashMap | `seed/compiler/src/vm/heap.rs` | 26 |
+| Value::List/Map 内联 | `seed/compiler/src/vm/value.rs` | 34-36 |
+| pop() clone func_name | `seed/compiler/src/vm/interp.rs` | 1957-1966 |
+| step() clone Instr | `seed/compiler/src/vm/interp.rs` | 147 |
+| do_call_native() clone | `seed/compiler/src/vm/interp.rs` | 1451 |
+| **无条件 eprintln (热路径)** | **`seed/compiler/src/vm/interp.rs`** | **1559, 1746** |
+| const_to_value() double alloc | `seed/compiler/src/vm/interp.rs` | 2313-2320 |
+| Value::as_string() alloc | `seed/compiler/src/vm/value.rs` | 118-123 |
+| bin_add() format! alloc | `seed/compiler/src/vm/interp.rs` | 2331-2335 |
+| Heap.allocated tracking | `seed/compiler/src/vm/heap.rs` | 75, 199 |
+| Frame locals/stack Vec | `seed/compiler/src/vm/mod.rs` | 884-895 |
+| pop_n() split_off | `seed/compiler/src/vm/interp.rs` | 1969-1984 |
+| Const::Str(String) | `seed/compiler/src/vm/opcode.rs` | 21 |
+| IncRef/DecRef clone stack top | `seed/compiler/src/vm/interp.rs` | 442-458 |
+| **主循环无指令上限** | **`seed/compiler/src/vm/mod.rs`** | **1494-1496** |
+| push_frame 诊断 to_string | `seed/compiler/src/vm/mod.rs` | 1738 |
+| step() watchdog to_string | `seed/compiler/src/vm/interp.rs` | 129-131 |
+| warn_unlinked_once 23GB 注释 | `seed/compiler/src/vm/interp.rs` | 13-16 |
+| max_call_depth=4096 | `seed/compiler/src/vm/mod.rs` | 164 |
+| dec_ref 不更新 allocated | `seed/compiler/src/vm/heap.rs` | 229-239 |

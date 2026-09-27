@@ -1137,7 +1137,7 @@ private fun applyCallingConvention(): Unit {
 
 ### C. ~~仍存在的同源风险（未修）~~ → **已消除**
 
-> 2026-09-21 第二轮：种子已重建（`rust/` cargo 构建 + `aura/core/aura/lang/**` 源码预编译
+> 2026-09-21 第二轮：种子已重建（`seed/` cargo 构建 + `aura/core/aura/lang/**` 源码预编译
 > 为 `build/aura_core_auc/**` 嵌入），VM 启动加载 **1034** 个 Aura 函数（此前 172 个
 > 且大量加载失败）。`String.substring` / `charCodeAt` / `toUpperCase` / `indexOf` /
 > `contains` / `split` 等在种子 VM 下**均已可用**，下述风险不复存在：
@@ -1177,7 +1177,7 @@ private fun applyCallingConvention(): Unit {
 
 ### F. 集合表示修复（本轮主要收益）
 
-**背景**：重建种子后（`rust/` cargo + `aura/core` 源码预编译嵌入），VM 侧集合操作全面失真：
+**背景**：重建种子后（`seed/` cargo + `aura/core` 源码预编译嵌入），VM 侧集合操作全面失真：
 `l.size` 恒为 0、`l[0]` 恒为 null、`l.set(i, v)` 直接 **访问违规**（`0xC0000005`）。
 
 **根因：VM 里有两套集合表示，而派发规则把它们串了线**
@@ -1286,7 +1286,7 @@ private fun applyCallingConvention(): Unit {
 
 ### K. 当前状态
 
-- **photon 套件：43 OK / 43，0 失败、0 超时**（`aura/seed/aura.exe` 与 `rust/target` 均一致）。
+- **photon 套件：43 OK / 43，0 失败、0 超时**（`aura/seed/aura.exe` 与 `seed/target` 均一致）。
 - AOT hello 正常产出并运行。
 - 种子已刷新：sha256 `107C2B99…`（8,900,096 B），VM 加载 1000 个 Aura 函数。
 - 非 photon 测试（196 个）仍有大量失败：主要是**既有**的两类问题 ——
@@ -1331,7 +1331,7 @@ private fun applyCallingConvention(): Unit {
 
 - **非 photon（195 个）：OK 111 → 120，FAIL 84 → 75**（+9 个用例）。
 - 未解析调用点总数：1365 → 990。
-- **photon 保持 43/43**（`aura/seed/aura.exe` 与 `rust/target` 均一致）；AOT 正常。
+- **photon 保持 43/43**（`aura/seed/aura.exe` 与 `seed/target` 均一致）；AOT 正常。
 - 种子已刷新：sha256 `0DDAF8A5…`。
 
 ### O. 剩余（非机械可解）

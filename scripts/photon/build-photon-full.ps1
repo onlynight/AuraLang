@@ -1,4 +1,4 @@
-# -------------------------------------------------------------
+ï»¿# -------------------------------------------------------------
 # Photon full compilation pipeline - Windows
 #
 # Pipeline:
@@ -37,9 +37,9 @@ $SourceAbs = (Resolve-Path $Source).Path
 $OutDirAbs = Join-Path $Root $OutDir
 $ModuleName = [System.IO.Path]::GetFileNameWithoutExtension($SourceAbs)
 
-Write-Host "¨X¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨["
-Write-Host "¨U   Photon Full Compilation Pipeline           ¨U"
-Write-Host "¨^¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨a"
+Write-Host "ï¿½Xï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½["
+Write-Host "ï¿½U   Photon Full Compilation Pipeline           ï¿½U"
+Write-Host "ï¿½^ï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½Tï¿½a"
 Write-Host "  Source:   $SourceAbs"
 Write-Host "  Output:   $OutDirAbs"
 Write-Host "  Module:   $ModuleName"
@@ -49,7 +49,7 @@ New-Item -ItemType Directory -Force -Path $OutDirAbs | Out-Null
 
 function Find-Aura {
     foreach ($c in @(
-        'rust/target/release/aura.exe', 'build/bin/aura.exe',
+        'seed/target/release/aura.exe', 'build/bin/aura.exe',
         'aura/seed/aura.exe', 'target/release/aura.exe', 'target/debug/aura.exe'
     )) {
         if (Test-Path $c) { return (Resolve-Path $c).Path }

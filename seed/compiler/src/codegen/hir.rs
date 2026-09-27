@@ -5425,7 +5425,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     //     `bin_add` 的 Float 分支（`Ptr.as_float()` = 0.0）→
                     //     `ptr + 0` = `Float(0.0)`、`ptr + 8` = `Float(8.0)`，
                     //     于是 `Memory.read` 读到地址 0 → `c == 0` → NUL 扫描恒得 0。
-                    //   已在 `rust/compiler/src/vm/interp.rs` 修好：`bin_add` / `bin_sub`
+                    //   已在 `seed/compiler/src/vm/interp.rs` 修好：`bin_add` / `bin_sub`
                     //   对含 `Ptr` 的操作数一律按**地址**做整数运算（与 `value_eq_abi`
                     //   同一条「指针即地址」ABI）。
                     //   验证：`class` + `init()` + `append()` + `build()` 的完整复刻探针

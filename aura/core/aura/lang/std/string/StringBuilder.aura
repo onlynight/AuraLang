@@ -57,12 +57,12 @@ object StringBuilder {
         // ── 长度就地算（不调 `StringOps.strlen`）────────────────────────────
         // 历史现象：`n` 恒为 0 → 缓冲长度恒为 0 → 发射内容全空。当时的排查把
         // 它记成「`StringOps.strlen` 在 object 方法体内被前端错解析」（见
-        // `rust/compiler/src/codegen/hir.rs:5322` 起的长注释）。
+        // `seed/compiler/src/codegen/hir.rs:5322` 起的长注释）。
         // **真实根因（2026-09-23 查明）在 VM 的指针算术**：`CString(s)` 产出的是
         // `Value::Ptr`，经 `Long` 形参传进来后，`Memory.read(text + n)` 里的
         // `text + n` 落进了 `bin_add` 的 Float 分支（`Ptr` 的 `as_float()` = 0.0）
         // → 读到地址 0 → `c == 0` → 扫描立刻结束、`n = 0`。
-        // 该缺陷已在 `rust/compiler/src/vm/interp.rs` 的 `bin_add`/`bin_sub` 修好
+        // 该缺陷已在 `seed/compiler/src/vm/interp.rs` 的 `bin_add`/`bin_sub` 修好
         //（含 `Ptr` 的加减一律按地址做整数运算）。
         //
         // 这里仍保留**就地扫描**：它只依赖 `Memory.read`（同 `appendN` 一直在用的

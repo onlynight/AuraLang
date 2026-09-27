@@ -1,4 +1,4 @@
-# Photon 后端实现完整性检查报告
+﻿# Photon 后端实现完整性检查报告
 
 **日期**: 2026-09-22
 **版本**: v3 设计文档对照检查
@@ -37,7 +37,7 @@
 
 | 设计文档要求 | 实际文件 | 状态 |
 |--------------|----------|------|
-| `rust/cli/src/main.rs` cmd_build_photon | `rust/cli/src/main.rs` | ✅ 已修改 |
+| `seed/compiler/src/main.rs` cmd_build_photon | `seed/compiler/src/main.rs` | ✅ 已修改 |
 | `PhotonDriver.aura` 参数解析 | `aura/.../photon/PhotonDriver.aura` | ✅ 已创建 |
 | `HirSerializer.aura` HIR 序列化 | `aura/.../photon/HirSerializer.aura` | ✅ 已创建 |
 | `build-photon-full.ps1` 构建脚本 | `scripts/build-photon-full.ps1` | ✅ 已创建 |
@@ -250,7 +250,7 @@ Phase 5.4: Stability Test
 
 | 文件 | 修改内容 | 阶段 | 状态 |
 |------|----------|------|------|
-| `rust/cli/src/main.rs` | cmd_build_photon | Phase 1 | ✅ |
+| `seed/compiler/src/main.rs` | cmd_build_photon | Phase 1 | ✅ |
 | `PhotonDriver.aura` | 参数解析 | Phase 1 | ✅ |
 | `InstructionSelection.aura` | @native 指令选择 | Phase 3 | ✅ |
 | `X86Emitter.aura` | syscall 指令发射 | Phase 3 | ✅ |

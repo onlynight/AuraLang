@@ -1,4 +1,4 @@
-# Photon 后端自包含架构设计 v3
+﻿# Photon 后端自包含架构设计 v3
 
 ## 1. 核心原则
 
@@ -55,7 +55,7 @@
   └── JitExec.aura              ✓ JIT 执行
 
 已实现 (Rust CLI):
-  rust/cli/src/main.rs
+  seed/compiler/src/main.rs
   └── cmd_build_photon()        △ 不完整，仅生成 HIR JSON，未调用 Photon 管线
 ```
 
@@ -603,7 +603,7 @@ class Thread {
 ### 6.2 cmd_build_photon 实现方案
 
 ```rust
-// rust/cli/src/main.rs
+// seed/compiler/src/main.rs
 
 fn cmd_build_photon(args: &[String]) {
     // 1. 解析参数
@@ -720,7 +720,7 @@ object PhotonDriverArgs {
 
 | 任务 | 文件 | 工作量 | 依赖 |
 |------|------|--------|------|
-| 1.1 cmd_build_photon 实现 | rust/cli/src/main.rs | 3 天 | 无 |
+| 1.1 cmd_build_photon 实现 | seed/compiler/src/main.rs | 3 天 | 无 |
 | 1.2 PhotonDriver 参数解析 | PhotonDriver.aura | 2 天 | 1.1 |
 | 1.3 HIR 序列化/反序列化 | HirSerializer.aura | 2 天 | 无 |
 | 1.4 构建脚本集成 | build.sh / build.ps1 | 1 天 | 1.1-1.3 |
@@ -839,7 +839,7 @@ object PhotonDriverArgs {
 
 | 文件 | 修改内容 | 阶段 |
 |------|----------|------|
-| `rust/cli/src/main.rs` | cmd_build_photon 完整实现 | Phase 1 |
+| `seed/compiler/src/main.rs` | cmd_build_photon 完整实现 | Phase 1 |
 | `PhotonDriver.aura` | 参数解析，环境变量读取 | Phase 1 |
 | `InstructionSelection.aura` | @native 指令选择 | Phase 3 |
 | `X86Emitter.aura` | syscall 指令发射 | Phase 3 |
