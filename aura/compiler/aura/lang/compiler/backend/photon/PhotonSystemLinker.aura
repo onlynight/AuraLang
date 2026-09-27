@@ -154,7 +154,10 @@ class PhotonSystemLinker {
 
     /// 执行链接器命令，返回退出码。
     fun runLinker(command: String): Int {
-        return Process.run(command)
+        println("    [linker] cmd=" + command)
+        val rc: Int = Process.run(command)
+        println("    [linker] rc=" + rc)
+        return rc
     }
 
     /// 构建参数列表（**不含**链接器路径本身）。

@@ -1,4 +1,4 @@
-# photon-hat-suite.ps1 — HAT 格式端到端差分跑批（aura 源码 → .hat → Photon HAT 后端 → exe）
+﻿# photon-hat-suite.ps1 — HAT 格式端到端差分跑批（aura 源码 → .hat → Photon HAT 后端 → exe）
 #
 # 与 scripts\photon-suite.ps1（PHIR 路径）并列：同一批用例、同一判定标准，
 # 但后端输入是 **HAT IR 文本**而不是 .phir 伪源码。
@@ -20,14 +20,22 @@ param(
     [string]$Phase = "P1,P2,P3",
     [string[]]$Files = @(),
     [int]$TimeoutSecs = 120,
-    [string]$OutRoot = "build\hat-suite"
+    [string]$OutRoot = "build\hat-suite",
+    # 打开阶段进度/心跳（[hat-front] / [Phase A-E] / [isa] / [hat-parse]）。
+    # 默认关：驱动 stdout 只保留 ===...=== 协议标记，本脚本逐行解析 COFF hex。
+    [switch]$Verbose
 )
 $ErrorActionPreference = 'Continue'
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
 $env:AURA_PHOTON_DEBUG_HIR = ''
 $env:AURA_PHOTON_TRACE = ''
+# 调试开关默认全关（见 PhotonPipeline.aura 的 verboseOn 注释）：
+#   AURA_PHOTON_VERBOSE=1  阶段进度/心跳
+#   AURA_HAT_TRACE=1       HAT 解析器心跳
+if ($Verbose) { $env:AURA_PHOTON_VERBOSE = '1'; $env:AURA_HAT_TRACE = '1' }
+else          { $env:AURA_PHOTON_VERBOSE = '';  $env:AURA_HAT_TRACE = '' }
 
 $Aura = Join-Path $Root 'rust\target\release\aura.exe'
 if (-not (Test-Path $Aura)) { Write-Host "aura.exe not found: $Aura" -ForegroundColor Red; exit 1 }

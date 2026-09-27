@@ -1,4 +1,4 @@
-# -------------------------------------------------------------
+﻿# -------------------------------------------------------------
 # Photon HAT v2.0 端到端构建脚本
 #
 # 管线: HAT 文本 -> SSA MIR -> LIR -> X86 -> COFF -> lld-link -> exe
@@ -20,7 +20,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 $LldOverride = $Lld
 

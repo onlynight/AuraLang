@@ -17,6 +17,7 @@ package aura.lang.compiler.linker
 
 import aura.lang.std.String
 import aura.lang.compiler.signature.Signature
+import aura.lang.collection.Collections
 
 // ═══════════════════════════════════════════════════════════════
 // LinkError — 链接错误
@@ -328,7 +329,7 @@ class Linker {
             }
         }
 
-        stack.remove(stack.length - 1)
+        Collections.listRemove(stack, stack.length - 1)
         return []
     }
 

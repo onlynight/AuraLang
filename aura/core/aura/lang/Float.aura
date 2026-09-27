@@ -84,6 +84,18 @@ value class Float {
         return this == other
     }
 
+    /// 浮点哈希：避免走 Any 默认的字符串哈希路径。
+    override fun hashCode(): Int {
+        val s: String = this.toString()
+        var hash: Int = 0
+        var i: Int = 0
+        while (i < s.length) {
+            hash = hash * 31 + (s.charCodeAt(i) as Int)
+            i = i + 1
+        }
+        return hash
+    }
+
     // ── 算术方法 ──
 
     /// 绝对值
@@ -168,7 +180,7 @@ value class Float {
 
     /// 以 2 为底的对数
     fun log2(): Float {
-        return (MathCore.log(this as Double) / MathCore.log(2.0)) as Float
+        return MathCore.log2(this as Double) as Float
     }
 
     /// 以 10 为底的对数

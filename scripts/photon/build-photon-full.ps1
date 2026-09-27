@@ -1,4 +1,4 @@
-# -------------------------------------------------------------
+﻿# -------------------------------------------------------------
 # Photon full compilation pipeline - Windows
 #
 # Pipeline:
@@ -24,7 +24,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 
 $LldOverride = $Lld

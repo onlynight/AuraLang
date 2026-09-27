@@ -1,4 +1,4 @@
-# photon-hat-bootstrap.ps1 — 用 Photon HAT 独立链路编译 Aura 自举编译器
+﻿# photon-hat-bootstrap.ps1 — 用 Photon HAT 独立链路编译 Aura 自举编译器
 #
 #   Main.aura(含递归 import) ──[原生 PhotonHatCompile.exe]──► HIR ──► SSA ──►
 #   .hat ──► LIR ──► DAG ──► RegAlloc ──► X86 ──► COFF ──► lld-link ──► exe
@@ -23,7 +23,7 @@ param(
     [string]$OutDir = "build\hat-bootstrap"
 )
 $ErrorActionPreference = 'Continue'
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
 $env:AURA_PHOTON_DEBUG_HIR = ''

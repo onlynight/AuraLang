@@ -1,4 +1,4 @@
-# -------------------------------------------------------------
+﻿# -------------------------------------------------------------
 # S1.9: Photon end-to-end diff test
 #
 # Compiles a simple Aura program through both VM and Photon paths,
@@ -15,7 +15,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 
 # Find aura binary

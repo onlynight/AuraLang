@@ -1,4 +1,4 @@
-# Baseline test runner: runs all non-photon tests, counts OK/FAIL, collects unresolved calls.
+﻿# Baseline test runner: runs all non-photon tests, counts OK/FAIL, collects unresolved calls.
 param(
     [string]$Label = "baseline",
     [switch]$IncludeComplier

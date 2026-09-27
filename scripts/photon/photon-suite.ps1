@@ -1,4 +1,4 @@
-# photon_suite.ps1 — Photon 差分测试跑批（开发期临时工具，位于 build/）
+﻿# photon_suite.ps1 — Photon 差分测试跑批（开发期临时工具，位于 build/）
 #
 # 对指定阶段目录下的每个 .aura：
 #   1) 用 VM 跑一遍得到基准 stdout
@@ -16,7 +16,7 @@ param(
     [string]$OutRoot = "build\suite"
 )
 $ErrorActionPreference = 'Continue'
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
 $env:AURA_PHOTON_DEBUG_HIR = ''

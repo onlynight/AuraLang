@@ -1,4 +1,4 @@
-# Test runner using cmd.exe to capture output
+﻿# Simple test runner: counts OK/FAIL by exit code, collects unresolved calls
 param([string]$Label = "test")
 $RootDir = 'D:\Code\AuraLang'
 Set-Location $RootDir
@@ -17,12 +17,24 @@ $totalUnresolved = 0
 
 foreach ($t in $tests) {
     $rel = $t.FullName.Substring($RootDir.Length + 1)
-    # Use cmd.exe to capture raw output
-    $cmdLine = "`"$exe`" run `"$($t.FullName)`" 2>&1"
-    $result = & cmd.exe /c $cmdLine
-    $code = $LASTEXITCODE
-    $out = $result -join "`n"
-
+    
+    # Run test with cmd.exe to capture raw stderr
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "cmd.exe"
+    $psi.Arguments = "/c `"$exe`" run `"$($t.FullName)`" 2>&1"
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $false
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    $proc.Start() | Out-Null
+    $out = $proc.StandardOutput.ReadToEnd()
+    $proc.WaitForExit()
+    $code = $proc.ExitCode
+    
+    # Count unresolved function calls
     $matches = [regex]::Matches($out, "未解析的函数调用 '([^']+)'")
     foreach ($m in $matches) {
         $name = $m.Groups[1].Value
@@ -30,7 +42,7 @@ foreach ($t in $tests) {
         $unresolved[$name]++
         $totalUnresolved++
     }
-
+    
     if ($code -eq 0) { $passed++ } else { $failed++; $failedList += $rel }
 }
 

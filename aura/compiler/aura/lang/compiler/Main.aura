@@ -775,7 +775,8 @@ fun cliArgCount(): Int {
     if (envN >= 0) {
         return envN
     }
-    return cliArgCount()
+    // No env channel; return 0 (standalone exe with no env args)
+    return 0
 }
 
 /// 取第 i 个命令行参数（i=0 为可执行文件名）。
@@ -787,7 +788,8 @@ fun cliArg(i: Int): String {
         }
         return Env.get("AURA_ARG_" + toStr(i))
     }
-    return cliArg(i)
+    // No env channel; return empty string
+    return ""
 }
 
 /// 编译器入口：有命令行参数时编译指定源文件，否则仅打印用法。
@@ -795,13 +797,18 @@ fun cliArg(i: Int): String {
 /// 注意：自检样例**不再**在无参数时自动运行；需要回归自检时显式调用
 /// [`MainUtils.runSelfTest`]（保持 `main` 的产出干净，便于 CLI 与 AOT 自举场景）。
 fun main() {
+    // 启动路径逐步标记（自举产物 `Main.exe` 启动期崩溃定位用；定位完成后可移除）
+    println("BOOT-1")
     // Determine argument base offset: when run via `aura run <file.auc> [args]`,
     // the VM passes [exe, "run", file.auc, ...].  Skip those two so that
     // arg(1) is the first user-supplied argument, matching standalone invocation.
     var base: Int = 0
-    if (cliArgCount() >= 3 && cliArg(1) == "run") {
+    val cnt0: Int = cliArgCount()
+    println("BOOT-1b cnt=" + toStr(cnt0))
+    if (cnt0 >= 3 && cliArg(1) == "run") {
         base = 2
     }
+    println("BOOT-2")
 
     if (cliArgCount() >= base + 2) {
         val first: String = cliArg(base + 1)
@@ -825,5 +832,7 @@ fun main() {
         MainUtils.runCli()
         return
     }
+    println("BOOT-3")
     println(MainUtils.cliUsage())
+    println("BOOT-4")
 }

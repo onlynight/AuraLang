@@ -36,6 +36,11 @@ value class Char {
         return toStr(this)
     }
 
+    /// 字符哈希：避免走 Any 默认的字符串哈希路径。
+    override fun hashCode(): Int {
+        return this as Int
+    }
+
     /// 转换为 Unicode 码点（Int）
     fun toInt(): Int {
         return this as Int

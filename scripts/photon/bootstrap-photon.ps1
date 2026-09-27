@@ -28,7 +28,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 
 # ---- toolchain ----
@@ -275,13 +275,18 @@ if ($steps -contains "4") {
         $stem = [System.IO.Path]::GetFileNameWithoutExtension($src)
         $da = Join-Path $s4 "a"; New-Item -ItemType Directory -Force -Path $da | Out-Null
         $db = Join-Path $s4 "b"; New-Item -ItemType Directory -Force -Path $db | Out-Null
+        # ⚠️ P3「Rust CLI 降级」后 `aura build -b photon` 不再产出 `.phir`（Rust 侧
+        #    已无前端），中间表示是 Aura 自举前端写出的 **`.hat`**，文件名由驱动按
+        #    模块名（= 源文件主干）决定，落在 `--output` 所在目录。
+        #    因此可复现性检验改为比较 `.hat` —— 这比旧 `.phir` 更强（`.hat` 是后端
+        #    真正消费的 IR，`.phir` 只是 Rust 前端的转储）。
         $r1 = Invoke-Proc $AuraBin "build -b photon `"$Root\$src`" --output `"$da\a.phir`"" $Root $TimeoutSecs
         $r2 = Invoke-Proc $AuraBin "build -b photon `"$Root\$src`" --output `"$db\b.phir`"" $Root $TimeoutSecs
-        $ha = ShaOf "$da\a.phir"; $hb = ShaOf "$db\b.phir"
+        $ha = ShaOf "$da\$stem.hat"; $hb = ShaOf "$db\$stem.hat"
         if ($ha -and $hb) {
-            if ($ha -eq $hb) { Pass "Step 4a PHIR byte-identical" }
-            else { Fail "Step 4a PHIR" "hashes differ" }
-        } else { Fail "Step 4a PHIR" "phir not produced" }
+            if ($ha -eq $hb) { Pass "Step 4a HAT byte-identical" }
+            else { Fail "Step 4a HAT" "hashes differ" }
+        } else { Fail "Step 4a HAT" "hat not produced ($stem.hat)" }
 
         $ho1 = ShaOf "$da\$stem.obj"; $ho2 = ShaOf "$db\$stem.obj"
         if ($ho1 -and $ho2) {

@@ -401,14 +401,30 @@ class MachineDag {
     }
 
     /// 模式缓存写入。
+    ///
+    /// ⚠️ **刻意 no-op**——这是 Phase C 内存失控的主因，不要"顺手恢复"它。
+    ///
+    /// `patternCacheGet` 被禁用（见下，S1 遗留的 `return -1`），于是 `Put` 的
+    /// 结果**从未被读取过**：它在 `selectPattern` 里被**每条指令调用一次**，
+    /// 且对两个字符串做 `s = s + "," + …` 的不可变拼接。`MachineDag` 在
+    /// `InstructionSelector.select()` 里**整个模块共用一个实例**（`addNode` /
+    /// `addInstr` 从不回退计数），所以这两张表随指令数单调增长且**永不释放**
+    /// （AOT 运行时无 GC）：
+    ///   * `keys`：每次 +2 字节 → 第 n 条指令时字符串已 n×2 长；
+    ///   * `vals`：每次 +6 字节（指令 ID 是 5 位数）→ n×6 长。
+    /// 每次追加都整体拷贝旧串，累计分配 = O(n²)，且每一版都留在堆上。
+    ///
+    /// 实测自举 `Main.aura`：处理到第 405 个函数（约 3.7 万条指令）时，这两张
+    /// 表就已经吃进 ~2 GB 存活内存（`AURA_MEM_STATS` 的 `<=1M` 桶 53k 次 /
+    /// 5.6 GB 主要就是它们），把 8 GiB 闸门打爆 → Phase C 永远跑不完。
+    ///
+    /// 缓存本身也没有意义：`patternTemplate` / `patternFlags` / `patternCond` /
+    /// `patternMem` / `patternBytes` 都是 `patternId` 的**纯函数**（见
+    /// `MachineDagUtils`），下方每次都直接重算，命中路径本就不会走。若将来真要
+    /// 恢复缓存，必须换成按 `patternId` 直接下标的列表（参考
+    /// `InstructionSelector.nodeMapIds` 的做法），绝不能再退回字符串累加。
     private fun patternCachePut(patternId: Int, instrId: Int): Unit {
-        if (this.patternCacheKeys == "") {
-            this.patternCacheKeys = toStr(patternId)
-            this.patternCacheVals = toStr(instrId)
-        } else {
-            this.patternCacheKeys = this.patternCacheKeys + "," + toStr(patternId)
-            this.patternCacheVals = this.patternCacheVals + "," + toStr(instrId)
-        }
+        // 缓存已禁用：什么都不做。
     }
 
     // ── 根/链管理 ──

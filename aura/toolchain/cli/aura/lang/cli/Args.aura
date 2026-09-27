@@ -2,7 +2,7 @@
 package aura.lang.cli
 
 import aura.lang.std.String
-import aura.lang.native.process.ProcessNative
+import aura.lang.std.Env
 
 // ═══════════════════════════════════════════════════════════════
 // 命令行参数解析
@@ -87,13 +87,41 @@ class Args {
 
 /// 参数解析工具对象
 object ArgsUtils {
+
+    /// 通过环境变量获取参数个数（VM 下 ProcessNative 不可用时的降级路径）。
+    fun envArgCount(): Int {
+        val s: String = Env.get("AURA_ARGV_COUNT", "")
+        if (s == "") {
+            return -1
+        }
+        var n: Int = 0
+        var k: Int = 0
+        while (k < s.length) {
+            val c: Int = s.charCodeAt(k)
+            if (c < 48 || c > 57) {
+                return -1
+            }
+            n = n * 10 + (c - 48)
+            k = k + 1
+        }
+        return n
+    }
+
+    /// 通过环境变量获取第 i 个参数。
+    fun envArg(i: Int): String {
+        return Env.get("AURA_ARG_" + toStr(i), "")
+    }
+
     fun parseArgs(): Args {
         val args = Args()
-        val count: Int = ProcessNative.argCount()
-        var i: Int = 1
-        while (i < count) {
-            args.add(ProcessNative.arg(i))
-            i = i + 1
+        val envN: Int = ArgsUtils.envArgCount()
+        if (envN >= 0) {
+            var i: Int = 1
+            while (i < envN) {
+                args.add(ArgsUtils.envArg(i))
+                i = i + 1
+            }
+            return args
         }
         return args
     }

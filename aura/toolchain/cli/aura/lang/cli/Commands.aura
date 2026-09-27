@@ -145,6 +145,7 @@ object CommandsUtils {
             }
         } else {
             println("Error: doc requires a source file")
+            return 1
         }
         return 0
     }

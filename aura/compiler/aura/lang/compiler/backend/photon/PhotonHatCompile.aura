@@ -23,6 +23,14 @@
 //   AURA_HAT_SRC     输出/输入的 .hat 路径                [默认 <out>/program.hat]
 //   AURA_HAT_OUT     输出目录                            [默认 build/hat_test]
 //   AURA_HAT_MODULE  模块名                              [默认 program]
+//   AURA_HAT_SKIP_FRONT  跳过前端，复用已有 .hat         [默认 关]
+//
+//   调试开关（默认全关，stdout 只保留下面的 ===...=== 协议标记）：
+//   AURA_PHOTON_VERBOSE=1   前端 + 后端的阶段进度/心跳
+//   AURA_PHOTON_TRACE=1     上者 + 节点级崩溃诊断
+//   AURA_HAT_TRACE=1        HAT 解析器心跳（长任务区分「慢」与「卡死」）
+//   AURA_PHOTON_DEBUG_HIR=1 SSA / LIR / DAG 全量转储
+//   AURA_PHOTON_STOP=A|B|C|D  阶段短路（性能二分）
 //
 // 输出标记（供构建脚本解析）:
 //   ===COFF-MAIN===<hex>
@@ -34,6 +42,7 @@ import aura.lang.std.String
 import aura.lang.std.FileSystem
 import aura.lang.std.Env
 import aura.lang.std.Process
+
 
 // ── 自举前端（源码 → HIR）的模块闭包 ──
 //
@@ -77,27 +86,47 @@ fun main() {
     }
 
     // ── 前端：源码（含递归 import）→ 合并 HIR ──
-    val linker = AotModuleLinker()
-    val hir: Hir = linker.link(srcPath)
-    println("[hat-front] modules=" + toStr(linker.loadedCount()) +
-            " hirNodes=" + toStr(hir.count))
-    if (linker.missing != "") {
-        // 注意：不要用 String.replace —— VM 路径下类方法调用未链接
-        println("[hat-front] missing imports: " + linker.missing)
-    }
-
-    // ── HIR → SSA MIR → HAT 文本（HAT 是这条链路的中间表示）──
-    println("[hat-front] ssa start (nodes=" + toStr(hir.count) + ")")
-    val ssa: MirSsaProgram = SsaBuilderUtils.build(hir)
-    println("[hat-front] ssa done")
-    println("[hat-front] ssa functions=" + toStr(ssa.functionCount) +
-            " values=" + toStr(ssa.valueCount) +
-            " blocks=" + toStr(ssa.blockCount))
-
-    val hatText: String = HatSerializerUtils.serializeHat(ssa, moduleName)
+    //
+    // `AURA_HAT_SKIP_FRONT=1` 跳过前端与 .hat 序列化，直接复用已有的 `hatPath`。
+    // 自举 `Main.aura` 的前端要 ~2 分钟，只调后端时用它迭代。
     FileSystem.mkdirP(outDir)
-    FileSystem.writeText(hatPath, hatText)
-    println("[hat-front] .hat = " + hatPath + " (" + toStr(hatText.length) + " 字符)")
+
+    // 阶段进度/心跳默认关闭：stdout 只保留 ===...=== 协议标记（脚本逐行解析）。
+    // Env.get 每次调用都重读 environ 缓冲，这里只算一次。
+    val verboseOn = Env.get("AURA_PHOTON_VERBOSE", "") == "1"
+            || Env.get("AURA_PHOTON_TRACE", "") == "1"
+
+    if (Env.get("AURA_HAT_SKIP_FRONT", "") == "1") {
+        if (verboseOn) { println("[hat-front] skipped (reuse " + hatPath + ")") }
+    } else {
+        val linker = AotModuleLinker()
+        val hir: Hir = linker.link(srcPath)
+        if (verboseOn) {
+            println("[hat-front] modules=" + toStr(linker.loadedCount()) +
+                    " hirNodes=" + toStr(hir.count))
+        }
+        if (linker.missing != "") {
+            // 注意：不要用 String.replace —— VM 路径下类方法调用未链接。
+            // 缺失 import 会直接变成链接期 undefined symbol，因此始终报出来。
+            println("[hat-front] missing imports: " + linker.missing)
+        }
+
+        // ── HIR → SSA MIR → HAT 文本（HAT 是这条链路的中间表示）──
+        if (verboseOn) { println("[hat-front] ssa start (nodes=" + toStr(hir.count) + ")") }
+        val ssa: MirSsaProgram = SsaBuilderUtils.build(hir)
+        if (verboseOn) {
+            println("[hat-front] ssa done")
+            println("[hat-front] ssa functions=" + toStr(ssa.functionCount) +
+                    " values=" + toStr(ssa.valueCount) +
+                    " blocks=" + toStr(ssa.blockCount))
+        }
+
+        val hatText: String = HatSerializerUtils.serializeHat(ssa, moduleName)
+        FileSystem.writeText(hatPath, hatText)
+        if (verboseOn) {
+            println("[hat-front] .hat = " + hatPath + " (" + toStr(hatText.length) + " 字符)")
+        }
+    }
 
     // ── HAT 文本 → SSA MIR → LIR → DAG → RegAlloc → X86 → COFF ──
     val pipeline = PhotonPipelineUtils.emptyPipeline()

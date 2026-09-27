@@ -29,6 +29,12 @@ value class Boolean {
         return "false"
     }
 
+    /// 布尔哈希：避免走 Any 默认的字符串哈希路径。
+    override fun hashCode(): Int {
+        if (this) return 1
+        return 0
+    }
+
     /// 转换为整数（true → 1, false → 0）
     fun toInt(): Int {
         if (this) return 1

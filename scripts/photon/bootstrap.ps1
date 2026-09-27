@@ -1,4 +1,4 @@
-# -------------------------------------------------------------
+﻿# -------------------------------------------------------------
 # Bootstrap: 从 seed 编译出新版编译器，逐级自举
 #
 # Stage 0: seed 编译当前编译器源码 → .auc
@@ -15,7 +15,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $RootDir
 
 $Seed = "aura/seed/aura.exe"

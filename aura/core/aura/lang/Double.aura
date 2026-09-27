@@ -41,37 +41,38 @@ value class Double {
 
         /// 从字符串解析为双精度浮点数
         fun parseDouble(text: String): Double {
-            var result: Float = 0.0f
-            var sign: Int = 1
+            val n: Int = text.length
+            var result: Double = 0.0
+            var sign: Double = 1.0
             var i: Int = 0
-            if (i < text.length && text[i] == '-') {
-                sign = -1
+            if (i < n && text.charCodeAt(i) == '-') {
+                sign = -1.0
                 i = i + 1
-            } else if (i < text.length && text[i] == '+') {
+            } else if (i < n && text.charCodeAt(i) == '+') {
                 i = i + 1
             }
-            var frac: Float = 0.0f
-            var divisor: Float = 1.0f
-            var afterDot = false
-            while (i < text.length) {
-                val c = text[i]
-                if (c == '.') {
+            var frac: Double = 0.0
+            var divisor: Double = 1.0
+            var afterDot: Boolean = false
+            while (i < n) {
+                val c: Int = text.charCodeAt(i)
+                if (c == 46) {
                     afterDot = true
                     i = i + 1
                     continue
                 }
-                if (c >= '0' && c <= '9') {
-                    val digit = (c - '0').toFloat()
+                if (c >= 48 && c <= 57) {
+                    val digit: Double = c - 48
                     if (afterDot) {
-                        frac = frac * 10.0f + digit
-                        divisor = divisor * 10.0f
+                        frac = frac * 10.0 + digit
+                        divisor = divisor * 10.0
                     } else {
-                        result = result * 10.0f + digit
+                        result = result * 10.0 + digit
                     }
                 }
                 i = i + 1
             }
-            return ((result + frac / divisor) * sign.toFloat()) as Double
+            return (result + frac / divisor) * sign
         }
     }
 
@@ -114,6 +115,18 @@ value class Double {
     /// 检查两个双精度浮点数是否相等
     override fun equals(other: Double): Boolean {
         return this == other
+    }
+
+    /// 双精度浮点哈希：避免走 Any 默认的字符串哈希路径。
+    override fun hashCode(): Int {
+        val s: String = this.toString()
+        var hash: Int = 0
+        var i: Int = 0
+        while (i < s.length) {
+            hash = hash * 31 + (s.charCodeAt(i) as Int)
+            i = i + 1
+        }
+        return hash
     }
 
     // ── 算术方法 ──

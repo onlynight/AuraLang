@@ -1,4 +1,4 @@
-# -------------------------------------------------------------
+﻿# -------------------------------------------------------------
 # Build the Aura core standard library (Aura → .auc bytecode)
 #
 # Compiles all .aura files under aura/core/ into .auc bytecode,
