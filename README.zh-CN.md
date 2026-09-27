@@ -1,6 +1,6 @@
 # Aura 编程语言
 
-> 为 NovaOS 从零构建的系统级脚本语言 —— Rust 实现、Kotlin 风格语法、AOT + JIT 混合编译、零开销 FFI、ARC 内存管理，以及一条**直接生成 COFF 的原生后端（HAT / Photon）**—— 不经 LLVM IR 即可产出原生可执行文件。
+> 为 NovaOS 从零构建的系统级脚本语言 —— **纯 Aura 实现（自举编译）**、Kotlin 风格语法、AOT + JIT 混合编译、零开销 FFI、ARC 内存管理，以及一条**直接生成 COFF 的原生后端（HAT / Photon）**—— 不经 LLVM IR 即可产出原生可执行文件。
 >
 > **English** → [README.md](README.md)
 
@@ -138,9 +138,9 @@ P3  系统调用: exit, NtCreateFile, NtWriteFile, mmap, read, write  6 例
 
 ---
 
-## 纯 Aura 编译器迁移进展
+## 纯 Aura 编译器
 
-与 Rust 编译器并行，正在构建一个**完全用 Aura 语言编写的编译器**（位于 `aura/compiler/aura/lang/compiler/`）。Rust 编译器（`rust/compiler/`）完全保留不修改，作为 fallback 与参考实现。
+**整个编译器完全用 Aura 语言编写** —— 已移除最后一个 Rust 依赖，编译器现在可以自举。核心编译器位于 `aura/compiler/aura/lang/compiler/`，Photon 原生后端位于 `aura/photon/aura/lang/compiler/photon/`。
 
 | 阶段 | 组件 | 状态 |
 |------|------|------|
@@ -165,7 +165,7 @@ P3  系统调用: exit, NtCreateFile, NtWriteFile, mmap, read, write  6 例
 Aura 编译器从一个预编译的种子二进制启动：
 
 ```
-aura/seed/aura.exe          <- Rust 引导（种子，无需重编）
+seed/aura.exe               <- Rust 引导（种子，无需重编）
         │
         ▼  aura build aura/compiler/.../Main.aura
         │
@@ -181,8 +181,8 @@ build/output/<file>.exe               <- AOT 编译出的原生可执行文件
 另有一条完全独立的自举路径，直接驱动 HAT 链路、不经过 VM：
 
 ```
-rust/target/release/aura.exe
-        │  aura build --aot aura/compiler/.../backend/photon/PhotonHatCompile.aura
+seed/aura.exe
+        │  aura build --aot aura/photon/.../PhotonHatCompile.aura
         ▼
 build/hat-native/PhotonHatCompile.exe        <- AOT 编译出的 HAT 链路驱动
         │  <driver>  Main.aura
@@ -190,22 +190,7 @@ build/hat-native/PhotonHatCompile.exe        <- AOT 编译出的 HAT 链路驱�
 Main.aura ──► HirProgram ──► SSA MIR ──► .hat ──► COFF ──► lld-link ──► .exe
 ```
 
-**引导解析顺序**（`build-aura-compiler.ps1`）：
-
-1. `rust/target/release/aura.exe` —— cargo 构建产物（首选）
-2. `rust/target/debug/aura.exe`
-3. `aura/seed/aura.exe` —— 冻结的 git-LFS 种子，仅在指定 `-FrozenSeed` 或前两者都不存在时使用
-
-**重建种子**（`rust/compiler` 更新后）：
-
-```powershell
-cd rust
-cargo build --release -p cli --features llvm
-copy target\release\aura.exe ..\aura\seed\aura.exe
-
-# 或在仓库根目录：
-scripts\build-aura-compiler.ps1 -RebuildSeed
-```
+**引导**：`seed/aura.exe`（git 跟踪的冻结种子）消除了对 Rust 工具链的需求。`build-aura-compiler.ps1` 默认使用它；`-FrozenSeed` 可强制使用。
 
 ### 测试结果
 
@@ -243,15 +228,24 @@ aot/        Emit, StdSigs, Runtime, ModuleLink — LLVM IR 发射、std 签名�
 jit/        JitCore, JitState, JitOpt, JitLower, DispatchTable — JIT 后端
 gc/         Gc, MarkSweep, Incremental, Concurrent      — GC 实现
 memory/     Memory, MemoryPool, Arc                    — 内存管理与 ARC
-backend/photon/  PhotonPipeline, Lowering, InstructionSelection, RegisterAllocator,
-                 PeepholeOptimizer, MachineDag, Lir, X86Emitter, PhotonObjectWriter,
-                 PhotonSystemLinker, PhotonRuntime, SyscallEmitter, JitBackend,
-                 PhotonHatCompile（HAT 链路驱动）
 errors/     CompileError                       — 诊断模型
 serialize/  AucSerializer, AucLoader, PlatformFileIO, WinFileIO — .auc 格式
 linker/     Linker                             — 模块链接器
 signature/  Signature                          — 签名表
 Main.aura   — 编译器入口骨架
+`
+
+Photon 原生后端模块位于 ura/photon/aura/lang/compiler/photon/：
+
+`
+PhotonPipeline, PhotonDriver, PhotonHatCompile  — 管线与 HAT 链路驱动
+Lowering, Lir, MachineDag, InstructionSelection — SSA → LIR → DAG → 指令选择
+RegisterAllocator, PeepholeOptimizer, X86Emitter — 寄存器分配与窥孔优化
+X86Encoder (x86_64/), PhotonObjectWriter       — X86-64 编码器与 COFF 写入器
+PhotonSystemLinker, PhotonNativeWriter          — 系统链接器与原生写入器
+PhotonRuntime, SyscallEmitter, PhotonLldConfig  — 运行库、系统调用发射、lld-link 配置
+JitBackend, PhotonHatBuild, PhotonHelloBuild     — JIT 后端与构建辅助
+PhirSerializer, PhotonOptPasses, PhotonExceptionHandler — PHIR、优化、错误处理
 ```
 
 ---
@@ -260,7 +254,6 @@ Main.aura   — 编译器入口骨架
 
 ```text
 AuraLang/
-├── Cargo.toml              Workspace 根
 ├── LICENSE                 Apache-2.0
 ├── README.md               English
 ├── README.zh-CN.md         ← 中文文档
@@ -276,80 +269,24 @@ AuraLang/
 │   │       ├── mir/                        MIR 与 SSA（SsaBuilder, SsaMir, Linearizer）
 │   │       ├── codegen/ vm/                字节码发射 + VM 解释器
 │   │       ├── aot/ jit/                   LLVM IR AOT + Cranelift JIT
-│   │       ├── backend/photon/             HAT 原生后端（LIR → COFF → exe）
 │   │       ├── gc/ memory/ runtime/        GC、ARC、协程运行时
 │   │       ├── serialize/ linker/ signature/ auz/ package/
 │   │       └── Main.aura                   编译器入口
-│   ├── runtime/            运行时支持源码
-│   ├── toolchain/          LSP、调试器、文档生成、cli
-│   └── seed/
-│       └── aura.exe        Rust 引导种子（预编译，无需重编）
+│   ├── photon/             Photon 原生后端（HAT / LIR / COFF）
+│   │   └── aura/lang/compiler/photon/
+│   │       ├── x86_64/                  X86-64 编码器
+│   │       └── (PhotonPipeline, RegisterAllocator, X86Encoder, ...)
+│   ├── runtime/            运行时支持源码（C: aura_syscalls.c）
+│   └── toolchain/          LSP、调试器、文档生成、loom、cli
 │
-├── rust/                   Rust 工具链（从此处构建）
-│   ├── compiler/           编译器 crate（lexer, sema, codegen, vm, std, lsp, ...）
-│   │   ├── src/
-│   │   │   ├── lexer.rs            词法分析器（手写，支持插值、原始字符串）
-│   │   │   ├── parser.rs           递归下降 + Pratt 优先级解析器
-│   │   │   ├── ast.rs              AST 节点定义
-│   │   │   ├── sema/               语义分析（ty / symbol / checker）
-│   │   │   ├── codegen/
-│   │   │   │   ├── hir.rs              HIR 脱糖
-│   │   │   │   ├── mir.rs              MIR 降级
-│   │   │   │   ├── emit.rs             字节码发射
-│   │   │   │   ├── opt.rs              优化 pass
-│   │   │   │   ├── arc.rs              ARC 分析与插入
-│   │   │   │   ├── serialize.rs        .auc 二进制格式
-│   │   │   │   └── aot/                AOT（LLVM）后端
-│   │   │   │       ├── emit.rs         LLVM IR 生成
-│   │   │   │       ├── linker.rs       llc/clang 链接
-│   │   │   │       ├── target.rs       跨平台三元组
-│   │   │   │       ├── dwarf.rs        DWARF 调试信息
-│   │   │   │       └── c_backend.rs    C 代码回退
-│   │   │   ├── vm/
-│   │   │   │   ├── interp.rs           栈式解释器
-│   │   │   │   ├── jit.rs              Cranelift JIT
-│   │   │   │   ├── ffi.rs              C FFI（extern "c"）
-│   │   │   │   ├── heap.rs             GC 堆 + ARC
-│   │   │   │   ├── value.rs            运行时值
-│   │   │   │   ├── actor.rs            Actor 运行时
-│   │   │   │   ├── channel.rs          消息通道
-│   │   │   │   ├── coroutine.rs        协程与 suspend
-│   │   │   │   ├── thread_pool.rs      线程池
-│   │   │   │   ├── debugger.rs         源码级调试器
-│   │   │   │   └── ...                 IPC、动态 FFI、native 等
-│   │   │   ├── std/                    标准库（19 个模块）
-│   │   │   │   ├── decl.rs             标准库函数单一真相源
-│   │   │   │   ├── std_math.rs         数学函数
-│   │   │   │   ├── std_io.rs           输入输出
-│   │   │   │   ├── std_collections.rs  集合操作
-│   │   │   │   ├── std_concurrent.rs   并发 API
-│   │   │   │   ├── std_json.rs         JSON 解析与序列化
-│   │   │   │   ├── std_string.rs       字符串操作
-│   │   │   │   ├── std_fs.rs           文件系统
-│   │   │   │   ├── std_env.rs          环境变量
-│   │   │   │   ├── std_process.rs      进程管理
-│   │   │   │   ├── std_time.rs         时间日期
-│   │   │   │   └── ...                 （+8 个模块）
-│   │   │   ├── auz/                    .auz 制品格式
-│   │   │   ├── lsp.rs                  LSP 服务器（stdio JSON-RPC）
-│   │   │   ├── package.rs              包管理器
-│   │   │   ├── docgen.rs               API 文档生成器
-│   │   │   └── linker.rs               模块链接
-│   │   ├── tests/                    集成测试（40+ 测试文件）
-│   │   └── examples/                 AOT 基准测试
-│   ├── cli/                    命令行工具（3 个二进制）
-│   │   └── src/
-│   │       ├── main.rs             `aura` — 20+ 子命令
-│   │       ├── lsp_main.rs         `aura-lsp` — 独立 LSP 进程
-│   │       └── debugger_main.rs    `aura-debug` — 源码级调试器
-│   ├── loom/                   构建系统（Gradle/Bazel 风格）
-│   └── target/                 Rust 构建产物（生成）
+├── seed/                   Rust 种子工作区（Cargo.toml, compiler/, target/）
+│   └── aura.exe            冻结引导二进制（预编译，无需重编）
 │
 ├── book/                   用户文档（教程、API、迁移指南）
 ├── docs/                   技术设计文档（系统/编译/语言/集成/规划）
 ├── examples/               Aura 源码示例
 ├── tests/                  测试文件
-│   ├── phase{0..9}_tests.aura      纯 Aura 编译器迁移测试
+│   ├── phase{0..9}_tests.aura      纯 Aura 编译器测试
 │   ├── photon/
 │   │   ├── P1/ P2/ P3/ P4/         端到端差用例
 │   │   └── S1/ S2/ S3/ S4/         后端单元/集成测试
@@ -369,8 +306,9 @@ AuraLang/
 └── build/                  生成产物（含 build/hat-native/、build/hat-bootstrap/）
 ```
 
-> **布局说明**：Rust 编译器、CLI 与 `loom` 构建系统位于 `rust/` 下，**不在仓库根目录**。
-> `aura/` 存放 Aura 编写的语言源码；编译器从 `aura/seed/aura.exe` 的冻结种子自举。
+> **布局说明**：`aura/compiler/` 存放核心编译器（lexer、parser、sema、HIR、MIR、codegen、VM、AOT、JIT）；
+> `aura/photon/` 存放 HAT/Photon 原生后端（LIR、寄存器分配、x86-64 编码器、COFF 写入器）；
+> `seed/` 存放 Rust 种子工作区。编译器从冻结种子 `seed/aura.exe` 引导 —— 无需 Rust 工具链。
 
 ---
 
@@ -378,7 +316,6 @@ AuraLang/
 
 ### 前置要求
 
-- Rust 1.75+（edition 2024）
 - LLVM ≥ 23（实测 `clang+llvm-23.1.0-x86_64-pc-windows-msvc`），其中 `lld-link.exe` 供
   HAT / Photon 原生后端使用，`llc` 供 LLVM IR 的 AOT 路径使用
 - Windows / PowerShell 5.1+（构建与自举脚本）
@@ -392,23 +329,19 @@ scripts\build-aura-compiler.ps1
 # 带 AOT 构建（原生可执行文件，需要 LLVM）
 scripts\build-aura-compiler.ps1 -Aot
 
-# 从 Rust 源码重建种子（rust/compiler 更新后）
-scripts\build-aura-compiler.ps1 -RebuildSeed
-
-# 重建原生 HAT 驱动（由 Rust 的 aura 做 AOT 编译，约 12 秒）
+# 重建原生 HAT 驱动（由种子 aura 做 AOT 编译，约 12 秒）
 $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
-.\rust\target\release\aura.exe build --aot `
-    aura\compiler\aura\lang\compiler\backend\photon\PhotonHatCompile.aura `
+.\seed\aura.exe build --aot `
+    aura\photon\aura\lang\compiler\photon\PhotonHatCompile.aura `
     --output build\hat-native\PhotonHatCompile.exe
 
 # HAT 差分套件（加 -Rebuild 会先重建驱动）
-.\scripts\photon-hat-native-suite.ps1 -Phase P1,P2,P3 -OutRoot build\hat-native-suite
-.\scripts\photon-hat-suite.ps1        -Phase P1,P2,P3 -OutRoot build\hat-suite
+.\scripts\photon\photon-hat-native-suite.ps1 -Phase P1,P2,P3 -OutRoot build\hat-native-suite
+.\scripts\photon\photon-hat-suite.ps1        -Phase P1,P2,P3 -OutRoot build\hat-suite
 ```
 
-> **说明**：`aura/seed/aura.exe` 是 git-LFS 跟踪的冻结种子，可以完全免去 Rust 工具链
-> —— 用 `build-aura-compiler.ps1 -FrozenSeed` 直接启用。否则脚本优先使用
-> `rust/target/{release,debug}/aura.exe` 的 cargo 构建产物。只有 `-RebuildSeed` 需要 `cargo`。
+> **说明**：`seed/aura.exe`（git 跟踪）是冻结种子，可以完全免去 Rust 工具链。
+> `-FrozenSeed` 可强制使用，即使存在其他构建产物。
 
 ### 运行
 
@@ -664,25 +597,23 @@ DSH 语法高亮插件的构建与打包位于 `tools/dsh-plugins/`
 
 ## 开发
 
-Rust workspace 位于 `rust/`：
+编译器和工具链均用 Aura 编写。使用以下方式构建和测试：
 
-```bash
-# 格式化
-cd rust && cargo fmt --all
+```powershell
+# 构建编译器（从冻结种子自举）
+scripts\build-aura-compiler.ps1
 
-# Lint
-cd rust && cargo clippy --all-features -- -D warnings
+# 带 AOT 构建（原生可执行文件）
+scripts\build-aura-compiler.ps1 -Aot
 
-# 测试
-cd rust && cargo test --workspace
-cd rust && cargo test --release --test perf_lexer -- --nocapture
+# 运行编译器测试
+aura run tests/phase9_compiler_tests.aura
+aura run tests/pure_aura_cffi/test.aura
 
-# 更新快照
-INSTA_UPDATE=always cargo test
+# 运行 HAT / Photon 测试套件
+scripts\photon\photon-hat-native-suite.ps1 -Phase P1,P2,P3
+scripts\photon\photon-hat-suite.ps1 -Phase P1,P2,P3
 ```
-
-CI 配置在 `rust/.github/workflows/ci.yml`：包含 `cargo fmt --check`、`cargo clippy -D warnings`、
-`cargo test`（debug + release）与覆盖率采集。
 
 ### HAT / Photon 后端调试
 
