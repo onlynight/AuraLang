@@ -2,7 +2,7 @@
 // Simple JIT test - no compileMachineCode, just dispatch table and stubs
 package tests.photon.S3
 
-import aura.lang.compiler.backend.photon.JitBackend
+import aura.lang.compiler.photon.JitBackend
 import aura.lang.compiler.test.TestRunner
 import aura.lang.std.String
 

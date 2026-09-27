@@ -1,13 +1,13 @@
-// aura:///aura/lang/compiler/backend/photon/PhotonPipelineTest2.aura
-package aura.lang.compiler.backend.photon
+// aura:///aura/lang/compiler/photon/PhotonPipelineTest2.aura
+package aura.lang.compiler.photon
 import aura.lang.std.String
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/RegisterAllocator.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/x86_64/X86Encoder.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/X86Emitter.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/MachineDag.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/RegisterAllocator.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/x86_64/X86Encoder.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/X86Emitter.aura"
 
 fun main() {
-    println("═══ S1 Test ═══")
+    println("══�?S1 Test ══�?)
     var pc = 0
 
     println("[1] X86Encoder basic")

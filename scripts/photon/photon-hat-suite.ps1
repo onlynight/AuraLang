@@ -1,18 +1,18 @@
-ï»¿# photon-hat-suite.ps1 â€” HAT æ ¼å¼ç«¯åˆ°ç«¯å·®åˆ†è·‘æ‰¹ï¼ˆaura æºç  â†’ .hat â†’ Photon HAT åç«¯ â†’ exeï¼‰
+# photon-hat-suite.ps1 ¡ª HAT ¸ñÊ½¶Ëµ½¶Ë²î·ÖÅÜÅú£¨aura Ô´Âë ¡ú .hat ¡ú Photon HAT ºó¶Ë ¡ú exe£©
 #
-# ä¸ scripts\photon-suite.ps1ï¼ˆPHIR è·¯å¾„ï¼‰å¹¶åˆ—ï¼šåŒä¸€æ‰¹ç”¨ä¾‹ã€åŒä¸€åˆ¤å®šæ ‡å‡†ï¼Œ
-# ä½†åç«¯è¾“å…¥æ˜¯ **HAT IR æ–‡æœ¬**è€Œä¸æ˜¯ .phir ä¼ªæºç ã€‚
+# Óë scripts\photon-suite.ps1£¨PHIR Â·¾¶£©²¢ÁĞ£ºÍ¬Ò»ÅúÓÃÀı¡¢Í¬Ò»ÅĞ¶¨±ê×¼£¬
+# µ«ºó¶ËÊäÈëÊÇ **HAT IR ÎÄ±¾**¶ø²»ÊÇ .phir Î±Ô´Âë¡£
 #
-# æ¯ä¸ªç”¨ä¾‹çš„æµç¨‹ï¼š
-#   1) VM è·‘ä¸€éå¾—åˆ°åŸºå‡† stdout                    aura run <src>.aura
-#   2) Rust å‰ç«¯äº§å‡º HIR æ–‡æœ¬ï¼ˆ.phir ä»…ä½œå‰ç«¯åºåˆ—åŒ–é€šé“ï¼ŒHAT ç®¡çº¿æœ¬èº«ä¸è¯»å®ƒï¼‰
+# Ã¿¸öÓÃÀıµÄÁ÷³Ì£º
+#   1) VM ÅÜÒ»±éµÃµ½»ù×¼ stdout                    aura run <src>.aura
+#   2) Rust Ç°¶Ë²ú³ö HIR ÎÄ±¾£¨.phir ½ö×÷Ç°¶ËĞòÁĞ»¯Í¨µÀ£¬HAT ¹ÜÏß±¾Éí²»¶ÁËü£©
 #                                                  aura build -b photon <src> --output <out>/<stem>.phir
-#   3) HIR â†’ SSA â†’ HAT æ–‡æœ¬ï¼Œå†ç”± HAT æ–‡æœ¬ â†’ SSA â†’ LIR â†’ X86 â†’ COFF
+#   3) HIR ¡ú SSA ¡ú HAT ÎÄ±¾£¬ÔÙÓÉ HAT ÎÄ±¾ ¡ú SSA ¡ú LIR ¡ú X86 ¡ú COFF
 #                                                  aura run .../PhotonHatBuild.aura
-#      ï¼ˆAURA_HAT_PHIR / AURA_HAT_SRC / AURA_HAT_OUT / AURA_HAT_MODULEï¼‰
-#   4) COFF hex â†’ .obj â†’ lld-link â†’ exeï¼Œè¿è¡Œå¹¶ä¸ VM åŸºå‡†æ¯”è¾ƒ stdout
+#      £¨AURA_HAT_PHIR / AURA_HAT_SRC / AURA_HAT_OUT / AURA_HAT_MODULE£©
+#   4) COFF hex ¡ú .obj ¡ú lld-link ¡ú exe£¬ÔËĞĞ²¢Óë VM »ù×¼±È½Ï stdout
 #
-# ç”¨æ³•:
+# ÓÃ·¨:
 #   powershell -File scripts\photon-hat-suite.ps1 -Phase P1
 #   powershell -File scripts\photon-hat-suite.ps1 -Phase P1,P2,P3
 #   powershell -File scripts\photon-hat-suite.ps1 -Files tests\photon\P1\01_hello_world.aura
@@ -21,8 +21,8 @@ param(
     [string[]]$Files = @(),
     [int]$TimeoutSecs = 120,
     [string]$OutRoot = "build\hat-suite",
-    # æ‰“å¼€é˜¶æ®µè¿›åº¦/å¿ƒè·³ï¼ˆ[hat-front] / [Phase A-E] / [isa] / [hat-parse]ï¼‰ã€‚
-    # é»˜è®¤å…³ï¼šé©±åŠ¨ stdout åªä¿ç•™ ===...=== åè®®æ ‡è®°ï¼Œæœ¬è„šæœ¬é€è¡Œè§£æ COFF hexã€‚
+    # ´ò¿ª½×¶Î½ø¶È/ĞÄÌø£¨[hat-front] / [Phase A-E] / [isa] / [hat-parse]£©¡£
+    # Ä¬ÈÏ¹Ø£ºÇı¶¯ stdout Ö»±£Áô ===...=== Ğ­Òé±ê¼Ç£¬±¾½Å±¾ÖğĞĞ½âÎö COFF hex¡£
     [switch]$Verbose
 )
 $ErrorActionPreference = 'Continue'
@@ -31,18 +31,18 @@ Set-Location $Root
 $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
 $env:AURA_PHOTON_DEBUG_HIR = ''
 $env:AURA_PHOTON_TRACE = ''
-# è°ƒè¯•å¼€å…³é»˜è®¤å…¨å…³ï¼ˆè§ PhotonPipeline.aura çš„ verboseOn æ³¨é‡Šï¼‰ï¼š
-#   AURA_PHOTON_VERBOSE=1  é˜¶æ®µè¿›åº¦/å¿ƒè·³
-#   AURA_HAT_TRACE=1       HAT è§£æå™¨å¿ƒè·³
+# µ÷ÊÔ¿ª¹ØÄ¬ÈÏÈ«¹Ø£¨¼û PhotonPipeline.aura µÄ verboseOn ×¢ÊÍ£©£º
+#   AURA_PHOTON_VERBOSE=1  ½×¶Î½ø¶È/ĞÄÌø
+#   AURA_HAT_TRACE=1       HAT ½âÎöÆ÷ĞÄÌø
 if ($Verbose) { $env:AURA_PHOTON_VERBOSE = '1'; $env:AURA_HAT_TRACE = '1' }
 else          { $env:AURA_PHOTON_VERBOSE = '';  $env:AURA_HAT_TRACE = '' }
 
 $Aura = Join-Path $Root 'rust\target\release\aura.exe'
 if (-not (Test-Path $Aura)) { Write-Host "aura.exe not found: $Aura" -ForegroundColor Red; exit 1 }
 
-$Driver = Join-Path $Root 'aura\compiler\aura\lang\compiler\backend\photon\PhotonHatBuild.aura'
+$Driver = Join-Path $Root 'aura\photon\aura\lang\compiler\photon\PhotonHatBuild.aura'
 
-# â”€â”€ è¿›ç¨‹è°ƒç”¨ï¼ˆå¼‚æ­¥åŒç®¡é“è¯»ï¼Œè¶…æ—¶æ€è¿›ç¨‹æ ‘ï¼‰â”€â”€
+# ©¤©¤ ½ø³Ìµ÷ÓÃ£¨Òì²½Ë«¹ÜµÀ¶Á£¬³¬Ê±É±½ø³ÌÊ÷£©©¤©¤
 function Invoke-Proc($exe, $argStr, $wd, $secs) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $exe
@@ -93,7 +93,7 @@ if ($resolved) { $lld = $resolved.Source }
 $k32 = Find-Kernel32
 if (-not $k32) { Write-Host "kernel32.Lib not found" -ForegroundColor Red; exit 1 }
 
-# â”€â”€ æ”¶é›†ç”¨ä¾‹ â”€â”€
+# ©¤©¤ ÊÕ¼¯ÓÃÀı ©¤©¤
 if ($Files.Count -eq 0) {
     foreach ($ph in ($Phase -split ',')) {
         $dir = "tests\photon\$($ph.Trim())"
@@ -104,7 +104,7 @@ if ($Files.Count -eq 0) {
 }
 if ($Files.Count -eq 0) { Write-Host "no files" -ForegroundColor Red; exit 1 }
 
-Write-Host "=== Photon HAT ç«¯åˆ°ç«¯å·®åˆ†ï¼ˆaura â†’ HAT â†’ exeï¼‰===" -ForegroundColor Cyan
+Write-Host "=== Photon HAT ¶Ëµ½¶Ë²î·Ö£¨aura ¡ú HAT ¡ú exe£©===" -ForegroundColor Cyan
 Write-Host "  aura   : $Aura"
 Write-Host "  driver : PhotonHatBuild.aura"
 Write-Host "  lld    : $lld"
@@ -126,14 +126,14 @@ foreach ($src in $Files) {
     $hat  = Join-Path $outDir "$stem.hat"
     $exe  = Join-Path $hatOut "$stem.exe"
 
-    # 1) VM åŸºå‡†
+    # 1) VM »ù×¼
     $vm = Invoke-Proc $Aura "run `"$src`"" $Root $TimeoutSecs
     $vmOut = (("" + $vm.Out) -replace "`r", "").Trim()
 
-    # 2) å‰ç«¯äº§å‡º HIR æ–‡æœ¬
+    # 2) Ç°¶Ë²ú³ö HIR ÎÄ±¾
     $b1 = Invoke-Proc $Aura "build -b photon `"$src`" --output `"$phir`"" $Root $TimeoutSecs
 
-    # 3) HAT ç®¡çº¿ï¼ˆHIR â†’ SSA â†’ .hat â†’ è§£æ â†’ SSA â†’ â€¦ â†’ COFFï¼‰
+    # 3) HAT ¹ÜÏß£¨HIR ¡ú SSA ¡ú .hat ¡ú ½âÎö ¡ú SSA ¡ú ¡­ ¡ú COFF£©
     $env:AURA_HAT_PHIR = $phir
     $env:AURA_HAT_SRC = $hat
     $env:AURA_HAT_OUT = $hatOut
@@ -141,7 +141,7 @@ foreach ($src in $Files) {
     $d = Invoke-Proc $Aura "run `"$Driver`"" $Root $TimeoutSecs
     $env:AURA_HAT_PHIR = ''; $env:AURA_HAT_SRC = ''; $env:AURA_HAT_OUT = ''; $env:AURA_HAT_MODULE = ''
 
-    # 4) è§£ææ ‡è®° â†’ å†™ .obj â†’ é“¾æ¥
+    # 4) ½âÎö±ê¼Ç ¡ú Ğ´ .obj ¡ú Á´½Ó
     $coffMain = $null; $coffRt = $null; $mode = ''; $errMsg = ''
     foreach ($l in ($d.Out -split "`n")) {
         $t = $l.Trim()

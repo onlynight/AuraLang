@@ -1,5 +1,5 @@
 // Test substring behavior
-package aura.lang.compiler.backend.photon
+package aura.lang.compiler.photon
 import aura.lang.std.String
 
 fun main() {

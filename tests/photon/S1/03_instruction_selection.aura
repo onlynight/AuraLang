@@ -1,16 +1,14 @@
 // tests/photon/S1/03_instruction_selection.aura
-// ═════════════════════════════════════════════════════════════
-// InstructionSelection 单元测试
+// ════════════════════════════════════════════════════════════�?// InstructionSelection 单元测试
 // 运行：aura run tests/photon/S1/03_instruction_selection.aura
-// ═════════════════════════════════════════════════════════════
-
+// ════════════════════════════════════════════════════════════�?
 import aura.lang.std.String
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/Lir.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/MachineDag.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/InstructionSelection.aura"
 
 fun main() {
-    println("═══ InstructionSelection 测试 ═══")
+    println("══�?InstructionSelection 测试 ══�?)
     var pass = 0
     var total = 5
 
@@ -20,18 +18,17 @@ fun main() {
         InstructionSelectorUtils.isArith("Add") &&
         InstructionSelectorUtils.isICmp("ICmpEQ")) { pass = pass + 1 }
 
-    // [2] 空 DAG
-    println("[2] 空 DAG")
+    // [2] �?DAG
+    println("[2] �?DAG")
     val dag = MachineDagUtils.emptyDag()
     if (dag.nodeCount == 0 && dag.instrCount == 0) { pass = pass + 1 }
 
-    // [3] 选择器创建
-    println("[3] 选择器创建")
+    // [3] 选择器创�?    println("[3] 选择器创�?)
     val sel = InstructionSelectorUtils.emptySelector()
     pass = pass + 1
 
-    // [4] 空程序 select
-    println("[4] 空程序 select")
+    // [4] 空程�?select
+    println("[4] 空程�?select")
     val lir = LirUtils.emptyProgram()
     val dag2 = sel.select(lir)
     println("  nodes=" + dag2.nodeCount + " instrs=" + dag2.instrCount)

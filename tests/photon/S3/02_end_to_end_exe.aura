@@ -1,24 +1,22 @@
 // tests/photon/S3/02_end_to_end_exe.aura
-// ═════════════════════════════════════════════════════════════
-// S3: 端到端 exe 测试 — 验证管线可生成可执行文件
+// ════════════════════════════════════════════════════════════�?// S3: 端到�?exe 测试 �?验证管线可生成可执行文件
 // 运行：aura run tests/photon/S3/02_end_to_end_exe.aura
-// ═════════════════════════════════════════════════════════════
-
+// ════════════════════════════════════════════════════════════�?
 import aura.lang.std.String
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/RegisterAllocator.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/X86Emitter.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonObjectWriter.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonSystemLinker.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/Lir.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/MachineDag.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/InstructionSelection.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/RegisterAllocator.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/X86Emitter.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/PhotonSystemLinker.aura"
 
 fun main() {
-    println("═══ S3 端到端 exe 测试 ═══")
+    println("══�?S3 端到�?exe 测试 ══�?)
     var pass = 0
     var total = 3
 
-    // [1] 完整管线：LIR → DAG → RegAlloc → Encode → COFF → Link
+    // [1] 完整管线：LIR �?DAG �?RegAlloc �?Encode �?COFF �?Link
     println("[1] 完整管线")
     val lir = LirUtils.emptyProgram()
     val t = lir.types
@@ -46,8 +44,7 @@ fun main() {
         println("  COFF hex length=" + coffHex.length)
     }
 
-    // [2] 二进制文件写入
-    println("[2] 二进制文件写入")
+    // [2] 二进制文件写�?    println("[2] 二进制文件写�?)
     val testPath = "build/photon/test_main.obj"
     val ok = writer.writeObjectBinaryFile(testPath)
     if (ok) {
@@ -70,6 +67,6 @@ fun main() {
     println("")
     println("PASS: " + pass + "/" + total)
     if (pass == total) {
-        println("ALL PASS — 端到端管线就绪")
+        println("ALL PASS �?端到端管线就�?)
     }
 }

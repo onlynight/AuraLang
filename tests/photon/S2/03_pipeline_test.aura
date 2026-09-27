@@ -1,22 +1,18 @@
 // tests/photon/S2/03_pipeline_test.aura
-// ═════════════════════════════════════════════════════════════
-// S2 管线集成测试：多指令 + 寄存器分配
-// 运行：aura run tests/photon/S2/03_pipeline_test.aura
-// ═════════════════════════════════════════════════════════════
-
+// ════════════════════════════════════════════════════════════�?// S2 管线集成测试：多指令 + 寄存器分�?// 运行：aura run tests/photon/S2/03_pipeline_test.aura
+// ════════════════════════════════════════════════════════════�?
 import aura.lang.std.String
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
-import "../../../aura/compiler/aura/lang/compiler/backend/photon/RegisterAllocator.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/Lir.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/MachineDag.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/InstructionSelection.aura"
+import "../../../aura/photon/aura/lang/compiler/photon/RegisterAllocator.aura"
 
 fun main() {
-    println("═══ S2 管线集成测试 ═══")
+    println("══�?S2 管线集成测试 ══�?)
     var pass = 0
     var total = 4
 
-    // [1] 多指令程序
-    println("[1] 多指令程序")
+    // [1] 多指令程�?    println("[1] 多指令程�?)
     val lir = LirUtils.emptyProgram()
     val t = lir.types
     val i32 = t.intType(32)
@@ -34,12 +30,10 @@ fun main() {
     println("  nodes=" + dag.nodeCount + " instrs=" + dag.instrCount)
     if (dag.instrCount >= 3) { pass = pass + 1 }
 
-    // [2] 寄存器分配
-    println("[2] 寄存器分配")
+    // [2] 寄存器分�?    println("[2] 寄存器分�?)
     val allocator = RegisterAllocatorUtils.emptyAllocator()
     allocator.allocate(dag)
-    // 检查节点是否分配了寄存器
-    var allAssigned: Boolean = true
+    // 检查节点是否分配了寄存�?    var allAssigned: Boolean = true
     var i: Int = 0
     while (i < dag.nodeCount) {
         val node = dag.nodeOf(i)
@@ -50,8 +44,7 @@ fun main() {
     }
     if (allAssigned) { pass = pass + 1; println("  all nodes assigned") }
 
-    // [3] 带 Phi 的程序
-    println("[3] 带 Phi 的程序")
+    // [3] �?Phi 的程�?    println("[3] �?Phi 的程�?)
     val lir2 = LirUtils.emptyProgram()
     val t2 = lir2.types
     val i32b = t2.intType(32)

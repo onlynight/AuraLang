@@ -1,0 +1,459 @@
+﻿// aura:///aura/lang/compiler/photon/PeepholeOptimizer.aura
+package aura.lang.compiler.photon
+// ─────────────────────────────────────────────────────────────
+// 窥孔优化（PeepholeOptimizer）�?Phase D (任务 D.2)
+//
+// �?Machine DAG 中连续指令序列进行局部优化�?// 支持多趟迭代直至无变化�?// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+// 本文件直接使�?`MachineDag` / `DagInstruction` 类型，必须显式导入�?import "MachineDag.aura"
+
+/// 窥孔优化器：�?Machine DAG 进行局部优化�?class PeepholeOptimizer {
+
+    /// DAG 引用�?    private var dag: MachineDag = null
+
+    /// 已应用的优化数量�?    private var optimized: Int = 0
+
+    /// 已执行的优化趟数�?    private var passCount: Int = 0
+
+    init() {
+        this.dag = null
+        this.optimized = 0
+        this.passCount = 0
+    }
+
+    /// 主入口：执行窥孔优化�?    fun optimize(d: MachineDag): Unit {
+        this.dag = d
+        this.optimized = 0
+        this.passCount = 0
+
+        // 多趟优化直至无变�?        var changed: Boolean = true
+        while (changed) {
+            changed = this.runPass()
+            this.passCount = this.passCount + 1
+            if (this.passCount > 100) { break } // 防止无限循环
+        }
+    }
+
+    /// 执行一趟优化�?    ///
+    /// ⚠️ **当前整趟禁用（返�?false，不做任何改写）**�?    ///
+    /// 原因：本文件里的若干趟是「跨整个 DAG、按节点 ID 全局重写」的启发式，
+    /// 没有按函数隔离、也没有校验被替换的节点是否真的是同一处的操作数，实测
+    /// 会破坏代码正确性。最典型的是 `optimizeCopyPropagate`：它�?*所�?*
+    /// `mov dst, src` 收进一张全局表，然后�?`src �?dst` 去替�?*所�?*指令�?    /// 操作�?—�?连定义这�?mov 的指令本身、以及其它函数里的同名节�?ID 也一�?    /// 换掉。实�?`mov rbx,10`（Const 10）的操作数被换成后面某个乘法结果节点�?     /// 发射出来变成 `mov rdi,0`，`println("a + b = " + toStr(a+b))` 输出 ` b =`�?    ///
+    /// 这些趟需要按「基本块内、单函数、单次使用」重写后才能重新启用
+    /// （属于后续优化工作项，不影响 Phase D 的寄存器分配正确性）�?    private fun runPass(): Boolean {
+        return false
+    }
+
+    /// 优化 MOV 链：mov r1, r2; mov r3, r1 �?mov r3, r2
+    private fun optimizeMovChain(): Boolean {
+        var changed: Boolean = false
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var i: Int = 0
+        while (i < instrs.size - 1) {
+            val instr: DagInstruction = instrs[i]
+            val next: DagInstruction = instrs[i + 1]
+            // 检�?mov r1, r2 后跟 mov r3, r1（模板与 X86Emitter 一致：$imm 格式�?            if (instr.template == "mov %dst, %src" && next.template == "mov %dst, %src") {
+                val src1: Int = instr.nodeAt(0)
+                val dst1: Int = instr.output
+                val src2: Int = next.nodeAt(0)
+                if (dst1 >= 0 && src2 == dst1) {
+                    // 合并：mov r3, r2
+                    next.nodes = toStr(src1)
+                    this.optimized = this.optimized + 1
+                    changed = true
+                }
+            }
+            i = i + 1
+        }
+        return changed
+    }
+
+    /// 自移动消除：mov r, r �?nop
+    private fun optimizeSelfMove(): Boolean {
+        var changed: Boolean = false
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var i: Int = 0
+        while (i < instrs.size) {
+            val instr: DagInstruction = instrs[i]
+            if (instr.template == "mov %dst, %src") {
+                val dst: Int = instr.nodeAt(0)
+                if (dst >= 0 && instr.output == dst) {
+                    instr.template = "nop"
+                    instr.nodes = ""
+                    instr.output = -1
+                    this.optimized = this.optimized + 1
+                    changed = true
+                }
+            }
+            i = i + 1
+        }
+        return changed
+    }
+
+    /// 死代码消除：移除结果未被使用的指令�?    private fun optimizeDeadCode(): Boolean {
+        var changed: Boolean = false
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var i: Int = instrs.size - 1
+        while (i >= 0) {
+            val instr: DagInstruction = instrs[i]
+            // 非副作用、非终结、非调用指令
+            if (!instr.isSideEffect() && !instr.isDagTerminator() && (instr.flags & 16) == 0) {
+                // 检查输出是否被使用
+                if (instr.output < 0 || this.isUnused(instr.output)) {
+                    // 移除指令（标记）
+                    instr.template = "nop"
+                    instr.nodes = ""
+                    instr.output = -1
+                    this.optimized = this.optimized + 1
+                    changed = true
+                }
+            }
+            i = i - 1
+        }
+        return changed
+    }
+
+    /// 公共子表达式消除：合并重复计算�?    private fun optimizeCommonSubexpression(): Boolean {
+        var changed: Boolean = false
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var i: Int = 0
+        while (i < instrs.size) {
+            val instr: DagInstruction = instrs[i]
+            if (instr.template == "nop") { i = i + 1; continue }
+            // 查找后续相同模板和相同输入的指令
+            var j: Int = i + 1
+            while (j < instrs.size) {
+                val next: DagInstruction = instrs[j]
+                if (next.template == "nop") { j = j + 1; continue }
+                if (next.template == instr.template && next.nodes == instr.nodes) {
+                    // 合并：使用相同输�?                    next.output = instr.output
+                    next.template = "nop"
+                    next.nodes = ""
+                    this.optimized = this.optimized + 1
+                    changed = true
+                    break
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        return changed
+    }
+
+    /// 常量折叠：add r1, r2, 0 �?NOP, imul r1, r2, 1 �?NOP
+    private fun optimizeConstantFold(): Boolean {
+        var changed: Boolean = false
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var i: Int = 0
+        while (i < instrs.size) {
+            val instr: DagInstruction = instrs[i]
+            // add with 0
+            if (instr.template == "add %dst, %src, @imm" && instr.mem == "0") {
+                instr.template = "nop"
+                instr.nodes = ""
+                this.optimized = this.optimized + 1
+                changed = true
+            }
+            // imul with 1
+            if (instr.template == "imul %dst, %src, @imm" && instr.mem == "1") {
+                instr.template = "nop"
+                instr.nodes = ""
+                this.optimized = this.optimized + 1
+                changed = true
+            }
+            // sub with 0
+            if (instr.template == "sub %dst, %src, @imm" && instr.mem == "0") {
+                instr.template = "nop"
+                instr.nodes = ""
+                this.optimized = this.optimized + 1
+                changed = true
+            }
+            i = i + 1
+        }
+        return changed
+    }
+
+    /// 强度削减：imul by 2^n �?shl, div by 2^n �?shr
+    private fun optimizeStrengthReduce(): Boolean {
+        var changed: Boolean = false
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var i: Int = 0
+        while (i < instrs.size) {
+            val instr: DagInstruction = instrs[i]
+            val mem: String = instr.mem
+            if (mem != "" && this.isPowerOfTwo(mem)) {
+                val shift: Int = this.log2(this.strToInt(mem))
+                // imul by 2^n �?shl
+                if (instr.template == "imul %dst, %src, @imm" && shift >= 1 && shift <= 63) {
+                    instr.template = "shl %dst, @shift"
+                    instr.mem = toStr(shift)
+                    this.optimized = this.optimized + 1
+                    changed = true
+                }
+                // div by 2^n �?shr
+                if (instr.template == "div %dst, %src" && shift >= 1 && shift <= 63) {
+                    instr.template = "shr %dst, @shift"
+                    instr.mem = toStr(shift)
+                    this.optimized = this.optimized + 1
+                    changed = true
+                }
+            }
+            i = i + 1
+        }
+        return changed
+    }
+
+    /// 复制传播：如�?mov r1, r2 已执行，�?r2 的用途替换为 r1�?    private fun optimizeCopyPropagate(): Boolean {
+        var changed: Boolean = false
+        val instrs: List<DagInstruction> = this.dag.instrs
+        val copyMap: List<String> = arrayListOf<String>()
+
+        // 第一趟：收集所有复制关�?        var i: Int = 0
+        while (i < instrs.size) {
+            val instr: DagInstruction = instrs[i]
+            if (instr.template == "mov %dst, %src" && instr.output >= 0) {
+                copyMap.add(toStr(instr.nodeAt(0)) + "|" + toStr(instr.output))
+            }
+            i = i + 1
+        }
+
+        // 第二趟：传播
+        i = 0
+        while (i < instrs.size) {
+            val instr: DagInstruction = instrs[i]
+            if (instr.template == "nop") { i = i + 1; continue }
+            var k: Int = 0
+            while (k < copyMap.size) {
+                val parts: List<String> = this.splitStr(copyMap[k], "|")
+                val src: Int = this.strToInt(parts[0])
+                val dst: Int = this.strToInt(parts[1])
+                // 检查指令是否使用了 src
+                val nodes: List<String> = this.splitStr(instr.nodes, ",")
+                var j: Int = 0
+                while (j < nodes.size) {
+                    if (this.strToInt(nodes[j]) == src) {
+                        // 替换�?dst
+                        nodes[j] = toStr(dst)
+                        changed = true
+                    }
+                    j = j + 1
+                }
+                instr.nodes = this.joinList(nodes, ",")
+                k = k + 1
+            }
+            i = i + 1
+        }
+        return changed
+    }
+
+    /// 冗余 Load/Store 消除�?    /// 冗余 load/store 消除�?    private fun optimizeRedundantLoadStore(): Boolean {
+        var changed: Boolean = false
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var i: Int = 0
+        while (i < instrs.size - 1) {
+            val instr: DagInstruction = instrs[i]
+            val next: DagInstruction = instrs[i + 1]
+            // mov r1, [mem]; mov [mem], r1 �?NOP (redundant load-store)
+            if (instr.template == "mov %dst, [mem]" && next.template == "mov [mem], %src"
+                && instr.output >= 0 && next.nodeAt(0) == instr.output) {
+                instr.template = "nop"
+                instr.nodes = ""
+                next.template = "nop"
+                next.nodes = ""
+                this.optimized = this.optimized + 2
+                changed = true
+            }
+            i = i + 1
+        }
+        return changed
+    }
+
+    /// NOP 消除�?    private fun optimizeNoOp(): Boolean {
+        var changed: Boolean = false
+        val instrs: List<DagInstruction> = this.dag.instrs
+        // 移除连续 NOP
+        var i: Int = 0
+        while (i < instrs.size - 1) {
+            if (instrs[i].template == "nop" && instrs[i + 1].template == "nop") {
+                // 保留一�?                i = i + 2
+                this.optimized = this.optimized + 1
+                changed = true
+            } else {
+                i = i + 1
+            }
+        }
+        return changed
+    }
+
+    /// 立即数折叠�?    private fun optimizeImmediateFold(): Boolean {
+        var changed: Boolean = false
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var i: Int = 0
+        while (i < instrs.size) {
+            val instr: DagInstruction = instrs[i]
+            // add r1, r2, 0
+            if (instr.template == "add %dst, %src, @imm" && instr.mem == "0") {
+                instr.template = "nop"
+                instr.nodes = ""
+                this.optimized = this.optimized + 1
+                changed = true
+            }
+            i = i + 1
+        }
+        return changed
+    }
+
+    /// 标志复用：cmp; jcc; cmp; jcc �?cmp; jcc; jcc
+    private fun optimizeFlagReuse(): Boolean {
+        var changed: Boolean = false
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var i: Int = 0
+        while (i < instrs.size - 2) {
+            val instr: DagInstruction = instrs[i]
+            val mid: DagInstruction = instrs[i + 1]
+            val next: DagInstruction = instrs[i + 2]
+            // cmp r1, imm; jcc target; cmp r1, imm; jcc target
+            if (instr.template == "cmp %src, @imm" && mid.template == "jcc @target"
+                && next.template == "cmp %src, @imm" && instr.mem == next.mem) {
+                // 合并：cmp; jcc target; jcc target
+                next.template = "jcc @target"
+                next.nodes = ""
+                next.mem = mid.cond
+                this.optimized = this.optimized + 1
+                changed = true
+            }
+            i = i + 1
+        }
+        return changed
+    }
+
+    // ── 辅助方法 ──
+
+    /// 检查节点输出是否未被使用�?    private fun isUnused(nodeId: Int): Boolean {
+        if (nodeId < 0) { return true }
+        // 简化检查：检查是否有指令引用此节�?        val instrs: List<DagInstruction> = this.dag.instrs
+        var i: Int = 0
+        while (i < instrs.size) {
+            val instr: DagInstruction = instrs[i]
+            var j: Int = 0
+            while (j < instr.nodeCount()) {
+                if (instr.nodeAt(j) == nodeId) {
+                    return false
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 检查是否为 2 的幂�?    private fun isPowerOfTwo(text: String): Boolean {
+        val n: Int = this.strToInt(text)
+        if (n <= 0) { return false }
+        return (n & (n - 1)) == 0
+    }
+
+    /// 计算 log2�?    private fun log2(n: Int): Int {
+        var result: Int = 0
+        var temp: Int = n
+        while (temp > 1) {
+            temp = temp / 2
+            result = result + 1
+        }
+        return result
+    }
+
+    /// 字符串转整数�?    private fun strToInt(text: String): Int {
+        if (text == "") { return 0 }
+        val len: Int = text.length
+        var total: Int = 0
+        var i: Int = 0
+        var neg: Boolean = false
+        if (len > 0 && text.charCodeAt(0) == 45) { neg = true; i = 1 }
+        while (i < len) {
+            val digit: Int = text.charCodeAt(i) - 48
+            if (digit >= 0 && digit <= 9) { total = total * 10 + digit }
+            i = i + 1
+        }
+        if (neg) { return -total }
+        return total
+    }
+
+    /// 整数转字符串�?    private fun toStr(n: Int): String {
+        if (n == 0) { return "0" }
+        var neg: Boolean = false
+        if (n < 0) { neg = true; n = -n }
+        var result: String = ""
+        while (n > 0) {
+            val digit: Int = n % 10
+            val digitStr: String = this.digitChar(digit)
+            result = digitStr + result
+            n = n / 10
+        }
+        if (neg) { result = "-" + result }
+        return result
+    }
+
+    /// 将单个数字转为字符串�?    private fun digitChar(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        if (d == 9) { return "9" }
+        return ""
+    }
+
+    /// 按分隔符分割字符串�?    private fun splitStr(text: String, sep: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") { return out }
+        val len: Int = text.length
+        var start: Int = 0
+        var i: Int = 0
+        while (i < len) {
+            if (text.charCodeAt(i) == sep.charCodeAt(0)) {
+                out.add(text.substring(start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        out.add(text.substring(start, len))
+        return out
+    }
+
+    /// 连接列表�?    private fun joinList(list: List<String>, sep: String): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < list.size) {
+            if (result != "") { result = result + sep }
+            result = result + list[i]
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 获取已应用的优化数量�?    fun getOptimizedCount(): Int {
+        return this.optimized
+    }
+
+    /// 获取已执行的趟数�?    fun getPassCount(): Int {
+        return this.passCount
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 工具对象
+// ─────────────────────────────────────────────────────────────
+
+object PeepholeOptimizerUtils {
+
+    /// 创建空的窥孔优化器�?    fun emptyOptimizer(): PeepholeOptimizer {
+        return PeepholeOptimizer()
+    }
+}

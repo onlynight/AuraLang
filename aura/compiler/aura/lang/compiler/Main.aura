@@ -61,8 +61,8 @@ import aura.lang.compiler.aot.Aot
 import aura.lang.compiler.aot.ModuleLink
 
 // Photon 后端
-import aura.lang.compiler.backend.photon.PhotonPipeline
-import aura.lang.compiler.backend.photon.JitBackend
+import aura.lang.compiler.photon.PhotonPipeline
+import aura.lang.compiler.photon.JitBackend
 
 // JIT 后端
 import aura.lang.compiler.jit.JitUtil

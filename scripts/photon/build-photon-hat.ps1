@@ -1,14 +1,14 @@
-ï»¿# -------------------------------------------------------------
-# Photon HAT v2.0 ç«¯åˆ°ç«¯æž„å»ºè„šæœ¬
+# -------------------------------------------------------------
+# Photon HAT v2.0 ¶Ëµ½¶Ë¹¹½¨½Å±¾
 #
-# ç®¡çº¿: HAT æ–‡æœ¬ -> SSA MIR -> LIR -> X86 -> COFF -> lld-link -> exe
+# ¹ÜÏß: HAT ÎÄ±¾ -> SSA MIR -> LIR -> X86 -> COFF -> lld-link -> exe
 #
-# ç”¨æ³•:
+# ÓÃ·¨:
 #   scripts\build-photon-hat.ps1
 #   scripts\build-photon-hat.ps1 -Keep
 #
-# å‰ç½®: rust\target\release\aura.exe å·²ç¼–è¯‘
-#       LLVM lld-link å¯ç”¨ (aura.toml [lld] æˆ– PATH)
+# Ç°ÖÃ: rust\target\release\aura.exe ÒÑ±àÒë
+#       LLVM lld-link ¿ÉÓÃ (aura.toml [lld] »ò PATH)
 # -------------------------------------------------------------
 param(
     [switch]$Keep,
@@ -123,7 +123,7 @@ $env:AURA_HAT_SRC = $HatSrc
 $env:AURA_HAT_OUT = $OutDir
 $env:AURA_HAT_MODULE = $Module
 
-$Driver = 'aura/compiler/aura/lang/compiler/backend/photon/PhotonHatBuild.aura'
+$Driver = 'aura/photon/aura/lang/compiler/photon/PhotonHatBuild.aura'
 $prevEap = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 $lines = & $AuraBin run $Driver 2>$null
