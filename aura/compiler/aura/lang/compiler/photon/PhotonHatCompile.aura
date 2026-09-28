@@ -39,7 +39,7 @@
 //   ===RESULT===success|fail
 //   ===ERR===<message>
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Env
 import aura.lang.std.Process
 
@@ -77,7 +77,7 @@ fun main() {
         hatPath = outDir + "/" + moduleName + ".hat"
     }
 
-    if (srcPath == "" || !FileSystem.exists(srcPath)) {
+    if (srcPath == "" || !FileUtils.exists(srcPath)) {
         println("===RESULT===fail")
         println("===ERR===source not found: " + srcPath)
         Process.exit(1)
@@ -87,7 +87,7 @@ fun main() {
     //
     // `AURA_HAT_SKIP_FRONT=1` 跳过前端与 .hat 序列化，直接复用已有的 `hatPath`。
     // 自举 `Main.aura` 的前端要 ~2 分钟，只调后端时用它迭代。
-    FileSystem.mkdirP(outDir)
+    FileUtils.mkdirP(outDir)
 
     // 阶段进度/心跳默认关闭：stdout 只保留 ===...=== 协议标记（脚本逐行解析）。
     // Env.get 每次调用都重读 environ 缓冲，这里只算一次。
@@ -120,7 +120,7 @@ fun main() {
         }
 
         val hatText: String = HatSerializerUtils.serializeHat(ssa, moduleName)
-        FileSystem.writeText(hatPath, hatText)
+        FileUtils.writeText(hatPath, hatText)
         if (verboseOn) {
             println("[hat-front] .hat = " + hatPath + " (" + toStr(hatText.length) + " 字符)")
         }

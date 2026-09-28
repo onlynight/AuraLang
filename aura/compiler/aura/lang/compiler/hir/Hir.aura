@@ -271,6 +271,17 @@ class Hir {
     /// 拷贝与原值仍共享同一组堆列表（`List` = `i8*`），`count` 也能自愈一致；
     /// 否则标量 `count` 会在拷贝间失步（曾导致原生编译器的 HIR 静默为空）。
     fun add(kind: String, text: String, ty: String, sp: Span, children: String): Int {
+        // ⚠️ Initialize lists if null (defensive: constructor may not have been called)
+        if (this.kinds == null) { this.kinds = arrayListOf<String>() }
+        if (this.texts == null) { this.texts = arrayListOf<String>() }
+        if (this.tys == null) { this.tys = arrayListOf<String>() }
+        if (this.spanStart == null) { this.spanStart = arrayListOf<Int>() }
+        if (this.spanEnd == null) { this.spanEnd = arrayListOf<Int>() }
+        if (this.spanStartLine == null) { this.spanStartLine = arrayListOf<Int>() }
+        if (this.spanStartCol == null) { this.spanStartCol = arrayListOf<Int>() }
+        if (this.spanEndLine == null) { this.spanEndLine = arrayListOf<Int>() }
+        if (this.spanEndCol == null) { this.spanEndCol = arrayListOf<Int>() }
+        if (this.kids == null) { this.kids = arrayListOf<String>() }
         val id: Int = this.kinds.size
         this.kinds.add(kind)
         // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）。
@@ -313,11 +324,17 @@ class Hir {
 
     /// 第 id 个节点的种类。
     fun kindOf(id: Int): String {
+        if (this.kinds == null) {
+            return ""
+        }
         return HirUtils.hirItemAt(this.kinds, id)
     }
 
     /// 第 id 个节点的主文本。
     fun textOf(id: Int): String {
+        if (this.texts == null) {
+            return ""
+        }
         val raw: String = HirUtils.hirItemAt(this.texts, id)
         // 绝大多数 text 不含换行转义：单次 `contains` 判定后直接复用原串，
         // 避免每次访问都逐字符重建（textOf 是发射期最热访问之一）。
@@ -342,11 +359,17 @@ class Hir {
 
     /// 第 id 个节点的类型名。
     fun tyOf(id: Int): String {
+        if (this.tys == null) {
+            return ""
+        }
         return HirUtils.hirItemAt(this.tys, id)
     }
 
     /// 第 id 个节点的位置。
     fun spanOf(id: Int): Span {
+        if (this.spanStart == null) {
+            return Span(0, 0, 0, 0, 0, 0)
+        }
         return Span(
             HirUtils.hirIntAt(this.spanStart, id), HirUtils.hirIntAt(this.spanEnd, id),
             HirUtils.hirIntAt(this.spanStartLine, id), HirUtils.hirIntAt(this.spanStartCol, id),
@@ -356,6 +379,9 @@ class Hir {
 
     /// 第 id 个节点的子节点 id 列表（逗号分隔串）。
     fun kidsOf(id: Int): String {
+        if (this.kids == null) {
+            return HirUtils.hirNoKids()
+        }
         return HirUtils.hirItemAt(this.kids, id)
     }
 

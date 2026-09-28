@@ -21,7 +21,7 @@ import aura.lang.std.String
 import aura.lang.std.Collections
 import aura.lang.std.Math
 import aura.lang.std.Iter
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Process
 
 // ── 前端 ──

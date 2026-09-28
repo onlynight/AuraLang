@@ -1,39 +1,39 @@
 // tests/photon/test_phir_to_exe.aura
-// ════════════════════════════════════════════════════════════�?// P0 端到端验证：.phir �?exe �?运行
+// ════════════════════════════════════════════════════════════�?// P0 端到端验证：.phir �?exe �?运行
 //
 // 运行：aura run tests/photon/test_phir_to_exe.aura
 //
-// 验证内容�?//   1. 读取 .phir 文件
-//   2. 解析 .phir �?HIR
+// 验证内容�?//   1. 读取 .phir 文件
+//   2. 解析 .phir �?HIR
 //   3. 调用 compileHir() 编译管线
-//   4. 生成可执行文�?//   5. 运行可执行文�?// ════════════════════════════════════════════════════════════�?
+//   4. 生成可执行文�?//   5. 运行可执行文�?// ════════════════════════════════════════════════════════════�?
 import aura.lang.std.String
 import aura.lang.std.Process
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import "../../aura/photon/aura/lang/compiler/photon/PhotonPipeline.aura"
 
 fun main() {
     println("╔══════════════════════════════════════════════════════╗")
-    println("�?  P0 端到端验证：.phir �?exe �?运行                 �?)
+    println("�?  P0 端到端验证：.phir �?exe �?运行                 �?)
     println("╚══════════════════════════════════════════════════════╝")
     println("")
 
     // ── Step 1: 读取 .phir 文件 ──
     val phirPath = "tests/phase_b_simple_test.phir"
     println("[Step 1] 读取 .phir 文件: " + phirPath)
-    val phirText = FileSystem.readText(phirPath)
+    val phirText = FileUtils.readText(phirPath)
     if (phirText == "") {
-        println("  �?.phir 文件不存在或为空")
+        println("  �?.phir 文件不存在或为空")
         println("  请先运行: aura build tests/phase_b_simple_test.aura -b photon")
         Process.exit(1)
     }
-    println("  �?读取成功: " + toStr(phirText.length) + " 字符")
+    println("  �?读取成功: " + toStr(phirText.length) + " 字符")
     println("")
 
-    // ── Step 2: 解析 .phir �?HIR ──
-    println("[Step 2] 解析 .phir �?HIR")
+    // ── Step 2: 解析 .phir �?HIR ──
+    println("[Step 2] 解析 .phir �?HIR")
     val hir = parsePhir(phirText)
-    println("  �?解析成功: " + toStr(hir.count) + " 节点")
+    println("  �?解析成功: " + toStr(hir.count) + " 节点")
     println("")
 
     // ── Step 3: 调用 compileHir() 编译管线 ──
@@ -46,43 +46,43 @@ fun main() {
     println("  编译结果:")
     println("    成功: " + toStr(result.success))
     println("    目标文件: " + result.objectFilePath)
-    println("    可执行文�? " + result.executablePath)
-    println("    机器码大�? " + toStr(result.encodedByteCount) + " 字节")
+    println("    可执行文�? " + result.executablePath)
+    println("    机器码大�? " + toStr(result.encodedByteCount) + " 字节")
     println("    COFF 大小: " + toStr(result.coffSize) + " 字节")
     println("")
 
     if (!result.success) {
-        println("  �?编译失败: " + result.errorMessage)
+        println("  �?编译失败: " + result.errorMessage)
         Process.exit(1)
     }
 
-    // ── Step 4: 验证可执行文�?──
-    println("[Step 4] 验证可执行文�?)
+    // ── Step 4: 验证可执行文�?──
+    println("[Step 4] 验证可执行文�?)
     if (result.executablePath != "" && result.executablePath != "null") {
-        println("  �?可执行文件已生成: " + result.executablePath)
+        println("  �?可执行文件已生成: " + result.executablePath)
         
-        // ── Step 5: 运行可执行文�?──
+        // ── Step 5: 运行可执行文�?──
         println("")
-        println("[Step 5] 运行可执行文�?)
+        println("[Step 5] 运行可执行文�?)
         val exitCode = Process.run(result.executablePath)
         println("  退出码: " + toStr(exitCode))
         
         if (exitCode == 0) {
-            println("  �?可执行文件运行成�?")
+            println("  �?可执行文件运行成�?")
         } else {
-            println("  �?可执行文件运行失�?(退出码: " + toStr(exitCode) + ")")
+            println("  �?可执行文件运行失�?(退出码: " + toStr(exitCode) + ")")
         }
     } else {
-        println("  �?未生成可执行文件")
+        println("  �?未生成可执行文件")
         println("  目标文件: " + result.objectFilePath)
     }
     
     println("")
-    println("══�?P0 验证完成 ══�?)
+    println("══�?P0 验证完成 ══�?)
     Process.exit(0)
 }
 
-/// 解析 .phir 文本�?HIR（最小化解析器）�?fun parsePhir(text: String): Hir {
+/// 解析 .phir 文本�?HIR（最小化解析器）�?fun parsePhir(text: String): Hir {
     val hir: Hir = Hir()
     
     // 创建 Program 节点
@@ -97,7 +97,7 @@ fun main() {
     while (i < lines.size) {
         val line: String = lines[i].trim()
         
-        // 跳过空行和注�?        if (line == "" || line.startsWith("#")) {
+        // 跳过空行和注�?        if (line == "" || line.startsWith("#")) {
             i = i + 1
             continue
         }
@@ -115,8 +115,8 @@ fun main() {
             val funcId: Int = result[0]
             val nextLine: Int = result[1]
             // 防御：解析结果必须严格前进。若因任何原因拿不到有效下标
-            // （历史教训：`[a, b]` 列表字面量在本运行时求值为 null�?            //  `i` 会退化成 0 �?外层 while 从头重来 �?无限循环 + 无限刷屏），
-            // 则至少前进一行，保证循环必然收敛�?            if (nextLine > i) {
+            // （历史教训：`[a, b]` 列表字面量在本运行时求值为 null�?            //  `i` 会退化成 0 �?外层 while 从头重来 �?无限循环 + 无限刷屏），
+            // 则至少前进一行，保证循环必然收敛�?            if (nextLine > i) {
                 i = nextLine
             } else {
                 i = i + 1
@@ -128,14 +128,14 @@ fun main() {
         i = i + 1
     }
 
-    println("  解析�?" + toStr(funcCount) + " 个函�?)
+    println("  解析�?" + toStr(funcCount) + " 个函�?)
     return hir
 }
 
-/// 解析函数定义，返�?[函数ID, 下一行索引]�?fun parseFunctionDef(hir: Hir, lines: List<String>, startLine: Int): List<Int> {
+/// 解析函数定义，返�?[函数ID, 下一行索引]�?fun parseFunctionDef(hir: Hir, lines: List<String>, startLine: Int): List<Int> {
     val line: String = lines[startLine].trim()
     
-    // 提取函数�?    var nameStart: Int = 4
+    // 提取函数�?    var nameStart: Int = 4
     var nameEnd: Int = nameStart
     while (nameEnd < line.length
         && line.substring(nameEnd, nameEnd + 1) != "("
@@ -147,7 +147,7 @@ fun main() {
     // 创建函数节点
     val funcId: Int = hir.add("HirFunction", funcName, "Unit", Span(0, 0, 1, 1, 1, 1), "")
     
-    // 查找函数体结束位�?    var bodyStart: Int = startLine
+    // 查找函数体结束位�?    var bodyStart: Int = startLine
     var braceCount: Int = 0
     var foundBody: Boolean = false
     
@@ -177,7 +177,7 @@ fun main() {
     val bodyId: Int = hir.add("HirBlock", "", "", Span(0, 0, 1, 1, 1, 1), "")
     hir.kids[funcId] = HirUtils.hirKidsAdd(hir.kids[funcId], bodyId)
     
-    // 解析函数体语�?    var stmtLine: Int = startLine + 1
+    // 解析函数体语�?    var stmtLine: Int = startLine + 1
     while (stmtLine < bodyStart) {
         val sl: String = lines[stmtLine].trim()
         if (sl != "" && !sl.startsWith("#")) {
@@ -186,16 +186,16 @@ fun main() {
         stmtLine = stmtLine + 1
     }
     
-    // 注意�?*不能**写成 `return [funcId, bodyStart + 1]` —�?列表字面�?    // 在本运行时（VM 字节码模式）求值为 null，调用方会拿到空结果�?    // `listOf(...)` 是本运行时下唯一可靠的列表构造方式�?    return listOf(funcId, bodyStart + 1)
+    // 注意�?*不能**写成 `return [funcId, bodyStart + 1]` —�?列表字面�?    // 在本运行时（VM 字节码模式）求值为 null，调用方会拿到空结果�?    // `listOf(...)` 是本运行时下唯一可靠的列表构造方式�?    return listOf(funcId, bodyStart + 1)
 }
 
-/// 是否�?ASCII 十进制数字字符�?fun isDigitChar(ch: String): Boolean {
+/// 是否�?ASCII 十进制数字字符�?fun isDigitChar(ch: String): Boolean {
     if (ch.length != 1) { return false }
     val c: Int = ch.charCodeAt(0)
     return c >= 48 && c <= 57
 }
 
-/// 是否�?ASCII 标识符字符（字母 / 数字 / 下划线）�?fun isWordChar(ch: String): Boolean {
+/// 是否�?ASCII 标识符字符（字母 / 数字 / 下划线）�?fun isWordChar(ch: String): Boolean {
     if (ch.length != 1) { return false }
     val c: Int = ch.charCodeAt(0)
     if (c >= 48 && c <= 57) { return true }
@@ -204,7 +204,7 @@ fun main() {
     return c == 95
 }
 
-/// 解析单条语句�?fun parseStatement(hir: Hir, blockId: Int, text: String): Unit {
+/// 解析单条语句�?fun parseStatement(hir: Hir, blockId: Int, text: String): Unit {
     // val/var 声明
     if (text.startsWith("val ") || text.startsWith("var ")) {
         val isVal: Boolean = text.startsWith("val ")
@@ -269,18 +269,18 @@ fun main() {
         return
     }
     
-    // 表达式语�?    val exprId: Int = hir.add("HirExprStmt", "", "", Span(0, 0, 1, 1, 1, 1), "")
+    // 表达式语�?    val exprId: Int = hir.add("HirExprStmt", "", "", Span(0, 0, 1, 1, 1, 1), "")
     hir.kids[blockId] = HirUtils.hirKidsAdd(hir.kids[blockId], exprId)
     parseExpr(hir, exprId, text)
 }
 
-/// 解析表达式�?fun parseExpr(hir: Hir, parentId: Int, text: String): Unit {
+/// 解析表达式�?fun parseExpr(hir: Hir, parentId: Int, text: String): Unit {
     text = text.trim()
     if (text == "") {
         return
     }
     
-    // 数字字面�?    var isNumber: Boolean = true
+    // 数字字面�?    var isNumber: Boolean = true
     var j: Int = 0
     while (j < text.length) {
         val ch: String = text.substring(j, j + 1)
@@ -304,7 +304,7 @@ fun main() {
         return
     }
     
-    // 布尔字面�?    if (text == "true" || text == "false" || text == "null") {
+    // 布尔字面�?    if (text == "true" || text == "false" || text == "null") {
         var ty: String = if (text == "null") "Any" else "Boolean"
         val id: Int = hir.add("HirLit", text, ty, Span(0, 0, 1, 1, 1, 1), "")
         hir.kids[parentId] = HirUtils.hirKidsAdd(hir.kids[parentId], id)
@@ -334,7 +334,7 @@ fun main() {
         return
     }
     
-    // 二元表达式（同样不能用字面量 `[...]`：本运行时会求值为 null�?    var ops: List<String> = listOf(
+    // 二元表达式（同样不能用字面量 `[...]`：本运行时会求值为 null�?    var ops: List<String> = listOf(
         "==", "!=", "<=", ">=", "&&", "||", "+", "-", "*", "/", "%",
         "<", ">", "&", "|", "^", "to", "as"
     )
@@ -378,6 +378,6 @@ fun main() {
         return
     }
     
-    // 默认：作为字符串字面�?    var fallbackId: Int = hir.add("HirLit", text, "String", Span(0, 0, 1, 1, 1, 1), "")
+    // 默认：作为字符串字面�?    var fallbackId: Int = hir.add("HirLit", text, "String", Span(0, 0, 1, 1, 1, 1), "")
     hir.kids[parentId] = HirUtils.hirKidsAdd(hir.kids[parentId], fallbackId)
 }

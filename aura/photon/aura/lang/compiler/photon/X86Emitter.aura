@@ -9,7 +9,7 @@ package aura.lang.compiler.photon
 
 import aura.lang.std.String
 import aura.lang.std.Env
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.compiler.photon.x86_64.X86Encoder
 import aura.lang.compiler.photon.MachineDag
 import aura.lang.compiler.photon.RegisterAllocator
@@ -109,7 +109,7 @@ class X86Emitter {
         if (this.probeBuf.length > 3000) {
             this.probeBuf = this.probeBuf.substring(this.probeBuf.length - 2500)
         }
-        FileSystem.writeText(this.probePath, this.probeBuf)
+        FileUtils.writeText(this.probePath, this.probeBuf)
     }
 
     /// 预扫：每个函数实际用到的**最大溢出槽号**。

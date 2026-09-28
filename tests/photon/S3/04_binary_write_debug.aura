@@ -1,7 +1,7 @@
 // tests/photon/S3/04_binary_write_debug.aura
 // Debug: test different PowerShell command formats
 import aura.lang.std.Process
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 
 fun main() {
     println("=== Debug binary writing ===")
@@ -24,16 +24,16 @@ fun main() {
     // Test 4: PowerShell with script file
     println("[4] PS script file")
     val scriptContent = "Write-Output 'hello_from_script'\n"
-    FileSystem.writeText("build/photon/test_script.ps1", scriptContent)
+    FileUtils.writeText("build/photon/test_script.ps1", scriptContent)
     val rc4 = Process.run("powershell -ExecutionPolicy Bypass -File build/photon/test_script.ps1")
     println("  rc=" + rc4)
     
     // Test 5: hex to binary conversion
     println("[5] hex to binary")
-    FileSystem.writeText("build/photon/test.hex", "48656c6c6f")
+    FileUtils.writeText("build/photon/test.hex", "48656c6c6f")
     val rc5 = Process.run("powershell -ExecutionPolicy Bypass -Command [IO.File]::WriteAllBytes('build/photon/test.bin', [Convert]::FromHexString([IO.File]::ReadAllText('build/photon/test.hex'))); Remove-Item 'build/photon/test.hex' -Force")
     println("  rc=" + rc5)
-    if (FileSystem.exists("build/photon/test.bin")) {
+    if (FileUtils.exists("build/photon/test.bin")) {
         println("  binary file created!")
     } else {
         println("  binary file NOT created")

@@ -3,10 +3,30 @@ package aura.lang.std.io
 
 /// 输入流接口（多态）。
 ///
+/// 提供从数据源读取数据的统一接口。
+/// 实现类包括：
+/// - `FileInputStream` — 从文件读取
+/// - `StdInputStream` — 从标准输入读取
+/// - `ByteArrayInputStream` — 从内存字符串读取
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.lang.std.io.InputStream
+/// import aura.lang.std.io.FileInputStream
+/// ```
+///
 /// @since 0.2
 interface InputStream {
+
+    /// 从流中读取最多 count 个字节到 buffer，返回实际读取字节数。
     fun read(buffer: Long, count: Int): Int
+
+    /// 读取一行文本（不含换行符）。
     fun readLine(): String
+
+    /// 读取全部内容直到 EOF。
     fun readAll(): String
+
+    /// 关闭流并释放资源。
     fun close(): Unit
 }

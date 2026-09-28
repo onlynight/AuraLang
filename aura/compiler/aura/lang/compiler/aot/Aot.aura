@@ -16,7 +16,7 @@ package aura.lang.compiler.aot
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Process
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.hir.Hir
@@ -105,7 +105,7 @@ object Aot {
 
     /// HIR → IR →（llc）→ .obj →（clang）→ 原生 exe。
     ///
-    /// 通过 `FileSystem.writeText` 落盘 IR，经 `Process.run` 调用 LLVM 工具链。
+    /// 通过 `FileUtils.writeText` 落盘 IR，经 `Process.run` 调用 LLVM 工具链。
     /// `llvmHome` 为 LLVM 根目录（如 `D:/DevTools/LLVM/clang+llvm-23.1.0-...`）。
     fun aotBuildExeFromHir(hir: Hir, moduleName: String, outDir: String, llvmHome: String): AotExeResult {
         return aotBuildExeFromHirEx(hir, moduleName, outDir, llvmHome, "")
@@ -131,8 +131,8 @@ object Aot {
         r.exePath = exePath
 
         // 1. 落盘 LLVM IR
-        FileSystem.mkdirP(outDir)
-        FileSystem.writeText(llPath, a.llvmIr)
+        FileUtils.mkdirP(outDir)
+        FileUtils.writeText(llPath, a.llvmIr)
 
         // 2. Phase 6.5.8 + A3：llc -verify-each 合并到主编译命令
         //    原实现先独立验证再编译（两次进程启动），现合并为一次调用，
@@ -147,8 +147,8 @@ object Aot {
             Aot.aotWinPath(logPath)
         r.llcExit = Process.run(llcCmd)
         if (r.llcExit != 0) {
-            if (FileSystem.exists(logPath)) {
-                val log: String = FileSystem.readText(logPath)
+            if (FileUtils.exists(logPath)) {
+                val log: String = FileUtils.readText(logPath)
                 r.irError = aotLineAt(log, 0)
             }
             // IR 非法：保留 .ll + .llc.log，直接返回，避免下游 clang 掩盖根因
@@ -158,7 +158,7 @@ object Aot {
         // 4. clang：目标文件 → 可执行文件。
         //
         //    Phase C.2：aura_std_cffi.c 编译步骤已移除。
-        //    所有 std 函数（String/Collections/Math/FileSystem 等）均由 Aura 实现提供，
+        //    所有 std 函数（String/Collections/Math/FileUtils 等）均由 Aura 实现提供，
         //    编译到 user.obj 中；链接器自动解析系统 libc 函数（malloc/free/printf 等）。
         //    并发原语（Channel）由 runtime/channel.ll 以纯 LLVM IR 提供；
         //    Thread 原语（aura_thread_*）由 runtime/libc.ll declare、
@@ -178,7 +178,7 @@ object Aot {
                 + " -o " + Aot.aotWinPath(sysObj)
                 + " -I " + cffiDir
             val sysExit: Int = Process.run(sysCmd)
-            if (sysExit == 0 && FileSystem.exists(sysObj)) {
+            if (sysExit == 0 && FileUtils.exists(sysObj)) {
                 clangCmd = clangCmd + " " + Aot.aotWinPath(sysObj)
             }
         }
@@ -229,10 +229,10 @@ object Aot {
     /// 与 Rust 编译器目录无关；回退旧位置 `compiler/src/std/cffi` 以兼容过渡期工作区。
     /// 两处都不存在时返回空串（调用方据此跳过线程桥编译，仅影响 Thread/并发）。
     fun resolveCffiDir(): String {
-        if (FileSystem.exists("aura/runtime/cffi/aura_syscalls.c")) {
+        if (FileUtils.exists("aura/runtime/cffi/aura_syscalls.c")) {
             return "aura/runtime/cffi"
         }
-        if (FileSystem.exists("compiler/src/std/cffi/aura_syscalls.c")) {
+        if (FileUtils.exists("compiler/src/std/cffi/aura_syscalls.c")) {
             return "compiler/src/std/cffi"
         }
         return ""

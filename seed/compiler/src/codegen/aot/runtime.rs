@@ -112,15 +112,93 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         ],
     },
     // `String_charAt`：Aura 源码 `String.charAt` 方法经 sanitizellvm 后的符号名。
-    // 当 `string_method_symbol` 改派失败时，裸名 `charAt` 可能经接收者类型
-    // 改派为 `String.charAt` → `String_charAt`，需要声明才能通过 llc。
+    // ⚠️ 此前在此声明导致 `declare` + `define` 共存 → llc 报
+    // "invalid redefinition of function 'String_charAt'"。
+    // 因为 Aura 源码已定义该函数（`define i8* @String_charAt`），
+    // runtime 再 `declare` 同一符号即为重复定义。已移除。
+    // 若 `string_method_symbol` 改派失败需此声明，应确保参数类型与
+    // Aura 源码一致（`Int` → `i32`），但正确做法是修复改派而非加声明。
+    // ── 裸名系统调用（`string_method_symbol` 改派失败时的兜底声明）──
+    // ⚠️ 这些是裸名调用，非 sanitized 名。正确做法是修复改派而非加声明。
+    RuntimeFn { name: "read", ret: "i64", params: &[("fd", "i64"), ("buf", "i64"), ("count", "i64")] },
+    RuntimeFn { name: "write", ret: "i64", params: &[("fd", "i64"), ("buf", "i64"), ("count", "i64")] },
+    RuntimeFn { name: "open", ret: "i64", params: &[("path", "i64"), ("flags", "i64")] },
+    RuntimeFn { name: "close", ret: "i64", params: &[("fd", "i64")] },
+    RuntimeFn { name: "access", ret: "i64", params: &[("path", "i64"), ("mode", "i64")] },
+    RuntimeFn { name: "unlink", ret: "i64", params: &[("path", "i64")] },
+    RuntimeFn { name: "lseek", ret: "i64", params: &[("fd", "i64"), ("off", "i64"), ("whence", "i64")] },
+    RuntimeFn { name: "fstat", ret: "i64", params: &[("fd", "i64"), ("buf", "i64")] },
+    RuntimeFn { name: "mmap", ret: "i64", params: &[("addr", "i64"), ("len", "i64"), ("prot", "i64"), ("flags", "i64"), ("fd", "i64"), ("off", "i64")] },
+    RuntimeFn { name: "munmap", ret: "i64", params: &[("addr", "i64"), ("len", "i64")] },
+    RuntimeFn { name: "pipe", ret: "i64", params: &[("pipes", "i64")] },
+    RuntimeFn { name: "clock_gettime", ret: "i64", params: &[("clock", "i64"), ("ts", "i64")] },
+    RuntimeFn { name: "getrandom", ret: "i64", params: &[("buf", "i64"), ("len", "i64"), ("flags", "i64")] },
+    RuntimeFn { name: "readv", ret: "i64", params: &[("fd", "i64"), ("iov", "i64"), ("iovcnt", "i64")] },
+    RuntimeFn { name: "writev", ret: "i64", params: &[("fd", "i64"), ("iov", "i64"), ("iovcnt", "i64")] },
+    // ── 裸名工具函数 ──
+    RuntimeFn { name: "min", ret: "i64", params: &[("a", "i64"), ("b", "i64")] },
+    RuntimeFn { name: "max", ret: "i64", params: &[("a", "i64"), ("b", "i64")] },
+    // `wait4`：系统调用，C 侧实现为 `aura_syscall_wait4`。
     RuntimeFn {
-        name: "String_charAt",
+        name: "wait4",
+        ret: "i32",
+        params: &[("pid", "i32"), ("status", "i64"), ("options", "i32"), ("rusage", "i64")],
+    },
+    // `getpid`：系统调用，C 侧实现为 `aura_syscall_getpid`。
+    RuntimeFn {
+        name: "getpid",
+        ret: "i32",
+        params: &[],
+    },
+    // `fork`：系统调用，C 侧实现为 `aura_syscall_fork`。
+    RuntimeFn {
+        name: "fork",
+        ret: "i32",
+        params: &[],
+    },
+    // `exitGroup`：系统调用，C 侧实现为 `aura_syscall_exitGroup`。
+    RuntimeFn {
+        name: "exitGroup",
+        ret: "void",
+        params: &[("code", "i32")],
+    },
+    // `execve`：系统调用，C 侧实现为 `aura_syscall_execve`。
+    // ⚠️ `string_method_symbol` 改派失败，裸名 `execve` 被当作自由函数调用。
+    RuntimeFn {
+        name: "execve",
+        ret: "i64",
+        params: &[("path", "i64"), ("args", "i64"), ("env", "i64")],
+    },
+    // `toChar`：`Int.toChar()` 方法经 sanitizellvm 后的符号名。
+    // ⚠️ 当前 `string_method_symbol` 改派失败，裸名 `toChar` 被当作自由函数调用。
+    // 发射器生成 `call void @toChar(i32)` → 需声明才能通过 llc。
+    // 正确签名应为 `i16 @Int_toChar(i8*)`，但调用点当前按 void 自由函数使用。
+    RuntimeFn {
+        name: "toChar",
+        ret: "void",
+        params: &[("code", "i32")],
+    },
+    // `ProcessOps_aura_process_argCount`：`ProcessOps.aura_process_argCount` 经 sanitizellvm 后的符号名。
+    // C 侧实现见 aura_std_cffi.c 的 aura_process_argCount。
+    RuntimeFn {
+        name: "ProcessOps_aura_process_argCount",
+        ret: "i64",
+        params: &[],
+    },
+    RuntimeFn {
+        name: "ProcessOps_aura_process_args",
         ret: "i8*",
-        params: &[
-            ("s", "i8*"),
-            ("idx", "i64"),
-        ],
+        params: &[],
+    },
+    RuntimeFn {
+        name: "ProcessOps_aura_process_arg",
+        ret: "i8*",
+        params: &[("index", "i64")],
+    },
+    RuntimeFn {
+        name: "ProcessOps_aura_process_run",
+        ret: "i64",
+        params: &[("cmd", "i8*")],
     },
     // `s.toInt()`：字符串转整数，C 侧实现见 aura_std_cffi.c
     RuntimeFn {
@@ -647,6 +725,16 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("val", "i64"),
         ],
     },
+    RuntimeFn {
+        name: "aura_lang_std_Console_print",
+        ret: "void",
+        params: &[("msg", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_lang_std_Console_println",
+        ret: "void",
+        params: &[("msg", "i64")],
+    },
 ];
 
 /// 生成所有 runtime 函数的 LLVM 外部声明
@@ -726,7 +814,8 @@ pub fn translate_to_legacy_c(name: &str) -> String {
             "Builtin" => "builtin",
             // Collections 保持新命名（C 运行时实现为 aura_lang_std_Collections_*）
             "Collections" => return name.to_string(),
-            "Console" => "console",
+            // Console 保持新命名（C 运行时实现为 aura_lang_std_Console_*）
+            "Console" => return name.to_string(),
             "Encoding" => "encoding",
             "Env" => "env",
             "FileSystem" => "fs",
@@ -776,6 +865,12 @@ pub fn translate_to_legacy_c(name: &str) -> String {
         let (_class, fn_name) = (parts[0], parts[1]);
         // 通用并发类：保留完整 sanitized 名
         return format!("aura_lang_concurrent_{}_{}", _class, fn_name);
+    }
+
+    // 处理 ProcessOps 前缀（`ProcessOps.aura_process_*` → `aura_process_*`）
+    let processops_prefix = "ProcessOps_";
+    if name.starts_with(processops_prefix) {
+        return name[processops_prefix.len()..].to_string();
     }
 
     name.to_string()

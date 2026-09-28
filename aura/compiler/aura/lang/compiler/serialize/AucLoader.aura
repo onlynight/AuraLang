@@ -13,7 +13,7 @@ import aura.lang.native.memory.Allocator
 import aura.lang.native.file.FileOps
 import aura.lang.native.Syscalls
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.compiler.serialize.AucSerializer
 
 /// 加载后的模块信息。
@@ -635,10 +635,10 @@ object AucLoaderUtils {
 
     /// 验证 .auc 文件是否存在且有效。
     fun validateAuc(path: String): Boolean {
-        if (!FileSystem.exists(path)) {
+        if (!FileUtils.exists(path)) {
             return false
         }
-        val size: Long = FileSystem.fileSize(path)
+        val size: Long = FileUtils.fileSize(path)
         if (size < 4) {
             return false  // 至少要有魔数
         }

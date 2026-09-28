@@ -6,7 +6,7 @@ package aura.lang.loom.dep
 // @since 0.6
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Collections
 
 // ══════════════════════════════════════════════════════════════
@@ -52,14 +52,14 @@ class LockFile {
             content = content + "\n"
             i = i + 1
         }
-        FileSystem.writeText(path, content)
+        FileUtils.writeText(path, content)
     }
 
     fun load(): Int {
-        if (!FileSystem.exists(path)) {
+        if (!FileUtils.exists(path)) {
             return 0  // 锁文件不存在，正常
         }
-        val content: String = FileSystem.readText(path)
+        val content: String = FileUtils.readText(path)
         return parseLock(content)
     }
 

@@ -17,7 +17,7 @@
 // ═════════════════════════════════════════════════════════════════
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Process
 
 import "../../aura/compiler/aura/lang/compiler/test/TestRunner.aura"

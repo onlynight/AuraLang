@@ -6,7 +6,7 @@ package aura.lang.loom.dep
 // @since 0.6
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Collections
 import aura.lang.loom.dep.Dependency
 
@@ -29,11 +29,11 @@ class Bom {
             val dep: Dependency = deps[i]
             if (dep.path.length > 0) {
                 // 本地路径依赖
-                if (FileSystem.exists(dep.path)) {
+                if (FileUtils.exists(dep.path)) {
                     val manifestPath: String = dep.path + "/aura.toml"
-                    if (FileSystem.exists(manifestPath)) {
+                    if (FileUtils.exists(manifestPath)) {
                         // 读取本地包的 manifest 获取版本
-                        val content: String = FileSystem.readText(manifestPath)
+                        val content: String = FileUtils.readText(manifestPath)
                         val version: String = extractVersion(content)
                         addPackage(dep.name, version, "path:" + dep.path)
                     } else {

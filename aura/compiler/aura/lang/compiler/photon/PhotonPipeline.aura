@@ -12,7 +12,7 @@ package aura.lang.compiler.photon
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Env
 import aura.lang.native.time.Clock
 
@@ -198,7 +198,7 @@ class PhotonPipeline {
         // 注意：不要用 Clock.timeMs() —— 该原生在 VM 路径下**未注册**
         //（`[bytecode] error: 未解析的函数调用 'Clock.timeMs'`），会让驱动直接失败。
         this.traceBuf = this.traceBuf + msg + "\n"
-        FileSystem.writeText(this.outDir + "/photon_trace.log", this.traceBuf)
+        FileUtils.writeText(this.outDir + "/photon_trace.log", this.traceBuf)
     }
 
     /// 读取 Phase E 探针输出路径；空串表示关闭。
@@ -230,7 +230,7 @@ class PhotonPipeline {
         if (this.probeBuf.length > 3000) {
             this.probeBuf = this.probeBuf.substring(this.probeBuf.length - 2500)
         }
-        FileSystem.writeText(this.probePath, this.probeBuf)
+        FileUtils.writeText(this.probePath, this.probeBuf)
     }
 
     /// 读取一次进度开关并缓存到 `verboseOn`（见字段说明）。
@@ -263,11 +263,11 @@ class PhotonPipeline {
 
         // 输出目录必须先存在。
         //
-        // VM 路径下 `FileSystem.writeText` **不会**自动创建父目录 → 目录缺失时
+        // VM 路径下 `FileUtils.writeText` **不会**自动创建父目录 → 目录缺失时
         // 写目标文件/runtime 对象全部静默失败，随后链接必然报 rc=-1
         //（实测：`build/photon_test` 曾被一个同名 .phir 文件占位，于是整条
         //  Phase E 的落盘都「失败」而没有任何报错）。
-        FileSystem.mkdirP(this.outDir)
+        FileUtils.mkdirP(this.outDir)
 
         // ── Phase A: HIR → SSA MIR ──
         this.traceMark("phaseA")
@@ -317,7 +317,8 @@ class PhotonPipeline {
         this.vprintln("[Phase D] Register Allocation + Peephole")
         val allocator = RegisterAllocatorUtils.emptyAllocator()
         allocator.allocate(dag)
-        this.vprintln("  spillSlots=" + allocator.getSpillSlots())
+        this.vprintln("  spillSlots=" + allocator.getSpillSlots() +
+                " dag=" + dag.nodeCount + "/" + dag.instrCount)
         if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
             var di: Int = 0
             while (di < dag.nodeCount) {
@@ -338,7 +339,8 @@ class PhotonPipeline {
         // 窥孔优化
         val peephole = PeepholeOptimizerUtils.emptyOptimizer()
         peephole.optimize(dag)
-        this.vprintln("  peephole passes=" + peephole.getPassCount())
+        this.vprintln("  peephole passes=" + peephole.getPassCount() +
+                " dag=" + dag.nodeCount + "/" + dag.instrCount)
         if (Env.get("AURA_PHOTON_STOP") == "D") {
             result.errorMessage = "STOPPED_AFTER_PHASE_D"
             return result
@@ -361,9 +363,13 @@ class PhotonPipeline {
 
         // Step 4: 指令编码
         this.vprintln("  Step 4: X86Emitter — 指令编码")
+        this.vprintln("    Step 4a: emptyEmitter")
         val emitter = X86EmitterUtils.emptyEmitter()
+        this.vprintln("    Step 4b: setAllocator")
         emitter.setAllocator(allocator)
+        this.vprintln("    Step 4c: emitFunction(dag)")
         emitter.emitFunction(dag, moduleName)
+        this.vprintln("    Step 4d: emit done")
         this.peProbe("emit done hexChars=" + toStr(emitter.getOutputHex().length) +
                 " relocs=" + toStr(emitter.getRelocRecords().length) +
                 " funcOffsets=" + toStr(emitter.getFuncOffsets().length))
@@ -529,7 +535,7 @@ class PhotonPipeline {
         this.vprintln("[photon] compilePhir: " + phirPath)
 
         // Step 1: 读取 .phir 文件
-        val phirText: String = FileSystem.readText(phirPath)
+        val phirText: String = FileUtils.readText(phirPath)
         if (phirText == "" || phirText == null) {
             val result = BackendResult()
             result.errorMessage = "Failed to read .phir file: " + phirPath
@@ -564,7 +570,7 @@ class PhotonPipeline {
         this.vprintln("[photon] compileHat: " + hatPath)
 
         // Step 1: 读取 .hat 文件
-        val hatText: String = FileSystem.readText(hatPath)
+        val hatText: String = FileUtils.readText(hatPath)
         if (hatText == "" || hatText == null) {
             val result = BackendResult()
             result.errorMessage = "Failed to read .hat file: " + hatPath
@@ -593,10 +599,10 @@ class PhotonPipeline {
     /// 用例（P1/P2/P3）的 .phir 转成 HAT 文本落盘，再由 compileHat() 走 HAT 路径，
     /// 从而让两条管线处理同一份程序、可比对产物。
     ///
-    /// 注意：调用方需保证 hatPath 的父目录已存在（FileSystem.writeText 不建父目录）。
+    /// 注意：调用方需保证 hatPath 的父目录已存在（FileUtils.writeText 不建父目录）。
     fun phirToHat(phirPath: String, hatPath: String, moduleName: String): Boolean {
         this.readVerboseFlag()
-        val phirText: String = FileSystem.readText(phirPath)
+        val phirText: String = FileUtils.readText(phirPath)
         if (phirText == "" || phirText == null) {
             println("[photon] phirToHat: failed to read " + phirPath)
             return false
@@ -608,7 +614,7 @@ class PhotonPipeline {
             this.photonDumpSsa(ssaMIR)
         }
         val hatText: String = HatSerializerUtils.serializeHat(ssaMIR, moduleName)
-        FileSystem.writeText(hatPath, hatText)
+        FileUtils.writeText(hatPath, hatText)
         this.vprintln("  .hat 输出: " + hatPath + " (" + hatText.length + " 字符)")
         return true
     }
@@ -657,7 +663,8 @@ class PhotonPipeline {
         this.vprintln("[Phase D] Register Allocation + Peephole")
         val allocator = RegisterAllocatorUtils.emptyAllocator()
         allocator.allocate(dag)
-        this.vprintln("  spillSlots=" + allocator.getSpillSlots())
+        this.vprintln("  spillSlots=" + allocator.getSpillSlots() +
+                " dag=" + dag.nodeCount + "/" + dag.instrCount)
         if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
             var di: Int = 0
             while (di < dag.nodeCount) {
@@ -678,7 +685,8 @@ class PhotonPipeline {
         // 窥孔优化
         val peephole = PeepholeOptimizerUtils.emptyOptimizer()
         peephole.optimize(dag)
-        this.vprintln("  peephole passes=" + peephole.getPassCount())
+        this.vprintln("  peephole passes=" + peephole.getPassCount() +
+                " dag=" + dag.nodeCount + "/" + dag.instrCount)
         if (Env.get("AURA_PHOTON_STOP") == "D") {
             result.errorMessage = "STOPPED_AFTER_PHASE_D"
             return result
@@ -701,9 +709,13 @@ class PhotonPipeline {
 
         // Step 4: 指令编码
         this.vprintln("  Step 4: X86Emitter — 指令编码")
+        this.vprintln("    Step 4a: emptyEmitter")
         val emitter = X86EmitterUtils.emptyEmitter()
+        this.vprintln("    Step 4b: setAllocator")
         emitter.setAllocator(allocator)
+        this.vprintln("    Step 4c: emitFunction(dag)")
         emitter.emitFunction(dag, moduleName)
+        this.vprintln("    Step 4d: emit done")
         this.peProbe("emit done hexChars=" + toStr(emitter.getOutputHex().length) +
                 " relocs=" + toStr(emitter.getRelocRecords().length) +
                 " funcOffsets=" + toStr(emitter.getFuncOffsets().length))
@@ -1851,11 +1863,13 @@ class PhotonPipeline {
         this.vprintln("[Phase D] Register Allocation + Peephole")
         val allocator = RegisterAllocatorUtils.emptyAllocator()
         allocator.allocate(dag)
-        this.vprintln("  spillSlots=" + allocator.getSpillSlots())
+        this.vprintln("  spillSlots=" + allocator.getSpillSlots() +
+                " dag=" + dag.nodeCount + "/" + dag.instrCount)
 
         val peephole = PeepholeOptimizerUtils.emptyOptimizer()
         peephole.optimize(dag)
-        this.vprintln("  peephole passes=" + peephole.getPassCount())
+        this.vprintln("  peephole passes=" + peephole.getPassCount() +
+                " dag=" + dag.nodeCount + "/" + dag.instrCount)
 
         // ── Phase E Step 4: 指令编码（仅此一步，不做 COFF/link） ──
         this.vprintln("[Phase E] Instruction Encoding only")

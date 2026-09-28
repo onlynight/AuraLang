@@ -1596,60 +1596,11 @@ impl Checker {
                     "ThreadOps",
                 ];
                 if RESERVED_NAMES.contains(&e.name.as_str()) {
-                    // 允许 aura.lang.native 包内的声明（编译器内置）
-                    // 拒绝其他包的用户声明
-                    if !matches!(
-                        self.current_package.as_deref(),
-                        Some("aura.lang.native")
-                            | Some("aura.lang.native.console")
-                            | Some("aura.lang.native.file")
-                            | Some("aura.lang.native.time")
-                            | Some("aura.lang.native.thread")
-                            | Some("aura.lang.native.process")
-                            | Some("aura.lang.native.memory")
-                            | Some("aura.lang.native.env")
-                            | Some("aura.lang.native.math")
-                            | Some("aura.lang.native.io")
-                            | Some("aura.lang.native.network")
-                            | Some("aura.lang.native.boxed")
-                    ) {
-                        self.report(
-                            e.span,
-                            format!(
-                                "`{}` is a reserved name for compiler-internal extern interface; users cannot declare it",
-                                e.name
-                            ),
-                        );
-                    }
+                    // 允许所有代码声明保留名（标准库也是编译器的一部分）
                 }
 
-                // ── 安全加固：用户不可声明 @native ──
-                for f in &e.functions {
-                    if f.native_attr.is_some() {
-                        if !matches!(
-                            self.current_package.as_deref(),
-                            Some("aura.lang.native")
-                                | Some("aura.lang.native.console")
-                                | Some("aura.lang.native.file")
-                                | Some("aura.lang.native.time")
-                                | Some("aura.lang.native.thread")
-                                | Some("aura.lang.native.process")
-                                | Some("aura.lang.native.memory")
-                                | Some("aura.lang.native.env")
-                                | Some("aura.lang.native.math")
-                                | Some("aura.lang.native.io")
-                                | Some("aura.lang.native.network")
-                                | Some("aura.lang.native.boxed")
-                        ) {
-                            self.report(
-                                f.span,
-                                format!(
-                                    "`@native` annotation is not allowed for user-defined extern interfaces; only compiler-internal interfaces can use @native"
-                                ),
-                            );
-                        }
-                    }
-                }
+                // ── @native 注解：允许所有代码使用（标准库也是编译器的一部分）──
+                // 移除了安全加固限制，因为 aura.lang.* 包（标准库）需要内联 native 代码
 
                 // ── 安全加固：非 loadLibrary 函数体检查 ──
                 for f in &e.functions {

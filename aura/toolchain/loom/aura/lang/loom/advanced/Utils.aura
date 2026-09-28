@@ -2,7 +2,7 @@
 package aura.lang.loom.advanced
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Collections
 
 // ═══════════════════════════════════════════════════════════════
@@ -26,12 +26,12 @@ fun dirname(path: String): String {
 }
 
 fun fileExists(path: String): Boolean {
-    return FileSystem.exists(path)
+    return FileUtils.exists(path)
 }
 
 fun listDir(path: String): List<String> {
-    if (!FileSystem.exists(path)) {
+    if (!FileUtils.exists(path)) {
         return mutableListOf()
     }
-    return FileSystem.listFiles(path)
+    return FileUtils.listFiles(path)
 }

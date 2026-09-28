@@ -11,7 +11,7 @@ package aura.lang.docgen
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Process
 import aura.lang.collection.ArrayList
 import aura.lang.collection.HashMap
@@ -355,34 +355,34 @@ object DocRegistryBuilder {
             "val xs = listOf(1, 2)\nCollections.push(xs, 3)  // [1, 2, 3]"
         ))
 
-        // ── std.filesystem ──
+        // ── std.FileUtils ──
         registry.add(DocEntry(
-            "filesystem", "aura.lang.std.FileSystem.exists",
+            "FileUtils", "aura.lang.std.FileUtils.exists",
             "判断文件是否存在。",
             param("path", "String", "文件路径"),
             "Boolean", "存在时返回 true",
-            "FileSystem.exists(\"/tmp/test.txt\")  // true"
+            "FileUtils.exists(\"/tmp/test.txt\")  // true"
         ))
         registry.add(DocEntry(
-            "filesystem", "aura.lang.std.FileSystem.fileSize",
+            "FileUtils", "aura.lang.std.FileUtils.fileSize",
             "获取文件大小（字节）。",
             param("path", "String", "文件路径"),
             "Long", "文件大小，不存在时返回 -1",
-            "FileSystem.fileSize(\"data.txt\")  // 1024"
+            "FileUtils.fileSize(\"data.txt\")  // 1024"
         ))
         registry.add(DocEntry(
-            "filesystem", "aura.lang.std.FileSystem.mkdir",
+            "FileUtils", "aura.lang.std.FileUtils.mkdir",
             "创建目录。",
             param("path", "String", "目录路径"),
             "Unit", "创建结果",
-            "FileSystem.mkdir(\"/tmp/newdir\")"
+            "FileUtils.mkdir(\"/tmp/newdir\")"
         ))
         registry.add(DocEntry(
-            "filesystem", "aura.lang.std.FileSystem.remove",
+            "FileUtils", "aura.lang.std.FileUtils.remove",
             "删除文件或空目录。",
             param("path", "String", "文件或目录路径"),
             "Unit", "删除结果",
-            "FileSystem.remove(\"/tmp/test.txt\")"
+            "FileUtils.remove(\"/tmp/test.txt\")"
         ))
 
         // ── std.process ──
@@ -829,8 +829,8 @@ fun main(): Int {
 
     // 输出
     if (outputDir != "") {
-        if (!FileSystem.exists(outputDir)) {
-            FileSystem.mkdir(outputDir)
+        if (!FileUtils.exists(outputDir)) {
+            FileUtils.mkdir(outputDir)
         }
         val ext: String = if (format == "html") "html" else "md"
         val filename: String = if (ext == "html") "index." + ext else "INDEX." + ext.toUpperCase()

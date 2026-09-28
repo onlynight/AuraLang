@@ -46,10 +46,18 @@ object Stdio {
     /// 将 Aura String 复制到内存缓冲区（含 NUL 终止符）。
     /// 返回缓冲区地址，失败返回 0。
     fun stringToBuffer(s: String): Long {
+        // ⚠️ 必须先判空再取长度：`s.length` 在 AOT 下是 `strlen`，
+        // 对 null 指针调用会直接 0xC0000005（自举编译器崩溃根因）。
+        if (s == null) {
+            val buf: Long = Allocator.malloc(1)
+            if (buf == 0) { return 0 }
+            Memory.write(buf, 0)
+            return buf
+        }
         // `s.length` 在 AOT 下是 `strlen`（O(n)）：必须先取出到局部量，
         // 否则循环条件里的 `s.length` 会让整段退化成 O(n²)。
         val slen: Int = s.length
-        if (s == null || slen == 0) {
+        if (slen == 0) {
             val buf: Long = Allocator.malloc(1)
             if (buf == 0) { return 0 }
             Memory.write(buf, 0)

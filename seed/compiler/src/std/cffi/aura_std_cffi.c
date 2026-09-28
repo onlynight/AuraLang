@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Aura std C FFI — 标准库 C ABI 实现
  *
  * 供 AOT 编译后端链接使用。
@@ -1341,6 +1341,7 @@ int64_t aura_to_int_any(uint64_t v) {
 }
 
 const char *aura_to_str_any(uint64_t v) {
+    if (v == 0) return "";  /* null → 空串，避免 strlen(null) 崩溃 */
     if (v & (uint64_t)1) {
         return aura_to_str((int64_t)((int64_t)v >> 1));
     }
@@ -2023,7 +2024,8 @@ const char *aura_env_get(const char *name) {
      *（PHIR / OUT / MODULE），导致 `phirPath` 读成模块名、报
      * `Failed to read .phir file: 01_hello_world`。
      *
-     * 泄漏量可忽略（环境变量读取次数极少），换来正确的值语义。 */
+     * 泄漏量可忽略（环境变量读取次数极少），换来正确的值语义。
+     * def 参数是 Aura 侧 `Env.get(name, default)` 的默认值，这里不使用。 */
     const char *v = getenv(name ? name : "");
     if (!v) return "";
     size_t n = strlen(v) + 1;
@@ -2285,6 +2287,21 @@ const void *aura_string_split(const char *s, const char *sep) {
 int aura_lang_std_String_equals(const char *a, const char *b) {
     if (!a || !b) return a == b ? 1 : 0;
     return strcmp(a, b) == 0 ? 1 : 0;
+}
+
+/* ── Console I/O ── */
+void aura_lang_std_Console_print(int64_t msg) {
+    if (!msg) return;
+    const char *s = (const char *)msg;
+    size_t len = strlen(s);
+    if (len > 0) {
+        fwrite(s, 1, len, stdout);
+    }
+}
+void aura_lang_std_Console_println(int64_t msg) {
+    aura_lang_std_Console_print(msg);
+    fputc('\n', stdout);
+    fflush(stdout);
 }
 
 /* ── 极简字符串键值表（`Map<String, Any>`；AOT 下 Map 表示为 i8*） ── */
@@ -3685,6 +3702,8 @@ static AuraFnEnt g_fn_table[AURA_FN_COUNT] = {
     AURA_FN(aura_lang_std_String_countChar),
     AURA_FN(aura_lang_std_String_endsWith),
     AURA_FN(aura_lang_std_String_equals),
+    AURA_FN(aura_lang_std_Console_print),
+    AURA_FN(aura_lang_std_Console_println),
     AURA_FN(aura_lang_std_String_indexOf),
     AURA_FN(aura_lang_std_String_lastIndexOf),
     AURA_FN(aura_lang_std_String_length),

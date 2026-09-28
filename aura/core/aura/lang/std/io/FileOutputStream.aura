@@ -1,0 +1,67 @@
+// aura:///aura/lang/std/io/FileOutputStream.aura
+package aura.lang.std.io
+
+import aura.lang.native.Memory
+import aura.lang.native.file.FileOps
+import aura.lang.native.io.Stdio
+import aura.lang.native.memory.Allocator
+
+/// 文件输出流。
+///
+/// 向指定路径的文件写入数据。
+/// 构造函数打开文件（O_WRONLY|O_CREAT|O_TRUNC），
+/// `println` 写入字符串加换行，`print` 写入字符串。
+///
+/// ```aura
+/// val os: OutputStream = FileOutputStream("output.txt")
+/// os.println("Hello")
+/// os.print("World\n")
+/// os.close()
+/// ```
+///
+/// @since 0.3
+class FileOutputStream : OutputStream {
+
+    private var fd: Int = -1
+
+    /// 绑定到指定路径，创建或截断文件。
+    init(path: String) {
+        val pathBuf: Long = Stdio.stringToBuffer(path)
+        if (pathBuf == 0) { return }
+        this.fd = FileOps.open(pathBuf, 1 | 0x40 | 0x200)  // O_WRONLY|O_CREAT|O_TRUNC
+        Allocator.free(pathBuf)
+    }
+
+    override fun println(msg: String): Unit {
+        if (fd < 0) { return }
+        val buf: Long = Stdio.stringToBuffer(msg)
+        if (buf == 0) { return }
+        val len: Long = Stdio.strlen(buf)
+        FileOps.write(fd, buf, len)
+        Allocator.free(buf)
+        // 写入换行符
+        val nl: Long = Allocator.malloc(1)
+        if (nl != 0) {
+            Memory.write(nl, 10)
+            FileOps.write(fd, nl, 1)
+            Allocator.free(nl)
+        }
+    }
+
+    override fun print(msg: String): Unit {
+        if (fd < 0) { return }
+        val buf: Long = Stdio.stringToBuffer(msg)
+        if (buf == 0) { return }
+        val len: Long = Stdio.strlen(buf)
+        FileOps.write(fd, buf, len)
+        Allocator.free(buf)
+    }
+
+    override fun flush(): Unit {
+        // 无缓冲，直接写入 fd，无需刷新
+    }
+
+    override fun close(): Unit {
+        if (fd >= 0) { FileOps.close(fd); fd = -1 }
+    }
+}

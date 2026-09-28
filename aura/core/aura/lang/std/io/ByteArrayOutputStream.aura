@@ -1,0 +1,40 @@
+// aura:///aura/lang/std/io/ByteArrayOutputStream.aura
+package aura.lang.std.io
+
+/// 字节数组输出流（写入内存缓冲）。
+///
+/// 将字符串写入内部缓冲，`toString` 返回全部内容。
+///
+/// ```aura
+/// val os: OutputStream = ByteArrayOutputStream()
+/// os.println("Line 1")
+/// os.println("Line 2")
+/// val content: String = os.toString()
+/// ```
+///
+/// @since 0.3
+class ByteArrayOutputStream : OutputStream {
+
+    private var buffer: String = ""
+
+    override fun println(msg: String): Unit {
+        buffer = buffer + msg + "\n"
+    }
+
+    override fun print(msg: String): Unit {
+        buffer = buffer + msg
+    }
+
+    override fun flush(): Unit {
+        // 无缓冲，数据已在内存中
+    }
+
+    override fun close(): Unit {
+        // 不重置 buffer，允许调用方继续读取
+    }
+
+    /// 获取已写入的全部内容。
+    fun toString(): String {
+        return buffer
+    }
+}

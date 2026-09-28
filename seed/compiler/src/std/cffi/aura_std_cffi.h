@@ -398,6 +398,10 @@ int64_t aura_lang_std_Process_argCount(void);
 const char *aura_lang_std_Process_arg(int64_t index);
 const char *aura_lang_std_Process_args(void);
 
+// aura.lang.std.Console.*
+void aura_lang_std_Console_print(int64_t msg);
+void aura_lang_std_Console_println(int64_t msg);
+
 // aura.lang.std.Math.*
 double aura_lang_std_Math_sin(double x);
 double aura_lang_std_Math_cos(double x);

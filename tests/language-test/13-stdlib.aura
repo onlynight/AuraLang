@@ -1,6 +1,6 @@
 // ════════════════════════════════════════════════════════════════
 // Phase 13 — 标准库快照（P13）
-// Math / String / Path / Env / FileSystem / IO
+// Math / String / Path / Env / FileUtils / IO
 // ════════════════════════════════════════════════════════════════
 //
 // 验证：
@@ -13,7 +13,7 @@
 // object，见 aura/core/aura/lang/std/）。调用形如：
 //   Math.abs(-5)              ← 旧: aura.math.abs(-5)
 //   Path.join("a","b.txt")    ← 旧: aura.path.join("a","b.txt")
-//   FileSystem.writeText(…)   ← 旧: aura.fs.writeText(…)
+//   FileUtils.writeText(…)   ← 旧: aura.fs.writeText(…)
 //   IO.fileExists(…)          ← 旧: aura.io.fileExists(…)
 // 字符串操作改用 String 实例方法（s.length / s.contains /
 // s.toUpperCase），不再通过 aura.string.* 模块函数调用。
@@ -58,7 +58,7 @@
 import aura.lang.std.Math
 import aura.lang.std.Path
 import aura.lang.std.Env
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.IO
 
 fun main() {
@@ -115,10 +115,10 @@ fun main() {
     // ── §13.10 Builtin（P13）── 见文件头说明 7)
     println("§13.10 builtin: (skipped — typeof unavailable in AOT)")
 
-    // ── §13.11 FileSystem（P13，最小写读）──
-    FileSystem.writeText("_std_snapshot.txt", "fs-ok")
-    val content: String = FileSystem.readText("_std_snapshot.txt")
-    val fsOk: Boolean = FileSystem.exists("_std_snapshot.txt")
+    // ── §13.11 FileUtils（P13，最小写读）──
+    FileUtils.writeText("_std_snapshot.txt", "fs-ok")
+    val content: String = FileUtils.readText("_std_snapshot.txt")
+    val fsOk: Boolean = FileUtils.exists("_std_snapshot.txt")
     println("§13.11 fs: roundtrip=" + content
         + ", exists=" + (if (fsOk) { "true" } else { "false" }))
 

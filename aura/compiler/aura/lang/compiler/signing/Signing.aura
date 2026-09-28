@@ -16,7 +16,7 @@ package aura.lang.compiler.signing
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Encoding
 
 // ═══════════════════════════════════════════════════════════════
@@ -82,7 +82,7 @@ class KeyConfig {
     /// 从文件加载密钥配置。
     fun fromFile(path: String): KeyConfig {
         val kc: KeyConfig = KeyConfig()
-        val content: String = FileSystem.readFile(path)
+        val content: String = FileUtils.readFile(path)
         if (content == null || content.length == 0) {
             return null
         }

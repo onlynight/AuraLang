@@ -2,7 +2,7 @@
 package aura.lang.loom.pkg
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.IO
 import aura.lang.std.Encoding
 import aura.lang.loom.pkg.PackageMeta
@@ -34,7 +34,7 @@ class RegistryClient {
     fun download(name: String, version: String, destDir: String): Int {
         // Simplified: copy from local registry
         val pkgPath: String = localRegistry.getPkgPath(name, version)
-        if (pkgPath == null || !FileSystem.exists(pkgPath)) {
+        if (pkgPath == null || !FileUtils.exists(pkgPath)) {
             IO.println("[registry] Package not found: " + name + "@" + version)
             return 1
         }
@@ -46,8 +46,8 @@ class RegistryClient {
     fun publish(name: String, version: String, pkgPath: String): Int {
         // Simplified: copy to local registry
         val destDir: String = localRegistry.getDir(name)
-        if (!FileSystem.exists(destDir)) {
-            FileSystem.mkdirP(destDir)
+        if (!FileUtils.exists(destDir)) {
+            FileUtils.mkdirP(destDir)
         }
         IO.println("[registry] Published: " + name + "@" + version)
         IO.println("[registry]   Location: " + destDir)

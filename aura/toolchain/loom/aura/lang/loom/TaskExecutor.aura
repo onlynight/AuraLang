@@ -2,7 +2,7 @@
 package aura.lang.loom
 
 import aura.lang.std.Collections
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Process
 
 import aura.lang.loom.Task

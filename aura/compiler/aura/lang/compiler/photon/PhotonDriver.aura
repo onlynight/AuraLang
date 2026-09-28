@@ -4,7 +4,7 @@ package aura.lang.compiler.photon
 import aura.lang.std.String
 import aura.lang.std.Env
 import aura.lang.std.Process
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.compiler.photon.PhotonPipeline
 
 fun main() {

@@ -19,7 +19,7 @@ package aura.lang.compiler
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Process
 import aura.lang.std.Env
 
@@ -584,7 +584,7 @@ object MainUtils {
         if (inputPath == "") {
             println(MainUtils.cliUsage())
             return
-        } else if (!FileSystem.exists(inputPath)) {
+        } else if (!FileUtils.exists(inputPath)) {
             println("Error: input file not found: " + inputPath)
             return
         }
@@ -606,7 +606,7 @@ object MainUtils {
         // JIT：源码 → Photon 裸机器码 → 分派表（不链接、不落盘 exe）
         if (backend == "jit") {
             println(MainUtils.banner() + " — Photon JIT compilation " + inputPath)
-            val src: String = FileSystem.readText(inputPath)
+            val src: String = FileUtils.readText(inputPath)
             println(MainUtils.photonJitSource(src, jitNative))
             return
         }

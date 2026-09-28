@@ -25,7 +25,7 @@ package aura.lang.compiler.photon
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Process
 import aura.lang.std.Env
 
@@ -309,7 +309,7 @@ class PhotonObjectWriter {
         if (this.probeBuf.length > 12000) {
             this.probeBuf = this.probeBuf.substring(this.probeBuf.length - 10000)
         }
-        FileSystem.writeText(this.probePath, this.probeBuf)
+        FileUtils.writeText(this.probePath, this.probeBuf)
     }
 
     fun buildSymbols(functionName: String, stringConsts: String): Unit {
@@ -1732,15 +1732,15 @@ class PhotonObjectWriter {
     /// 把当前目标文件写成 **hex 文本**（VM 路径的落盘通道）。
     ///
     /// 建议路径形如 `build/hello.obj.hex`，随后由构建脚本把 hex 转成二进制 `.obj`。
-    /// 返回文件是否确实落盘（`FileSystem.writeText` 自身不返回状态）。
+    /// 返回文件是否确实落盘（`FileUtils.writeText` 自身不返回状态）。
     ///
     /// **为什么不在这里直接写二进制**：VM 执行路径没有可用的原始字节写盘原语 ——
-    /// `FileSystem.writeBytes` 依赖 `Array<Byte>` + `String.fromCharCode`（LLVM IR 链路，
+    /// `FileUtils.writeBytes` 依赖 `Array<Byte>` + `String.fromCharCode`（LLVM IR 链路，
     /// 本项目不使用）；`Memory.write` / `Allocator` / `FileOps` 属 `extern interface`
     /// builtin，只有在 AOT / 自举运行时才存在。原生落盘见 `PhotonNativeWriter`。
     fun writeObjectHexFile(path: String): Boolean {
-        FileSystem.writeText(path, this.emit())
-        return FileSystem.exists(path)
+        FileUtils.writeText(path, this.emit())
+        return FileUtils.exists(path)
     }
 
     /// 把当前目标文件写成 **二进制**（通过 hex 中转）。
@@ -1753,7 +1753,7 @@ class PhotonObjectWriter {
         this.writeObjectHexFile(hexPath)
         // PowerShell 脚本需 $ 变量，Aura 字符串无法直接表示，
         // 因此仅写 hex 文件，由外部脚本完成 hex→binary 转换。
-        return FileSystem.exists(hexPath)
+        return FileUtils.exists(hexPath)
     }
 
     /// 由目标文件路径推导 hex 文本路径：`build/hello.obj` → `build/hello.obj.hex`。
@@ -2139,15 +2139,15 @@ object PhotonObjectWriterUtils {
 
     /// 把 COFF hex 文本写入文件（**VM 路径**的落盘通道）。
     ///
-    /// 走 `FileSystem.writeText` → 预编译 stdlib 的 `Stdio.writeFile`，在种子编译器下可解析。
+    /// 走 `FileUtils.writeText` → 预编译 stdlib 的 `Stdio.writeFile`，在种子编译器下可解析。
     /// 返回文件是否确实落盘；随后由构建脚本把 `.hex` 转成二进制 `.obj`。
     ///
     /// 与 `PhotonObjectWriter.writeObjectHexFile()` 的分工：
     /// 本方法面向"手上已有 hex 字符串"的调用方（例如 `PhotonRuntime.buildMainObject()`）；
     /// 后者面向"已配置好的 writer 实例"，由 writer 重新序列化后写文件。
     fun saveHexFile(path: String, coffHex: String): Boolean {
-        FileSystem.writeText(path, coffHex)
-        return FileSystem.exists(path)
+        FileUtils.writeText(path, coffHex)
+        return FileUtils.exists(path)
     }
 
     /// 生成「可直接链接运行」的 helloworld `main`。

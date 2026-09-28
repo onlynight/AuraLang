@@ -31,7 +31,7 @@ package aura.lang.compiler.photon
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 
 /// Photon 自举链管理器。
 class PhotonBootstrap {
@@ -93,7 +93,7 @@ class PhotonBootstrap {
 
     /// 检查 n2 编译器是否就绪。
     fun checkN2(): Boolean {
-        return this.n2Path != "" && FileSystem.exists(this.n2Path)
+        return this.n2Path != "" && FileUtils.exists(this.n2Path)
     }
 
     // ── 阶段 3：n3 就绪 ──
@@ -115,7 +115,7 @@ class PhotonBootstrap {
 
     /// 检查 n3 编译器是否就绪。
     fun checkN3(): Boolean {
-        return this.n3Path != "" && FileSystem.exists(this.n3Path)
+        return this.n3Path != "" && FileUtils.exists(this.n3Path)
     }
 
     // ── 自举验证 ──
@@ -128,8 +128,8 @@ class PhotonBootstrap {
 
         // 比较 n2 和 n3 的文件内容
         // 简化：仅检查文件大小
-        val n2Size: Long = FileSystem.size(this.n2Path)
-        val n3Size: Long = FileSystem.size(this.n3Path)
+        val n2Size: Long = FileUtils.size(this.n2Path)
+        val n3Size: Long = FileUtils.size(this.n3Path)
 
         if (n2Size != n3Size) {
             this.status = "mismatch_size"

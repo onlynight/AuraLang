@@ -15,7 +15,7 @@ package aura.lang.compiler.package
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Path
 import aura.lang.std.Json
 
@@ -467,7 +467,7 @@ class LockFile {
                 toml = toml + "checksum = \"" + entry.checksum + "\"\n"
             }
         }
-        return FileSystem.writeFile(path, toml)
+        return FileUtils.writeFile(path, toml)
     }
 }
 

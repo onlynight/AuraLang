@@ -88,6 +88,13 @@ pub(crate) struct EmitCtx {
     pub func_param_types: HashMap<String, Vec<String>>,
     /// 当前正在发射的函数的 LLVM 返回类型（用于 return 语句的类型转换）
     pub current_ret_ty: String,
+    /// 当前函数的 **Aura** 声明返回类型名（`String` / `Any` / `Int` …）。
+    ///
+    /// 用途：`String` 与 `Any` 在 LLVM 层都是 `i8*`，但 return 的转换语义不同 ——
+    /// `Any` 走 Plan A 低位标记装箱（`(v<<1)|1`），`String` 则是「地址即字符串」
+    /// 的零拷贝约定（见 `Stdio.bufferToString` 的 `return buf`）。区分不了时
+    /// 后者会被装箱成伪指针，调用方解引用即 0xC0000005。
+    pub current_ret_aura_ty: Option<String>,
     /// 类名 → (字段名 → (LLVM 类型字符串, 字段索引))（用于 emit_member_access 推断字段类型和索引）
     pub class_field_types: HashMap<String, HashMap<String, (String, usize)>>,
     /// 当前正在发射的函数所属的类（方法名形如 `Lexer.peek`）；自由函数为 None。
@@ -98,6 +105,15 @@ pub(crate) struct EmitCtx {
     /// 引用到未定义结构体时统一退化为 `i8*`，避免出现 unsized 类型
     ///（`%struct.ClosureManager` 等只在字段中被引用、从未定义）。
     pub known_structs: std::collections::HashSet<String>,
+    /// `object` 单例类型名（Aura 名）。AOT 侧为每个单例发一个模块级全局实例
+    /// `@<Name>_instance`，调用点把该实例地址作为 `self` 传入。旧实现把「裸类型名
+    /// 当接收者」统一降级为 `null`（前提是「单例无状态」），但 `object Allocator`
+    /// 等单例声明了 `var totalAllocs` 等字段 ⇒ 方法内首次读写字段即
+    /// `incq 0x38(%rax)`（rax=0）→ 0xC0000005。
+    pub singleton_structs: std::collections::HashSet<String>,
+    /// 拥有 `<Name>.__singletonInit` 初始化函数的单例名（只有含默认值字段的单例
+    /// 才会合成该函数）。入口 `main` 开头逐个调用，把字段默认值写入全局实例。
+    pub singleton_inits: Vec<String>,
     /// 类型别名表：别名 → LLVM 类型字符串（用于 AOT 解析 typealias）
     pub type_aliases: HashMap<String, String>,
     /// P3.2: 枚举变体映射（枚举名 → [(变体名, 变体索引, 关联值数)]）
@@ -189,9 +205,12 @@ impl EmitCtx {
             func_ret_types: HashMap::new(),
             func_param_types: HashMap::new(),
             current_ret_ty: String::new(),
+            current_ret_aura_ty: None,
             class_field_types: HashMap::new(),
             current_class: None,
             known_structs: std::collections::HashSet::new(),
+            singleton_structs: std::collections::HashSet::new(),
+            singleton_inits: Vec::new(),
             type_aliases: HashMap::new(),
             enum_variants: HashMap::new(),
             enum_max_fields: HashMap::new(),
@@ -917,6 +936,12 @@ fn emit_native_wrapper(
             } else if func.name.contains("Memory") && method_lower == "set" {
                 // Memory.set(addr, v, n) → @llvm.memset
                 "%ptr.addr = inttoptr i64 %arg.0 to i8*\ncall void @llvm.memset(i8* %ptr.addr, i8 %arg.1, i64 %arg.2, i1 false)".to_string()
+            } else if sym_lower.contains("console") && sym_lower.contains("println") {
+                // Console.println(msg) → call aura_lang_std_Console_println
+                "call void @aura_lang_std_Console_println(i64 %arg.0)".to_string()
+            } else if sym_lower.contains("console") && sym_lower.contains("print") {
+                // Console.print(msg) → call aura_lang_std_Console_print
+                "call void @aura_lang_std_Console_print(i64 %arg.0)".to_string()
             } else {
                 // 未知内置：直接返回默认值（不可生成 `%result = 0` 这类非法 IR）
                 String::new()
@@ -1050,6 +1075,36 @@ pub fn emit_program(
         known_structs.insert(e.name.clone());
     }
     ctx.known_structs = known_structs.clone();
+
+    // 4.7 `object` 单例的模块级实例。
+    //
+    // Aura 的 `object X { var f = 1; fun m() }` 在 VM 侧由 `create_singletons`
+    // 创建一个真实实例，并在入口前跑 `X.__singletonInit(inst)` 写入字段默认值。
+    // AOT 侧此前**没有实例**：凡「裸类型名当接收者」的调用点（`Allocator.malloc(n)`）
+    // 一律传 `null`，前提假设是「单例无状态、self 只是占位」。该假设对
+    // `object Allocator`（有 `var totalAllocs/totalFrees` 等字段）不成立 ⇒
+    // 方法内首次读写字段即 `incq 0x38(%rax)`（rax=0）→ 0xC0000005，
+    // 表现为自举驱动 `PhotonHatCompile.exe` 启动阶段崩溃（`main` 尚未打印任何输出）。
+    //
+    // 这里为每个单例发一个零初始化的全局实例，并把「含默认值字段、因而合成了
+    // `__singletonInit`」的单例记下来，由入口 `main` 逐个调用写入默认值。
+    let mut singleton_inits: Vec<String> = Vec::new();
+    let mut seen_singletons: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for st in &program.structs {
+        if !st.is_singleton || !seen_singletons.insert(st.name.clone()) {
+            continue;
+        }
+        let llvm_name = format!("%struct.{}", sanitizellvm(&st.name));
+        let gname = format!("@{}_instance", sanitizellvm(&st.name));
+        ctx.singleton_structs.insert(st.name.clone());
+        ctx.globals.push(format!("{} = internal global {} zeroinitializer", gname, llvm_name));
+        let init_name = format!("{}.__singletonInit", st.name);
+        if program.functions.iter().any(|f| f.name == init_name) {
+            singleton_inits.push(st.name.clone());
+        }
+    }
+    singleton_inits.sort();
+    ctx.singleton_inits = singleton_inits;
 
     // 4.8 预注册函数返回类型映射（供 emit_call 推断返回类型）
     // 同时构建函数索引映射（供 Thread.spawn 解析函数引用为整数 ID）
@@ -1186,6 +1241,24 @@ pub fn emit_program(
             })
             .collect();
         ctx.func_param_types.insert(native.name.clone(), param_tys);
+
+        // `@native(N)`（syscall）的包装器由 `emit_native_wrapper` 统一生成为
+        // `define i64 @Sym(i64 %arg.0, …)`（全部 i64，见该函数注释），但调用点
+        // 此前按 Aura 签名传参（`Int` → `i32`）⇒ 形参寄存器**高 32 位是垃圾**。
+        //
+        // 实测：`FileOps.lseek(fd, 0, 2)` 的 `fd` 被读成 `0x????????00000003`
+        // ⇒ `aura_get_std_handle(fd)` 越界 ⇒ 返回 -1 ⇒ `File.readText()` 恒返回
+        // 空串（`f.readText()` 长度 0）；自举驱动 `PhotonHatCompile.exe` 因此
+        // 读不到源码内容，前端拿到空输入后崩溃。
+        // （`FileOps.open` 侥幸正常：它的 flags 在 C 层被 `& 0xFFFF` 掩码掉高位。）
+        //
+        // 这里把调用点形参类型对齐到包装器的 `i64`，由 `coerce_arg` 插入
+        // `sext`/`zext`，两端一致。
+        if matches!(native.native_attr, Some(crate::ast::NativeAttr::Syscall(_))) {
+            let n = native.params.len();
+            ctx.func_param_types
+                .insert(native.name.clone(), vec!["i64".to_string(); n]);
+        }
     }
 
     // 5. 生成所有用户函数（期间收集的全局常量在函数后统一输出）
@@ -1425,6 +1498,16 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
     }
     let ret_str = ret_ty.clone();
     ctx.current_ret_ty = ret_str.clone();
+    // Aura 声明的返回类型名（用于区分 `String` 的「地址即字符串」语义与
+    // `Any` 的 Plan A 装箱语义，见 `coerce_return_value`）。
+    ctx.current_ret_aura_ty = match &func.ret {
+        Some(HirType::Named(n)) => Some(n.trim_end_matches('?').to_string()),
+        Some(HirType::Nullable(inner)) => match inner.as_ref() {
+            HirType::Named(n) => Some(n.trim_end_matches('?').to_string()),
+            _ => None,
+        },
+        _ => None,
+    };
 
     // 方法名形如 `Lexer.peek` → 当前类 `Lexer`（供 `this`/`self` 成员解析）
     //
@@ -1535,6 +1618,18 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
     // C 入口 main：把宿主 argv 存入 C 运行时，供 Process.arg/argCount 读取。
     if is_entry_main {
         blocks.last_mut().body.push("call void @aura_args_set(i32 %argc, i8** %argv)".to_string());
+        // `object` 单例初始化：把字段默认值写入模块级全局实例（对应 VM 的
+        // create_singletons + run_singleton_initializers）。必须在 main 体之前执行，
+        // 否则 `Allocator.malloc` 等会在字段尚未初始化时被调用（更糟：旧实现传 null）。
+        for name in ctx.singleton_inits.clone() {
+            let llvm_name = format!("%struct.{}", sanitizellvm(&name));
+            let gname = format!("@{}_instance", sanitizellvm(&name));
+            let sym = sanitizellvm(&format!("{}.__singletonInit", name));
+            blocks.last_mut().body.push(format!(
+                "call void @{}({}* {})",
+                sym, llvm_name, gname
+            ));
+        }
     }
 
     // 生成函数体
@@ -1695,7 +1790,7 @@ fn emit_statement(
                 } else {
                     let (val_ir, val_ty) = emit_expr_val(ctx, blocks, v)?;
                     // 返回值类型必须与函数签名的返回类型一致（如 Float 函数里 `return 0.0`）
-                    let converted = coerce_arg(ctx, blocks, val_ir, &val_ty, &want);
+                    let converted = coerce_return_value(ctx, blocks, val_ir, &val_ty, &want);
                     blocks.set_terminator(&format!("ret {} {}", converted.1, converted.0));
                 }
             } else {
@@ -2553,9 +2648,12 @@ fn emit_expr_val(
                 func_ret_types: ctx.func_ret_types.clone(),
                 func_param_types: ctx.func_param_types.clone(),
                 current_ret_ty: ret_ty.clone(),
+                current_ret_aura_ty: None,
                 class_field_types: ctx.class_field_types.clone(),
                 current_class: None,
                 known_structs: ctx.known_structs.clone(),
+                singleton_structs: ctx.singleton_structs.clone(),
+                singleton_inits: Vec::new(),
                 type_aliases: ctx.type_aliases.clone(),
                 enum_variants: ctx.enum_variants.clone(),
                 enum_max_fields: ctx.enum_max_fields.clone(),
@@ -2858,16 +2956,21 @@ fn emit_variable_load(
             slot.llvm_name
         ));
         Ok((tmp, slot.llvm_ty))
-    } else if ctx.known_structs.contains(name) {
-        // 裸类型名 / object 单例名被当作**值**使用（如 `return SyscallEmitter`，
-        // `SyscallEmitter` 是 `object` 单例）。AOT 把 object 的方法编译为
-        // `Type_method(self, …)`，单例本身无状态、`self` 只是占位，因此用
-        // `null`（i8*）作该值即可。
+    } else if ctx.singleton_structs.contains(name) {
+        // `object` 单例名被当作**值**使用（`Allocator.malloc(n)` 的接收者、
+        // `return SyscallEmitter` 等）。返回模块级全局实例的地址（i8*），
+        // 供 `Type_method(self, …)` 得到真实的 `self`。
         //
-        // 旧实现落到下面「未声明变量」分支，发出 `%<TypeName>` + 类型 i32 ⇒
-        // 再被装箱成 `sext i32 %SyscallEmitter to i64`，llc 报
-        //   `error: use of undefined value '%SyscallEmitter'`
-        // （自举编译 `SyscallEmitterUtils.empty` 时实测）。
+        // 旧实现无条件给 `null`（假设单例无状态），字段一旦被访问即空指针崩溃。
+        let sname = format!("%struct.{}", sanitizellvm(name));
+        let gname = format!("@{}_instance", sanitizellvm(name));
+        let tmp = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!("{} = bitcast {}* {} to i8*", tmp, sname, gname));
+        Ok((tmp, "i8*".to_string()))
+    } else if ctx.known_structs.contains(name) {
+        // 非单例的裸类型名被当作值使用（异常路径）：仍用 `null`（i8*）占位，
+        // 避免生成 `sext i32 %TypeName to i64` 这类未定义值引用。
         Ok(("null".to_string(), "i8*".to_string()))
     } else {
         // 未声明变量：作为外部引用（可能是函数调用或全局变量）
@@ -4043,6 +4146,56 @@ fn emit_call(
             .push(format!("{} = call i64 @aura_strlen(i8* {})", dst, ptr));
         return Ok((dst, "i64".to_string()));
     }
+    // ── XxxUtils.method() 解析修正（Phase D 自举修复）──
+    //
+    // HIR 的 resolve_method_owner 在接收者类型为 XxxUtils（工具对象）时
+    // 找不到方法，回退到「全表唯一候选」后可能错误地解析到 XxxUtils
+    // 而非 Xxx。这些方法定义在 class Xxx（返回 String/i8*），
+    // 而非 object XxxUtils（工具对象，无此方法 ⇒ 返回类型 void）。
+    // 原样发射会生成 `call void @XxxUtils_method(...)`（符号未定义、返回
+    // 类型错误），导致后续成员访问（`.length`）在 `0` 上崩溃。
+    //
+    // 通用修复：如果 callee 是 XxxUtils.method 且 Xxx.method 在 func_ret_types 中，
+    // 则重定向到 Xxx.method。参见 `InstructionSelection.aura:1640`（VM 侧同名修复）。
+    if callee_owned.contains("Utils.") {
+        if let Some(dot_pos) = callee_owned.find('.') {
+            let prefix = &callee_owned[..dot_pos];
+            let method = &callee_owned[dot_pos + 1..];
+            // 如果前缀以 "Utils" 结尾，尝试去掉 "Utils" 后缀
+            if prefix.ends_with("Utils") {
+                let cls = &prefix[..prefix.len() - 5];
+                let correct_name = format!("{}.{}", cls, method);
+                if ctx.func_ret_types.contains_key(&correct_name)
+                    && !ctx.func_ret_types.contains_key(&callee_owned)
+                {
+                    // ⚠️ 不能无条件剔除首参。
+                    //
+                    // 两种 HIR 形态都会走到这里：
+                    //   (a) `XxxUtils.method(Xxx, …)` —— 首参是**幽灵类名占位**
+                    //       （命名空间式调用），改派到 `Xxx.method` 后应剔除；
+                    //   (b) `XxxUtils.method(recv, …)` —— 首参是**真实接收者**
+                    //       （`pipeline.compileHat(hatPath)` 被「全表唯一候选」解析成
+                    //        `PhotonPipelineUtils.compileHat(pipeline, hatPath)`）。
+                    //       目标 `Xxx.method` 的形参 0 就是 self ⇒ **必须保留**。
+                    // 旧实现无条件 `remove(0)`，于是 (b) 变成
+                    //   `call %struct.BackendResult* @PhotonPipeline_compileHat(i8* <hatPath>)`
+                    // —— self 收到 hatPath、hatPath 形参读到垃圾（实测打印出空路径，
+                    // `FileUtils.readText("")` 失败，整条后端管线静默返回 fail）。
+                    let phantom_name = prefix.to_string();
+                    let is_phantom_first = matches!(
+                        effective_args.first(),
+                        Some(HirExpr::Var(v))
+                            if *v == phantom_name
+                                && !ctx.var_scope.iter().any(|s| s.contains_key(v.as_str()))
+                    );
+                    callee_owned = correct_name;
+                    if is_phantom_first {
+                        effective_args.remove(0);
+                    }
+                }
+            }
+        }
+    }
     // ── 方法解析容错（Phase C.2 自举修复）──
     //
     // HIR 的 `resolve_method_owner` 在**没有 sema 类型信息**时会用「全表唯一
@@ -4181,6 +4334,30 @@ fn emit_call(
         }
     }
 
+    // ── object 单例方法调用的 self 占位 ──
+    //
+    // HIR 为保证「实参数 == self + 形参」对齐，把单例方法调用的首参固定填
+    // `Literal::Null`（`hir.rs::HirExpr::Call` 的类方法分派分支，注释写着
+    // 「单例没有实例可传」）。VM 侧 `do_call` 会用真实单例对象替换该占位，但
+    // **AOT 侧没有这层替换**：`null` 一路传进方法体，单例字段一被读写即
+    // 空指针解引用（`Allocator.malloc` 的 `totalAllocs++` → `incq 0x38(%rax)`，
+    // rax = 0 → 0xC0000005，表现为自举驱动启动即崩）。
+    //
+    // 这里把该占位换成单例名，由 `emit_variable_load` 解析成模块级实例地址
+    // （见 emit_program 中 `@<Name>_instance` 的定义）。
+    let singleton_self_class: Option<String> = {
+        let mut found: Option<String> = None;
+        for name in [callee.to_string(), callee_owned.clone()] {
+            if let Some((cls, _)) = name.rsplit_once('.') {
+                if ctx.singleton_structs.contains(cls) {
+                    found = Some(cls.to_string());
+                    break;
+                }
+            }
+        }
+        found
+    };
+
     let callee: &str = &callee_owned;
     // 参数/返回类型：优先 Aura 侧签名；缺失时回退到 **runtime 声明表**
     //（否则 std 字符串方法会退化成 `void` 返回，见上）。
@@ -4210,6 +4387,14 @@ fn emit_call(
                     effective_args[0] = HirExpr::Lit(crate::ast::Literal::Int(idx as i64));
                 }
             }
+        }
+    }
+
+    // object 单例方法的 self 占位替换（见上方 `singleton_self_class`）：把 HIR 填的
+    // `Literal::Null` 换成单例名，发射期解析为模块级实例地址。
+    if let Some(cls) = singleton_self_class.as_ref() {
+        if matches!(effective_args.first(), Some(HirExpr::Lit(crate::ast::Literal::Null))) {
+            effective_args[0] = HirExpr::Var(cls.clone());
         }
     }
 
@@ -4434,6 +4619,44 @@ fn emit_call(
         // 确保消息值是 i8* 类型（字符串指针）
         let coerced = coerce_val_to_i8ptr(ctx, blocks, msg_val, msg_ty);
         return Ok((coerced, "i8*".to_string()));
+    }
+
+    // ── `Env.get` / `EnvOps.get` → C 运行时 `aura_env_get`（底层 `getenv`）──
+    //
+    // `EnvOps.aura` 的纯 Aura 实现读 `/proc/self/environ`（Linux 专有），在
+    // Windows 上恒失败 ⇒ `Env.get(name, default)` **永远**返回 default ——
+    // 自举驱动 `PhotonHatCompile.exe` 因此读不到 `AURA_HAT_AURA`（`srcPath == ""`），
+    // 直接走「source not found」分支，再用空输入跑完整前端/后端（随后崩溃）。
+    //
+    // C 运行时早已提供 `aura_env_get(name)`（`aura_std_cffi.c`，其注释明确写着
+    // 「def 参数是 Aura 侧 `Env.get(name, default)` 的默认值」⇒ 它本就是 `Env.get`
+    // 的落地实现）。这里把调用点改派过去；未命中时它返回空串，再按 Aura 语义
+    // 回落到 default。
+    if matches!(
+        callee,
+        "EnvOps.get" | "Env.get" | "aura.lang.std.Env.get" | "aura.lang.native.env.EnvOps.get"
+    ) && (args_ir.len() == 2 || args_ir.len() == 3)
+    {
+        // 2 参 = `EnvOps.get(name, default)`（无接收者）；
+        // 3 参 = `Env.<name>(self, name, default)`（方法形态，self 是单例实例）。
+        let base = args_ir.len() - 2;
+        let (name, name_ty) = &args_ir[base];
+        let (def, def_ty) = &args_ir[base + 1];
+        let name_ptr = coerce_val_to_i8ptr(ctx, blocks, name, name_ty);
+        let def_ptr = coerce_val_to_i8ptr(ctx, blocks, def, def_ty);
+        let v = ctx.fresh_var();
+        let len = ctx.fresh_var();
+        let is_empty = ctx.fresh_var();
+        let out = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!("{} = call i8* @aura_env_get(i8* {})", v, name_ptr));
+        cur.body.push(format!("{} = call i64 @aura_strlen(i8* {})", len, v));
+        cur.body.push(format!("{} = icmp eq i64 {}, 0", is_empty, len));
+        cur.body.push(format!(
+            "{} = select i1 {}, i8* {}, i8* {}",
+            out, is_empty, def_ptr, v
+        ));
+        return Ok((out, "i8*".to_string()));
     }
 
     // ── 集合/列表内建：映射到已有的 aura_lang_std_Collections_* 运行时 C 实现 ──
@@ -4917,6 +5140,38 @@ fn is_float_ty(t: &str) -> bool {
     t == "float" || t == "double"
 }
 
+/// `return` 语句的值转换：在 `coerce_arg` 基础上区分 `String` 返回类型。
+///
+/// `String` 与 `Any` 在 LLVM 层同为 `i8*`，但语义不同：
+/// - `Any`：整型走 Plan A 低位标记装箱 `(v<<1)|1`（`aura_to_str_any` 据此解码）；
+/// - `String`：Aura 的 String 就是「NUL 结尾的 `i8*`」，`return buf`（`buf: Long`）
+///   是零拷贝惯用法（见 `Stdio.bufferToString` 的注释），必须 `inttoptr` 重解释。
+///
+/// 旧实现一律走 `coerce_arg` 的装箱分支 ⇒ `bufferToString` 返回 `(buf<<1)|1`
+/// 这一**伪指针**，调用方 `println` / `strlen` 一解引用即 0xC0000005
+/// （实测 `File.readText()` 读任何文件都崩、自举驱动读不到源码）。
+fn coerce_return_value(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    val: String,
+    from: &str,
+    to: &str,
+) -> (String, String) {
+    if is_ptr_ty(to)
+        && is_int_ty(from)
+        && from != "i1"
+        && ctx.current_ret_aura_ty.as_deref() == Some("String")
+    {
+        let t = ctx.fresh_var();
+        blocks
+            .last_mut()
+            .body
+            .push(format!("{} = inttoptr {} {} to {}", t, from, val, to));
+        return (t, to.to_string());
+    }
+    coerce_arg(ctx, blocks, val, from, to)
+}
+
 /// 将实参值转换为被调方声明的参数类型。
 ///
 /// LLVM IR 要求 `call` 的实参类型与 `declare`/`define` 的参数类型完全一致；
@@ -4942,6 +5197,24 @@ fn coerce_arg(
             format!("{} = extractvalue {} {}, 0", t, from, val),
         );
         return (t, to.to_string());
+    }
+    // 指针 → 指针：直接 bitcast。
+    //
+    // ⚠️ 必须排在下面「结构体值 → 指针」**之前**：类实例指针 `%struct.X*`
+    // （Phase A.1 按引用传递）同样以 `%struct.` 开头，会被那条分支误判成
+    // 「结构体值」—— 它会另建一个栈槽存这个指针、再把**栈槽地址**
+    //（`%struct.X**`）bitcast 成目标指针类型传出去。被调方拿到的不是对象，
+    // 而是「存放对象指针的临时槽」。
+    //
+    // 实测（自举驱动链路）：`FileUtils.exists(p)` 被内联成
+    // `File(p).exists()` 后，接收者经此路径变成槽地址 ⇒ `File*` 头上的
+    // `pathStr` 读出来是指针值 ⇒ `Stdio.fileExists` 恒 false
+    //（对比 `val f = File(p); f.exists()` 走「内联字段访问」路径，返回 true）。
+    if is_ptr_ty(from) && is_ptr_ty(to) {
+        let cast = ctx.fresh_var();
+        let body = &mut blocks.last_mut().body;
+        body.push(format!("{} = bitcast {} {} to {}", cast, from, val, to));
+        return (cast, to.to_string());
     }
     // 结构体值 → 指针：栈上分配后取地址（方法调用的 self 参数等）
     if from.starts_with("%struct.") && is_ptr_ty(to) {
@@ -5784,6 +6057,13 @@ fn emit_member_access(
             ));
         } else {
             // 回退到 i8* 方式
+            // 防御性检查：如果 obj_ir 是整数常量（如 0），不能作为指针使用
+            if obj_ir.trim() == "0" || obj_ir.trim().ends_with("i32") || obj_ir.trim().ends_with("i64") {
+                return Err(AotError::UnsupportedExpr(format!(
+                    "member access on non-pointer value: obj_ir={}, obj_ty={}, field={}, owner={:?}, obj={:.240?}",
+                    obj_ir, obj_ty, name, owner_struct, object
+                )));
+            }
             cur.body.push(format!("{} = getelementptr i8, i8* {}, i64 0", gep, obj_ir));
             cur.body.push(format!(
                 "{} = load {}, {}* {}",
@@ -5792,6 +6072,15 @@ fn emit_member_access(
         }
     } else {
         // 对象是结构体值：直接使用 extractvalue（结构体类型与字段索引同源）
+        // 防御性检查：如果 obj_ty 不是指针类型，不能进行成员访问
+        if !obj_ty.ends_with('*') && obj_ty != "i8*" && obj_ty != "ptr"
+            && !obj_ty.starts_with("%struct.")
+        {
+            return Err(AotError::UnsupportedExpr(format!(
+                "member access on non-pointer value: obj_ir={}, obj_ty={}, field={}, owner={:?}, obj={:.240?}",
+                obj_ir, obj_ty, name, owner_struct, object
+            )));
+        }
         let struct_type = owner_struct.clone().unwrap_or_else(|| obj_ty.clone());
 
         // 检查 obj_ty 是否是聚合类型，如果不是，需要转换为结构体类型
@@ -5805,6 +6094,13 @@ fn emit_member_access(
         } else {
             // obj_ty 不是聚合类型，无法使用 extractvalue
             // 回退到 i8* 方式
+            // 防御性检查：如果 obj_ir 是整数常量（如 0），不能作为指针使用
+            if obj_ir.trim() == "0" || obj_ir.trim().ends_with("i32") || obj_ir.trim().ends_with("i64") {
+                return Err(AotError::UnsupportedExpr(format!(
+                    "member access on non-pointer value: obj_ir={}, obj_ty={}, field={}, struct={}",
+                    obj_ir, obj_ty, name, struct_type
+                )));
+            }
             let gep = ctx.fresh_var();
             cur.body.push(format!("{} = getelementptr i8, i8* {}, i64 0", gep, obj_ir));
             cur.body.push(format!(
@@ -6380,7 +6676,7 @@ fn emit_block_expr(
                         ctx.exit_scope();
                         return Ok((v, t));
                     }
-                    let converted = coerce_arg(ctx, blocks, v.clone(), &t, &want);
+                    let converted = coerce_return_value(ctx, blocks, v.clone(), &t, &want);
                     blocks.set_terminator(&format!("ret {} {}", converted.1, converted.0));
                     ctx.exit_scope();
                     return Ok((v, t));

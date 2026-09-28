@@ -238,6 +238,17 @@ const PHOTON_PKG_ROOT: &str = "aura.lang.compiler.photon.";
 /// `aura.lang.collection.` 包根前缀：映射到 `aura/core/aura/lang/collection/`。
 const COLLECTION_PKG_ROOT: &str = "aura.lang.collection.";
 
+/// `aura.lang.` 包根前缀（兜底）：映射到 `aura/core/aura/lang/`。
+///
+/// 处理所有未匹配到更具体包根的 `aura.lang.*` 导入：
+/// - `import aura.lang.std.File` → `aura/core/aura/lang/std/File.aura`
+/// - `import aura.lang.std.fs.FileUtils` → `aura/core/aura/lang/std/fs/FileUtils.aura`
+/// - `import aura.lang.concurrent.Mutex` → `aura/core/aura/lang/concurrent/Mutex.aura`
+/// 
+/// 注意：必须在 COMPILER_PKG_ROOT、PHOTON_PKG_ROOT、COLLECTION_PKG_ROOT、NATIVE_PKG_ROOT
+/// 之后检查，作为兜底方案。
+const LANG_PKG_ROOT: &str = "aura.lang.";
+
 /// native 包根：`aura.lang.native` 映射到 `aura/lang/native/` 目录。
 ///
 /// `aura.lang.native.Memory` → `<lang>/native/Memory.aura`；
@@ -260,6 +271,8 @@ const NATIVE_PKG_ROOT: &str = "aura.lang.native.";
 ///
 /// `file_path` 为当前源文件路径（用于解析相对路径），`None` 时无法解析相对导入。
 pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
+    // 提取第一个文件的 package 声明（用于设置 current_package）
+    let pkg_name = extract_package_from_source(source);
     // `base_dir`：当前正在处理的文件的目录，仅用于路径形式 import
     // （`import "x.aura"`），相对该文件解析。
     let base_dir = match file_path {
@@ -275,19 +288,26 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
         .as_ref()
         .map(|pr| pr.join("aura").join("compiler").join("aura").join("lang").join("compiler"));
     // `photon_pkg_root`：`aura.lang.compiler.photon` 包根目录。
+    // ⚠️ 必须包含 `/photon` 后缀：`aura/photon/aura/lang/compiler/photon/`
+    // 是实际源码目录（`PhotonPipeline.aura` 等都在此），少一级会全部找不到。
     let photon_pkg_root: Option<std::path::PathBuf> = project_root
         .as_ref()
-        .map(|pr| pr.join("aura").join("photon").join("aura").join("lang").join("compiler"));
+        .map(|pr| pr.join("aura").join("photon").join("aura").join("lang").join("compiler").join("photon"));
     // `collection_pkg_root`：`aura.lang.collection` 包根目录。
     let collection_pkg_root: Option<std::path::PathBuf> = project_root
         .as_ref()
         .map(|pr| pr.join("aura").join("core").join("aura").join("lang").join("collection"));
+    // `lang_pkg_root`：`aura.lang` 包根目录（兜底，处理 std/concurrent 等子包）。
+    let lang_pkg_root: Option<std::path::PathBuf> = project_root
+        .as_ref()
+        .map(|pr| pr.join("aura").join("core").join("aura").join("lang"));
     let mut visited = std::collections::HashSet::new();
     let mut out = resolve_aura_imports_rec(
         source,
         &compiler_pkg_root,
         &photon_pkg_root,
         &collection_pkg_root,
+        &lang_pkg_root,
         &base_dir,
         &mut visited,
     );
@@ -310,6 +330,7 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
                     &compiler_pkg_root,
                     &photon_pkg_root,
                     &collection_pkg_root,
+                    &lang_pkg_root,
                     child_base,
                     &mut visited,
                 ));
@@ -327,7 +348,17 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
             eprintln!("[aura] expanded source ({} bytes) -> {}", out.len(), path);
         }
     }
-    out
+    // 重新添加第一个文件的 package 声明（确保在最后，解析器会取最后一个）
+    if let Some(pkg) = pkg_name {
+        // 移除内联代码中可能存在的第一个文件的 package 声明
+        let out_without_pkg = out.lines()
+            .filter(|line| !line.trim_start().starts_with(&format!("package {}", pkg)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{}\npackage {}", out_without_pkg, pkg)
+    } else {
+        out
+    }
 }
 
 /// 递归解析 import：除入口文件的顶层 import 外，被内联文件内部的 import
@@ -339,6 +370,7 @@ fn resolve_aura_imports_rec(
     compiler_pkg_root: &Option<std::path::PathBuf>,
     photon_pkg_root: &Option<std::path::PathBuf>,
     collection_pkg_root: &Option<std::path::PathBuf>,
+    lang_pkg_root: &Option<std::path::PathBuf>,
     base_dir: &std::path::Path,
     visited: &mut std::collections::HashSet<std::path::PathBuf>,
 ) -> String {
@@ -362,6 +394,7 @@ fn resolve_aura_imports_rec(
                         compiler_pkg_root,
                         photon_pkg_root,
                         collection_pkg_root,
+                        lang_pkg_root,
                         child_base,
                         visited,
                     );
@@ -373,11 +406,10 @@ fn resolve_aura_imports_rec(
 
     for line in source.lines() {
         let trimmed = line.trim_start();
-        // 包声明（如 `package aura.lang.compiler.lexer`）由编译器消费，
-        // 不参与 AST；必须在预处理阶段剥离，否则解析器会将其当作非法声明。
-        if trimmed.starts_with("package ") {
-            continue;
-        }
+        // 保留所有 package 声明（解析器会取最后一个）
+        // if trimmed.starts_with("package ") {
+        //     continue;
+        // }
         // 匹配 `import "path"` 或 `import <pkg>`
         if let Some(rest) = trimmed.strip_prefix("import ") {
             let rest = rest.trim();
@@ -460,6 +492,31 @@ fn resolve_aura_imports_rec(
                     let rel = pkg_to_aura_path(pkg);
                     lang.join("native").join(rel)
                 })
+            } else if let Some(pkg) = rest.strip_prefix(LANG_PKG_ROOT) {
+                // `aura.lang.*` 兜底：映射到 `aura/core/aura/lang/`
+                // 去掉通配/别名的尾巴（如 `File.*` / `File as F`）
+                let pkg = pkg.split_whitespace().next().unwrap_or(pkg);
+                let pkg = pkg.trim_end_matches(".*");
+                if let Some(root) = lang_pkg_root {
+                    let rel = pkg_to_aura_path(pkg);
+                    let path = root.join(rel);
+                    // 回退：如果 `std/X.aura` 不存在，尝试 `X.aura`（从 lang 根目录）
+                    if path.exists() {
+                        Some(path)
+                    } else if pkg.starts_with("std.") {
+                        let fallback_rel = pkg_to_aura_path(&pkg[4..]); // 去掉 "std."
+                        let fallback_path = root.join(fallback_rel);
+                        if fallback_path.exists() {
+                            Some(fallback_path)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -480,6 +537,7 @@ fn resolve_aura_imports_rec(
                         compiler_pkg_root,
                         photon_pkg_root,
                         collection_pkg_root,
+                        lang_pkg_root,
                         child_base,
                         visited,
                     );
@@ -595,12 +653,35 @@ fn find_aura_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
 
 /// 从 `start` 向上查找项目根目录（包含 `Cargo.toml` 的目录）。
 fn find_project_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    if std::env::var_os("AURA_DEBUG_IMPORT").is_some() {
+        eprintln!("[debug] find_project_root start={:?}", start);
+        eprintln!("[debug] find_project_root cwd={:?}", std::env::current_dir().ok());
+    }
     let mut cur = Some(start);
     while let Some(dir) = cur {
+        if std::env::var_os("AURA_DEBUG_IMPORT").is_some() {
+            eprintln!("[debug] find_project_root checking {:?}", dir);
+            eprintln!("[debug] find_project_root cargo.toml exists: {}", dir.join("Cargo.toml").is_file());
+        }
         if dir.join("Cargo.toml").is_file() {
-            return Some(dir.to_path_buf());
+            // 返回绝对路径，避免相对路径在后续 join 时产生歧义。
+            // ⚠️ `canonicalize("")` 在 Windows 上返回 None（空字符串不是合法绝对路径），
+            // 必须用 `current_dir()` 兜底：当 dir 是空串（代表当前工作目录）时，
+            // 直接返回 cwd 的规范化路径。
+            let canon = if dir == std::path::Path::new("") {
+                std::env::current_dir().ok()
+            } else {
+                std::fs::canonicalize(dir).ok()
+            };
+            if std::env::var_os("AURA_DEBUG_IMPORT").is_some() {
+                eprintln!("[debug] find_project_root found! canon={:?}", canon);
+            }
+            return canon;
         }
         cur = dir.parent();
+    }
+    if std::env::var_os("AURA_DEBUG_IMPORT").is_some() {
+        eprintln!("[debug] find_project_root: not found");
     }
     None
 }

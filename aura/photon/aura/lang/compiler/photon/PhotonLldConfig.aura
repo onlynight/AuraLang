@@ -28,7 +28,7 @@ package aura.lang.compiler.photon
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 
 // ─────────────────────────────────────────────────────────────
 // PhotonLldConfig — [lld] 段解析
@@ -68,10 +68,10 @@ class PhotonLldConfig {
         this.dir = ""
         this.loaded = true
 
-        if (!FileSystem.exists(this.manifestPath)) {
+        if (!FileUtils.exists(this.manifestPath)) {
             return false
         }
-        val text: String = FileSystem.readText(this.manifestPath)
+        val text: String = FileUtils.readText(this.manifestPath)
         if (text.length == 0) {
             return false
         }

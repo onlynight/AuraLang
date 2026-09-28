@@ -1,24 +1,24 @@
 // aura:///aura/lang/std/File.aura
 package aura.lang.std
 
-import aura.lang.native.Memory
 import aura.lang.native.memory.Allocator
 import aura.lang.native.file.FileOps
 import aura.lang.native.io.Stdio
 
 /// 文件资源实例（有状态）。
 ///
-/// 说明：构造参数用 `init(...)` 块表达（语言既有惯例），而不是
-/// `class File(path: String)` —— 后者是「主构造器参数」语法，AST 中
-/// 没有这个概念（构造器是 `ClassDecl.constructors`），写出来会直接报
-/// `parse error: Expected Arrow, got LBrace`。
-///
 /// 打开标志一律写字面量而不是 `FileOps.O_WRONLY` 等常量成员：
 /// **跨模块**的对象/接口常量成员在 AOT 下无法折叠（`FileOps` 是独立编译
 /// 单元，其 `const val` 不参与本编译单元的 HIR），会发射出未定义值
-/// `%FileOps` 导致链接失败。数值与 `aura/lang/native/file/FileOps.aura`
-/// 的声明保持一致（`O_RDONLY=0`、`O_WRONLY=1`、`O_CREAT=0x40`、
-/// `O_TRUNC=0x200`、`SEEK_SET=0`、`SEEK_END=2`）。
+/// `%FileOps` 导致链接失败。
+///
+/// ```aura
+/// val f: File = File("hello.txt")
+/// f.writeText("Hello, World!")
+/// val content: String = f.readText()
+/// f.exists()
+/// f.delete()
+/// ```
 ///
 /// @since 0.2
 class File {
@@ -62,8 +62,14 @@ class File {
             return ""
         }
 
+        // ⚠️ `Stdio.bufferToString` 是**零拷贝**：返回的 String 就是 `buf` 本身
+        // （见其文档「调用方此后**不得** `Allocator.free(buf)`」）。
+        // 旧实现在此处 free 后再返回 ⇒ 悬垂指针：调用方拿到的是已释放内存，
+        // 后续任何分配都会覆盖它 —— 实测自举驱动 `AotModuleLinker.loadPath`
+        // 读到的源码长度变成 6、内容全错（`parse-start len=6 nodes=1`），
+        // 读 `aura/core/aura/lang/String.aura` 时直接 0xC0000005。
+        // 因此这里**不能** free；缓冲区随返回的字符串一起存活（少量泄漏可接受）。
         val text: String = Stdio.bufferToString(buf, read)
-        Allocator.free(buf)
         return text
     }
 
@@ -84,8 +90,36 @@ class File {
         FileOps.close(fd)
     }
 
+    /// 读取整个文件为字节数组；失败返回空数组。
+    fun readBytes(): Array<Byte> {
+        val text: String = readText()
+        val arr: Array<Byte> = arrayOf<Byte>()
+        var i: Int = 0
+        while (i < text.length) {
+            arr[i] = text.charCodeAt(i) as Byte
+            i = i + 1
+        }
+        return arr
+    }
+
+    /// 覆写整个文件（二进制）。
+    fun writeBytes(bytes: Array<Byte>): Unit {
+        var content: String = ""
+        var i: Int = 0
+        while (i < bytes.size) {
+            content = content + String.fromCharCode(bytes[i])
+            i = i + 1
+        }
+        writeText(content)
+    }
+
     /// 文件是否存在。
     fun exists(): Boolean {
+        return Stdio.fileExists(pathStr)
+    }
+
+    /// 是否为普通文件。
+    fun isFile(): Boolean {
         return Stdio.fileExists(pathStr)
     }
 
@@ -101,5 +135,19 @@ class File {
     /// 删除文件。
     fun delete(): Unit {
         FileOps.unlink(pathBuf)
+    }
+
+    /// 重命名文件到 newPath。
+    fun renameTo(newPath: String): Unit {
+        val newBuf: Long = Stdio.stringToBuffer(newPath)
+        if (newBuf == 0) { return }
+        FileOps.rename(pathBuf, newBuf)
+        Allocator.free(newBuf)
+    }
+
+    /// 复制文件到 targetPath。
+    fun copyTo(targetPath: String): Unit {
+        val target: File = File(targetPath)
+        target.writeText(readText())
     }
 }

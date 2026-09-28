@@ -14,7 +14,7 @@ package aura.lang.compiler.photon
 
 import aura.lang.std.String
 import aura.lang.std.Env
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.compiler.photon.Lir
 import aura.lang.compiler.photon.MachineDag
 // `emitConst` 需要按类型 id 判断字符串常量（this.types.isString）：
@@ -72,7 +72,7 @@ class InstructionSelector {
     /// 的说明）：漏一项就会在链接期报 `duplicate symbol`。
     /// 成员方法按本表的 `.` 拼写书写，比较时由 `dotToUnderscore` 归一化，
     /// 因此 `Collections.getAt` 与 `Collections_getAt` 都能命中。
-    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.listRemove,Collections.count,Collections.clear,Collections.hashMapPut,Collections.indexOf,Collections.contains,Collections.mapContainsKey,Collections.getAt,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4"
+    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.listRemove,Collections.count,Collections.clear,Collections.hashMapPut,Collections.indexOf,Collections.contains,Collections.mapContainsKey,Collections.getAt,Collections.listAppend,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4"
 
     /// `computeReachable` 的列表形式结果（供 `select()` 免分配查表）。
     private var reachableNames: List<String> = arrayListOf<String>()
@@ -98,7 +98,7 @@ class InstructionSelector {
     /// 43s → **265s**、`Main.obj` 1.11MB → 1.73MB —— 收益为零（`add`/`keys`
     /// 的调用点仍未被映射，仍是未定义），代价却是 6 倍编译时间。
     /// 只保留**确实解决未定义**的三个（且都是叶子小函数）。
-    private var forceReachable: String = "MirUtils_mirNoKids,MirUtils_mirKidsAdd,Linearizer_mirNoKids,Linearizer_mirKidsAdd,FileSystem_mkdir,ArrayList_add,HashMap_keys,Ast_add,Hir_add,Mir_add"
+    private var forceReachable: String = "MirUtils_mirNoKids,MirUtils_mirKidsAdd,Linearizer_mirNoKids,Linearizer_mirKidsAdd,FileUtils_mkdir,ArrayList_add,HashMap_keys,Ast_add,Hir_add,Mir_add"
 
     /// Phase C 定位探针（见 `selProbe` 的说明）。
     private var probePath: String = ""
@@ -498,7 +498,7 @@ class InstructionSelector {
         if (this.probeBuf.length > 3000) {
             this.probeBuf = this.probeBuf.substring(this.probeBuf.length - 2500)
         }
-        FileSystem.writeText(this.probePath, this.probeBuf)
+        FileUtils.writeText(this.probePath, this.probeBuf)
     }
 
     /// 名字是否由 Photon runtime 目标文件（`aura_runtime.obj`）提供。
@@ -1383,7 +1383,7 @@ class InstructionSelector {
             && this.lir != null) {
             // Case 1: rhs 是常量 0 → streq 结果比较
             val rhsVal: LirValue = this.lir.valueOf(rhs)
-            if (this.types.isInt64(rhsVal.type)
+            if (this.types.isInt(rhsVal.type)
                 && rhsVal.isConst()
                 && (LirUtils.strToInt(rhsVal.aux) == 0 || LirUtils.strToInt(rhsVal.args) == 0)) {
                 // streq 已经返回 1/0，直接 cmp 0 + setcc
@@ -1468,6 +1468,35 @@ class InstructionSelector {
         // ⚠️ 前端发的是**限定后**的名字（`@call @Env_get(...)`），两种拼法都要映射；
         // 并把 `Env_get` 留在跳过名单里，避免 stdlib 那份（光子路径恒返回空串）被发射。
         if (name == "Env.get" || name == "Env_get") { return "env_get" }
+        // `Console.println(msg)` / `Console.print(msg)` → runtime 的 `println` / `print`
+        //
+        // ⚠️ 前端把大写接收者名的成员调用写为 `ClassName_method`
+        // （`Hir.aura::lowerCall` 的 P1 fix），因此 `Console.println(msg)`
+        // 在 HAT IR 里是 `@Console_println(...)`，而 runtime 实现的名字是
+        // `println`（`PhotonRuntime.aura::RUNTIME_SYMBOLS`）。
+        // 不加映射会报 `undefined symbol: Console_println`（实测）。
+        //
+        // 同时覆盖 Rust 前端的 `aura_lang_std_Console_println` 形态
+        // （`sanitizeLlvm("aura.lang.std.Console.println")`），
+        // 以及 `.` 分隔的 `Console.println` 形态。
+        if (name == "Console_println" || name == "Console.println"
+            || name == "aura.lang.std.Console.println"
+            || name == "aura_lang_std_Console_println") { return "println" }
+        if (name == "Console_print" || name == "Console.print"
+            || name == "aura.lang.std.Console.print"
+            || name == "aura_lang_std_Console_print") { return "print" }
+        // `IO.println(msg)` / `IO.print(msg)` → 同上
+        if (name == "IO_println" || name == "IO.println"
+            || name == "aura.lang.std.IO.println"
+            || name == "aura_lang_std_IO_println") { return "println" }
+        if (name == "IO_print" || name == "IO.print"
+            || name == "aura.lang.std.IO.print"
+            || name == "aura_lang_std_IO_print") { return "print" }
+        // `Stdio.println(msg)` / `Stdio.print(msg)` → 同上
+        if (name == "Stdio_println" || name == "Stdio.println"
+            || name == "aura.lang.std.Stdio.println") { return "println" }
+        if (name == "Stdio_print" || name == "Stdio.print"
+            || name == "aura.lang.std.Stdio.print") { return "print" }
         if (name == "String.charCodeAt" || name == "charCodeAt") { return "charCodeAt" }
         if (name == "Any.toString") { return "toString" }
         if (name == "Any.equals") { return "streq" }
@@ -1526,10 +1555,10 @@ class InstructionSelector {
         if (name == "FileOps_read") { return "io_read" }
         if (name == "FileOps_write") { return "io_write" }
         if (name == "FileOps_access") { return "io_access" }
-        // `FileSystem.mkdir(path)` → 模块内**已编译**的 `FileSystem_mkdir`
+        // `FileUtils.mkdir(path)` → 模块内**已编译**的 `FileUtils_mkdir`
         //（签名一致：1 个 String 参数）。前端把它发成限定名 `FileOps_mkdir`，
         // 而 runtime 没有 `io_mkdir`，直接映射到模块内实现最省事且语义正确。
-        if (name == "FileOps_mkdir" || name == "FileSystem_mkdir" || name == "mkdir") { return "FileSystem_mkdir" }
+        if (name == "FileOps_mkdir" || name == "FileUtils_mkdir" || name == "mkdir") { return "FileUtils_mkdir" }
         // ── 编译器自身的**同名工具函数**：两套定义，靠**元数**区分 ──
         //
         // HAT 实测（自举 Main.aura）：
@@ -1568,6 +1597,18 @@ class InstructionSelector {
         if (name == "spanOf" && recvTy == "Ast") { return "Ast_spanOf" }
         if (name == "spanOf" && recvTy == "Hir") { return "Hir_spanOf" }
         if (name == "spanOf" && recvTy == "Mir") { return "Mir_spanOf" }
+        if (name == "kindOf" && recvTy == "Ast") { return "Ast_kindOf" }
+        if (name == "kindOf" && recvTy == "Hir") { return "Hir_kindOf" }
+        if (name == "kindOf" && recvTy == "Mir") { return "Mir_kindOf" }
+        if (name == "textOf" && recvTy == "Ast") { return "Ast_textOf" }
+        if (name == "textOf" && recvTy == "Hir") { return "Hir_textOf" }
+        if (name == "textOf" && recvTy == "Mir") { return "Mir_textOf" }
+        if (name == "childOf" && recvTy == "Ast") { return "Ast_childOf" }
+        if (name == "childOf" && recvTy == "Hir") { return "Hir_childOf" }
+        if (name == "childOf" && recvTy == "Mir") { return "Mir_childOf" }
+        if (name == "tyOf" && recvTy == "Ast") { return "Ast_tyOf" }
+        if (name == "tyOf" && recvTy == "Hir") { return "Hir_tyOf" }
+        if (name == "tyOf" && recvTy == "Mir") { return "Mir_tyOf" }
         // ── 兜底：接收者类型未正确传播（`Basic` / `""`）时的启发式 ──
         //
         // `Hir.aura::lowerMember` 未把字段声明类型写到 HirNode.ty，导致
@@ -1585,6 +1626,13 @@ class InstructionSelector {
         if (name == "leaf" && recvTy != "Hir" && recvTy != "Mir") { return "Ast_leaf" }
         if (name == "kidsOf" && recvTy != "Hir" && recvTy != "Mir") { return "Ast_kidsOf" }
         if (name == "spanOf" && recvTy != "Hir" && recvTy != "Mir") { return "Ast_spanOf" }
+        // 同类 Ast 工具方法（`kindOf` / `textOf` / `childOf` / `tyOf`）：
+        // 与 `leaf`/`kidsOf`/`spanOf` 同源 —— 三个类同时声明、`receiverClassOf`
+        // 返回 ""、裸名透传。实测自举 Main.exe 全部是 Ast 侧的调用。
+        if (name == "kindOf" && recvTy != "Hir" && recvTy != "Mir") { return "Ast_kindOf" }
+        if (name == "textOf" && recvTy != "Hir" && recvTy != "Mir") { return "Ast_textOf" }
+        if (name == "childOf" && recvTy != "Hir" && recvTy != "Mir") { return "Ast_childOf" }
+        if (name == "tyOf" && recvTy != "Hir" && recvTy != "Mir") { return "Ast_tyOf" }
         // ── 集合方法（裸名）：接收者类型**带类型参数**（`List<Any>`、
         //    `Map<String,Int>`），按等值匹配必然失手，必须用**前缀**判定 ──
         //
@@ -1593,7 +1641,7 @@ class InstructionSelector {
         // `VmStack_push`（`__field_get(this,0) : List<Any>` 后接 `.add(v)`）、
         // `keys` ← `Codegen_varTableStr`。用 `recvTy == "List"` 之类的等值判断
         // 永远命中不了（类型名里有 `<...>`），这是上一次改造没生效的原因。
-        if (name == "add" && recvTy.indexOf("List") >= 0) { return "ArrayList_add" }
+        if (name == "add" && recvTy.indexOf("List") >= 0) { return "Collections.listAppend" }
         // ⚠️ 集合的 `add` 还有一种**三参**形态：`add(this, item, memToken)`
         //（调用点把内存链 token 作为最后一个实参，见 HAT 的 `@MemToken`）。
         // 这时**不能用类型判定**：接收者常来自 `arrayListOf(...)`，HAT 把它的类型
@@ -1611,7 +1659,7 @@ class InstructionSelector {
         // `VmOps_add(@a, @b)`（VM 算术 `+`）两参、无 mem token，天然不受影响。
         // 目标 `ArrayList_add(@this, @item)` 只用 rcx/rdx，多传的 r8 被忽略，
         // 因此三参调用点绑到它**语义与 ABI 都安全**。
-        if (name == "add" && lastIsMem) { return "ArrayList_add" }
+        if (name == "add" && lastIsMem) { return "Collections.listAppend" }
         if (name == "keys" && recvTy.indexOf("HashMap") >= 0) { return "HashMap_keys" }
         if (name == "keys" && recvTy.indexOf("Map") >= 0) { return "HashMap_keys" }
         // ── 元数兜底（判据来自**全量实测**，不是猜测）──
@@ -1625,7 +1673,7 @@ class InstructionSelector {
         // ⇒ 3 参的 `add` 只可能是「集合 add + 内存链 token」，2 参的 `keys` 只可能是
         // `HashMap_keys`。前面基于接收者类型/MemToken 的判定在这些调用点上都不命中
         //（接收者类型常被标注成 `Basic`，见 HAT），故在此按元数兜底。
-        if (name == "add" && argCount >= 3) { return "ArrayList_add" }
+        if (name == "add" && argCount >= 3) { return "Collections.listAppend" }
         if (name == "keys" && argCount >= 2) { return "HashMap_keys" }
         // Collections.listRemove(list, idx) → 运行时移除元素
         if (name == "aura.lang.std.Collections.listRemove" || name == "Collections.listRemove"

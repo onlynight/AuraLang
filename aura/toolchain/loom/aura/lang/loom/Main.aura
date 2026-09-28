@@ -2,7 +2,7 @@
 package aura.lang.loom
 
 import aura.lang.std.Process
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 
 // Loom CLI entry point (pure Aura implementation)
 // Delegates compilation to aura.exe via Process.run()
@@ -39,7 +39,7 @@ object LoomUtils {
     // Find the aura compiler executable (use PATH or known locations)
     fun findAuraCompiler(): String {
         // Try cargo install location first
-        if (FileSystem.exists("C:/Users/zhang/.cargo/bin/aura.exe")) {
+        if (FileUtils.exists("C:/Users/zhang/.cargo/bin/aura.exe")) {
             return "C:/Users/zhang/.cargo/bin/aura.exe"
         }
         // Try PATH
@@ -85,7 +85,7 @@ object LoomUtils {
         Process.run("del /q *.auc 2>nul")
         
         // Clean target/release but preserve aura.exe
-        if (FileSystem.exists("target")) {
+        if (FileUtils.exists("target")) {
             Process.run("del /q target\\release\\*.auc 2>nul")
             Process.run("del /q target\\release\\*.exe 2>nul")
             Process.run("del /q target\\release\\aura.exe 2>nul")
@@ -186,10 +186,10 @@ object LoomUtils {
             }
         } else {
             // Run default executable
-            if (FileSystem.exists("target/release/app.exe")) {
+            if (FileUtils.exists("target/release/app.exe")) {
                 println("[loom] Running: target/release/app.exe")
                 return Process.run("target/release/app.exe")
-            } else if (FileSystem.exists("target/release/main.exe")) {
+            } else if (FileUtils.exists("target/release/main.exe")) {
                 println("[loom] Running: target/release/main.exe")
                 return Process.run("target/release/main.exe")
             } else {
@@ -208,7 +208,7 @@ object LoomUtils {
         Process.run("mkdir package 2>nul")
         
         // Copy executable to package
-        if (FileSystem.exists("target/release")) {
+        if (FileUtils.exists("target/release")) {
             Process.run("xcopy target\\release\\*.exe package\\ /Y")
             println("[loom] Copied executables to package/")
         }

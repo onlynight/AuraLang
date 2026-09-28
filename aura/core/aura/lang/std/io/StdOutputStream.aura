@@ -1,0 +1,27 @@
+// aura:///aura/lang/std/io/StdOutputStream.aura
+package aura.lang.std.io
+
+/// 标准输出流实现。
+///
+/// 委托到 `StreamImpl.writeOut`，直接写入 stdout（fd=1）。
+/// 无缓冲，每次调用立即写入。
+///
+/// @since 0.3
+class StdOutputStream : OutputStream {
+
+    override fun println(msg: String): Unit {
+        StreamImpl.writeOut(msg, true)
+    }
+
+    override fun print(msg: String): Unit {
+        StreamImpl.writeOut(msg, false)
+    }
+
+    override fun flush(): Unit {
+        // 无缓冲，直接写入 fd，无需刷新
+    }
+
+    override fun close(): Unit {
+        // stdout 不可关闭
+    }
+}

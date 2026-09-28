@@ -1522,7 +1522,16 @@ class SsaBuilder {
             funcName = this.resolveMethodSymbol(src, kids, kCount, funcName)
         }
 
-        if (this.memHead >= 0) {
+        // 顶层自由函数（用户自己写的 `fun add(a, b)`）的调用**不追加内存链尾参**。
+        //
+        // 否则 `add(3, 4)` 会变成 3 实参形态 `@call @add(3, 4, mem)`，与「集合追加」
+        // 的 `add(x, mem)` 撞车：后端 `InstructionSelection.mapStdlibFuncName` 按
+        // 「3 实参的 `add`」判为集合追加、改派成运行库符号 `Collections.listAppend`
+        // ⇒ 实测 `tests/photon/P1/05_functions.aura` 一进 `main` 就 0xC0000005
+        //（`movq (%rcx),%rax`，rcx=3 被当列表指针）。
+        // 自由函数是普通 ABI（形参个数 = 声明参数），多传一个尾参既无意义又会让
+        // 后端的名字映射误判。
+        if (this.memHead >= 0 && !this.isFreeFunc(bareName)) {
             if (args == "") {
                 args = toStr(this.memHead)
             } else {
@@ -2219,7 +2228,32 @@ class SsaBuilder {
         if (name == "" || ty == "") {
             return
         }
-        this.localTypes = this.localTypes + name + "|" + ty + "\n"
+        // 归一化：HIR 把可见性修饰符以 `#<vis>|` 前缀写进声明节点的 `ty` 字段
+        //（见 `Parser.aura` 的 `prsCurVis` 注释）⇒ `ty` 实为 `#public|String`。
+        // 不剥掉的话本表记录成 `s3|#public|String`，而 `localTypeOf` 按 `|` 切分
+        // 只取到 `#public` ⇒ 接收者类型判定全部失手：`s3.length()` 落进
+        // 「方法属主唯一候选」兜底 ⇒ `StringBuilder_length(s3)`（把字符串指针当
+        // StringBuilder 读字段）⇒ 实测 `P2/04_string_ops.aura` 打印
+        // `len = 4404577004589182066`（VM 为 11）；同理 `List<Int>` 局部量会
+        // 退化成 `#public`，集合映射也一起失效。
+        val norm: String = this.normAuraType(ty)
+        if (norm == "") {
+            return
+        }
+        this.localTypes = this.localTypes + name + "|" + norm + "\n"
+    }
+
+    /// 归一化 HIR 类型名：剥掉 `#<vis>|` 可见性前缀；纯可见性（无类型）返回 ""。
+    private fun normAuraType(ty: String): String {
+        var s: String = ty
+        if (s.startsWith("#")) {
+            val bar: Int = s.indexOf("|")
+            if (bar < 0) {
+                return ""
+            }
+            s = s.substring(bar + 1, s.length)
+        }
+        return s
     }
 
     /// 局部变量声明类型名（未命中返回 ""）。
@@ -2526,17 +2560,22 @@ class SsaBuilder {
             + toStr(index) + "|" + fty + "|" + toStr(defId) + "\n"
     }
 
-    /// 字段默认值表达式节点（仅接受字面量；其余走零初始化）。
+    /// 字段默认值表达式节点。
     ///
-    /// 只认字面量是刻意的：默认值在「构造器合成」阶段求值，那里没有
-    /// `this`/局部变量上下文，复杂表达式会退化成读 null。
+    /// 接受字面量（`HirLit`）和函数调用（`HirCall`，如 `arrayListOf<String>()`）。
+    /// 此前只认字面量，导致 `= arrayListOf<String>()` 这类**非字面量默认值**被
+    /// 忽略、字段零初始化为 null —— 自举 `Hir` / `Ast` / `Mir` 等核心类的
+    /// 列表字段全部为 null，构造后首次 `add` 即触发 `movq (%rcx), %rcx`（rcx=0）崩溃。
+    /// `HirCall` 不引用 `this`/局部变量（`arrayListOf()` 是纯函数调用），
+    /// 在构造器合成阶段求值安全。
     private fun fieldDefaultNode(src: Hir, declNode: Int): Int {
         val kids: String = src.kidsOf(declNode)
         if (HirUtils.hirKidsCount(kids) < 1) {
             return -1
         }
         val kid: Int = HirUtils.hirKidsAt(kids, 0)
-        if (src.kindOf(kid) == "HirLit") {
+        val k: String = src.kindOf(kid)
+        if (k == "HirLit" || k == "HirCall") {
             return kid
         }
         return -1
@@ -2724,6 +2763,9 @@ class SsaBuilder {
         if (bare == "indexOf") {
             return "Collections.indexOf"
         }
+        if (bare == "add") {
+            return "Collections.listAppend"
+        }
         return ""
     }
 
@@ -2799,6 +2841,32 @@ class SsaBuilder {
         if (bare == "") {
             return bare
         }
+        // 0) **运行库全局裸名优先**（`exit` / `exitGroup` / `strlen` / `toStr` …）
+        //
+        // 这些符号在运行库里是**裸名**（`aura_runtime.obj` 导出 `exit` / `exitGroup`），
+        // 若先走下面的「属主类前缀」就会生成 `Syscalls_exit` ⟶ 链接期
+        // `undefined symbol: Syscalls_exit`（实测 `tests/photon/P3/06_syscall_exit.aura`：
+        // `Syscalls.exit(0)` 是 `extern interface` 声明，实现由运行库提供）。
+        if (this.isRuntimeBareName(bare)) {
+            return bare
+        }
+        // 0.1) **`extern interface` 的 `Obj_method` → 运行库裸名**
+        //
+        // `Hir.aura::lowerCall` 的 P1 fix 把 `Uppercase.m(...)` 一律限定成
+        // `Uppercase_m`，但 `extern interface`（`Syscalls` / …）的实现由运行库
+        // 以**裸名**提供：`Syscalls.exit(0)` 因此成了 `Syscalls_exit` ⟶
+        // 链接期 `undefined symbol: Syscalls_exit`（实测 P3/06_syscall_exit.aura）。
+        // 只在「前缀是 `extern interface` 名」**且**「后缀确实是运行库裸名」时剥前缀，
+        // 避免误伤本就带前缀的 `Memory_alloc` / `ProcessOps_execve` / `ThreadOps_*`。
+        val us: Int = bare.indexOf("_")
+        if (us > 0 && this.externCsv.indexOf("\n" + bare.substring(0, us) + "\n") >= 0) {
+            val tail: String = bare.substring(us + 1, bare.length)
+            if (this.isRuntimeBareName(tail)) {
+                return tail
+            }
+        }
+        // `length`/`size`（字符串）与集合映射都需要接收者的**真实声明类型**，
+        // 见 `localTypeAdd` 的归一化说明。
 
         // 0) **集合族接收者 → 运行库符号**（先于其它一切判定，且不依赖 `classMethods`）
         //
@@ -2815,6 +2883,18 @@ class SsaBuilder {
             val rtSym: String = this.collectionRuntimeSymbol(recvTy, bare)
             if (rtSym != "") {
                 return rtSym
+            }
+            // 0.5) **字符串 `s.length()` / `s.size()`（带括号）→ 运行库 `strlen`**
+            //
+            // 属性式（`s.length`，无括号）在 `buildFieldGet` 里已降级为 `strlen`；
+            // 带括号的形式走 `buildCall`→本方法，若不在这里映射，会落到下面的
+            // 「方法属主」兜底 —— `length` 的**唯一属主**是 `StringBuilder`
+            // ⇒ 生成 `@call @StringBuilder_length(s, mem)`，把字符串指针当
+            // StringBuilder 读字段 ⇒ 长度变成垃圾大整数
+            //（实测 `tests/photon/P2/04_string_ops.aura`：`len = 4404577004589182066`，
+            //  VM 为 11）。与属性式保持一致，直接映射 `strlen`（按 NUL 结尾计算）。
+            if ((bare == "length" || bare == "size") && recvTy == "String") {
+                return "strlen"
             }
         }
 
@@ -3142,16 +3222,23 @@ class SsaBuilder {
             fi = fi + 1
         }
 
-        // 把构造实参转发给 `<Class>_init<ar>`：`constructor(m) : super(m) { }`
-        // 的字段初始化写在 init 体里（经 `super` 降级），`__new` 只负责
-        // 分配与默认值。`curParams` 已是「入口块 Param 值」的逗号串，直接拼上。
-        if (this.initOverloaded(cname)) {
+        // 把构造实参转发给 `<Class>_init` / `<Class>_init<ar>`：
+        // `constructor(m) : super(m) { }` 的字段初始化写在 init 体里
+        //（经 `super` 降级），`__new` 只负责分配与默认值。
+        //
+        // ⚠️ 此前只在 `initOverloaded(cname)` 为 true 时调用，导致**单
+        // init 类**（如 `Exception("msg")`）的 init 体被完全跳过 —— 构造参数
+        // 无处落地，字段初始化也全部丢失（P4 `test_exception` 的
+        // `message` 恒为空）。现在只要有 init 就调用：重载时加 `<ar>` 后缀，
+        // 非重载时用裸名，与 `buildFunction` / `buildCall` 一致。
+        if (this.classDeclaresMethod(cname, "init")) {
             var initArgs: String = toStr(objVal)
             if (this.curParams != "") {
                 initArgs = initArgs + "," + this.curParams
             }
-            this.program.addValue("Call", lty, initArgs,
-                    cname + "_init" + ar, this.curBlock)
+            val initFunc: String = if (this.initOverloaded(cname))
+                cname + "_init" + ar else cname + "_init"
+            this.program.addValue("Call", lty, initArgs, initFunc, this.curBlock)
             // 父类 init 由 `<Sub>_init<ar>` 体内的 `super(...)` 降级处理
             //（见 `buildCall` 的 `super` 分支），这里不再重复调用。
         }

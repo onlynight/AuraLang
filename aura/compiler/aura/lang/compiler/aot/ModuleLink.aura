@@ -22,7 +22,7 @@ package aura.lang.compiler.aot
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.parser.Parser
 import aura.lang.compiler.hir.Hir
@@ -116,8 +116,8 @@ class AotModuleLinker {
         while (i < pathCount) {
             val p: String = aotLineAt(paths, i)
             val norm: String = ModuleLinkUtils.normalizePath(p)
-            if (norm != "" && FileSystem.exists(norm) && this.cacheGet(norm) == "") {
-                val content: String = FileSystem.readText(norm)
+            if (norm != "" && FileUtils.exists(norm) && this.cacheGet(norm) == "") {
+                val content: String = FileUtils.readText(norm)
                 this.cacheBlob = this.cacheBlob + norm + "\n" + toStr(content.length) + "\n" + content
             }
             i = i + 1
@@ -178,7 +178,7 @@ class AotModuleLinker {
         if (aotListContains(this.seen, norm)) {
             return hirNoKids()
         }
-        if (!FileSystem.exists(norm)) {
+        if (!FileUtils.exists(norm)) {
             this.missing = this.missing + norm + "\n"
             return hirNoKids()
         }
@@ -190,7 +190,7 @@ class AotModuleLinker {
         if (cached != "") {
             source = cached
         } else {
-            source = FileSystem.readText(norm)
+            source = FileUtils.readText(norm)
         }
         val p: Parser = Parser(source)
         p.parseProgram()
@@ -317,7 +317,7 @@ class AotModuleLinker {
         val n: Int = aotLineCount(candidates)
         while (i < n) {
             val c: String = ModuleLinkUtils.normalizePath(aotLineAt(candidates, i))
-            if (FileSystem.exists(c)) {
+            if (FileUtils.exists(c)) {
                 return c
             }
             i = i + 1
@@ -339,7 +339,7 @@ class AotModuleLinker {
 
     /// 查找同包下的所有 .aura 文件（排除自身）。
     /// 使用预生成的索引文件 `aura/.aura_index.txt`（格式：`package|relativePath`），
-    /// 避免运行时目录遍历（Aura FileSystem 在 AOT 模式下不支持 listDir）。
+    /// 避免运行时目录遍历（Aura FileUtils 在 AOT 模式下不支持 listDir）。
     fun findSiblingAuraFiles(pkgName: String, selfPath: String): String {
         if (pkgName == "") {
             return ""
@@ -351,10 +351,10 @@ class AotModuleLinker {
         }
         // 读取索引文件
         val indexPath: String = auraRoot + "/.aura_index.txt"
-        if (!FileSystem.exists(indexPath)) {
+        if (!FileUtils.exists(indexPath)) {
             return ""
         }
-        val indexContent: String = FileSystem.readText(indexPath)
+        val indexContent: String = FileUtils.readText(indexPath)
         if (indexContent == "") {
             return ""
         }
@@ -441,7 +441,7 @@ object ModuleLinkUtils {
 
     /// Phase B.3：自动包含的 std 模块路径列表（换行分隔）。
     ///
-    /// 当用户代码引用 String/Math/FileSystem 等 std 类时，对应的 Aura 实现
+    /// 当用户代码引用 String/Math/FileUtils 等 std 类时，对应的 Aura 实现
     /// 必须参与编译。这些模块通过 `@native` 声明底层 syscall/asm，再由
     /// Phase A 的 emitNativeWrapper 直接生成 LLVM IR（无 C 运行库）。
     ///
@@ -481,7 +481,7 @@ object ModuleLinkUtils {
             // Phase P1-P3: 纯 Aura 标准库模块（已验证可自动包含）
             "aura/core/aura/lang/std/string/StringBuilder.aura\n" +
             "aura/core/aura/lang/collection/Collections.aura\n" +
-            "aura/core/aura/lang/std/FileSystem.aura\n" +
+            "aura/core/aura/lang/std/fs/FileUtils.aura\n" +
             "aura/core/aura/lang/native/file/FileOps.aura\n" +
             "aura/core/aura/lang/std/string/StringOps.aura\n" +
             "aura/core/aura/lang/native/process/ProcessNative.aura\n"

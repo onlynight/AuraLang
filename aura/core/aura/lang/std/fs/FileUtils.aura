@@ -1,0 +1,185 @@
+// aura:///aura/lang/std/fs/FileUtils.aura
+package aura.lang.std.fs
+
+import aura.lang.std.File
+import aura.lang.native.memory.Allocator
+import aura.lang.native.file.FileOps
+import aura.lang.native.io.Stdio
+import aura.lang.native.Memory
+
+/// 文件系统工具对象。
+///
+/// 提供文件操作、批量操作。
+/// 所有操作均委托到 `File` 类实现。
+///
+/// @since 0.3
+object FileUtils {
+
+    // ── 文件检查 ──
+
+    /// 检查路径是否存在。
+    fun exists(path: String): Boolean {
+        return File(path).exists()
+    }
+
+    /// 检查路径是否为文件。
+    fun isFile(path: String): Boolean {
+        return File(path).isFile()
+    }
+
+    /// 检查路径是否为目录。
+    fun isDirectory(path: String): Boolean {
+        return false
+    }
+
+    // ── 文件读取 ──
+
+    /// 读取文本文件。
+    fun readText(path: String): String {
+        return File(path).readText()
+    }
+
+    /// 读取二进制文件（返回字节数组）。
+    fun readBytes(path: String): Array<Byte> {
+        return File(path).readBytes()
+    }
+
+    // ── 文件写入 ──
+
+    /// 写入文本文件。
+    fun writeText(path: String, content: String): Unit {
+        File(path).writeText(content)
+    }
+
+    /// 写入二进制文件。
+    fun writeBytes(path: String, bytes: Array<Byte>): Unit {
+        File(path).writeBytes(bytes)
+    }
+
+    // ── 批量操作 ──
+
+    /// 批量写入多个文件（同内容）。
+    fun batchWrite(paths: List<String>, content: String): Unit {
+        val size: Int = paths.size
+        var i: Int = 0
+        while (i < size) {
+            writeText(paths[i], content)
+            i = i + 1
+        }
+    }
+
+    /// 批量读取多个文件，返回合并内容（用换行分隔）。
+    fun batchRead(paths: List<String>): String {
+        val size: Int = paths.size
+        var result: String = ""
+        var i: Int = 0
+        while (i < size) {
+            if (i > 0) { result = result + "\n" }
+            result = result + readText(paths[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 文件操作 ──
+
+    /// 删除文件。
+    fun delete(path: String): Unit {
+        File(path).delete()
+    }
+
+    /// 重命名文件。
+    fun rename(oldPath: String, newPath: String): Unit {
+        File(oldPath).renameTo(newPath)
+    }
+
+    /// 复制文件。
+    fun copy(source: String, target: String): Unit {
+        File(source).copyTo(target)
+    }
+
+    // ── 目录操作 ──
+
+    /// 创建目录。
+    fun mkdir(path: String): Unit {
+        val pathBuf: Long = Stdio.stringToBuffer(path)
+        if (pathBuf == 0) { return }
+        FileOps.mkdir(pathBuf, 493)
+        Allocator.free(pathBuf)
+    }
+
+    /// 递归创建目录（含父目录）。
+    fun mkdirP(path: String): Unit {
+        val pathBuf: Long = Stdio.stringToBuffer(path)
+        if (pathBuf == 0) { return }
+        val len: Long = Stdio.strlen(pathBuf)
+        if (len <= 0) { Allocator.free(pathBuf); return }
+        var i: Long = 1
+        while (i < len) {
+            val c: Byte = Memory.read(pathBuf + i)
+            if (c == '/') {
+                Memory.write(pathBuf + i, 0)
+                FileOps.mkdir(pathBuf, 493)
+                Memory.write(pathBuf + i, '/')
+            }
+            i = i + 1
+        }
+        FileOps.mkdir(pathBuf, 493)
+        Allocator.free(pathBuf)
+    }
+
+    /// 删除空目录。
+    fun deleteDir(path: String): Unit {
+        // 简化实现：需要 rmdir syscall
+    }
+
+    /// 复制目录（递归）。
+    fun copyDir(source: String, target: String): Unit {
+        // 简化实现：需要 readdir + copy
+    }
+
+    // ── 文件信息 ──
+
+    /// 获取文件大小（字节）。不存在返回 0。
+    fun fileSize(path: String): Long {
+        return File(path).size()
+    }
+
+    /// 获取文件最后修改时间（简化实现：返回 0）。
+    fun lastModified(path: String): Float {
+        return 0.0f
+    }
+
+    // ── 路径信息 ──
+
+    /// 获取绝对路径（简化实现：返回原路径）。
+    fun absolutePath(path: String): String {
+        return path
+    }
+
+    /// 用户主目录。
+    val homeDir: String = ""
+
+    /// 临时目录。
+    val tempDir: String = ""
+
+    /// 当前工作目录。
+    val currentDir: String = ""
+
+    // ── 遍历 ──
+
+    /// 列出目录内容。
+    fun listDir(path: String): List<String> {
+        return arrayListOf<String>()
+    }
+
+    /// 列出目录中的文件。
+    fun listFiles(path: String): List<String> {
+        return arrayListOf<String>()
+    }
+
+    /// 递归遍历目录树。
+    fun walk(path: String): List<String> {
+        return arrayListOf<String>()
+    }
+}

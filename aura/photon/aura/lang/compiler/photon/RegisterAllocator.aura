@@ -15,7 +15,7 @@ package aura.lang.compiler.photon
 
 import aura.lang.std.String
 import aura.lang.std.Env
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 
 /// 寄存器分配器：乐观图着色算法。
 class RegisterAllocator {
@@ -719,7 +719,7 @@ class RegisterAllocator {
         if (this.probeBuf.length > 3000) {
             this.probeBuf = this.probeBuf.substring(this.probeBuf.length - 2500)
         }
-        FileSystem.writeText(this.probePath, this.probeBuf)
+        FileUtils.writeText(this.probePath, this.probeBuf)
     }
 
     /// 检查「带首尾逗号」的颜色串中是否已包含指定颜色（**零分配**）。
