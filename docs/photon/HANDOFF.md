@@ -880,3 +880,35 @@ powershell -File scripts\photon\photon-hat-native-suite.ps1 -Phase P1,P2,P3
 
 建议顺序：先 5（补符号，纯增量、能一次性点亮 2 个用例），再 1（布尔定型），
 然后 3/4（ARC / 异常，语义较重），最后 2（对象打印格式）。
+
+---
+
+## 第十一轮进展（2026-09-29）—— **P0 已修复：P0+P1+P2+P3 = PASS=16 FAIL=0**
+
+```
+powershell -File scripts\photon\photon-hat-native-suite.ps1 -Phase P0,P1,P2,P3
+→ TOTAL: PASS=16 FAIL=0
+```
+
+### 本轮修的 2 个缺陷（都在 `SsaBuilder.aura`）
+
+| # | 根因 | 现象 | 修复 |
+|---|------|------|------|
+| 11.1 | **`if` 表达式（值位置）没有 SSA 分支**：`buildExpr` 只认 HirVar/Binary/Unary/Call/Member/Index/Block，`val x = if (c) a else b` 与 `toStr(if …)` 实参位落到默认分支 ⇒ 直接产出 `null`/`0` 常量 | `P0/01_string_eq` 的 `eq_aa/eq_ab/eq_ne_ab` 在 .hat 里全是 `@null : Basic`，打印 `0/0/0`（VM 为 `1/0/1`）。**注意 kind 是 `HirIfExpr`**（`Hir.aura::lowerIfExpr`，`when` 也降级成它），不是语句用的 `HirIf` —— `AURA_PHOTON_TRACE=1` 的 `[expr] default branch for kind=…` 可直接看到 | 新增 `buildIfExpr`：条件 → `CondBr(then,else)`；两分支各求值 → merge 块 `@phi(thenV, elseV)` 作为表达式值（类型取 then 分支实值类型）；并接入 `buildExpr`（`HirIf` / `HirIfExpr` 都走它） |
+| 11.2 | **`mapVidOf` 的名字匹配不是「整行匹配」**：只检查「首字符 + 后面紧跟 `\|`」，**没检查是否行首**，且倒序扫描优先命中靠后的行 | 变量表 `a\|537\nb\|538\neq_aa\|548\n` 里查 `a` 命中了 `eq_aa` 末尾那个 `a` ⇒ `a` 被解析成 `eq_aa` 的值；查 `b` 命中 `eq_ab`。于是 `val eq_ab = if (a == b) 1 else 0` 编成 `@call @streq(@t548, @t538)`（@t548 是**上一个 if 的 Phi**），第三个判等更是拿前两个结果比 ⇒ 判等全错 | `mapVidOf` 增加「`p == 0` 或前一个字符是 `\n`」的行首判定 |
+
+> 11.2 是**通用正确性**修复（变量名互为子串时全线错值），
+> `varMap` / `varVersion` / `lookupVar` 三个表都走这个函数，一并受益。
+
+### 复现/定位手法（本轮新增）
+
+- `AURA_PHOTON_TRACE=1`：`buildExpr` 默认分支会打印 `[expr] default branch for kind=<kind>` ——
+  **识别「前端没实现这个节点」的最快手段**（本轮两个 bug 都是这样定位的）；
+- 变量错值类问题：直接读 `<out>/<module>.hat` 里对应 `@call` 的操作数，
+  和源码逐一对齐（本轮靠 `@call @streq(@t548, ...)` 一眼看出操作数是「上一个 if 的结果」）。
+
+### 剩余（P4，11 个）
+
+`-Phase P4` → PASS=1 FAIL=11，分类见上一节。其中 `test_memory_alloc` 只差
+「布尔打印」（`init: 1` vs VM `init: true`）、`probe_*` 多为对象引用打印格式，
+`test_runtime_init` / `test_thread` 是运行库符号缺口（`Runtime_*` / `ThreadOps_currentId`）。

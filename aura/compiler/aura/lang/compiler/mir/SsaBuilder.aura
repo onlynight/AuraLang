@@ -548,6 +548,79 @@ class SsaBuilder {
         this.varMapAdd(varName, initVal)
     }
 
+    /// 构建 `if` **表达式**（值位置）。
+    ///
+    /// 旧实现没有这条分支：`val x = if (c) a else b`（以及 `toStr(if …)` 这类实参位）
+    /// 直接落到 `buildExpr` 的默认分支，产出 `null`/`0` 常量 —— 实测
+    /// `tests/photon/P0/01_string_eq.aura` 的三个判等全变 `@null`，打印 `0/0/0`
+    ///（VM 为 `1/0/1`）。
+    ///
+    /// 实现：条件 → CondBr(then, else)；两分支各求值并把值留作 Phi 的 incoming
+    ///（then 在前、else 在后，与 CondBr 的操作数顺序一致，后端据此配对前驱）；
+    /// merge 块取 Phi 作为表达式值。
+    fun buildIfExpr(src: Hir, id: Int): Int {
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (kCount < 2) {
+            return -1
+        }
+        val condVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+        val thenBlock: Int = this.program.addBlock()
+        val elseBlock: Int = this.program.addBlock()
+        val mergeBlock: Int = this.program.addBlock()
+        this.program.setTerminator(this.curBlock, "CondBr", 0,
+            toStr(condVal) + "," + toStr(thenBlock) + "," + toStr(elseBlock), "")
+        val varMapBefore: String = this.varMap
+
+        // ── then 分支 ──
+        this.curBlock = thenBlock
+        var thenVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 1))
+        if (thenVal < 0) {
+            thenVal = this.zeroValueOf(src.tyOf(id))
+        }
+        if (this.program.blockOf(this.curBlock).term < 0) {
+            this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock), "")
+        }
+        val varMapAfterThen: String = this.varMap
+
+        // ── else 分支 ──
+        this.curBlock = elseBlock
+        var elseVal: Int = -1
+        if (kCount > 2) {
+            elseVal = this.buildExpr(src, HirUtils.hirKidsAt(kids, 2))
+        }
+        if (elseVal < 0) {
+            // 无 else（或分支无值）：补零值，保持与 `buildVarDecl` 的零值约定一致
+            elseVal = this.zeroValueOf(src.tyOf(id))
+        }
+        if (this.program.blockOf(this.curBlock).term < 0) {
+            this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock), "")
+        }
+        val varMapAfterElse: String = this.varMap
+
+        // 说明：这里**不**调用语句形式的 `insertPhisAtMerge` —— 值位置语义下，
+        // 分支内声明的变量不该泄漏到表达式之外；本表达式的值由下面的 Phi 给出。
+        //（`varMapBefore/AfterThen/AfterElse` 保留给将来需要时使用。）
+
+        // 本表达式的值 = merge 块的 Phi（类型取 then 分支的实值类型，最准确）
+        this.curBlock = mergeBlock
+        val phiType: Int = this.program.valueOf(thenVal).type
+        return this.makePhi(mergeBlock, phiType,
+            toStr(thenVal) + "," + toStr(elseVal), "")
+    }
+
+    /// 按 Aura 类型名生成零值常量（`Int` → `0`、`Float` → `0.0`、其余 → `null`）。
+    private fun zeroValueOf(tyName: String): Int {
+        val typeId: Int = this.types.fromTypeName(tyName)
+        if (this.types.isInt(typeId)) {
+            return this.program.addValue("Const", typeId, "", "0", this.curBlock)
+        }
+        if (this.types.isFloat(typeId)) {
+            return this.program.addValue("Const", typeId, "", "0.0", this.curBlock)
+        }
+        return this.program.addValue("Const", typeId, "", "null", this.curBlock)
+    }
+
     /// 构建 if 语句。
     ///
     /// 创建 then/else/merge 三个基本块：
@@ -786,7 +859,19 @@ class SsaBuilder {
         val c0: Int = name.charCodeAt(0)
         var p: Int = mlen - nlen - 1
         while (p >= 0) {
-            if (map.charCodeAt(p) == c0 && map.charCodeAt(p + nlen) == 124) {
+            // ⚠️ 必须要求 `p` 是**行首**（`p == 0` 或前一字符是 `\n`）。
+            //
+            // 原实现只检查「名字首字符 + 后面紧跟 `|`」，于是在
+            //     a|537\nb|538\neq_aa|548\n
+            // 里查 `a` 会命中 `eq_aa|548` 的**末尾那个 a**（它后面正好是 `|`），
+            // 且倒序扫描还优先命中它 ⇒ `a` 被解析成 `eq_aa` 的值。
+            // 实测 `tests/photon/P0/01_string_eq.aura`：
+            //     val eq_aa = if (a == a) 1 else 0
+            //     val eq_ab = if (a == b) 1 else 0      ← 这里的 a 变成 eq_aa（当前 if 的上一个结果）
+            //     val eq_ne_ab = if (a != b) 1 else 0   ← a→eq_aa、b→eq_ab
+            // HAT 里成了 `@call @streq(@t548, @t538)`（应为 @t537）⇒ 判等结果全错。
+            val atLineStart: Boolean = (p == 0) || (map.charCodeAt(p - 1) == 10)
+            if (atLineStart && map.charCodeAt(p) == c0 && map.charCodeAt(p + nlen) == 124) {
                 var match: Boolean = true
                 var k: Int = 1
                 while (k < nlen) {
@@ -1254,6 +1339,12 @@ class SsaBuilder {
         }
         if (kind == "HirIndex") {
             return this.buildIndex(src, id)
+        }
+        if (kind == "HirIf" || kind == "HirIfExpr") {
+            // `if` 用在**值位置**（`val x = if (c) a else b`、`toStr(if …)` 参数位）。
+            // 注意 kind 是 `HirIfExpr`（`Hir.aura::lowerIfExpr`；`when` 也降级成它），
+            // 不是语句用的 `HirIf` —— 两种都接住，避免又落到默认分支产出 `null`。
+            return this.buildIfExpr(src, id)
         }
         if (kind == "HirBlock") {
             // 块表达式：构建块，返回最后一个表达式的值
