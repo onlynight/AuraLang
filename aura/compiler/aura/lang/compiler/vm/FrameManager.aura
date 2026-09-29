@@ -7,8 +7,8 @@ package aura.lang.compiler.vm
 //
 // ── 设计方式 ──
 //
-// 使用 Frame 类 + ArrayList<Frame> 存储帧链（替代旧版字符串编码）。
-// 帧数据 O(1) 访问，无字符串重建开销。
+// 使用 HashMap 存储帧数据（替代 List<Frame>，后者在 AOT 下有类型推断问题）。
+// 每帧 6 个字段分别存储在独立 HashMap 中，O(1) 访问。
 //
 // ── 增强特性（Phase 5）──
 //
@@ -22,28 +22,7 @@ package aura.lang.compiler.vm
 
 import aura.lang.std.String
 import aura.lang.compiler.lexer.Span
-import aura.lang.collection.ArrayList
-import aura.lang.collection.Collections
 import aura.lang.collection.HashMap
-
-/// 栈帧（结构化对象，替代旧版字符串编码）。
-class Frame {
-    private var id: Int = 0
-    private var funcName: String = ""
-    private var ip: Int = 0
-    private var arity: Int = 0
-    private var localsCount: Int = 0
-    private var upvalues: String = ""
-
-    init() {
-        this.id = 0
-        this.funcName = ""
-        this.ip = 0
-        this.arity = 0
-        this.localsCount = 0
-        this.upvalues = ""
-    }
-}
 
 /// 增强栈帧管理器。
 class FrameManager {
@@ -59,12 +38,12 @@ class FrameManager {
     /// 最大调用深度。
     private var maxCallDepth: Int = 64
 
-    /// 帧链表（原生堆列表，O(1) 访问）。
-    ///
-    /// **不能用 `ArrayList<Frame>` 类**：其构造器内部用 `mutableListOf`，
-    /// 而 `mutableListOf` 的实现又是 `ArrayList<Any>(items)`；
-    /// 自举 AOT 下这条环会变成无限递归（构造即栈溢出）。原生堆列表没有该问题。
-    private var frames: List<Frame> = arrayListOf<Frame>()
+    /// 帧数据（独立 HashMap 存储各字段）。
+    private var frameFuncNames: HashMap<Int, String> = HashMap<Int, String>()
+    private var frameArity: HashMap<Int, Int> = HashMap<Int, Int>()
+    private var frameIp: HashMap<Int, Int> = HashMap<Int, Int>()
+    private var frameLocals: HashMap<Int, Int> = HashMap<Int, Int>()
+    private var frameUpvalues: HashMap<Int, String> = HashMap<Int, String>()
 
     /// 栈内存（HashMap 实现，O(1) get/set）。
     private var stackMemory: HashMap<Int, String> = HashMap<Int, String>()
@@ -89,7 +68,11 @@ class FrameManager {
         this.localsSize = 32
         this.maxStackDepth = 256
         this.maxCallDepth = 64
-        this.frames = arrayListOf<Frame>()
+        this.frameFuncNames = HashMap<Int, String>()
+        this.frameArity = HashMap<Int, Int>()
+        this.frameIp = HashMap<Int, Int>()
+        this.frameLocals = HashMap<Int, Int>()
+        this.frameUpvalues = HashMap<Int, String>()
         this.stackMemory = HashMap<Int, String>()
         this.frameCount = 0
         this.callDepth = 0
@@ -124,16 +107,13 @@ class FrameManager {
             return -1
         }
 
-        // 创建帧对象
-        val frame: Frame = Frame()
-        frame.id = id
-        frame.funcName = funcName
-        frame.ip = 0
-        frame.arity = arity
-        frame.localsCount = locals
-        frame.upvalues = ""
+        // 存储帧数据
+        this.frameFuncNames.put(id, funcName)
+        this.frameIp.put(id, 0)
+        this.frameArity.put(id, arity)
+        this.frameLocals.put(id, locals)
+        this.frameUpvalues.put(id, "")
 
-        this.frames.add(frame)
         this.frameCount = this.frameCount + 1
         this.callDepth = this.callDepth + 1
 
@@ -143,11 +123,13 @@ class FrameManager {
     /// 释放栈帧（LIFO 释放）。
     fun deallocateFrame(frameId: Int): Unit {
         if (this.callDepth > 0) {
-            // 从尾部移除（LIFO）
-            if (this.frames.size > 0) {
-                Collections.listRemove(this.frames, this.frames.size - 1)
-            }
+            this.frameFuncNames.remove(frameId)
+            this.frameIp.remove(frameId)
+            this.frameArity.remove(frameId)
+            this.frameLocals.remove(frameId)
+            this.frameUpvalues.remove(frameId)
             this.callDepth = this.callDepth - 1
+            this.frameCount = this.frameCount - 1
         }
     }
 
@@ -155,46 +137,50 @@ class FrameManager {
 
     /// 查询帧的函数名。
     fun frameFuncName(frameId: Int): String {
-        if (frameId < 0 || frameId >= this.frames.size) return ""
-        return this.frames.get(frameId).funcName
+        val v = this.frameFuncNames.get(frameId)
+        if (v == null) return ""
+        return v
     }
 
     /// 查询帧的指令指针。
     fun frameIp(frameId: Int): Int {
-        if (frameId < 0 || frameId >= this.frames.size) return 0
-        return this.frames.get(frameId).ip
+        val v = this.frameIp.get(frameId)
+        if (v == null) return 0
+        return v as Int
     }
 
     /// 查询帧的参数数量。
     fun frameArity(frameId: Int): Int {
-        if (frameId < 0 || frameId >= this.frames.size) return 0
-        return this.frames.get(frameId).arity
+        val v = this.frameArity.get(frameId)
+        if (v == null) return 0
+        return v as Int
     }
 
     /// 查询帧的局部变量槽数。
     fun frameLocals(frameId: Int): Int {
-        if (frameId < 0 || frameId >= this.frames.size) return 0
-        return this.frames.get(frameId).localsCount
+        val v = this.frameLocals.get(frameId)
+        if (v == null) return 0
+        return v as Int
     }
 
     /// 查询帧的上值列表。
     fun frameUpvalues(frameId: Int): String {
-        if (frameId < 0 || frameId >= this.frames.size) return ""
-        return this.frames.get(frameId).upvalues
+        val v = this.frameUpvalues.get(frameId)
+        if (v == null) return ""
+        return v
     }
 
     // ── 栈操作 ──
 
     /// 设置指令指针。
     fun setIp(frameId: Int, ip: Int): Unit {
-        if (frameId < 0 || frameId >= this.frames.size) return
-        this.frames.get(frameId).ip = ip
+        this.frameIp.put(frameId, ip)
     }
 
     /// 获取栈内存值。
     fun getStackValue(slotIdx: Int): String {
         val v = this.stackMemory.get(slotIdx)
-        if (toStr(v) == "null") return "0"
+        if (v == null) return "0"
         return v
     }
 
@@ -207,8 +193,7 @@ class FrameManager {
 
     /// 附加上值到帧（闭包捕获）。
     fun attachUpvalues(frameId: Int, upvalueIds: String): Unit {
-        if (frameId < 0 || frameId >= this.frames.size) return
-        this.frames.get(frameId).upvalues = upvalueIds
+        this.frameUpvalues.put(frameId, upvalueIds)
     }
 
     /// 查找父帧（通过 upvalues 链）。
@@ -221,12 +206,12 @@ class FrameManager {
 
     /// 复用当前帧（尾调用优化）。
     fun reuseFrame(frameId: Int, newArity: Int): Boolean {
-        if (frameId < 0 || frameId >= this.frames.size) return false
-        val frame = this.frames.get(frameId)
+        val current = this.frameArity.get(frameId)
+        if (current == null) return false
         // 更新参数数量
-        frame.arity = newArity
+        this.frameArity.put(frameId, newArity)
         // 重置指令指针
-        frame.ip = 0
+        this.frameIp.put(frameId, 0)
         return true
     }
 

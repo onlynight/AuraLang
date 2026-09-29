@@ -1453,13 +1453,30 @@ pub fn lower_program(hir: &HirProgram) -> (Vec<MirFunction>, LowerCtx) {
     for e in &hir.enums {
         ctx.enum_names.insert(e.name.clone());
     }
+    // Phase 1: **先**一次性登记所有用户自定义函数名，**再**逐个下沉。
+    //
+    // ⚠ 必须在任何 `lower_function` 之前登记完毕：此前是「边下沉边登记」，
+    // 于是**前向引用**（`f` 调用声明在它之后的 `g`）在下沉 `f` 时
+    // `ctx.user_functions` 里还没有 `g`，`lower_expr` 的 `HirExpr::Call`
+    // 分派便会落到最后的兜底分支，把用户函数 `g` 误发射为 **CallNative**。
+    //
+    // 后果（实测 AotUtil.aotFieldAt → AotUtil.aotSlice）：
+    //   * CallNative 的参数个数、self 注入语义与用户函数调用不一致
+    //     （natives 表按名登记、param_count 记 0）；
+    //   * `aotFieldAt`/`trimSpaces` 等**声明顺序靠前**的方法调用同 object 中
+    //     声明靠后的 `aotSlice` 时实参整体错位 → 返回空串；
+    //   * 表象是 phase6 大批字符串解析辅助函数（`aotFieldAt` / `aotLineAt` /
+    //     `aotCsvToSpaced` …）静默失效，TypeMapper/Target/Runtime/Dwarf/Ffi 全挂。
+    for f in &hir.functions {
+        if !f.is_native {
+            ctx.user_functions.insert(f.name.clone());
+        }
+    }
     let mut mir_funcs = Vec::new();
     for f in &hir.functions {
         if f.is_native {
             continue; // 原生函数没有 body，仅登记签名（已在 natives 中）
         }
-        // Phase 1: 记录用户自定义函数名，供 lower_expr 区分 CallNative vs Call
-        ctx.user_functions.insert(f.name.clone());
         mir_funcs.push(lower_function(f, &mut ctx, hir));
     }
     (mir_funcs, ctx)

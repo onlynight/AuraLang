@@ -204,6 +204,13 @@ struct ClassCtx {
     fields: Vec<String>,
     /// 作用域栈内的局部名（屏蔽同名字段）
     locals: Vec<std::collections::HashSet<String>>,
+    /// 当前是否处于 **companion object** 方法体内（无 `self` 形参）。
+    ///
+    /// companion 方法里的裸调用（`indexOf(text, substring)`）指向**静态** companion
+    /// 方法，调用点必须**不补 self**；否则实参整体前移一格（`text` 落到 self 槽位），
+    /// 且会命中同名的 3 参重载。实测 `String.contains` 因此恒为 false
+    /// （`contains` → `indexOf(self, text, substring)` → 3 参 `indexOf` → -1）。
+    is_companion: bool,
 }
 
 impl ClassCtx {
@@ -353,6 +360,15 @@ fn bare_call_in_class(n: &str) -> Option<(String, bool)> {
     let ctx = CLASS_CTX.with(|c| c.borrow().as_ref().cloned())?;
     let table = CLASS_TABLE.with(|t| t.borrow().clone());
     let entry = table.get(&ctx.class)?;
+    if ctx.is_companion && !ctx.is_local(n) {
+        // companion 方法体内：裸调用一律是**静态** companion 方法（无 self）。
+        // 内置 `String` 的硬编码成员表把同名方法同时登记在 `methods` 与
+        // `companion_methods`，故此处不能按 `methods` 判定「实例方法」。
+        if entry.companion_methods.contains(n) || entry.methods.contains(n) {
+            return Some((format!("{}.{}", ctx.class, n), false));
+        }
+        return None;
+    }
     if entry.methods.contains(n) && !ctx.is_local(n) {
         return Some((format!("{}.{}", ctx.class, n), true));
     }
@@ -1092,8 +1108,6 @@ fn build_class_table(program: &Program) -> HashMap<String, ClassEntry> {
     // String 是内置类型，不在 program.declarations 中，需手动注册到 CLASS_TABLE。
     let string_methods = [
         "fromChars",
-        "fromCharCode",
-        "join",
         "length",
         "isEmpty",
         "substring",
@@ -1136,6 +1150,15 @@ fn build_class_table(program: &Program) -> HashMap<String, ClassEntry> {
     for m in string_methods {
         string_entry.companion_methods.insert(m.to_string());
         string_entry.methods.insert(m.to_string());
+    }
+    // **静态工厂**（companion-only）：`String.fromCharCode(code)` / `String.join(list, sep)`
+    // 没有接收者。若它们同时出现在 `methods` 中，实例方法体内的裸调用
+    // （`charAt` / `toUpperCase` 里的 `fromCharCode(c)`）会被 `bare_call_in_class`
+    // 判定为「实例方法」并补一个 `self` 形参 → `String.fromCharCode(self, c)`
+    // 实参前移，运行期返回数字文本（实测 `"abc".toUpperCase()` 得到 `"656667"`）。
+    // 归入 companion-only 后调用点不补 self，落到原生 `String.fromCharCode`。
+    for m in ["fromChars", "fromCharCode", "join"] {
+        string_entry.methods.remove(m);
     }
     table.entry("String".to_string()).or_insert(string_entry);
     table
@@ -2278,6 +2301,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         class: c.name.clone(),
                         fields: ctor_fields,
                         locals: vec![std::collections::HashSet::new()],
+                        is_companion: false,
                     });
                     prev
                 });
@@ -3778,6 +3802,7 @@ fn desugar_class_method(f: &FnDecl, class: &str, with_self: bool) -> HirFunction
             class: class.to_string(),
             fields,
             locals: vec![std::collections::HashSet::new()],
+            is_companion: !with_self,
         })
     });
     // 参数进入局部作用域（屏蔽同名字段）
@@ -3843,6 +3868,7 @@ fn synthesize_accessors(class: &str, fields: &[StructField]) -> Vec<HirFunction>
                     class: class.to_string(),
                     fields: field_names.clone(),
                     locals: vec![std::collections::HashSet::new()],
+                    is_companion: false,
                 })
             });
             let body = block_with_trailing_return(desugar_block(&g.body));
@@ -3875,6 +3901,7 @@ fn synthesize_accessors(class: &str, fields: &[StructField]) -> Vec<HirFunction>
                     class: class.to_string(),
                     fields: field_names.clone(),
                     locals: vec![std::collections::HashSet::new()],
+                    is_companion: false,
                 })
             });
             register_local(&param_name);
@@ -3925,9 +3952,15 @@ fn desugar_block_inner(b: &Expr) -> HirBlock {
     // 表达式位置上的块：`{ stmt* }` 或 `{ stmt*; lastExpr }`
     let stmts = match b {
         Expr::Block(stmts, _) => stmts,
+        // 无花括号的单条语句体（`if (c) x = v` / `if (c) return x` / `if (c) break` …）。
+        //
+        // ⚠ 必须走 `desugar_expr_stmt`：`desugar_expr` **没有** `Expr::Assign` /
+        // `Expr::Return` 等分支，会落到 `_other => HirExpr::Lit(Literal::Null)` 兜底，
+        // 于是整条语句被**静默丢弃**（实测：`var ch = "?"; if (n == 0) ch = "0"`
+        // 恒返回 "?"；`if (i >= len) return -1` 的提前返回也不会生效）。
         other => {
             return HirBlock {
-                stmts: vec![HirStmt::Expr(desugar_expr(other))],
+                stmts: vec![desugar_expr_stmt(other)],
             };
         }
     };
@@ -5226,7 +5259,12 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     // `l.getSize()` / `l.isEmpty()` 若按普通方法解析，会调用 Aura 侧
                     // `ArrayList.getSize`（读私有字段 `_size`），而运行期 `l` 是
                     // `Value::List` → 字段不存在 → 取到 null。
-                    if name.as_str() == "getSize" && args.is_empty() {
+                    //
+                    // `l.size()`（带括号）此前未被覆盖：它会退化成**裸名** `size()`
+                    // → 运行期返回 0（VM 的 `size` 原生按句柄语义实现，与 `Value::List`
+                    // 不匹配）。`Vm.buildLineCache` 的 `this.lines.size()` 正因此恒为 0，
+                    // 整个字节码执行器一条指令都不跑（instrCount=0、returnValue=null）。
+                    if (name.as_str() == "getSize" || name.as_str() == "size") && args.is_empty() {
                         if let Some(ty) = resolve_receiver_type_deep(object) {
                             if is_list_like_type(&ty) {
                                 return HirExpr::Call {
@@ -5246,17 +5284,18 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                             }
                         }
                     }
-                    // List/Array/Set 的 Collection 通用方法调用 → Collections.* 原生函数
-                    if name.as_str() == "get" || name.as_str() == "getAt" {
+                    // List/Array/Set 的 `get(i)` / `getAt(i)` → 下标读取（`HirExpr::Index`）。
+                    //
+                    // 此前降级为 `aura.lang.std.Collections.getAt(list, i)`：该函数按
+                    // **AOT 句柄语义**实现（`Memory.read64` 解引用裸地址）。VM 下堆列表是
+                    // `Value::Ref` / `Value::List`，`as_int()` 得 0 → 恒返回 0（表现为
+                    // `l.get(0)` 为 null）。下标读取走 `GetIndex` 指令，两个后端都已支持。
+                    if (name.as_str() == "get" || name.as_str() == "getAt") && args.len() == 1 {
                         if let Some(ty) = resolve_receiver_type_deep(object) {
                             if is_list_like_type(&ty) {
-                                let mut all_args = vec![desugar_expr(object)];
-                                for a in args {
-                                    all_args.push(desugar_expr(a));
-                                }
-                                return HirExpr::Call {
-                                    callee: "aura.lang.std.Collections.getAt".into(),
-                                    args: all_args,
+                                return HirExpr::Index {
+                                    container: Box::new(desugar_expr(object)),
+                                    index: Box::new(desugar_expr(&args[0])),
                                 };
                             }
                         }
@@ -6124,6 +6163,16 @@ fn desugar_expr(e: &Expr) -> HirExpr {
 fn desugar_block_or_expr(e: &Expr) -> HirExpr {
     match e {
         Expr::Block(_, _) => HirExpr::Block(desugar_block(e)),
+        // 语句型表达式（赋值 / return / break / continue / throw）在
+        // `desugar_expr` 中会被静默丢弃（无对应分支 → 落到 `_other => Null`）。
+        // 包成单语句块并交给 `desugar_expr_stmt`，与 `desugar_block_inner` 一致。
+        Expr::Assign { .. }
+        | Expr::Return { .. }
+        | Expr::Break { .. }
+        | Expr::Continue { .. }
+        | Expr::Throw { .. } => HirExpr::Block(HirBlock {
+            stmts: vec![desugar_expr_stmt(e)],
+        }),
         other => desugar_expr(other),
     }
 }

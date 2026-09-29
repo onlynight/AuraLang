@@ -86,14 +86,14 @@ fun test_as_cast() {
 
     // as 转换到父类（向下兼容）
     val a1: Animal = dog as Animal
-    println("dog as Animal: " + a1.name())
+    println("dog as Animal: " + a1.name)
 
     val a2: Animal = cat as Animal
-    println("cat as Animal: " + a2.name())
+    println("cat as Animal: " + a2.name)
 
     // as 转换到自身
     val d2: Dog = dog as Dog
-    println("dog as Dog: " + d2.name())
+    println("dog as Dog: " + d2.name)
 }
 
 fun test_when_is() {

@@ -1,0 +1,224 @@
+// ═════════════════════════════════════════════════════════════
+// P0 语法特性测试：扩展函数 + select { } + Future.then
+//
+// 验证内容：
+//   1. 扩展函数解析：`fun Type.name()` 语法
+//   2. select { } 解析：多路复用表达式
+//   3. Future.then() API 存在性
+//   4. suspend/async/await 作为普通标识符
+//
+// 运行：aura run tests/p0_features_test.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Span.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Token.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Lexer.aura"
+import "../aura/compiler/aura/lang/compiler/ast/Ast.aura"
+import "../aura/compiler/aura/lang/compiler/parser/Parser.aura"
+import "../aura/compiler/aura/lang/compiler/errors/CompileError.aura"
+
+// ═════════════════════════════════════════════════════════════
+// 测试 1: 扩展函数解析
+// ═════════════════════════════════════════════════════════════
+
+fun testExtensionFunctionParsing(): Int {
+    val t = TestRunner()
+    t.begin("ExtensionFunction.parsing")
+
+    // 测试 1a: 简单扩展函数
+    val src1 = "fun String.upperFirst(): String { return this }"
+    val p1 = Parser(src1)
+    p1.parseProgram()
+    t.assertFalse(p1.errors.isOk(), "extension function parsed without errors")
+
+    // 检查 AST 中有 Function 节点，且 ty 包含 #recv
+    val ast1 = p1.ast
+    var foundExtFn = false
+    var i = 0
+    while (i < ast1.count) {
+        if (ast1.kindOf(i) == "Function") {
+            val ty = ast1.tyOf(i)
+            if (ty.contains("#recv")) {
+                foundExtFn = true
+            }
+        }
+        i = i + 1
+    }
+    t.assertTrue(foundExtFn, "extension function has #recv marker in ty")
+
+    // 测试 1b: 带参数的扩展函数
+    val src2 = "fun Int.clamp(min: Int, max: Int): Int { return this }"
+    val p2 = Parser(src2)
+    p2.parseProgram()
+    t.assertFalse(p2.errors.isOk(), "extension function with params parsed")
+
+    // 测试 1c: 扩展函数名
+    val ast2 = p2.ast
+    var foundClamp = false
+    var j = 0
+    while (j < ast2.count) {
+        if (ast2.kindOf(j) == "Function") {
+            if (ast2.textOf(j) == "clamp") {
+                foundClamp = true
+            }
+        }
+        j = j + 1
+    }
+    t.assertTrue(foundClamp, "extension function name is 'clamp'")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 2: select { } 解析
+// ═════════════════════════════════════════════════════════════
+
+fun testSelectParsing(): Int {
+    val t = TestRunner()
+    t.begin("Select.parsing")
+
+    // 测试 2a: 简单 select
+    val src1 = "select { ch -> { } }"
+    val p1 = Parser(src1)
+    p1.parseProgram()
+    t.assertFalse(p1.errors.isOk(), "simple select parsed without errors")
+
+    // 检查 AST 中有 Select 节点
+    val ast1 = p1.ast
+    var foundSelect = false
+    var i = 0
+    while (i < ast1.count) {
+        if (ast1.kindOf(i) == "Select") {
+            foundSelect = true
+        }
+        i = i + 1
+    }
+    t.assertTrue(foundSelect, "Select node found in AST")
+
+    // 测试 2b: 带 timeout 的 select
+    val src2 = "select { ch -> { } timeout(1000) -> { } }"
+    val p2 = Parser(src2)
+    p2.parseProgram()
+    t.assertFalse(p2.errors.isOk(), "select with timeout parsed")
+
+    // 检查 AST 中有 SelectCase 节点
+    val ast2 = p2.ast
+    var foundCase = false
+    var foundTimeout = false
+    var j = 0
+    while (j < ast2.count) {
+        if (ast2.kindOf(j) == "SelectCase") {
+            foundCase = true
+            val ch = ast2.textOf(j)
+            if (ch == "__timeout__") {
+                foundTimeout = true
+            }
+        }
+        j = j + 1
+    }
+    t.assertTrue(foundCase, "SelectCase node found")
+    t.assertTrue(foundTimeout, "__timeout__ case found")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 3: Future.then() API
+// ═════════════════════════════════════════════════════════════
+
+fun testFutureThen(): Int {
+    val t = TestRunner()
+    t.begin("Future.then")
+
+    // 验证 Future.then 方法存在（通过解析调用代码）
+    val src = "val f = 0; Future.then(f) { r -> println(toStr(r)) }"
+    val p = Parser(src)
+    p.parseProgram()
+    t.assertFalse(p.errors.isOk(), "Future.then call parsed")
+
+    // 验证 Future.thenMap 方法存在
+    val src2 = "val f2 = Future.thenMap(0) { v -> v }"
+    val p2 = Parser(src2)
+    p2.parseProgram()
+    t.assertFalse(p2.errors.isOk(), "Future.thenMap call parsed")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 4: suspend/async/await 作为普通标识符
+// ═════════════════════════════════════════════════════════════
+
+fun testCoroutineKeywords(): Int {
+    val t = TestRunner()
+    t.begin("CoroutineKeywords.identifiers")
+
+    // suspend 作为变量名
+    val src1 = "val suspend: Int = 1"
+    val p1 = Parser(src1)
+    p1.parseProgram()
+    t.assertFalse(p1.errors.isOk(), "suspend as variable name parsed")
+
+    // async 作为变量名
+    val src2 = "val async: Int = 2"
+    val p2 = Parser(src2)
+    p2.parseProgram()
+    t.assertFalse(p2.errors.isOk(), "async as variable name parsed")
+
+    // await 作为变量名
+    val src3 = "val await: Int = 3"
+    val p3 = Parser(src3)
+    p3.parseProgram()
+    t.assertFalse(p3.errors.isOk(), "await as variable name parsed")
+
+    // 检查这些词不在关键字表中
+    val kwTable = TokenUtils.keywordTable()
+    t.assertFalse(kwTable.contains("suspend|"), "suspend not in keyword table")
+    t.assertFalse(kwTable.contains("async|"), "async not in keyword table")
+    t.assertFalse(kwTable.contains("await|"), "await not in keyword table")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 5: select 作为变量名（向后兼容）
+// ═════════════════════════════════════════════════════════════
+
+fun testSelectAsIdentifier(): Int {
+    val t = TestRunner()
+    t.begin("Select.identifier")
+
+    // select 仍然可以作为变量名（当后面没有 { 时）
+    val src = "val select: Int = 5"
+    val p = Parser(src)
+    p.parseProgram()
+    t.assertFalse(p.errors.isOk(), "select as variable name parsed")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// Main
+// ═════════════════════════════════════════════════════════════
+
+fun main(): Int {
+    println("P0 Features Test Suite")
+    println("======================")
+
+    val r1 = testExtensionFunctionParsing()
+    val r2 = testSelectParsing()
+    val r3 = testFutureThen()
+    val r4 = testCoroutineKeywords()
+    val r5 = testSelectAsIdentifier()
+
+    val total = r1 + r2 + r3 + r4 + r5
+    if (total == 0) {
+        println("RESULT: PASS")
+        return 0
+    } else {
+        println("RESULT: FAIL ($total failures)")
+        return 1
+    }
+}

@@ -41,6 +41,7 @@ class SymbolTable {
     private var typeIndex: String = ""
 
     /// 全局函数索引（`name|params|ret`，每行一项）。
+    /// P0 新增：支持同名重载（多个不同签名的函数）。
     private var fnIndex: String = ""
 
     /// 作用域总数。
@@ -285,9 +286,20 @@ class SymbolTable {
     }
 
     /// 查找全局函数。返回参数|返回类型字符串，未找到返回 ""。
+    /// P0 新增：支持同名重载，匹配参数数量。
     fun stFindFunction(name: String): String {
+        // 无参查找：返回第一个匹配
+        return this.stFindFunctionOverloaded(name, -1)
+    }
+
+    /// 查找全局函数（带参数数量匹配）。
+    /// - 参数：`name` — 函数名
+    /// - 参数：`argCount` — 调用时的参数数量（-1 表示不检查，返回第一个匹配）
+    /// - 返回：参数|返回类型字符串，未找到返回 ""
+    fun stFindFunctionOverloaded(name: String, argCount: Int): String {
         val lines: List<String> = this.fnIndex.split("\n")
         var i: Int = 0
+        var fallback: String = ""
         while (i < lines.size) {
             val line: String = lines[i]
             if (line == "") {
@@ -296,15 +308,38 @@ class SymbolTable {
             }
             val parts: List<String> = line.split("|")
             if (parts.size >= 3 && parts[0] == name) {
-                // params 可能为空
-                if (parts[1] == "") {
-                    return parts[2]
+                val params: String = parts[1]
+                val ret: String = parts[2]
+                val result: String = if (params == "") { ret } else { params + "|" + ret }
+                // 检查参数数量是否匹配
+                if (argCount < 0) {
+                    // 不检查，直接返回
+                    return result
                 }
-                return parts[1] + "|" + parts[2]
+                // 计算 params 中的参数数量（逗号分隔 + 1）
+                var paramCount: Int = 0
+                if (params != "") {
+                    paramCount = 1
+                    var j: Int = 0
+                    while (j < params.length) {
+                        if (params.charCodeAt(j) == 44) { // ','
+                            paramCount = paramCount + 1
+                        }
+                        j = j + 1
+                    }
+                }
+                if (paramCount == argCount) {
+                    return result
+                }
+                // 记住第一个匹配作为 fallback
+                if (fallback == "") {
+                    fallback = result
+                }
             }
             i = i + 1
         }
-        return ""
+        // 如果没有精确匹配，返回 fallback（第一个同名函数）
+        return fallback
     }
 
     // ── 工具 ──

@@ -119,4 +119,80 @@ object Future {
         Memory.write64(cell + 8L, 1L)
         Memory.free(cell)
     }
+
+    /// 为 Future 注册回调（P0 新增：替代 `suspend`/`await` 的回调式 API）。
+    ///
+    /// 当 Future 完成时，调用 `onComplete(value)`。
+    /// 这是一个轻量异步原语，替代 Kotlin 协程的 `async/await`。
+    ///
+    /// 使用示例：
+    /// ```aura
+    /// val f = Future.spawn(compute, 42)
+    /// Future.then(f) { result ->
+    ///     println("Got: " + toStr(result))
+    /// }
+    /// ```
+    ///
+    /// - 参数：`future_id` — Future 句柄 ID
+    /// - 参数：`onComplete` — 回调函数（接收 Future 结果）
+    fun then(future_id: Int, onComplete: (Int) -> Unit): Unit {
+        val cell: Long = future_id as Long
+        if (cell == 0L) {
+            return
+        }
+        val tid: Int = Memory.read64(cell) as Int
+        val result: Int = Thread.join(tid)
+        Memory.write64(cell + 16L, result as Long)
+        Memory.write64(cell + 8L, 1L)
+        // 调用回调
+        onComplete(result)
+    }
+
+    /// 为 Future 注册转换回调，返回新的 Future（P0 新增：替代 `async/await` 链式调用）。
+    ///
+    /// 使用示例：
+    /// ```aura
+    /// val f1 = Future.spawn(fetch, 0)
+    /// val f2 = Future.thenMap(f1) { data ->
+    ///     Future.spawn(process, data)
+    /// }
+    /// val result = Future.await(f2)
+    /// ```
+    ///
+    /// - 参数：`future_id` — 源 Future 句柄 ID
+    /// - 参数：`transform` — 转换函数（接收旧结果，返回新 Future 句柄）
+    /// - 返回：新 Future 句柄 ID（0 表示失败）
+    fun thenMap(future_id: Int, transform: (Int) -> Int): Int {
+        val cell: Long = future_id as Long
+        if (cell == 0L) {
+            return 0
+        }
+        val tid: Int = Memory.read64(cell) as Int
+        val result: Int = Thread.join(tid)
+        Memory.write64(cell + 16L, result as Long)
+        Memory.write64(cell + 8L, 1L)
+        // 调用转换函数，返回新 Future
+        return transform(result)
+    }
+
+    /// 创建一个新的 Promise 并返回其句柄（P0 新增：替代 `suspend` 的回调模式）。
+    ///
+    /// 使用示例：
+    /// ```aura
+    /// val (fid, resolver) = Future.promise()
+    /// // 在异步回调中：
+    /// resolver(42)
+    /// // 在等待方：
+    /// val result = Future.await(fid)
+    /// ```
+    ///
+    /// - 返回：Promise 句柄（Long），0 表示创建失败
+    fun promise(): Long {
+        return aura.lang.concurrent.Promise.create()
+    }
+
+    /// 解析 Promise（便捷别名）。
+    fun resolve(fid: Long, value: Int): Unit {
+        aura.lang.concurrent.Promise.resolve(fid, value)
+    }
 }

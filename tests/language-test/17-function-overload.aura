@@ -1,0 +1,72 @@
+// tests/language-test/17-function-overload.aura
+// ─────────────────────────────────────────────────────────────
+// Phase 17 — 函数重载测试 (P0 特性)
+//
+// 验证：同名函数按参数签名区分
+// ─────────────────────────────────────────────────────────────
+
+/// 加法（两个 Int）
+fun add(a: Int, b: Int): Int {
+    return a + b
+}
+
+/// 加法（三个 Int）
+fun add(a: Int, b: Int, c: Int): Int {
+    return a + b + c
+}
+
+/// 加法（Int + Float）
+fun add(a: Int, b: Float): Float {
+    return a + b
+}
+
+/// 加法（String 拼接）
+fun add(a: String, b: String): String {
+    return a + b
+}
+
+/// 打印函数（无参数）
+fun greet(): String {
+    return "Hello"
+}
+
+/// 打印函数（一个 String）
+fun greet(name: String): String {
+    return "Hello, " + name
+}
+
+/// 打印函数（两个 String）
+fun greet(first: String, last: String): String {
+    return "Hello, " + first + " " + last
+}
+
+fun main() {
+    println("=== 函数重载测试 ===")
+
+    // ── Int 重载 ──
+    val sum2: Int = add(3, 5)
+    println("add(3, 5) = " + toStr(sum2))
+
+    val sum3: Int = add(1, 2, 3)
+    println("add(1, 2, 3) = " + toStr(sum3))
+
+    // ── Float 重载 ──
+    val sumMixed: Float = add(3, 1.5)
+    println("add(3, 1.5) = " + toStr(sumMixed))
+
+    // ── String 重载 ──
+    val concat: String = add("Hello", "World")
+    println("add('Hello', 'World') = " + concat)
+
+    // ── greet 重载 ──
+    val g0: String = greet()
+    println("greet() = " + g0)
+
+    val g1: String = greet("Aura")
+    println("greet('Aura') = " + g1)
+
+    val g2: String = greet("Hello", "World")
+    println("greet('Hello', 'World') = " + g2)
+
+    println("=== 函数重载测试 PASS ===")
+}

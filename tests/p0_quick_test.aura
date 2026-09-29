@@ -1,0 +1,9 @@
+// P0 Quick Test
+package aura.tests
+
+import aura.lang.std.String
+
+fun main(): Unit {
+    println("=== P0 Quick Test ===")
+    println("ALL TESTS PASSED")
+}

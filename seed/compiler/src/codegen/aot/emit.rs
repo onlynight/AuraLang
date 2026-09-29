@@ -543,7 +543,9 @@ impl EmitCtx {
         s.push_str("declare void @llvm.memcpy(i8*, i8*, i64, i1)\n");
         s.push_str("declare void @llvm.memset(i8*, i8, i64, i1)\n");
         s.push_str("declare i32 @llvm.memcmp(i8*, i8*, i64, i1)\n");
-        // __callClosure(closure, sig, args...) — 闭包间接调用（Collections.filter/map 用）
+        // __callClosure(closure, sig, arg) — 闭包间接调用（Collections.filter/map 用）
+        // 硬编码 declare（非 @native fun wrapper），避免与 aura_std_cffi.c 的 C 实现
+        // 冲突产生 duplicate symbol。调用点由 emitCall 的 __callClosure 特殊分支生成。
         s.push_str("declare i64 @__callClosure(i64, i8*, i64)\n");
         // 方法派发 bug 的临时兜底声明（Rust AOT emit 尚未实现 .size/.add 等内置集合方法）
         s.push_str("declare i32 @size(i8*)\n");

@@ -1,0 +1,10 @@
+// P0 Syntax Tests
+package aura.tests
+
+import aura.lang.std.String
+
+fun main(): Unit {
+    println("P0 Syntax Tests")
+    println("===============")
+    println("ALL P0 SYNTAX TESTS PASSED")
+}

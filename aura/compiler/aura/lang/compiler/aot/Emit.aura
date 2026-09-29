@@ -32,6 +32,13 @@ import aura.lang.compiler.aot.TypeMapper
 import aura.lang.compiler.aot.Runtime
 import aura.lang.compiler.aot.Dwarf
 
+// 闭包间接调用运行时函数 — 字节码后端需注册为原生函数以解析 __callClosure 调用
+// ⚠️ 此处不声明 @native fun：AOT emit.rs 中已有硬编码 declare i64 @__callClosure(...)
+// 供 emitCall 的 __callClosure 特殊分支使用。若在源码中再声明 @native fun，
+// emit_native_wrapper 会生成 define，与 C stub (aura_std_cffi.c) 的 __callClosure
+// 实现冲突，导致链接器报 duplicate symbol。
+// 字节码后端的注册见 native.rs / interp.rs。
+
 /// LLVM IR 生成器（有状态，单次 `emitProgram` 内复用）。
 class LlvmEmitter {
 
@@ -458,13 +465,13 @@ class LlvmEmitter {
                         this.fObjectClassNames = this.fObjectClassNames + clsName + "\n"
                     }
                 }
-                val cKids: String = hir.kidsOf(i)
+                val cKids: String = hir.kidsOfList(i)
                 val cn: Int = hirKidsCount(cKids)
                 var j: Int = 0
                 while (j < cn) {
                     val bodyId: Int = hirKidsAt(cKids, j)
                     if (hir.kindOf(bodyId) == "HirBlock") {
-                        val bk: String = hir.kidsOf(bodyId)
+                        val bk: String = hir.kidsOfList(bodyId)
                         val bn: Int = hirKidsCount(bk)
                         var m: Int = 0
                         while (m < bn) {
@@ -489,7 +496,7 @@ class LlvmEmitter {
         i = 0
         while (i < hir.count) {
             if (hir.kindOf(i) == "HirExternObject") {
-                val ek: String = hir.kidsOf(i)
+                val ek: String = hir.kidsOfList(i)
                 val en: Int = hirKidsCount(ek)
                 val ename: String = sanitizeLlvm(hir.textOf(i))
                 if (ename != "") {
@@ -569,12 +576,12 @@ class LlvmEmitter {
         //      `emitDecl` 走局部路径，不在此列。
         //      HIR 节点类型为 `HirValDecl` / `HirVarDecl`（非 `HirVal`/`HirVar`）。
         i = 0
-        val rootKids: String = hir.kidsOf(hir.rootId)
+        val rootKids: String = hir.kidsOfList(hir.rootId)
         while (i < hirKidsCount(rootKids)) {
             val rid: Int = hirKidsAt(rootKids, i)
             val rk: String = hir.kindOf(rid)
             if (rk == "HirValDecl" || rk == "HirVarDecl") {
-                val rKids: String = hir.kidsOf(rid)
+                val rKids: String = hir.kidsOfList(rid)
                 if (hirKidsCount(rKids) > 0) {
                     val initId: Int = hirKidsAt(rKids, 0)
                     val rkKind: String = hir.kindOf(initId)
@@ -746,7 +753,7 @@ class LlvmEmitter {
             // 否则 structLines 会出现重复字段行 → 字段序号错乱
             return
         }
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         // 基类登记（`HirClass` 的 ty 列，见 Hir.lowerTypeDecl / Parser.parseTypeDecl）
         val parentTy: String = hir.tyOf(id)
         if (parentTy != "") {
@@ -774,7 +781,7 @@ class LlvmEmitter {
             val bodyKind: String = hir.kindOf(body)
             var fields: String = ""
             if (bodyKind == "HirBlock") {
-                fields = hir.kidsOf(body)
+                fields = hir.kidsOfList(body)
             }
             val fn: Int = hirKidsCount(fields)
             var fi: Int = 0
@@ -1230,7 +1237,7 @@ class LlvmEmitter {
 
     /// 结构体字段默认值（取 HIR 字面量初始化；否则用类型零值）。
     fun fieldDefault(hir: Hir, fieldId: Int, lty: String): String {
-        val kids: String = hir.kidsOf(fieldId)
+        val kids: String = hir.kidsOfList(fieldId)
         if (hirKidsCount(kids) > 0) {
             val ik: Int = hirKidsAt(kids, 0)
             if (hir.kindOf(ik) == "HirLit") {
@@ -1252,7 +1259,7 @@ class LlvmEmitter {
     /// 字段默认值若为**非字面量表达式**（如 `Lexer("")` / `arrayListOf<String>()`），
     /// 返回其 HIR 节点 id（供构造时求值）；字面量或无初始化返回 -1。
     fun fieldInitExprId(hir: Hir, fieldId: Int): Int {
-        val kids: String = hir.kidsOf(fieldId)
+        val kids: String = hir.kidsOfList(fieldId)
         if (hirKidsCount(kids) == 0) {
             return -1
         }
@@ -1343,7 +1350,7 @@ class LlvmEmitter {
             }
         }
         if (hir.kindOf(recvId) == "HirMember") {
-            val mk: String = hir.kidsOf(recvId)
+            val mk: String = hir.kidsOfList(recvId)
             if (hirKidsCount(mk) >= 1) {
                 val rid: Int = hirKidsAt(mk, 0)
                 var sym: String = this.structSymOfPtr(this.inferType(hir, rid))
@@ -1403,7 +1410,7 @@ class LlvmEmitter {
             }
         }
         if (hir.kindOf(recvId) == "HirMember") {
-            val mk: String = hir.kidsOf(recvId)
+            val mk: String = hir.kidsOfList(recvId)
             if (hirKidsCount(mk) >= 1) {
                 val rid: Int = hirKidsAt(mk, 0)
                 var sym: String = this.structSymOfPtr(this.inferType(hir, rid))
@@ -1853,7 +1860,7 @@ class LlvmEmitter {
         if (retTy == "") {
             retTy = "void"
         }
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         val kCount: Int = hirKidsCount(kids)
         var params: String = ""
         val ownerCls: String = this.methodOwnerClass(id)
@@ -1900,7 +1907,7 @@ class LlvmEmitter {
     /// 登记一个函数的形参节点列表（`fname|id1,id2,…`），供调用点补齐默认参数。
     /// 方法（`ownerCls != ""`）在表首插入 `-1` 占位，与签名表的 self 位对齐。
     fun registerParamDefs(hir: Hir, id: Int) {
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         val kCount: Int = hirKidsCount(kids)
         var fname: String = hir.textOf(id)
         val ownerCls: String = this.methodOwnerClass(id)
@@ -2012,7 +2019,7 @@ class LlvmEmitter {
         }
         this.fRetTy = retTy
 
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         val kCount: Int = hirKidsCount(kids)
         var paramsIr: String = ""
         var bodyId: Int = -1
@@ -2283,7 +2290,7 @@ class LlvmEmitter {
 
     /// 取原生函数的 metadata（`kids[0]` 的 `HirNativeInfo` 文本；非原生返回 ""）。
     fun nativeMetaOf(hir: Hir, id: Int): String {
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         if (hirKidsCount(kids) < 1) {
             return ""
         }
@@ -2307,7 +2314,7 @@ class LlvmEmitter {
         } else if (retTy == "") {
             retTy = "void"
         }
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         val kCount: Int = hirKidsCount(kids)
         var params: String = ""
         var i: Int = 0
@@ -3066,7 +3073,7 @@ class LlvmEmitter {
         if (hir.kindOf(id) != "HirCall") {
             return ""
         }
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         var fname: String = hir.textOf(id)
         if (fname == "" && hirKidsCount(kids) > 0) {
             fname = hir.textOf(hirKidsAt(kids, 0))
@@ -3109,7 +3116,7 @@ class LlvmEmitter {
         if (hir.kindOf(id) != "HirCall") {
             return ""
         }
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         var fname: String = ""
         if (hirKidsCount(kids) < 1) {
             // 无参调用（`makeTransformerSimple()`）：HIR 里 HirCall 无 kids，
@@ -3363,7 +3370,7 @@ class LlvmEmitter {
 
     /// 拆解 HirLambda：返回 `paramId1,paramId2|bodyId`。
     fun lambdaPiece(hir: Hir, id: Int): String {
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         val n: Int = hirKidsCount(kids)
         var ps: String = ""
         var body: Int = -1
@@ -3429,7 +3436,7 @@ class LlvmEmitter {
         if (hir.kindOf(id) == "HirVar" && hir.textOf(id) == name) {
             return true
         }
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         val n: Int = hirKidsCount(kids)
         var i: Int = 0
         while (i < n) {
@@ -3461,7 +3468,7 @@ class LlvmEmitter {
             return false
         }
         val k: String = hir.kindOf(id)
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         val n: Int = hirKidsCount(kids)
         if (k == "HirBinary" && n == 2) {
             val op: String = hir.textOf(id)
@@ -3558,14 +3565,14 @@ class LlvmEmitter {
 
     /// 在块（含嵌套块）中找第一条 `HirReturn`，返回其值类型（无则 ""）。
     fun scanBlockReturnTy(hir: Hir, blockId: Int): String {
-        val kids: String = hir.kidsOf(blockId)
+        val kids: String = hir.kidsOfList(blockId)
         val n: Int = hirKidsCount(kids)
         var i: Int = 0
         while (i < n) {
             val cid: Int = hirKidsAt(kids, i)
             val ck: String = hir.kindOf(cid)
             if (ck == "HirReturn") {
-                val rk: String = hir.kidsOf(cid)
+                val rk: String = hir.kidsOfList(cid)
                 if (hirKidsCount(rk) > 0) {
                     return this.inferType(hir, hirKidsAt(rk, 0))
                 }
@@ -3864,7 +3871,7 @@ class LlvmEmitter {
     /// 发射函数体 / 语句块。
     fun emitBody(hir: Hir, id: Int) {
         if (hir.kindOf(id) == "HirBlock") {
-            val kids: String = hir.kidsOf(id)
+            val kids: String = hir.kidsOfList(id)
             val n: Int = hirKidsCount(kids)
             var i: Int = 0
             while (i < n) {
@@ -3978,7 +3985,7 @@ class LlvmEmitter {
         while (i < total) {
             var aId: Int = aotToInt(aotFieldAt(argIds, i, ","))
             if (hir.kindOf(aId) == "HirNamedArg") {
-                val nk: String = hir.kidsOf(aId)
+                val nk: String = hir.kidsOfList(aId)
                 if (hirKidsCount(nk) > 0) {
                     aId = hirKidsAt(nk, 0)
                 }
@@ -4109,7 +4116,7 @@ class LlvmEmitter {
     /// 集合以 `i8*` 句柄表示，遍历走 `aura_lang_std_Collections_count` /
     /// `getAt`（与 Rust AOT 后端同一约定）。
     fun emitFor(hir: Hir, id: Int) {
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         if (hirKidsCount(kids) < 3) {
             // 形态不完整：至少把循环体发射出来，避免整段丢失
             if (hirKidsCount(kids) >= 1) {
@@ -4295,7 +4302,7 @@ class LlvmEmitter {
         if (name == "") {
             return
         }
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         var initVal: String = "0"
         var initTy: String = "i32"
         var hasInit: Boolean = false
@@ -4329,8 +4336,8 @@ class LlvmEmitter {
                 //（后者把类指针当列表头解引用 → 取值全错/崩溃）。
                 // 反之 `mapOf()`/`listOf()` 初始化的接口变量仍是句柄，不登记。
                 var cname: String = hir.textOf(initId)
-                if (cname == "" && hirKidsCount(hir.kidsOf(initId)) > 0) {
-                    cname = hir.textOf(hirKidsAt(hir.kidsOf(initId), 0))
+                if (cname == "" && hirKidsCount(hir.kidsOfList(initId)) > 0) {
+                    cname = hir.textOf(hirKidsAt(hir.kidsOfList(initId), 0))
                 }
                 if (cname != "" && this.isStructSym(sanitizeLlvm(cname))) {
                     this.markClsVar(name, sanitizeLlvm(cname))
@@ -4413,7 +4420,7 @@ class LlvmEmitter {
 
     /// 集合构造调用的元素 LLVM 类型（取首个实参类型；**无法判定时按 `i8*`**）。
     fun collectionElemTy(hir: Hir, callId: Int): String {
-        val kids: String = hir.kidsOf(callId)
+        val kids: String = hir.kidsOfList(callId)
         if (hirKidsCount(kids) > 0) {
             val e: String = this.inferType(hir, hirKidsAt(kids, 0))
             if (e != "") {
@@ -4456,7 +4463,7 @@ class LlvmEmitter {
 
     /// 发射赋值语句。
     fun emitAssign(hir: Hir, id: Int) {
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         if (hirKidsCount(kids) < 2) {
             return
         }
@@ -4466,7 +4473,7 @@ class LlvmEmitter {
         // （接收者 kids[0]、下标 kids[1]、值 kids[2]）。展开为 gep + store；
         // 否则会把 `[N x T]` 当标量整体 store，生成非法 IR。
         if (hir.kindOf(valueId) == "HirCall" && hir.textOf(valueId) == "Collections.set") {
-            val sk: String = hir.kidsOf(valueId)
+            val sk: String = hir.kidsOfList(valueId)
             if (hirKidsCount(sk) >= 3) {
                 val recvId: Int = hirKidsAt(sk, 0)
                 if (hir.kindOf(recvId) == "HirVar") {
@@ -4525,7 +4532,7 @@ class LlvmEmitter {
 
     /// 定长数组元素写入：`a[i] = v` → gep + store（非定长数组返回 false）。
     fun emitArrayElemStore(hir: Hir, idxId: Int, valueId: Int): Boolean {
-        val kids: String = hir.kidsOf(idxId)
+        val kids: String = hir.kidsOfList(idxId)
         if (hirKidsCount(kids) < 2) {
             return false
         }
@@ -4575,7 +4582,7 @@ class LlvmEmitter {
 
     /// 发射 return 语句（Phase 6.5.2：按函数返回类型转换后再 ret）。
     fun emitReturn(hir: Hir, id: Int) {
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         if (hirKidsCount(kids) > 0) {
             val vId: Int = hirKidsAt(kids, 0)
             val vTy: String = this.inferType(hir, vId)
@@ -4607,7 +4614,7 @@ class LlvmEmitter {
 
     /// 发射 if 语句（HirIf kids = [cond, then, else?]）。
     fun emitIf(hir: Hir, id: Int) {
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         val n: Int = hirKidsCount(kids)
         if (n < 2) {
             return
@@ -4670,7 +4677,7 @@ class LlvmEmitter {
     ///   4. throw 调用 longjmp 跳转到最近的 setjmp
     ///   5. finally 块在两条路径汇合后执行
     fun emitTry(hir: Hir, id: Int) {
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         val n: Int = hirKidsCount(kids)
         if (n < 1) {
             return
@@ -4797,7 +4804,7 @@ class LlvmEmitter {
 
     /// 发射 while 循环（HirWhile kids = [cond, body]）。
     fun emitWhile(hir: Hir, id: Int) {
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         val n: Int = hirKidsCount(kids)
         if (n < 2) {
             return
@@ -4865,7 +4872,7 @@ class LlvmEmitter {
         }
         if (k == "HirNamedArg") {
             // 命名实参：求值其子表达式（按位置传参）
-            val nk: String = hir.kidsOf(id)
+            val nk: String = hir.kidsOfList(id)
             if (hirKidsCount(nk) > 0) {
                 return this.emitExpr(hir, hirKidsAt(nk, 0))
             }
@@ -4895,7 +4902,7 @@ class LlvmEmitter {
     /// HIR kids = [容器, 下标]。集合元素以 Plan A `i8*` 返回，调用方在使用处
     /// 按元素类型经 `coerceValue` 拆箱（见 `inferType`/`coerceValue`）。
     fun emitIndex(hir: Hir, id: Int): String {
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         if (hirKidsCount(kids) < 2) {
             return "0"
         }
@@ -5096,7 +5103,7 @@ class LlvmEmitter {
     /// 发射二元运算（含字符串拼接/比较、整型提升，Phase 6.5.5/6.5.6）。
     fun emitBinary(hir: Hir, id: Int): String {
         val op: String = hir.textOf(id)
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         if (hirKidsCount(kids) < 2) {
             return "0"
         }
@@ -5492,7 +5499,7 @@ class LlvmEmitter {
     /// 发射一元运算。
     fun emitUnary(hir: Hir, id: Int): String {
         val op: String = hir.textOf(id)
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         if (hirKidsCount(kids) < 1) {
             return "0"
         }
@@ -5536,7 +5543,7 @@ class LlvmEmitter {
     /// 发射成员访问：结构体字段（`p.x`）或字符串 `.length` / `.size`。
     fun emitMember(hir: Hir, id: Int): String {
         val member: String = hir.textOf(id)
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         if (hirKidsCount(kids) < 1) {
             return "0"
         }
@@ -5696,7 +5703,7 @@ class LlvmEmitter {
     /// 结构体字段写入：`p.x = v` → gep + store。
     fun emitStructFieldStore(hir: Hir, targetId: Int, valueId: Int): Boolean {
         val member: String = hir.textOf(targetId)
-        val mk: String = hir.kidsOf(targetId)
+        val mk: String = hir.kidsOfList(targetId)
         if (hirKidsCount(mk) < 1) {
             return false
         }
@@ -5959,7 +5966,7 @@ class LlvmEmitter {
     }
 
     fun emitCall(hir: Hir, id: Int): String {
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         val n: Int = hirKidsCount(kids)
         var fname: String = hir.textOf(id)
         var argStart: Int = 0
@@ -7628,7 +7635,7 @@ class LlvmEmitter {
             var aId: Int = aotToInt(aotFieldAt(argIds, i, ","))
             // 命名实参 `f(name = v)`：取标记节点的子表达式求值
             if (hir.kindOf(aId) == "HirNamedArg") {
-                val nk: String = hir.kidsOf(aId)
+                val nk: String = hir.kidsOfList(aId)
                 if (hirKidsCount(nk) > 0) {
                     aId = hirKidsAt(nk, 0)
                 }
@@ -7696,7 +7703,7 @@ class LlvmEmitter {
                 }
                 var dv: String = EmitUtils.defaultValue(wantTy)
                 if (pid >= 0) {
-                    val pk: String = hir.kidsOf(pid)
+                    val pk: String = hir.kidsOfList(pid)
                     if (hirKidsCount(pk) > 0) {
                         val did: Int = hirKidsAt(pk, 0)
                         val dTy: String = this.inferType(hir, did)
@@ -7842,7 +7849,7 @@ class LlvmEmitter {
     /// 于是声明节点的 kind 变成空 → HIR 降级按 kind 匹配不到 → **所有 `val`/`var`
     /// 声明被静默丢弃**（`self.exe` 编译出的程序里局部变量全变成 0）。
     fun emitIfValue(hir: Hir, id: Int): String {
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         val n: Int = hirKidsCount(kids)
         if (n < 2) {
             return "0"
@@ -7934,7 +7941,7 @@ class LlvmEmitter {
     /// 块作为**值**时的类型（块内末语句类型；非块按普通节点推断）。
     fun inferBlockValueTy(hir: Hir, id: Int): String {
         if (hir.kindOf(id) == "HirBlock") {
-            val kids: String = hir.kidsOf(id)
+            val kids: String = hir.kidsOfList(id)
             val n: Int = hirKidsCount(kids)
             if (n == 0) {
                 return "i32"
@@ -7950,7 +7957,7 @@ class LlvmEmitter {
             val lt: String = this.inferType(hir, id)
             return this.coerceValue(this.emitExpr(hir, id), lt, wantTy)
         }
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         val n: Int = hirKidsCount(kids)
         if (n == 0) {
             return EmitUtils.defaultValue(wantTy)
@@ -8026,7 +8033,7 @@ class LlvmEmitter {
             val op: String = hir.textOf(id)
             // 类型转换 `x as T`：类型 = 左操作数类型（运行期表示不变）
             if (op == "as" || op == "As") {
-                val ak: String = hir.kidsOf(id)
+                val ak: String = hir.kidsOfList(id)
                 if (hirKidsCount(ak) > 0) {
                     return this.inferType(hir, hirKidsAt(ak, 0))
                 }
@@ -8039,7 +8046,7 @@ class LlvmEmitter {
             if (op == "is" || op == "Is") {
                 return "i1"
             }
-            val kids: String = hir.kidsOf(id)
+            val kids: String = hir.kidsOfList(id)
             if (hirKidsCount(kids) >= 2) {
                 val aTy: String = this.inferType(hir, hirKidsAt(kids, 0))
                 // Elvis 结果类型 = 可空内部类型
@@ -8067,7 +8074,7 @@ class LlvmEmitter {
             if (hir.textOf(id) == "!") {
                 return "i1"
             }
-            val kids: String = hir.kidsOf(id)
+            val kids: String = hir.kidsOfList(id)
             if (hirKidsCount(kids) > 0) {
                 return this.inferType(hir, hirKidsAt(kids, 0))
             }
@@ -8075,7 +8082,7 @@ class LlvmEmitter {
         }
         if (k == "HirMember") {
             val member: String = hir.textOf(id)
-            val mk: String = hir.kidsOf(id)
+            val mk: String = hir.kidsOfList(id)
             if (hirKidsCount(mk) > 0) {
                 val recvTy: String = this.inferType(hir, hirKidsAt(mk, 0))
                 val sym: String = this.structSymOfPtr(recvTy)
@@ -8092,7 +8099,7 @@ class LlvmEmitter {
             // 值位置的条件表达式：结果类型 = then 分支（块则取末语句）类型。
             // 缺此分支会让 `val s: String = if (c) { "A" } else { "B" }`
             // 走默认 i32，插入错误的 inttoptr 转换。
-            val ik: String = hir.kidsOf(id)
+            val ik: String = hir.kidsOfList(id)
             if (hirKidsCount(ik) > 1) {
                 val vt: String = this.inferBlockValueTy(hir, hirKidsAt(ik, 1))
                 if (vt != "" && vt != "void") {
@@ -8102,7 +8109,7 @@ class LlvmEmitter {
             return "i32"
         }
         if (k == "HirIndex") {
-            val kids: String = hir.kidsOf(id)
+            val kids: String = hir.kidsOfList(id)
             if (hirKidsCount(kids) > 0) {
                 val cId: Int = hirKidsAt(kids, 0)
                 // 集合（含字段接收者 `this.fields[i]`）→ 元素类型
@@ -8122,14 +8129,14 @@ class LlvmEmitter {
             return "i8*"
         }
         if (k == "HirNamedArg") {
-            val nk: String = hir.kidsOf(id)
+            val nk: String = hir.kidsOfList(id)
             if (hirKidsCount(nk) > 0) {
                 return this.inferType(hir, hirKidsAt(nk, 0))
             }
             return "i32"
         }
         if (k == "HirCall") {
-            val kids: String = hir.kidsOf(id)
+            val kids: String = hir.kidsOfList(id)
             var fname: String = hir.textOf(id)
             if (fname == "" && hirKidsCount(kids) > 0) {
                 fname = hir.textOf(hirKidsAt(kids, 0))
@@ -8574,7 +8581,7 @@ class LlvmEmitter {
             if (cnSelf != "") {
                 return cnSelf
             }
-            val mk: String = hir.kidsOf(calleeId)
+            val mk: String = hir.kidsOfList(calleeId)
             if (hirKidsCount(mk) < 1) {
                 return ""
             }
@@ -9288,7 +9295,7 @@ class LlvmEmitter {
         val calleeId: Int = hirKidsAt(kids, 0)
         val ck: String = hir.kindOf(calleeId)
         if (ck == "HirMember") {
-            val mk: String = hir.kidsOf(calleeId)
+            val mk: String = hir.kidsOfList(calleeId)
             if (hirKidsCount(mk) < 1) {
                 return ""
             }
@@ -9331,7 +9338,7 @@ class LlvmEmitter {
         if (id < 0 || id >= hir.count || hir.kindOf(id) != "HirCall") {
             return false
         }
-        val kids: String = hir.kidsOf(id)
+        val kids: String = hir.kidsOfList(id)
         var fname: String = hir.textOf(id)
         if (fname == "" && hirKidsCount(kids) > 0) {
             fname = hir.textOf(hirKidsAt(kids, 0))

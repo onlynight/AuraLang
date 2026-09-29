@@ -55,6 +55,35 @@ object VmRunnerUtils {
         }
         return total
     }
+
+    /// 整数转字符串（不依赖 toStr，避免 AOT 转换问题）。
+    fun vrIntToStr(n: Int): String {
+        if (n == 0) return "0"
+        var neg: Boolean = false
+        if (n < 0) {
+            neg = true
+            n = -n
+        }
+        var result: String = ""
+        while (n > 0) {
+            val digit: Int = n % 10
+            var ch: String = ""
+            if (digit == 0) ch = "0"
+            else if (digit == 1) ch = "1"
+            else if (digit == 2) ch = "2"
+            else if (digit == 3) ch = "3"
+            else if (digit == 4) ch = "4"
+            else if (digit == 5) ch = "5"
+            else if (digit == 6) ch = "6"
+            else if (digit == 7) ch = "7"
+            else if (digit == 8) ch = "8"
+            else ch = "9"
+            result = ch + result
+            n = n / 10
+        }
+        if (neg) result = "-" + result
+        return result
+    }
 }
 
 /// VM 运行器（P0 升级版：委托到完整 Vm）。
@@ -133,13 +162,10 @@ class VmRunner {
 
     /// 执行字节码，返回结果。
     fun run(): Any {
-        this.running = true
         this.returnValue = this.vm.run()
         this.error = this.vm.getError()
         this.instructionCount = this.vm.getInstructionCount()
-        if (this.vm.getError() != "") {
-            this.running = false
-        }
+        this.running = this.vm.isRunning()
         return this.returnValue
     }
 
@@ -250,5 +276,50 @@ class VmRunner {
     /// 恢复 VM 状态。
     fun restoreState(state: HashMap<String, Any>): Unit {
         this.vm.restoreState(state)
+    }
+
+    /// 压栈（测试用）。
+    fun push(value: String): Unit {
+        this.vm.push(value)
+    }
+
+    /// 栈顶（测试用）。
+    fun peek(): String {
+        return this.vm.peek()
+    }
+
+    /// 弹栈（测试用）。
+    fun pop(): String {
+        return this.vm.pop()
+    }
+
+    /// 设置局部变量（测试用）。
+    fun setLocal(idx: Int, value: String): Unit {
+        this.vm.setLocal(idx, value)
+    }
+
+    /// 获取局部变量（测试用）。
+    fun getLocal(idx: Int): String {
+        return this.vm.getLocal(idx)
+    }
+
+    /// 加法（测试用）。
+    fun arithAdd(a: String, b: String): String {
+        return this.vm.arithAdd(a, b)
+    }
+
+    /// 减法（测试用）。
+    fun arithSub(a: String, b: String): String {
+        return this.vm.arithSub(a, b)
+    }
+
+    /// 乘法（测试用）。
+    fun arithMul(a: String, b: String): String {
+        return this.vm.arithMul(a, b)
+    }
+
+    /// 除法（测试用）。
+    fun arithDiv(a: String, b: String): String {
+        return this.vm.arithDiv(a, b)
     }
 }

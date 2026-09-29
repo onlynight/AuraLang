@@ -82,6 +82,8 @@ impl NativeRegistry {
         r.register("toBoolean", native_to_boolean);
         r.register("toHex", native_to_hex);
         r.register("clock", native_clock);
+        r.register("Clock.clockGettime", native_clock_gettime);
+        r.register("aura.lang.native.time.Clock.clockGettime", native_clock_gettime);
         r.register("strlen", native_strlen);
         r.register("CString", native_cstring);
         r.register("CStr", native_cstr);
@@ -98,6 +100,7 @@ impl NativeRegistry {
         r.register("aura_cast_safety", native_cast_safety);
         r.register("__size", native_size);
         r.register("__get", native_get);
+        r.register("__callClosure", native_call_closure);
         // prelude 裸名（isNull / listOf / min / assertEq ...）
         crate::std::register_prelude(&mut r);
         // Full-name aliases for prelude (aura.lang.std.<fn>)
@@ -179,6 +182,8 @@ impl NativeRegistry {
         r.register("toBoolean", native_to_boolean);
         r.register("toHex", native_to_hex);
         r.register("clock", native_clock);
+        r.register("Clock.clockGettime", native_clock_gettime);
+        r.register("aura.lang.native.time.Clock.clockGettime", native_clock_gettime);
         r.register("strlen", native_strlen);
         r.register("CString", native_cstring);
         r.register("CStr", native_cstr);
@@ -198,6 +203,7 @@ impl NativeRegistry {
         // 变成空循环且静默无输出。
         r.register("__size", native_size);
         r.register("__get", native_get);
+        r.register("__callClosure", native_call_closure);
 
         // prelude 裸名（isNull / listOf / min / assertEq ...）
         crate::std::register_prelude(&mut r);
@@ -640,6 +646,41 @@ fn native_clock(args: &[Value]) -> Value {
     Value::Float(now)
 }
 
+/// `Clock.clockGettime(clock, ts)` → 0（成功）
+///
+/// 将当前时间写入 `ts` 指向的堆内存（sec 在 ts+0，nsec 在 ts+8）。
+fn native_clock_gettime(args: &[Value]) -> Value {
+    if args.len() < 2 {
+        return Value::Int(-1);
+    }
+    let _clock = match args[0] {
+        Value::Int(i) => i,
+        _ => 0,
+    };
+    let ts = match args[1] {
+        Value::Int(i) => i,
+        Value::Ptr(p) => p,
+        Value::Ref(id) => {
+            // 如果传入的是引用，尝试解析为地址
+            id as i64
+        }
+        _ => 0,
+    };
+    if ts == 0 {
+        return Value::Int(-1);
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let sec = now.as_secs() as i64;
+    let nsec = (now.subsec_nanos() as i64) * 1_000_000_000 / 1_000_000_000;
+    // 写入堆内存（sec 在 ts+0，nsec 在 ts+8）
+    unsafe {
+        let ts_ptr = ts as *mut i64;
+        *ts_ptr = sec;
+        *ts_ptr.add(1) = nsec;
+    }
+    Value::Int(0)
+}
+
 fn native_strlen(args: &[Value]) -> Value {
     match args.first() {
         Some(Value::Str(s)) => Value::Int(s.chars().count() as i64),
@@ -822,6 +863,15 @@ fn native_make_callback(_args: &[Value]) -> Value {
     // makeCallback 由 MakeCallback 指令处理（见 mir.rs / emit.rs）
     // 此处作为占位：如果通过 CallNative 调用，返回无效回调 ID
     Value::Ptr(0)
+}
+
+/// `__callClosure(closure, sig, arg)` — 闭包间接调用占位。
+///
+/// 实际逻辑在 `do_call_native` 中拦截（interp.rs），从堆取出闭包的
+/// captures + func_idx 后调用 `do_call`。此处仅作为注册占位，
+/// 使字节码编译器知道 `__callClosure` 是原生函数而非用户函数。
+fn native_call_closure(_args: &[Value]) -> Value {
+    Value::Null
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

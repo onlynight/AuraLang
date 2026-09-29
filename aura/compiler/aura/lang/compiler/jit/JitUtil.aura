@@ -100,14 +100,24 @@ object JitUtil {
         return jitLineIndex(lines, value) >= 0
     }
 
-    // ── 函数表访问（表格式：`name|offset|paramCount`，见 Codegen.funcTableStr）──
+    // ── 函数表访问（表格式：`idx|name|size|native|arity|callees`）──
+    //
+    // 每行一个函数记录，字段：
+    //   0 idx      函数序号（= 行号）
+    //   1 name     函数名
+    //   2 size     函数体规模（指令数）
+    //   3 native   是否原生 FFI（"0"/"1"）
+    //   4 arity    形参个数
+    //   5 callees  被调函数序号，逗号分隔（可为空）
+    //
+    // 例：`0|main|3|0|0|1,2`。
 
     /// 第 idx 个函数的名称（越界返回空串）。
     fun jitFuncName(funcs: String, idx: Int): String {
         if (idx < 0 || idx >= jitLineCount(funcs)) {
             return ""
         }
-        return jitFieldAt(jitLineAt(funcs, idx), 0, "|")
+        return jitFieldAt(jitLineAt(funcs, idx), 1, "|")
     }
 
     /// 第 idx 个函数的形参个数（越界返回 0）。
@@ -115,7 +125,7 @@ object JitUtil {
         if (idx < 0 || idx >= jitLineCount(funcs)) {
             return 0
         }
-        return jitParseInt(jitFieldAt(jitLineAt(funcs, idx), 2, "|"))
+        return jitParseInt(jitFieldAt(jitLineAt(funcs, idx), 4, "|"))
     }
 
     /// 函数索引是否有效。
@@ -123,22 +133,28 @@ object JitUtil {
         return idx >= 0 && idx < jitLineCount(funcs)
     }
 
-    /// 函数体规模（当前函数表不含体积信息，返回 0 表示未知）。
+    /// 函数体规模（指令数；越界返回 0）。
     fun jitFuncSize(funcs: String, idx: Int): Int {
         if (!jitFuncExists(funcs, idx)) {
             return 0
         }
-        return 0
+        return jitParseInt(jitFieldAt(jitLineAt(funcs, idx), 2, "|"))
     }
 
-    /// 是否为原生（FFI）函数（当前函数表不含该标记，返回 false）。
+    /// 是否为原生（FFI）函数（字段 3 为 `"1"`）。
     fun jitFuncNative(funcs: String, idx: Int): Boolean {
-        return false
+        if (!jitFuncExists(funcs, idx)) {
+            return false
+        }
+        return jitFieldAt(jitLineAt(funcs, idx), 3, "|") == "1"
     }
 
-    /// 被调函数索引列表（逗号分隔；当前函数表不含调用图，返回空串）。
+    /// 被调函数索引列表（逗号分隔；无调用返回空串）。
     fun jitFuncCallees(funcs: String, idx: Int): String {
-        return ""
+        if (!jitFuncExists(funcs, idx)) {
+            return ""
+        }
+        return jitFieldAt(jitLineAt(funcs, idx), 5, "|")
     }
 
     // ── 数值解析 ──

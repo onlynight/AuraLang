@@ -214,12 +214,40 @@ class TypeChecker {
     }
 
     /// 收集函数声明。
+    /// P0 新增：提取参数签名，支持同名重载。
     fun tcCollectFunDecl(ast: Ast, id: Int) {
         val name: String = ast.textOf(id)
         val rawTy: String = ast.tyOf(id)
         val vis: String = this.tcExtractVis(rawTy)
         val ty: String = this.tcExtractTy(rawTy)
-        this.st.stInsert(name, "Fn", vis, false, "", ty)
+        // 提取参数签名（P0：支持函数重载）
+        val params: String = this.tcExtractParams(ast, id)
+        this.st.stInsert(name, "Fn", vis, false, params, ty)
+    }
+
+    /// 从函数 AST 节点提取参数签名。
+    /// 格式：`Int,String`（逗号分隔的类型名列表）
+    fun tcExtractParams(ast: Ast, id: Int): String {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount > 0) {
+            val paramsNodeId: Int = kidsAt(kids, 0)
+            val paramsKids: String = ast.kidsOf(paramsNodeId)
+            val pkCount: Int = kidsCount(paramsKids)
+            var sig: String = ""
+            var pi: Int = 0
+            while (pi < pkCount) {
+                val pId: Int = kidsAt(paramsKids, pi)
+                val paramTy: String = ast.tyOf(pId)
+                if (sig != "") {
+                    sig = sig + ","
+                }
+                sig = sig + paramTy
+                pi = pi + 1
+            }
+            return sig
+        }
+        return ""
     }
 
     /// 收集类型声明（struct/class/object）。
@@ -719,6 +747,7 @@ class TypeChecker {
     }
 
     /// 检查函数调用表达式。
+    /// P0 新增：支持函数重载解析（按参数数量匹配）。
     fun tcCheckCall(ast: Ast, id: Int): String {
         val kids: String = ast.kidsOf(id)
         val kCount: Int = kidsCount(kids)
@@ -726,12 +755,15 @@ class TypeChecker {
             val calleeId: Int = kidsAt(kids, 0)
             val calleeName: String = ast.textOf(calleeId)
 
-            // 查找函数签名
-            val fnSig: String = this.st.stFindFunction(calleeName)
+            // 计算调用时的参数数量（排除 callee 本身）
+            val argCount: Int = kCount - 1
+
+            // 查找函数签名（P0：支持同名重载）
+            val fnSig: String = this.st.stFindFunctionOverloaded(calleeName, argCount)
             if (fnSig != "") {
                 val parts: List<String> = fnSig.split("|")
                 if (parts.size >= 2) {
-                    return parts[1]
+                    return parts[parts.size - 1]  // 最后一个字段是返回类型
                 }
             }
         }
