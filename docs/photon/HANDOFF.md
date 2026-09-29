@@ -912,3 +912,62 @@ powershell -File scripts\photon\photon-hat-native-suite.ps1 -Phase P0,P1,P2,P3
 `-Phase P4` → PASS=1 FAIL=11，分类见上一节。其中 `test_memory_alloc` 只差
 「布尔打印」（`init: 1` vs VM `init: true`）、`probe_*` 多为对象引用打印格式，
 `test_runtime_init` / `test_thread` 是运行库符号缺口（`Runtime_*` / `ThreadOps_currentId`）。
+
+---
+
+## 第十二轮进展（2026-09-29）—— P4：修掉 4 个真 bug，暴露 1 个硬前置 + 1 个口径阻塞
+
+### ✅ 本轮修复（都有可复现证据）
+
+| # | 缺陷 | 现象 → 修复 |
+|---|------|-------------|
+| 12.1 | **`toStr(<Boolean>)` 不会真值化**：运行库 `toStr` 只做整数→十进制，布尔在生成物里就是 0/1；后端只折叠 `toStr(<Bool **常量**>)` | `P4/test_memory_alloc` 打印 `init: 1`（VM `true`）→ 前端把 `toStr(bool)` 改写成三元式 `flag ? "true" : "false"`（`buildBoolToString`：两个字符串常量 + CondBr + Phi），并新增**类限定返回类型表** `classMethodRetTypes`（`init`/`isLocked` 等同名方法在全局表里是「歧义」，按接收者类查才准确）。**`test_memory_alloc` 转 PASS** |
+| 12.2 | **`or`/`and`/`xor`/`shl`/`shr` 的源操作数取错节点**：`emitLogicBinary` / `emitXorRR` / `emitShiftByReg` 固定取 `nodes[0]`，而 `emitArith` 的约定是 `dst,src`（`nodes[0]` 就是**目的节点**）⇒ 发射成 `or %dst, %dst` | `a == 0 \|\| a < 16` 恒为**假** ⇒ `ARC.retain(1)` 的守卫失效、计数错 → 统一改用既有的 `divSrcNode(instr)`（取 `nodes[1]`，与 div/rem 一致）。**`test_arc_refcount` 转 PASS**（retain/release 回到 VM 的 0/0） |
+| 12.3 | **`object X` 与同名 `extern interface X` 冲突**：`registerClass` 见到「名字已知」就整体 `return` ⇒ 后一个声明的**方法全丢**（`Runtime.aura` 里既有 `extern interface Runtime` 又有 `object Runtime`） | 改成「同类重复才跳过」，并按**逐个方法**登记 extern 成员（`externMethodsCsv`，新增 `registerClassBodyEx(..., isExternDecl)`）⇒ `Runtime_init` / `isInitialized` / `cleanup` 等**真实 Aura 实现**终于被生成（此前是把它们当自由函数发射成 `init`，调用点 `Runtime_init` 链接期未定义） |
+| 12.4 | **`Memory_mmap` 的 Nt 系统调用栈参数偏移错 0x10**：第 5/6 个实参应写在 `[rsp+0x28]/[rsp+0x30]`，`emitPrologue(0x90)` 下即 `rbp-0x68/rbp-0x60`，旧实现写在 `-0x58/-0x50` | 内核读到残留栈数据 ⇒ `STATUS_INVALID_PARAMETER` ⇒ **mmap 恒返回 0**；而 `ArenaAllocator.init` 只判 `baseAddr == -1` ⇒ 把 0 当成功 ⇒「mmap 堆」形同虚设、`alloc` 恒返回 0。修复后 `Memory.mmap(0,{4K,8K,1M,64M},3,34,-1,0)` 全部返回**真实指针** ✓（P4 第 1 项 mmap 堆的真根因） |
+
+> 12.4 的副作用（重要）：`probe_mmap` 由 **PASS 变 FAIL** —— 因为它的 VM 基准
+> 打印的是 **0**（VM 的 `Memory.mmap` 是桩），native 修对之后两边反而不一致了。
+> 这正是下面 12.6 的现象。
+
+### 🔴 新发现·硬前置：`PhotonObjectWriter` 在函数数变化时错位
+
+往 runtime 对象里**追加 8 个函数**（`ThreadOps_*` / `Runtime_arc*`）后：
+
+- `RELCHK-FINAL funcs=128` → **120**（追加 8 个反而少了 8 个 ⇒ 顶掉了已有函数）
+- `Memory_mmap` 开始返回 0（即使把 12.4 修好也复现）
+
+⇒ **必须先修 `PhotonObjectWriter` 的函数/符号表**（函数数变化时的偏移/容量），
+才能把 `ThreadOps_currentId` 等接进 runtime 对象。本轮已把那 8 个函数**回退**
+（在 `PhotonRuntime.buildRuntimeObject` 里留了注释与现成的 encoder 函数
+`emitThreadOpsCurrentId` / `emitStubZero` / `emitStubVoid`），等前置修好再接。
+
+### 🔴 阻塞项（需拍板）：P4 差分基准是 **VM 桩**
+
+P4 用例的期望值来自 VM（`aura run`），而 **VM 侧这批能力本身就是桩**：
+
+| 用例 | VM（桩） | native（越来越对） |
+|---|---|---|
+| `probe_mmap` | `mmap1: 0` | 真实指针（12.4 修好后）→ **反而 FAIL** |
+| `07_mutex_ops` | `After lock: false`（VM 的 lock 没生效） | `false/true/false`（正确） |
+| `06_gc_collect` | `null/null/null/null` | `false/false/true/1` |
+| `probe_env` | 把变量名当值返回 `CNT=[AURA_ARGV_COUNT]` | `CNT=[]`（真实） |
+| `probe_arena` | `capacity: 0 / M usedSize: null` | `capacity: 1048576`（真实） |
+| `probe_mutex` | `mutex=<ref#4>`（VM 的引用打印格式） | 原始地址 |
+| `test_arc_refcount` | `0/0`（VM 的 ARC 桩） | 修好 12.2 后也是 `0/0` ✓ 对上了 |
+
+两条路线，选一条（推荐 A）：
+
+- **A. 修 VM 侧**：把这批 native/内嵌 stdlib 补成真实实现（`Memory.mmap`、
+  `Memory.atomic*`、GC 状态、ARC 计数、`Env.get`、对象引用打印）——
+  差分才有意义，且能顺带修掉 VM 的同类缺陷；代价是 Rust VM 侧工作量。
+- **B. 给 P4 换基准**：为 `tests/photon/P4/*` 增加 native 期望值文件，
+  套件对 P4 用期望值比对（不动 VM）；快，但要为每条用例确定「正确输出」。
+
+### 第十二轮成绩
+
+- `-Phase P0,P1,P2,P3` → **16/16 不变**（无退化）；
+- `-Phase P4` → PASS=1 FAIL=11；其中 `test_arc_refcount` 通过，
+  `test_memory_alloc` / `probe_mmap` 因「native 更正确」而在口径上翻转，
+  `test_thread` 仍链接失败（`ThreadOps_currentId`，等 12.5 前置），
+  `test_exception` 仍崩（native 异常支持未做）。

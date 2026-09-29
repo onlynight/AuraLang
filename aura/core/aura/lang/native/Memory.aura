@@ -190,9 +190,6 @@ object MemoryManager {
 // ═══════════════════════════════════════════════════════════════
 
 object MemoryUtils {
-
-    /// 创建空的 Arena 分配器实例。
-    fun emptyAllocator(): ArenaAllocator {
-        return ArenaAllocator()
-    }
+    // ArenaAllocator 是全局单例，无法创建新实例。
+    // 请使用 MemoryManager.alloc() 分配内存。
 }

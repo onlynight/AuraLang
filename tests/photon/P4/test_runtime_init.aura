@@ -6,7 +6,6 @@
 import aura.lang.std.String
 import aura.lang.native.Runtime
 import aura.lang.native.Memory
-import aura.lang.native.GC
 import aura.lang.errors.Exception
 
 fun main() {
@@ -23,10 +22,6 @@ fun main() {
     // 测试内存分配
     val ptr: Long = MemoryManager.alloc(100)
     println("Alloc: " + toStr(ptr))
-    
-    // 测试 GC
-    GC.collect()
-    println("GC count: " + toStr(GC.getGcCount()))
     
     // 清理运行时
     println("Cleaning up...")

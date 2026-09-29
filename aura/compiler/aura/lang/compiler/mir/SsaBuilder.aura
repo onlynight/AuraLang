@@ -132,6 +132,14 @@ class SsaBuilder {
     /// `emitFunction` / `link` / `setOutputType` / `getSize` / `emit` …）。
     private var methodRetTypes: String = ""
 
+    /// 类限定「方法 → 返回类型」（`\nClass|method|retTy\n`）。
+    ///
+    /// 与 `methodRetTypes` 的区别：不做歧义合并 —— `init` / `isLocked` /
+    /// `getUsedSize` 这类方法在多个类里都有，全局表只能置为「歧义」，
+    /// 但调用点的接收者类型是确定的 ⇒ 由本表判定真实返回类型。
+    /// 用途：布尔真值化（`toStr(ArenaAllocator.init(...))`）等「按返回类型分派」的改写。
+    private var classMethodRetTypes: String = ""
+
     /// 顶层自由函数名（`\nname\n`）。
     ///
     /// 调用点解析必须避开它们：`add(3, 4)` 这样的自由函数调用与
@@ -171,6 +179,15 @@ class SsaBuilder {
     /// 属主直接跳过，否则链接期 `duplicate symbol: Memory_alloc`。
     private var externCsv: String = ""
 
+    /// `extern interface` **声明的方法**（`\nOwner|method\n`）。
+    ///
+    /// `buildAllFunctions` 只跳过**这些**，而不是「属主名出现在 externCsv 里」的
+    /// 所有函数：同一模块里可能既有 `extern interface Runtime`（4 个 asm 成员）
+    /// 又有 `object Runtime`（`init` / `isInitialized` / `cleanup` … 的真实 Aura 实现，
+    /// 见 `aura/lang/native/Runtime.aura`）。按名字整体跳过会把后者的实现也丢掉
+    /// ⇒ 调用点 `Runtime_init` 未定义（实测 P4/test_runtime_init 链接失败）。
+    private var externMethodsCsv: String = ""
+
     /// `init` 节点声明的元数表（`\nClass|arity\n`）。
     ///
     /// 由 `scanInitArities` 在建函数之前一次性填充；`synthesizeCtors` 用它决定
@@ -200,12 +217,14 @@ class SsaBuilder {
         this.classMethods = ""
         this.methodOwners = ""
         this.methodRetTypes = ""
+        this.classMethodRetTypes = ""
         this.freeFuncs = ""
         this.ownerByNode = arrayListOf<String>()
         this.curClass = ""
         this.localTypes = ""
         this.singletonCsv = ""
         this.externCsv = ""
+        this.externMethodsCsv = ""
         this.objFieldStateCsv = ""
         this.singletonList = arrayListOf<String>()
         this.initArityCsv = ""
@@ -267,7 +286,7 @@ class SsaBuilder {
         val n: Int = src.count
         var i: Int = 0
         while (i < n) {
-            if (src.kindOf(i) == "HirFunction" && !this.isExternObjMethod(i)) {
+            if (src.kindOf(i) == "HirFunction" && !this.isExternObjMethod(src, i)) {
                 this.dbgFuncCount = this.dbgFuncCount + 1
                 // 崩溃诊断：AURA_PHOTON_TRACE=1 时逐函数打印，定位精确崩溃点
                 if (traceOn) {
@@ -619,6 +638,79 @@ class SsaBuilder {
             return this.program.addValue("Const", typeId, "", "0.0", this.curBlock)
         }
         return this.program.addValue("Const", typeId, "", "null", this.curBlock)
+    }
+
+    /// `<Boolean> → "true"/"false"`：两个字符串常量 + 条件分支 + Phi。
+    ///
+    /// 不改运行库/ABI（`toStr` 仍是整数→十进制），纯前端改写。
+    private fun buildBoolToString(boolVal: Int): Int {
+        val strType: Int = this.types.fromTypeName("String")
+        val thenBlock: Int = this.program.addBlock()
+        val elseBlock: Int = this.program.addBlock()
+        val mergeBlock: Int = this.program.addBlock()
+        this.program.setTerminator(this.curBlock, "CondBr", 0,
+            toStr(boolVal) + "," + toStr(thenBlock) + "," + toStr(elseBlock), "")
+        this.curBlock = thenBlock
+        val tv: Int = this.program.addValue("Const", strType, "", "true", this.curBlock)
+        this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock), "")
+        val varMapAfterThen: String = this.varMap
+        this.curBlock = elseBlock
+        val fv: Int = this.program.addValue("Const", strType, "", "false", this.curBlock)
+        this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock), "")
+        this.curBlock = mergeBlock
+        return this.makePhi(mergeBlock, strType, toStr(tv) + "," + toStr(fv), "")
+    }
+
+    /// 该 HIR 表达式是否**静态类型为 Boolean**（判定 `toStr` 实参需不需要真值化）。
+    ///
+    /// 覆盖四种来源：局部/形参的声明类型、`!x`、返回 Boolean 的调用、
+    /// 比较类二元运算；最后兜底看 HIR 自己记的类型。
+    private fun isBoolExpr(src: Hir, nodeId: Int): Boolean {
+        if (nodeId < 0) {
+            return false
+        }
+        val t: String = src.tyOf(nodeId)
+        if (t == "Boolean" || t == "Bool") {
+            return true
+        }
+        val k: String = src.kindOf(nodeId)
+        if (k == "HirVar") {
+            return this.localTypeOf(src.textOf(nodeId)) == "Boolean"
+        }
+        if (k == "HirUnary") {
+            val op: String = src.textOf(nodeId)
+            return op == "!" || op == "Not"
+        }
+        if (k == "HirCall") {
+            val callee: String = src.textOf(nodeId)
+            // (a) 全局唯一返回类型
+            if (this.uniqueMethodReturnType(callee) == "Boolean") {
+                return true
+            }
+            // (b) `Class_method` 形式（HIR 对 `Uppercase.m()` 的限定写法）
+            val us: Int = callee.indexOf("_")
+            if (us > 0) {
+                val short: String = callee.substring(us + 1, callee.length)
+                if (this.classMethodReturnType(callee.substring(0, us), short) == "Boolean") {
+                    return true
+                }
+            }
+            // (c) 裸名 + 接收者：先定出接收者的类，再查类限定返回类型
+            val ck: String = src.kidsOf(nodeId)
+            if (HirUtils.hirKidsCount(ck) >= 1) {
+                val recvCls: String = this.receiverClassOf(src, HirUtils.hirKidsAt(ck, 0))
+                if (recvCls != "") {
+                    return this.classMethodReturnType(recvCls, callee) == "Boolean"
+                }
+            }
+            return false
+        }
+        if (k == "HirBinary") {
+            val op: String = src.textOf(nodeId)
+            return op == "==" || op == "!=" || op == "<" || op == ">"
+                || op == "<=" || op == ">=" || op == "&&" || op == "||"
+        }
+        return false
     }
 
     /// 构建 if 语句。
@@ -1613,6 +1705,27 @@ class SsaBuilder {
             funcName = this.resolveMethodSymbol(src, kids, kCount, funcName)
         }
 
+        // `toStr(<Boolean>)` / `toString(<Boolean>)` → `"true"` / `"false"`。
+        //
+        // 运行库的 `toStr` 只做**整数 → 十进制**（`PhotonRuntime.emitToStr`），
+        // 而布尔值在生成物里就是 0/1 ⇒ 打印 `0`/`1`（VM 语义为 `true`/`false`）。
+        // 后端只折叠了「`toStr(<Bool **常量**>)`」这一特例
+        //（见 `InstructionSelection` 的「特例：toStr(<Bool 常量>)」），
+        // **运行时变量**需要前端把它改写成三元式：
+        //     toStr(flag)  ≡  flag ? "true" : "false"
+        // 实测 P4：`toStr(initialized)`/`toStr(ok)`/`toStr(GC.isEnabled())`/
+        // `toStr(mutex.isLocked())`/`toStr(!mutex.isLocked())` 全部落到这条路径。
+        if ((bareName == "toStr" || bareName == "toString") && kCount == 1) {
+            val a0v: Int = LirUtils.strToInt(args)
+            if (a0v >= 0) {
+                val isBoolArg: Boolean = this.types.isBool(this.program.valueOf(a0v).type)
+                    || this.isBoolExpr(src, HirUtils.hirKidsAt(kids, 0))
+                if (isBoolArg) {
+                    return this.buildBoolToString(a0v)
+                }
+            }
+        }
+
         // 顶层自由函数（用户自己写的 `fun add(a, b)`）的调用**不追加内存链尾参**。
         //
         // 否则 `add(3, 4)` 会变成 3 实参形态 `@call @add(3, 4, mem)`，与「集合追加」
@@ -1639,7 +1752,9 @@ class SsaBuilder {
         // `1`/`0`，与 VM 语义 `true`/`false` 不符（P4 全部并发用例的判定行）。
         // 这里按被调方法的**声明返回类型**补定型；只认 `Boolean` —— 整数 / 浮点
         // / 指针与 `Basic` 同宽，定型无收益且可能改变指令选择路径，一律不碰。
-        if (src.tyOf(id) == "" && this.uniqueMethodReturnType(bareName) == "Boolean") {
+        // （`isBoolExpr` 覆盖：全局唯一返回类型、`Class_method` 限定、以及
+        //   「裸名 + 接收者类」三种形态，见其说明。）
+        if (src.tyOf(id) == "" && this.isBoolExpr(src, id)) {
             typeId = this.types.fromTypeName("Boolean")
         }
         val callVal: Int = this.program.addValue("Call", typeId, args, funcName, this.curBlock)
@@ -2041,9 +2156,13 @@ class SsaBuilder {
         return this.externCsv.indexOf("\n" + name + "\n") >= 0
     }
 
-    /// `HirFunction` 是否属于某个 `extern interface`。
-    private fun isExternObjMethod(node: Int): Boolean {
-        return this.isExternObj(this.ownerClassNameOf(node))
+    /// 该 `HirFunction` 是否是 `extern interface` **声明**的方法（只有这些跳过代码生成）。
+    private fun isExternObjMethod(src: Hir, node: Int): Boolean {
+        val owner: String = this.ownerClassNameOf(node)
+        if (owner == "" || this.externMethodsCsv == "") {
+            return false
+        }
+        return this.externMethodsCsv.indexOf("\n" + owner + "|" + src.textOf(node) + "\n") >= 0
     }
 
     /// 单例模块是否带**字段状态**。
@@ -2551,7 +2670,27 @@ class SsaBuilder {
     ///（`HirObject`/`HirExternObject`）：后者**不进** `classList`。
     private fun registerClass(src: Hir, id: Int, kind: String) {
         val name: String = src.textOf(id)
-        if (name == "" || this.isClassName(name) || this.isBuiltinValueClass(name)) {
+        if (name == "" || this.isBuiltinValueClass(name)) {
+            return
+        }
+        // ⚠️ `classNamesCsv` 里已有该名**不代表**这个声明登记过：同一模块里可能
+        // 同时有 `extern interface Runtime`（asm 成员）与 `object Runtime`
+        //（`init` / `isInitialized` / `cleanup` 的真实 Aura 实现，见
+        // `aura/lang/native/Runtime.aura`）。旧实现见到「名字已知」就整体 return，
+        // 于是后者的方法既不进 `classMethods` 也不进 `ownerByNode` —— 其函数体被
+        // 当成**自由函数**发射（符号 `init` 而非 `Runtime_init`），调用点
+        // `@call @Runtime_init` 在链接期未定义（P4/test_runtime_init 的根因）。
+        // 现在按「同类重复」判重：object / extern 各自查各自的表。
+        // 同类重复才跳过：`HirExternObject` 查 `externCsv`，`HirObject` 查 `singletonCsv`。
+        if (kind == "HirExternObject") {
+            if (this.externCsv.indexOf("\n" + name + "\n") >= 0) {
+                return
+            }
+        } else if (kind == "HirObject") {
+            if (this.singletonCsv.indexOf("\n" + name + "\n") >= 0) {
+                return
+            }
+        } else if (this.isClassName(name)) {
             return
         }
         this.classNamesCsv = this.classNamesCsv + "\n" + name + "\n"
@@ -2586,7 +2725,7 @@ class SsaBuilder {
             val child: Int = HirUtils.hirKidsAt(kids, j)
             val ck: String = src.kindOf(child)
             if (ck == "HirBlock") {
-                idx = this.registerClassBody(src, name, child, idx, id)
+                idx = this.registerClassBodyEx(src, name, child, idx, id, kind == "HirExternObject")
             } else if (ck == "HirVarDecl" || ck == "HirValDecl") {
                 this.addField(src, name, child, idx)
                 idx = idx + 1
@@ -2603,6 +2742,10 @@ class SsaBuilder {
                 // `alloc` / `write64` / `currentId`，链接期 undefined symbol。
                 this.addMethodOwner(child, name)
                 this.addClassMethod(name, src.textOf(child))
+                // `extern interface` 的成员逐个登记（列表路径在 registerClassBodyEx 里）
+                if (kind == "HirExternObject") {
+                    this.externMethodsCsv = this.externMethodsCsv + "\n" + name + "|" + src.textOf(child) + "\n"
+                }
             }
             j = j + 1
         }
@@ -2616,6 +2759,19 @@ class SsaBuilder {
     /// 登记类体块（字段 + 方法），返回下一个可用字段序号。
     private fun registerClassBody(src: Hir, cls: String, blockId: Int,
                                   startIdx: Int, classNode: Int): Int {
+        return this.registerClassBodyEx(src, cls, blockId, startIdx, classNode, false)
+    }
+
+    /// `registerClassBody` 的实现体；`isExternDecl` 表示**当前声明**是
+    /// `extern interface`（只有它的成员才登记进 `externMethodsCsv`）。
+    ///
+    /// ⚠️ 不能改用 `isExternObj(cls)` 来判断：同一模块里可能既有
+    /// `extern interface Runtime` 又有 `object Runtime`，后者扫描时
+    /// `isExternObj("Runtime")` 也为真 ⇒ 会把**真实实现的 Aura 方法**也登记成
+    /// 「外部实现」而跳过代码生成（`Runtime_init` 未定义）。
+    private fun registerClassBodyEx(src: Hir, cls: String, blockId: Int,
+                                    startIdx: Int, classNode: Int,
+                                    isExternDecl: Boolean): Int {
         var idx: Int = startIdx
         val kids: String = src.kidsOf(blockId)
         val kn: Int = HirUtils.hirKidsCount(kids)
@@ -2629,7 +2785,17 @@ class SsaBuilder {
             } else if (ck == "HirFunction" || ck == "HirNativeFunction") {
                 this.addMethodOwner(child, cls)
                 this.addClassMethod(cls, src.textOf(child))
+                // `extern interface` 声明的方法要逐个登记（只跳这些，不跳整个属主：
+                // 同名 `object` 的真实实现必须保留，见 `externMethodsCsv` 的说明）。
+                if (isExternDecl) {
+                    this.externMethodsCsv = this.externMethodsCsv + "\n" + cls + "|" + src.textOf(child) + "\n"
+                }
                 this.addMethodReturnType(src.textOf(child), src.tyOf(child))
+                // 同时登记**类限定**的返回类型：同名方法（`init` / `isLocked` /
+                // `getUsedSize` …）在多个类里声明时上面那张全局表会置为歧义，
+                // 而调用点（`ArenaAllocator.init(...)` / `mutex.isLocked()`）
+                // 的接收者类型是确定的 —— 需要这张表才能判定「返回 Boolean」。
+                this.addClassMethodReturnType(cls, src.textOf(child), src.tyOf(child))
             } else if (ck == "HirBlock") {
                 // 嵌套块（极少见）：继续下钻
                 idx = this.registerClassBody(src, cls, child, idx, classNode)
@@ -2754,7 +2920,11 @@ class SsaBuilder {
     /// 刻意**不在登记时**用 `isClassName` 过滤：本表在 `buildClassIndex` 预扫描
     /// 期间建立，而 `classNamesCsv` 要到预扫描结束才完整 —— 中途过滤会把多数
     /// 类名误判为「非类」而丢掉。类型合法性改在**使用点**判断。
-    private fun addMethodReturnType(method: String, ty: String) {
+    private fun addMethodReturnType(method: String, rawTy: String) {
+        // 归一化：声明节点的 `ty` 带 `#<vis>|` 可见性前缀（见 `normAuraType`），
+        // 不剥掉的话 `Boolean` 会存成 `#public|Boolean`，所有「按返回类型分派」
+        // 的判定（布尔定型 / 真值化）全部失手。
+        val ty: String = this.normAuraType(rawTy)
         if (method == "" || ty == "") {
             return
         }
@@ -2779,6 +2949,26 @@ class SsaBuilder {
             this.methodRetTypes = this.methodRetTypes.substring(0, start)
                 + this.methodRetTypes.substring(i, len)
         }
+    }
+
+    /// 登记「类限定：类|方法 → 返回类型」（不做歧义合并，见字段说明）。
+    private fun addClassMethodReturnType(cls: String, method: String, rawTy: String) {
+        val ty: String = this.normAuraType(rawTy)
+        if (cls == "" || method == "" || ty == "") {
+            return
+        }
+        val key: String = "\n" + cls + "|" + method + "|"
+        if (this.classMethodRetTypes.indexOf(key) < 0) {
+            this.classMethodRetTypes = this.classMethodRetTypes + key + ty + "\n"
+        }
+    }
+
+    /// 类限定方法的返回类型（未命中返回 ""）。
+    private fun classMethodReturnType(cls: String, method: String): String {
+        if (cls == "" || method == "") {
+            return ""
+        }
+        return this.flatFieldAfter(this.classMethodRetTypes, "\n" + cls + "|" + method + "|")
     }
 
     /// 方法的唯一返回类型（歧义 / 未命中返回 ""）。

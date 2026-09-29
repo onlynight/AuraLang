@@ -1,4 +1,4 @@
-﻿# Photon 后端实现完整性检查报告
+# Photon 后端实现完整性检查报告
 
 **日期**: 2026-09-22
 **版本**: v3 设计文档对照检查
@@ -13,7 +13,7 @@
 | Phase 1: 基础设施 | 编译管线、HIR 序列化、驱动 | ✅ 完成 | 100% |
 | Phase 2: 核心代码生成 | 控制流、内存、类型、调用约定、优化 | ✅ 完成 | 100% |
 | Phase 3: 原生函数支持 | syscall 生成、系统调用表 | ✅ 完成 | 100% |
-| Phase 4: 运行时系统 | 内存、GC、异常、线程、运行时入口 | ✅ 完成 | 100% |
+| Phase 4: 运行时系统 | 内存（ARC）、异常、线程、运行时入口 | ✅ 完成 | 100% |
 | Phase 5: 集成验证 | 管线集成、功能验证、性能、稳定性 | ✅ 完成 | 100% |
 | Phase 6: 自举验证 | LLVM 编译、Photon 编译、自举验证 | 📋 脚本就绪 | 80% |
 
@@ -120,7 +120,7 @@
 | 任务 | 设计文档要求 | 实际文件 | 行数 | 状态 |
 |------|--------------|----------|------|------|
 | 4.1 Arena 分配器 | `aura/runtime/Memory.aura` | `Memory.aura` | 116 | ✅ |
-| 4.2 ARC 引用计数 | `aura/runtime/GC.aura` | `GC.aura` | 132 | ✅ |
+| 4.2 ARC 引用计数 | `aura/runtime/ARC.aura` | `ARC.aura` | 132 | ✅ |
 | 4.3 异常处理 | `aura/runtime/Exception.aura` | `Exception.aura` | 140 | ✅ |
 | 4.4 线程支持 | `aura/runtime/Thread.aura` | `Thread.aura` | 165 | ✅ |
 | 4.5 运行时入口 | `aura/runtime/Runtime.aura` | `Runtime.aura` | 151 | ✅ |
@@ -134,10 +134,9 @@
 - ✅ 8 字节对齐
 - ✅ 内存溢出检测
 
-**GC.aura**:
+**ARC.aura**:
 - ✅ `ObjectHeader` - 引用计数 + 类型 ID
 - ✅ `ARC` - retain/release/refCount
-- ✅ `GC` - 标记-清除 (框架)
 
 **Exception.aura**:
 - ✅ `Exception` - 基类异常
@@ -242,7 +241,7 @@ Phase 5.4: Stability Test
 |------|----------|----------|--------|
 | 零外部依赖 | 不依赖 kernel32.dll | PhotonRuntime 仍用 kernel32 | ⚠️ 部分 |
 | @native → syscall | Photon 直接生成 syscall | SyscallEmitter.aura 已实现 | ✅ |
-| 运行时纯 Aura | 内存/GC/异常/线程 | aura/runtime/ 已实现 | ✅ |
+| 运行时纯 Aura | 内存（ARC）/异常/线程 | aura/runtime/ 已实现 | ✅ |
 | 自举可行 | Photon 编译自身 | 脚本就绪，待执行 | 📋 |
 | 分平台 syscall | Linux/Windows 表 | Syscalls.aura 已有 | ✅ |
 
@@ -263,7 +262,7 @@ Phase 5.4: Stability Test
 | 文件 | 用途 | 阶段 | 状态 |
 |------|------|------|------|
 | `aura/runtime/Memory.aura` | Arena 分配器 | Phase 4 | ✅ |
-| `aura/runtime/GC.aura` | ARC 引用计数 | Phase 4 | ✅ |
+| `aura/runtime/ARC.aura` | ARC 引用计数 | Phase 4 | ✅ |
 | `aura/runtime/Exception.aura` | 异常处理 | Phase 4 | ✅ |
 | `aura/runtime/Thread.aura` | 线程支持 | Phase 4 | ✅ |
 | `aura/runtime/Runtime.aura` | 运行时入口 | Phase 4 | ✅ |

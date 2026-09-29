@@ -1380,16 +1380,23 @@ impl Vm {
     /// 遍历所有候选索引，返回参数个数最匹配的那个。
     pub fn find_stdlib_func(&self, name: &str, expected_params: usize) -> Option<(usize, bool)> {
         let indices = self.stdlib_func_map.get(name)?;
+        // 两轮遍历：优先返回参数个数完全匹配的，其次才接受 +1（self 注入）。
+        // 否则 2 参 `Env.get(name, default)` 会在 1 参调用 `Env.get(name)` 时
+        // 被 `+1` 匹配误判为 self 注入，导致默认值被错当作用户参数。
         for &idx in indices {
             if idx >= self.module.funcs.len() {
                 continue;
             }
-            let func = &self.module.funcs[idx];
-            let actual_params = func.param_count as usize;
-            if actual_params == expected_params {
-                return Some((idx, false)); // 完全匹配
-            } else if actual_params == expected_params + 1 {
-                return Some((idx, true)); // self 参数匹配（多一个参数）
+            if self.module.funcs[idx].param_count as usize == expected_params {
+                return Some((idx, false));
+            }
+        }
+        for &idx in indices {
+            if idx >= self.module.funcs.len() {
+                continue;
+            }
+            if self.module.funcs[idx].param_count as usize == expected_params + 1 {
+                return Some((idx, true));
             }
         }
         None

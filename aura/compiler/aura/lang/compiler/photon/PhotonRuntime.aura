@@ -1137,6 +1137,41 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
+    // ── P4：线程支持（`extern interface ThreadOps` 的运行库实现）──
+    //
+    // Photon 运行库目前是**单线程**的：`Mutex` / `Condvar` 由 Aura 侧基于
+    // `Memory.atomicAdd`（`lock xaddq`，真原子）实现，没有线程注册表与调度器。
+    // 这里提供 `ThreadOps` 的 5 个符号，保证「引用即已定义」（旧实现完全缺失，
+    // P4/test_thread 在链接期 `undefined symbol: ThreadOps_currentId`）：
+    //   * `currentId` → 主线程 id = 1（与 VM 参考实现输出一致）
+    //   * `cores`     → 1
+    //   * `create` / `join` → 0（未创建线程）
+    //   * `sleepMs`   → 即时返回
+    // 语义上限写在此处：真正的线程创建需要 OS 线程 + Aura 函数回调桥，属后续工作。
+
+    fun emitThreadOpsCurrentId(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitMovRI("eax", 1)
+        enc.emitEpilogue()
+    }
+
+    fun emitThreadOpsCores(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitMovRI("eax", 1)
+        enc.emitEpilogue()
+    }
+
+    fun emitStubZero(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitMovRI("eax", 0)
+        enc.emitEpilogue()
+    }
+
+    fun emitStubVoid(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitEpilogue()
+    }
+
     /// stub: Collections.getAt 返回**静态空串**（`@str.0`）。
     ///
     /// `Env.get` 被映射到 `Collections.getAt`，但 runtime 没有真正的键值存储。
@@ -1655,10 +1690,18 @@ object PhotonRuntime {
         enc.emitXorRR("r8", "r8")
         enc.emitLeaStack("r9", -0x38)
         enc.emitMovRR("r10", "rcx")
+        // ⚠️ Nt* syscall 的**第 5/6 个参数在栈上**，位置是 `[rsp+0x28]` / `[rsp+0x30]`
+        //（Win64 前 4 个实参占 `[rsp+0x00..0x20]` 的影子空间，第 5 个从 +0x28 开始）。
+        // 本函数 `emitPrologue(0x90)` ⇒ `rsp = rbp-0x90` ⇒ 正确槽位是
+        // **`rbp-0x68`（AllocationType）与 `rbp-0x60`（Protect）**。
+        // 旧实现写在 `-0x58`/`-0x50`（= `rsp+0x38/0x40`，偏了 0x10）⇒ 内核读到的是
+        // 残留栈数据 ⇒ `STATUS_INVALID_PARAMETER` ⇒ 直接走 `mm_fail` 返回 **0**
+        //（实测 `probe_mmap` 的 `mmap1: 0`：`ArenaAllocator.init` 又把 0 当成成功，
+        //  于是「mmap 堆」形同虚设、`alloc` 恒返回 0 —— P4 第 1 项的真根因）。
         enc.emitMovRI32("eax", 0x3000)
-        enc.emitStackStore(-0x58, "rax")
+        enc.emitStackStore(-0x68, "rax")
         enc.emitMovRI32("eax", 4)
-        enc.emitStackStore(-0x50, "rax")
+        enc.emitStackStore(-0x60, "rax")
         SyscallEmitter.emitSyscall(enc, 0x18)
         enc.emitTestRR("rax", "rax")
         enc.emitJccLabel("ne", "mm_fail")
@@ -2552,6 +2595,13 @@ object PhotonRuntime {
         PhotonRuntime.emitMemoryMunmap(encMunmap)
         writer.appendFunction(encMunmap.toHex(), "Memory_munmap", PhotonObjectWriterUtils.joinRelocRecords(encMunmap.getRelocations()))
         writer.appendFunction(encMf.toHex(), "Memory_free", PhotonObjectWriterUtils.joinRelocRecords(encMf.getRelocations()))
+        // ⚠️ P4 待办：`ThreadOps_*`（线程支持）与 `Runtime_arc*` 的运行库实现
+        // **暂时不能加在这里** —— 往 runtime 对象里追加函数会让 `Memory_mmap`
+        // 开始返回 0（实测：`Memory.mmap(0, 4096, 3, 34, -1, 0)` 由有效指针变 0，
+        // 且 `RELCHK-FINAL funcs` 由 128 变 120 —— 追加函数**顶掉**了 8 个已有函数）。
+        // 也就是说 `PhotonObjectWriter` 的函数/符号表在函数数变化时会错位，
+        // 需要先修好这个（P4 的硬前置），再接 `ThreadOps_currentId`。
+
         // CLI 参数函数由 Main.aura 定义（使用 Env.get 通道），runtime 不提供
         for (symName in listOf("fork", "execve", "wait4")) {
             println("[rt] encoding stub " + symName)

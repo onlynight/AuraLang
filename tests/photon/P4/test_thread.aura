@@ -10,16 +10,16 @@ import aura.lang.concurrent.Condvar
 
 fun main() {
     // 测试 Mutex
-    val mutex: Mutex = Mutex()
-    println("Mutex created")
+    val lock_id: Long = Mutex()
+    println("Mutex created, lock_id=" + toStr(lock_id))
     
     // 锁定
-    mutex.lock()
-    println("Locked: " + toStr(mutex.isLocked()))
+    Mutex.lock(lock_id)
+    println("Locked: " + toStr(Mutex.isLocked(lock_id)))
     
     // 解锁
-    mutex.unlock()
-    println("Unlocked: " + toStr(!mutex.isLocked()))
+    Mutex.unlock(lock_id)
+    println("Unlocked: " + toStr(!Mutex.isLocked(lock_id)))
     
     // 获取当前线程 ID
     val tid: Long = Thread.currentThreadId()

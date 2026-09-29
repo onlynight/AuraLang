@@ -1305,9 +1305,12 @@ class X86Emitter {
         if (instr.output < 0) { return }
         val dstNode: DagNode = dag.nodeOf(instr.output)
         val dstRaw: String = this.regOfNode(dstNode)
-        val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
-        if (nodes.size < 1) { return }
-        val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+        // ⚠️ 源操作数取 `nodes[1]`（`emitArith` 的约定是 `dst,src`）——
+        // 旧实现取 `nodes[0]`=**目的节点**，于是发射成 `or %dst, %dst`
+        // （右操作数被忽略）：实测 `a == 0 || a < 16` 恒为**假**，
+        // P4/ARC.retain 的守卫失效 ⇒ retain(1) 未提前返回、计数错误。
+        val srcNodeId: Int = this.divSrcNode(instr)
+        if (srcNodeId < 0) { return }
         val srcNode: DagNode = dag.nodeOf(srcNodeId)
         val srcRaw: String = this.regOfNode(srcNode)
         val src: String = this.resolveToReg(srcRaw, "r10")
@@ -1331,9 +1334,11 @@ class X86Emitter {
         if (instr.output >= 0) {
             val dstNode: DagNode = dag.nodeOf(instr.output)
             val dstRaw: String = this.regOfNode(dstNode)
-            val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
-            if (nodes.size >= 1) {
-                val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+            // 同 `emitLogicBinary`：源操作数是 `nodes[1]`（`dst,src` 约定），
+            // 取 `nodes[0]` 会发射 `xor %dst, %dst`（结果恒 0）。
+            val xorSrc: Int = this.divSrcNode(instr)
+            if (xorSrc >= 0) {
+                val srcNodeId: Int = xorSrc
                 val srcNode: DagNode = dag.nodeOf(srcNodeId)
                 val srcRaw: String = this.regOfNode(srcNode)
                 val src: String = this.resolveToReg(srcRaw, "r10")
@@ -1370,7 +1375,10 @@ class X86Emitter {
         val dstRaw: String = this.regOfNode(dstNode)
         val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
         if (nodes.size < 1) { return }
-        val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+        // 移位量同样取 `nodes[1]`（`shl %dst, %src` 的 dst 是 output，
+        // nodes = "dst,src"）；取 `nodes[0]` 会把目的节点当移位量。
+        val srcNodeId: Int = this.divSrcNode(instr)
+        if (srcNodeId < 0) { return }
         val srcNode: DagNode = dag.nodeOf(srcNodeId)
         val srcRaw: String = this.regOfNode(srcNode)
         // 移位量必须先在 rcx（用 r10 中转，避免与 CL 冲突）。

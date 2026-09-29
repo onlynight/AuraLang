@@ -1,4 +1,4 @@
-﻿# Photon 后端自包含架构设计 v3
+# Photon 后端自包含架构设计 v3
 
 ## 1. 核心原则
 
@@ -6,7 +6,7 @@
 |---|------|------|
 | 1 | **零外部依赖** | 不依赖 C/C++/Rust 运行时库，不依赖 kernel32.dll |
 | 2 | **系统调用由 Photon 直接生成** | `@native(N)` → syscall 指令，无需中间层 |
-| 3 | **运行时逻辑用纯 Aura 实现** | 内存管理、GC、异常处理、线程全部用 Aura 编写 |
+| 3 | **运行时逻辑用纯 Aura 实现** | 内存管理（ARC）、异常处理、线程全部用 Aura 编写 |
 | 4 | **自举可行** | 用 Photon 编译的编译器可重新编译自身，产出一致 |
 | 5 | **分平台 syscall 表** | Linux 用 Linux syscall 号，Windows 用 Nt* 服务号 |
 
@@ -67,7 +67,7 @@
 | `PhotonDriver.aura` | 硬编码参数 | 命令行参数解析 | 无法灵活配置 |
 | Windows @native | FFI 调用 kernel32 | Nt* syscall 指令 | 依赖外部 DLL |
 | 内存管理 | 未实现 | Arena 分配器 (Aura) | 无法运行复杂程序 |
-| GC | 仅占位 | ARC + 可达性分析 (Aura) | 内存泄漏 |
+| ARC | 仅占位 | ARC 引用计数 (Aura) | 内存泄漏 |
 | 异常处理 | 仅占位 | SEH 异常表 (Aura) | 无法处理错误 |
 | 线程支持 | 未实现 | clone/futex (Aura) | 无法并发 |
 | 自举 | 未实现 | Photon 编译自身 | 无法验证正确性 |
@@ -84,9 +84,9 @@
 ┌─────────────────────────────────────────────────────────────┐
 │           Aura 运行时 (纯 Aura)                               │
 │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐           │
-│  │  Memory.aura │ │  GC.aura    │ │Exception.aura│           │
+│  │  Memory.aura │ │  ARC.aura   │ │Exception.aura│           │
 │  │  Arena 分配器│ │  ARC 引用计数│ │ SEH 异常表   │           │
-│  │  mmap/munmap │ │  可达性分析  │ │ 异常传播     │           │
+│  │  mmap/munmap │ │  原子操作   │ │ 异常传播     │           │
 │  └─────────────┘ └─────────────┘ └─────────────┘           │
 │  ┌─────────────┐ ┌─────────────┐                           │
 │  │ Thread.aura │ │Runtime.aura │                            │
@@ -342,10 +342,10 @@ object MemoryManager {
 }
 ```
 
-### 5.2 垃圾回收 (GC.aura)
+### 5.2 内存管理 (ARC.aura)
 
 ```aura
-// aura/core/aura/runtime/GC.aura
+// aura/core/aura/runtime/ARC.aura
 
 /// ARC 对象头
 /// [0..7]: 引用计数 (Int64)
@@ -374,8 +374,8 @@ object ARC {
         // @native(asm = "lock dec") → 原子减少
         val rc: Long = Runtime.arcDecrement(obj)
         if (rc == 0) {
-            // 引用计数为 0，需要释放
-            GC.freeObject(obj)
+            // 引用计数为 0，立即释放（确定性回收）
+            Memory.free(obj)
             return true
         }
         return false
@@ -384,28 +384,6 @@ object ARC {
     /// 获取引用计数
     fun refCount(obj: Long): Long {
         return Memory.readLong(obj)
-    }
-}
-
-/// 垃圾回收器
-object GC {
-    var gcEnabled: Boolean = true
-    var collectedCount: Long = 0
-    var freedMemory: Long = 0
-
-    /// 标记-清除 GC (可达性分析)
-    fun collect(): Unit {
-        if (!this.gcEnabled) { return }
-        // 1. 标记: 从根集合开始遍历
-        // 2. 清除: 释放未标记的对象
-        // 3. 压缩: 可选的内存压缩
-    }
-
-    /// 释放对象 (清理资源)
-    fun freeObject(obj: Long): Unit {
-        // 根据 typeId 调用对应的析构函数
-        // 释放对象占用的内存
-        this.collectedCount = this.collectedCount + 1
     }
 }
 ```
@@ -773,7 +751,7 @@ object PhotonDriverArgs {
 | 任务 | 文件 | 工作量 | 依赖 |
 |------|------|--------|------|
 | 4.1 Arena 分配器 | aura/runtime/Memory.aura (新) | 1 周 | Phase 3 |
-| 4.2 ARC 引用计数 | aura/runtime/GC.aura (新) | 1 周 | 4.1 |
+| 4.2 ARC 引用计数 | aura/runtime/ARC.aura (新) | 1 周 | 4.1 |
 | 4.3 异常处理 | aura/runtime/Exception.aura (新) | 1 周 | 4.1-4.2 |
 | 4.4 线程支持 | aura/runtime/Thread.aura (新) | 1 周 | 4.1-4.3 |
 | 4.5 运行时入口 | aura/runtime/Runtime.aura (新) | 0.5 周 | 4.1-4.4 |
@@ -852,7 +830,7 @@ object PhotonDriverArgs {
 | 文件 | 用途 | 阶段 |
 |------|------|------|
 | `aura/runtime/Memory.aura` | Arena 分配器 | Phase 4 |
-| `aura/runtime/GC.aura` | ARC 引用计数 | Phase 4 |
+| `aura/runtime/ARC.aura` | ARC 引用计数 | Phase 4 |
 | `aura/runtime/Exception.aura` | 异常处理 | Phase 4 |
 | `aura/runtime/Thread.aura` | 线程支持 | Phase 4 |
 | `aura/runtime/Runtime.aura` | 运行时入口 | Phase 4 |
@@ -890,7 +868,7 @@ object PhotonDriverArgs {
 
 ### D2: 运行时逻辑用纯 Aura 实现
 
-- **决策**: 内存管理、GC、异常处理、线程用 Aura 实现
+- **决策**: 内存管理（ARC）、异常处理、线程用 Aura 实现
 - **原因**: 保持自包含，无外部依赖
 - **替代方案**: C 运行时 (malloc/free, pthread)
 - **影响**: 增加运行时代码 (~2000 行)，但与编译器一致
@@ -1038,9 +1016,8 @@ syscall 指令 (与 Linux 相同):
 26. alloc.aura → 内存分配
 27. free.aura → 内存释放
 28. arc.aura → 引用计数
-29. gc.aura → 垃圾回收
-30. exception.aura → 异常抛出
-31. catch.aura → 异常捕获
+29. exception.aura → 异常抛出
+30. catch.aura → 异常捕获
 32. thread.aura → 线程创建
 33. mutex.aura → 互斥锁
 34. condvar.aura → 条件变量
@@ -1056,7 +1033,7 @@ syscall 指令 (与 Linux 相同):
 | Phase 1: 基础设施 | 编译管线、HIR 序列化、驱动 | ✅ 完成 | 100% | PhotonDriver, HirSerializer, build scripts |
 | Phase 2: 核心代码生成 | 控制流、内存、类型、调用约定、优化 | ✅ 完成 | 100% | RegisterAllocator, TypeRegistry, Lowering 修改 |
 | Phase 3: 原生函数支持 | syscall 生成、系统调用表 | ✅ 完成 | 100% | SyscallEmitter, X86Encoder 修改 |
-| Phase 4: 运行时系统 | 内存、GC、异常、线程、运行时入口 | ✅ 完成 | 100% | aura/runtime/ 5 个文件 |
+| Phase 4: 运行时系统 | 内存（ARC）、异常、线程、运行时入口 | ✅ 完成 | 100% | aura/runtime/ 4 个文件 |
 | Phase 5: 集成验证 | 管线集成、功能验证、性能、稳定性 | ✅ 完成 | 100% | build-photon-phase5.ps1 |
 | Phase 6: 自举验证 | LLVM 编译、Photon 编译、自举验证 | 📋 脚本就绪 | 80% | bootstrap-photon.ps1 |
 
@@ -1095,7 +1072,7 @@ syscall 指令 (与 Linux 相同):
 
 #### 运行时系统 (`aura/runtime/`)
 - `Memory.aura` - Arena 分配器
-- `GC.aura` - ARC 引用计数
+- `ARC.aura` - ARC 引用计数
 - `Exception.aura` - 异常处理
 - `Thread.aura` - 线程支持
 - `Runtime.aura` - 运行时入口

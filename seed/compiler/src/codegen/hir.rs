@@ -5047,6 +5047,22 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             // 异常类构造器走原生路径（__new_exception），避免跨模块函数解析问题。
             if let Expr::Ident(n, _) = callee.as_ref() {
                 if is_type_name(n) {
+                    // BUG FIX: 单例 object（is_singleton=true）不能被 `HirExpr::New`
+                    // 分配新实例——应改为调用其 `new()` 工厂方法（如 `Mutex()` →
+                    // `Mutex.new()`）。此前直接生成 `Alloc` 指令会在堆上创建新对象，
+                    // 返回 `Value::Ref`（单例引用），导致 `Mutex()` 返回单例而非
+                    // `Memory.alloc` 的地址，后续 `Mutex.lock(ref)` 参数错位。
+                    let is_singleton_type = CLASS_TABLE.with(|t| {
+                        t.borrow().get(n).map_or(false, |e| e.is_singleton)
+                    });
+                    if is_singleton_type {
+                        // 解析为 ClassName.new(args...) 调用
+                        let mut all_args = args.iter().map(desugar_expr).collect();
+                        return HirExpr::Call {
+                            callee: format!("{}.new", n),
+                            args: all_args,
+                        };
+                    }
                     // 异常类：走原生构造路径。支持 `E()`（空消息）、`E(msg)` 与
                     // `E(msg, cause)`；cause 暂不传递（AOT/VM 的异常对象目前只承载消息）。
                     // 若只处理单参形式，`E()` 会落到 `HirExpr::New`，而异常类定义位于

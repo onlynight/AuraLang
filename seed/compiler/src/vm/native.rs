@@ -14,6 +14,23 @@ use crate::codegen::opcode::FfiAbi;
 use crate::vm::dynamic_ffi::DynamicLoader;
 use crate::vm::value::Value;
 
+#[cfg(windows)]
+unsafe extern "system" {
+    fn VirtualAlloc(
+        lp_address: *mut libc::c_void,
+        dw_size: usize,
+        fl_allocation_type: u32,
+        fl_protection: u32,
+    ) -> *mut libc::c_void;
+    fn VirtualFree(lp_address: *mut libc::c_void, dw_size: usize, dw_free_type: u32) -> bool;
+    fn VirtualProtect(
+        lp_address: *mut libc::c_void,
+        dw_size: usize,
+        fl_new_protection: u32,
+        lp_old_protection: *mut u32,
+    ) -> bool;
+}
+
 /// 原生函数指针类型
 pub type NativeFn = fn(&[Value]) -> Value;
 
@@ -323,10 +340,29 @@ impl NativeRegistry {
         r.register("Memory.write64", native_memory_write64);
         r.register("Memory.copy", native_memory_copy);
         r.register("Memory.set", native_memory_set);
+        // Phase P4: Memory.mmap/munmap/mprotect — 系统级内存映射
+        r.register("Memory.mmap", native_memory_mmap);
+        r.register("Memory.munmap", native_memory_munmap);
+        r.register("Memory.mprotect", native_memory_mprotect);
+        // Phase P4: Memory.atomicAdd — Mutex 自旋锁的底座（与 Cpu.atomicAdd 同源）
+        r.register("Memory.atomicAdd", native_cpu_atomic_add);
+        // Phase P4: Memory.arcIncrement/arcDecrement — ARC 原子引用计数
+        r.register("Memory.arcIncrement", native_memory_arc_increment);
+        r.register("Memory.arcDecrement", native_memory_arc_decrement);
+        // Phase P4: Console/FileOps/Stdio Rust native 实现（替代 AOT 接口调用）
+        r.register("Console.writeStdout", native_console_write_stdout);
+        r.register("FileOps.open", native_fileops_open);
+        r.register("FileOps.close", native_fileops_close);
+        r.register("FileOps.read", native_fileops_read);
+        r.register("FileOps.write", native_fileops_write);
+        r.register("Stdio.stringToBuffer", native_stdio_string_to_buffer);
+        r.register("Stdio.bufferToString", native_stdio_buffer_to_string);
         r.register("Cpu.rdtsc", native_cpu_rdtsc);
         r.register("Cpu.memFence", native_cpu_mem_fence);
         r.register("Cpu.cpuid", native_cpu_cpuid);
         r.register("Cpu.atomicAdd", native_cpu_atomic_add);
+        // Phase P3: Syscalls.exit — 进程退出
+        r.register("Syscalls.exit", native_syscalls_exit);
         // `Builtin.cstr` 系列（`prelu.aura:CString/CStr`，前端以同名原生函数注册，
         // 见 `codegen/hir.rs` P8.5）：Aura String ↔ C 字符串的**既有接口**。
         // 之前 VM 未实现它们，`CString(s)` 落到「未链接 → 0」，导致
@@ -1058,6 +1094,15 @@ fn native_fn_index(args: &[Value]) -> Value {
 fn native_memory_alloc(args: &[Value]) -> Value {
     let n = arg_i64(args, 0).max(0) as usize;
     let p = unsafe { libc::malloc(n.max(1)) };
+    if !p.is_null() && n > 0 {
+        // BUG FIX: 零初始化分配内存。此前未清零，导致 `Mutex()` 返回的地址
+        // 指向随机数据——`Mutex.lock(lock_id)` 的 `atomicAdd(lock_id, 1)` 永远
+        // 不等于 0，自旋锁无限循环（P4 probe_mutex / 07_mutex_ops 超时）。
+        // AOT 路径的 `runtime_emitObjectAlloc` 有 zero loop，VM 路径也必须对齐。
+        unsafe {
+            std::ptr::write_bytes(p, 0, n)
+        }
+    }
     // 返回 `Int`（不是 `Ptr`）：曾试过返回 `Ptr` 以便 `as_string()` 把
     // 缓冲按 C 字符串解读，但 VM 里 `Ptr` 会被 `as_string()` 无条件解引用，
     // 而不少指针并非 C 字符串（FFI 句柄等）→ 静默段错误（实测 Example 1 直接终止）。
@@ -1244,7 +1289,146 @@ fn native_cpu_atomic_add(args: &[Value]) -> Value {
     Value::Int(atom.fetch_add(delta, std::sync::atomic::Ordering::SeqCst))
 }
 
-/// Cpu.memFence()：内存屏障（顺序一致性）
+/// Memory.mmap(addr, length, prot, flags, fd, offset) → Long
+///
+/// 在 VM 侧用 VirtualAlloc (Windows) / mmap (Unix) 实现匿名内存映射。
+/// 参数与 `Memory.aura` 的 `@native(SYS_MMAP)` 声明一致。
+/// `MAP_FAILED` = -1 (0xFFFFFFFFFFFFFFFF) 表示失败。
+fn native_memory_mmap(args: &[Value]) -> Value {
+    let length = arg_i64(args, 1).max(1) as usize;
+    let prot = arg_i64(args, 2);
+    #[cfg(windows)]
+    {
+        let alloc_prot = if prot & 1 != 0 && prot & 2 != 0 {
+            0x04 // PAGE_READWRITE
+        } else if prot & 1 != 0 {
+            0x02 // PAGE_READONLY
+        } else {
+            0x01 // PAGE_NOACCESS
+        };
+        unsafe {
+            let addr = VirtualAlloc(
+                std::ptr::null_mut(),
+                length,
+                0x2000 | 0x1000, // MEM_COMMIT | MEM_RESERVE
+                alloc_prot,
+            );
+            if addr.is_null() {
+                Value::Int(-1)
+            } else {
+                Value::Int(addr as i64)
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        let prot_flags = if prot & 1 != 0 && prot & 2 != 0 {
+            libc::PROT_READ | libc::PROT_WRITE
+        } else if prot & 1 != 0 {
+            libc::PROT_READ
+        } else {
+            libc::PROT_NONE
+        };
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                prot_flags,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if addr == libc::MAP_FAILED {
+            Value::Int(-1)
+        } else {
+            Value::Int(addr as i64)
+        }
+    }
+}
+
+/// Memory.munmap(addr, length) → Int
+fn native_memory_munmap(args: &[Value]) -> Value {
+    let addr = arg_i64(args, 0);
+    let length = arg_i64(args, 1).max(0) as usize;
+    if addr == 0 {
+        return Value::Int(0);
+    }
+    #[cfg(windows)]
+    unsafe {
+        VirtualFree(addr as *mut libc::c_void, 0, 0x8000) // MEM_RELEASE
+    };
+    #[cfg(unix)]
+    unsafe {
+        libc::munmap(addr as *mut libc::c_void, length);
+    }
+    Value::Int(0)
+}
+
+/// Memory.mprotect(addr, length, prot) → Int
+fn native_memory_mprotect(args: &[Value]) -> Value {
+    let addr = arg_i64(args, 0);
+    let length = arg_i64(args, 1).max(0) as usize;
+    let prot = arg_i64(args, 2);
+    if addr == 0 {
+        return Value::Int(0);
+    }
+    #[cfg(windows)]
+    {
+        let new_prot = if prot & 1 != 0 && prot & 2 != 0 {
+            0x04
+        } else if prot & 1 != 0 {
+            0x02
+        } else {
+            0x01
+        };
+        unsafe {
+            let mut old_prot = 0u32;
+            VirtualProtect(
+                addr as *mut libc::c_void,
+                length,
+                new_prot,
+                &mut old_prot,
+            )
+        }
+        .then(|| Value::Int(0))
+        .unwrap_or(Value::Int(-1))
+    }
+    #[cfg(unix)]
+    {
+        let prot_flags = if prot & 1 != 0 && prot & 2 != 0 {
+            libc::PROT_READ | libc::PROT_WRITE
+        } else if prot & 1 != 0 {
+            libc::PROT_READ
+        } else {
+            libc::PROT_NONE
+        };
+        unsafe {
+            let ret = libc::mprotect(addr as *mut libc::c_void, length, prot_flags);
+            if ret == 0 { Value::Int(0) } else { Value::Int(-1) }
+        }
+    }
+}
+
+/// Memory.arcIncrement(addr) → Long：原子递增引用计数，返回**旧值**
+fn native_memory_arc_increment(args: &[Value]) -> Value {
+    let addr = arg_i64(args, 0);
+    if addr == 0 {
+        return Value::Int(0);
+    }
+    let atom = unsafe { &*(addr as *const std::sync::atomic::AtomicI64) };
+    Value::Int(atom.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+}
+
+/// Memory.arcDecrement(addr) → Long：原子递减引用计数，返回**新值**
+fn native_memory_arc_decrement(args: &[Value]) -> Value {
+    let addr = arg_i64(args, 0);
+    if addr == 0 {
+        return Value::Int(0);
+    }
+    let atom = unsafe { &*(addr as *const std::sync::atomic::AtomicI64) };
+    Value::Int(atom.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) - 1)
+}
 fn native_cpu_mem_fence(_args: &[Value]) -> Value {
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
     Value::Null
@@ -1258,6 +1442,12 @@ fn native_cpu_rdtsc(_args: &[Value]) -> Value {
 /// Cpu.cpuid(level) → CPU 信息（占位实现，返回 0）
 fn native_cpu_cpuid(_args: &[Value]) -> Value {
     Value::Int(0)
+}
+
+/// Syscalls.exit(code) — 终止进程（Phase P3）
+fn native_syscalls_exit(args: &[Value]) -> Value {
+    let code = arg_i64(args, 0) as i32;
+    std::process::exit(code);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1451,4 +1641,108 @@ fn native_get(args: &[Value]) -> Value {
         }
         _ => Value::Null,
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase P4: Console/FileOps Rust native 实现
+// 替代 AOT 接口调用，确保在 VM 模式下可用
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Console.writeStdout(buf, len) → Unit
+fn native_console_write_stdout(args: &[Value]) -> Value {
+    let buf = arg_i64(args, 0);
+    let len = arg_i64(args, 1) as usize;
+    if buf != 0 && len > 0 {
+        unsafe {
+            let ptr = buf as *const u8;
+            std::io::Write::write_all(&mut std::io::stdout(), std::slice::from_raw_parts(ptr, len))
+                .ok();
+        }
+    }
+    Value::Null
+}
+
+/// Stdio.stringToBuffer(s) → Long: copy Aura String to heap buffer with NUL terminator
+fn native_stdio_string_to_buffer(args: &[Value]) -> Value {
+    let s = match &args[0] {
+        Value::Str(v) => v.to_string(),
+        _ => return Value::Int(0),
+    };
+    let len = s.len() as i64;
+    let alloc_size = len + 1;
+    let buf = unsafe { libc::malloc(alloc_size as usize) as i64 };
+    if buf == 0 {
+        return Value::Int(0);
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(s.as_ptr(), buf as *mut u8, s.len());
+        *(buf as *mut u8).add(s.len()) = 0;
+    }
+    Value::Int(buf)
+}
+
+/// Stdio.bufferToString(buf, len) → String
+fn native_stdio_buffer_to_string(args: &[Value]) -> Value {
+    let buf = arg_i64(args, 0);
+    let len = arg_i64(args, 1) as usize;
+    if buf == 0 || len == 0 {
+        return Value::str_("");
+    }
+    let slice = unsafe { std::slice::from_raw_parts(buf as *const u8, len) };
+    match std::str::from_utf8(slice) {
+        Ok(s) => Value::str_(s.to_string()),
+        Err(_) => Value::str_(""),
+    }
+}
+
+/// FileOps.open(path, flags) → Int (fd or -1)
+fn native_fileops_open(args: &[Value]) -> Value {
+    let path = arg_i64(args, 0);
+    let flags = arg_i64(args, 1) as i32;
+    if path == 0 {
+        return Value::Int(-1);
+    }
+    // Read the path string from memory
+    let c_str = unsafe { std::ffi::CStr::from_ptr(path as *const libc::c_char) };
+    match c_str.to_str() {
+        Ok(s) => {
+            let fd = unsafe { libc::open(s.as_ptr() as *const i8, flags) };
+            Value::Int(fd as i64)
+        }
+        Err(_) => Value::Int(-1),
+    }
+}
+
+/// FileOps.close(fd) → Int (0 on success, -1 on error)
+fn native_fileops_close(args: &[Value]) -> Value {
+    let fd = arg_i64(args, 0) as i32;
+    if fd < 0 {
+        return Value::Int(-1);
+    }
+    let ret = unsafe { libc::close(fd) };
+    Value::Int(ret as i64)
+}
+
+/// FileOps.read(fd, buf, count) → Long (bytes read or -1)
+fn native_fileops_read(args: &[Value]) -> Value {
+    let fd = arg_i64(args, 0) as i32;
+    let buf = arg_i64(args, 1);
+    let count = arg_i64(args, 2) as u32;
+    if fd < 0 || buf == 0 || count == 0 {
+        return Value::Int(-1);
+    }
+    let n = unsafe { libc::read(fd, buf as *mut libc::c_void, count) };
+    Value::Int(n as i64)
+}
+
+/// FileOps.write(fd, buf, count) → Long (bytes written or -1)
+fn native_fileops_write(args: &[Value]) -> Value {
+    let fd = arg_i64(args, 0) as i32;
+    let buf = arg_i64(args, 1);
+    let count = arg_i64(args, 2) as u32;
+    if fd < 0 || buf == 0 || count == 0 {
+        return Value::Int(-1);
+    }
+    let n = unsafe { libc::write(fd, buf as *const libc::c_void, count) };
+    Value::Int(n as i64)
 }

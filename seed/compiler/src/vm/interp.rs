@@ -1106,10 +1106,14 @@ impl Vm {
                         if let Some(type_id) = self.class_id_by_name(&class_name) {
                             let field_names =
                                 self.module.module.classes[type_id as usize].field_names.clone();
-                            if let Some(field_idx) =
-                                field_names.iter().position(|n| n == &member_name)
-                            {
-                                let field_val = self.heap.get_field(handle, field_idx as u16);
+                            if field_names.iter().any(|n| n == &member_name) {
+                                // BUG FIX: 字段索引必须使用 FNV-1a 哈希（与 emit.rs 一致），
+                                // 而非字段名在 vector 中的位置。此前用 position() 导致
+                                // `ArenaAllocator.baseAddr` 等单例字段读取始终返回默认值，
+                                // 因为 emit 的 SetField 用 field_index() 写入，而这里用
+                                // position 读取 → 哈希索引 ≠ 位置索引 → 永远读不到更新后的值。
+                                let hash_idx = crate::codegen::emit::field_index(&member_name);
+                                let field_val = self.heap.get_field(handle, hash_idx);
                                 // 字段一旦被赋值即以堆值为准；尚未赋值（单例创建时统一置为 Null）
                                 // 时**不返回**，继续走常规调用路径执行 HIR 合成的
                                 // `<Object>.<field>` 零参读取函数，从而返回字段声明的默认值。
@@ -1546,6 +1550,18 @@ impl Vm {
             return Ok(());
         }
 
+        // Phase P4: extern interface（FfiAbi::Aura）的 Rust native 优先回退。
+        // Console.writeStdout / FileOps.open 等 extern interface 声明在 VM 中没有 AOT 机器码，
+        // 必须在 `stdlib_func_map` 之前查 Rust native 注册表，否则会被嵌入 .auc 的
+        // 同名 Aura 编译函数（若存在）拦截，或直接落入 call_aot_ffi 失败路径。
+        if native.ffi_abi == FfiAbi::Aura {
+            if let Some(f) = self.natives.get(&native.name) {
+                let result = f(&args);
+                self.frames[top].stack.push(result);
+                return Ok(());
+            }
+        }
+
         // Phase D: Aura 编译的标准库函数版本优先。
         // 始终先查 `stdlib_func_map`（嵌入 .auc 的 Aura 编译函数），
         // 仅当未找到或函数为 native 声明（is_native=true，无 Aura 实现体）时才回退到 Rust native。
@@ -1735,6 +1751,15 @@ impl Vm {
         if let Some(v) = self.try_inline_coll_set(&native.name, &args) {
             self.frames[top].stack.push(v);
             return Ok(());
+        }
+
+        // Phase P4: extern interface（FfiAbi::Aura）的 Rust native 优先回退（同 do_call_native）
+        if native.ffi_abi == FfiAbi::Aura {
+            if let Some(f) = self.natives.get(&native.name) {
+                let result = f(&args);
+                self.frames[top].stack.push(result);
+                return Ok(());
+            }
         }
 
         // Phase D: Aura 编译的标准库函数版本优先（同 do_call_native，始终先查 stdlib_func_map）

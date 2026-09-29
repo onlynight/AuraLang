@@ -204,9 +204,6 @@ object Runtime {
 // ─────────────────────────────────────────────────────────────
 
 object RuntimeUtils {
-
-    /// 创建空的 RuntimeConfig 实例。
-    fun emptyConfig(): RuntimeConfig {
-        return RuntimeConfig()
-    }
+    // RuntimeConfig 是全局单例，无法创建新实例。
+    // 请直接使用 RuntimeConfig 访问全局配置。
 }
