@@ -115,6 +115,9 @@ class PhotonPipeline {
         this.phirPos = 0
         this.phirSigs = ""
         this.phirEnv = ""
+        this.verboseOn = false
+        this.traceOn = false
+        this.traceStep = 0
     }
 
     /// 设置输出类型（"exe" / "dll" / "so" / "dylib" / "lib"）。
@@ -180,6 +183,14 @@ class PhotonPipeline {
     /// 持续分配源（与 `phirSigLookup` 的分配治理同理）。
     private var verboseOn: Boolean = false
 
+    /// `AURA_PHOTON_TRACE=1` 时缓存为 true（入口处读一次，避免 `traceMark`
+    /// 每次调用都读 environ）。与 `verboseOn` 分离：verbose 包含 VERBOSE+TRACE，
+    /// trace 只包含 TRACE（`traceMark` 只在该开关下落盘）。
+    private var traceOn: Boolean = false
+
+    /// `traceMark` 的步骤序号（有界截断后仍保留计数，便于定位）。
+    private var traceStep: Int = 0
+
     /// 临时性能探针：类型环境/签名表的查询次数与累计扫描字符数。
     private var dbgEnvGet: Int = 0
     private var dbgEnvSet: Int = 0
@@ -193,11 +204,18 @@ class PhotonPipeline {
     /// 为什么落盘而不是 `println`：VM 的 stdout 是带缓冲的，进程被 OOM killer
     /// 终止时缓冲区内容整体丢失（实测大工程编译崩溃时终端一行都看不到），
     /// 无法定位崩溃点。文件写入每条都同步，崩溃前的进度得以保留。
+    ///
+    /// ⚠️ 2026-09-29：改为有界截断（只保留尾部 2.5KB，每次重写 ≤3KB 小文件）。
+    /// 旧写法 `traceBuf = traceBuf + msg + "\n"` + 整文件重写是 O(行数²) 分配源——
+    /// `parsePhirText` 每 20–25 个函数打一次点、每个 Phase 也打点，编译 Main.aura
+    /// 时 traceBuf 累积到数万行后每次追加都整段拷贝。照抄 `peProbe` 的做法。
     private fun traceMark(msg: String): Unit {
-        if (Env.get("AURA_PHOTON_TRACE") != "1") { return }
-        // 注意：不要用 Clock.timeMs() —— 该原生在 VM 路径下**未注册**
-        //（`[bytecode] error: 未解析的函数调用 'Clock.timeMs'`），会让驱动直接失败。
-        this.traceBuf = this.traceBuf + msg + "\n"
+        if (!this.traceOn) { return }
+        this.traceStep = this.traceStep + 1
+        this.traceBuf = this.traceBuf + "[s" + this.traceStep + "] " + msg + "\n"
+        if (this.traceBuf.length > 3000) {
+            this.traceBuf = this.traceBuf.substring(this.traceBuf.length - 2500)
+        }
         FileUtils.writeText(this.outDir + "/photon_trace.log", this.traceBuf)
     }
 
@@ -237,6 +255,8 @@ class PhotonPipeline {
     private fun readVerboseFlag(): Unit {
         this.verboseOn = Env.get("AURA_PHOTON_VERBOSE", "") == "1"
                 || Env.get("AURA_PHOTON_TRACE", "") == "1"
+        this.traceOn = Env.get("AURA_PHOTON_TRACE", "") == "1"
+        this.traceStep = 0
     }
 
     /// 阶段进度/心跳输出：`verboseOn` 为假时直接丢弃。
@@ -272,7 +292,7 @@ class PhotonPipeline {
         // ── Phase A: HIR → SSA MIR ──
         this.traceMark("phaseA")
         this.vprintln("[Phase A] HIR → SSA MIR (SsaBuilder)")
-        val ssaBuilder = SsaBuilderUtils.build(hir)
+        var ssaBuilder = SsaBuilderUtils.build(hir)
         this.vprintln("  functions=" + ssaBuilder.functionCount +
                 " values=" + ssaBuilder.valueCount +
                 " blocks=" + ssaBuilder.blockCount)
@@ -289,13 +309,17 @@ class PhotonPipeline {
         this.traceMark("phaseB")
         this.vprintln("[Phase B] MIR → LIR (Lowering)")
         val lowering = Lowering()
-        val lir = lowering.lower(ssaBuilder)
+        var lir = lowering.lower(ssaBuilder)
         this.vprintln("  LIR functions=" + lir.functionCount +
                 " values=" + lir.valueCount +
                 " blocks=" + lir.blockCount)
         if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
             this.photonDumpLir(lir)
         }
+        // ⚠️ 2026-09-29 阶段释放点：SSA 表在 Phase B 产出 LIR 后不再需要。
+        // 无 GC 运行时下 ARC 引用不释放则常驻——把 ssaBuilder 置空让 ARC 回收
+        // （Phase B 是整条管线最重的阶段，SSA 表常达数百 MB）。
+        ssaBuilder = SsaBuilder()
         if (Env.get("AURA_PHOTON_STOP") == "B") {
             result.errorMessage = "STOPPED_AFTER_PHASE_B"
             return result
@@ -305,9 +329,12 @@ class PhotonPipeline {
         this.traceMark("phaseC")
         this.vprintln("[Phase C] LIR → Machine DAG (InstructionSelection)")
         val selector = InstructionSelectorUtils.emptySelector()
-        val dag = selector.select(lir)
+        var dag = selector.select(lir)
         this.vprintln("  DAG nodes=" + dag.nodeCount +
                 " instrs=" + dag.instrCount)
+        // ⚠️ 2026-09-29 阶段释放点：LIR 在 Phase C 产出 DAG 后不再需要。
+        // DAG 是 Phase D/E 的唯一输入，LIR 是中间产物。
+        lir = LirProgram()
         if (Env.get("AURA_PHOTON_STOP") == "C") {
             result.errorMessage = "STOPPED_AFTER_PHASE_C"
             return result
@@ -432,19 +459,26 @@ class PhotonPipeline {
         this.peProbe("preLinkStep runtimeObjPath=empty")
 
         // 生成 runtime 目标文件（定义 println，供 main 引用）；Unix 共享库不需要 runtime 入口对象
+        //
+        // ⚠️ 2026-09-29 缓存：runtime 对象对给定平台是常量，编译多次内容完全一致。
+        // 旧实现每次编译都重新走一遍 50+ 个函数的编码 + 落盘（~50 MB 字符串
+        // 分配）。先检查文件是否已存在——存在则直接复用，跳过整个生成过程。
         var runtimeObjPath: String = ""
         if (this.outputType != "so" && this.outputType != "dylib") {
             runtimeObjPath = this.outDir + "/aura_runtime.obj"
-            this.peProbe("genRuntimeObj path=" + runtimeObjPath)
-            // 同主目标文件：优先**原生二进制**落盘（VM/AOT 通用），失败才回退 hex。
-            val runtimeHex: String = PhotonRuntime.buildRuntimeObject()
-            this.peProbe("runtimeObjHex chars=" + this.toStr(runtimeHex.length))
-            var runtimeResult: Boolean =
-                PhotonNativeWriter.writeObjectFile(runtimeObjPath, runtimeHex)
+            var runtimeResult: Boolean = FileUtils.exists(runtimeObjPath)
             if (!runtimeResult) {
-                runtimeResult = PhotonRuntimeUtils.writeRuntimeObjectHexFile(runtimeObjPath)
+                this.peProbe("genRuntimeObj path=" + runtimeObjPath)
+                val runtimeHex: String = PhotonRuntime.buildRuntimeObject()
+                this.peProbe("runtimeObjHex chars=" + this.toStr(runtimeHex.length))
+                runtimeResult =
+                    PhotonNativeWriter.writeObjectFile(runtimeObjPath, runtimeHex)
+                if (!runtimeResult) {
+                    runtimeResult = PhotonRuntimeUtils.writeRuntimeObjectHexFile(runtimeObjPath)
+                }
             }
-            this.peProbe("writeRuntimeObj ok=" + this.toStr(runtimeResult))
+            this.peProbe("writeRuntimeObj ok=" + this.toStr(runtimeResult) +
+                    (if (runtimeResult) " (cached)" else ""))
             this.vprintln("    runtime 对象: " + runtimeObjPath +
                     (if (runtimeResult) " ✓" else " ⚠ 写入失败"))
         } else {
@@ -634,13 +668,15 @@ class PhotonPipeline {
         this.traceMark("phaseB")
         this.vprintln("[Phase B] MIR → LIR (Lowering)")
         val lowering = Lowering()
-        val lir = lowering.lower(ssaMIR)
+        var lir = lowering.lower(ssaMIR)
         this.vprintln("  LIR functions=" + lir.functionCount +
                 " values=" + lir.valueCount +
                 " blocks=" + lir.blockCount)
         if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
             this.photonDumpLir(lir)
         }
+        // ⚠️ 2026-09-29 阶段释放点：SSA MIR 在 Phase B 后不再需要。
+        // 注意：ssaMIR 是参数，不在此处置空（调用方可能仍持有引用）。
         if (Env.get("AURA_PHOTON_STOP") == "B") {
             result.errorMessage = "STOPPED_AFTER_PHASE_B"
             return result
@@ -650,9 +686,11 @@ class PhotonPipeline {
         this.traceMark("phaseC")
         this.vprintln("[Phase C] LIR → Machine DAG (InstructionSelection)")
         val selector = InstructionSelectorUtils.emptySelector()
-        val dag = selector.select(lir)
+        var dag = selector.select(lir)
         this.vprintln("  DAG nodes=" + dag.nodeCount +
                 " instrs=" + dag.instrCount)
+        // ⚠️ 2026-09-29 阶段释放点：LIR 在 Phase C 产出 DAG 后不再需要。
+        lir = LirProgram()
         if (Env.get("AURA_PHOTON_STOP") == "C") {
             result.errorMessage = "STOPPED_AFTER_PHASE_C"
             return result
@@ -779,22 +817,23 @@ class PhotonPipeline {
         this.peProbe("preLinkStep runtimeObjPath=empty")
 
         // 生成 runtime 目标文件（定义 println，供 main 引用）；Unix 共享库不需要 runtime 入口对象
+        // ⚠️ 2026-09-29 缓存：同 compileHir 路径，已存在则跳过重建。
         var runtimeObjPath: String = ""
         if (this.outputType != "so" && this.outputType != "dylib") {
             runtimeObjPath = this.outDir + "/aura_runtime.obj"
-            this.peProbe("genRuntimeObj path=" + runtimeObjPath)
-            println("    [debug] before buildRuntimeObject")
-            val runtimeHex: String = PhotonRuntime.buildRuntimeObject()
-            println("    [debug] after buildRuntimeObject, len=" + runtimeHex.length)
-            this.peProbe("runtimeObjHex chars=" + this.toStr(runtimeHex.length))
-            println("    [debug] before writeObjectFile")
-            var runtimeResult: Boolean =
-                PhotonNativeWriter.writeObjectFile(runtimeObjPath, runtimeHex)
-            println("    [debug] after writeObjectFile, result=" + runtimeResult)
+            var runtimeResult: Boolean = FileUtils.exists(runtimeObjPath)
             if (!runtimeResult) {
-                runtimeResult = PhotonRuntimeUtils.writeRuntimeObjectHexFile(runtimeObjPath)
+                this.peProbe("genRuntimeObj path=" + runtimeObjPath)
+                val runtimeHex: String = PhotonRuntime.buildRuntimeObject()
+                this.peProbe("runtimeObjHex chars=" + this.toStr(runtimeHex.length))
+                runtimeResult =
+                    PhotonNativeWriter.writeObjectFile(runtimeObjPath, runtimeHex)
+                if (!runtimeResult) {
+                    runtimeResult = PhotonRuntimeUtils.writeRuntimeObjectHexFile(runtimeObjPath)
+                }
             }
-            this.peProbe("writeRuntimeObj ok=" + this.toStr(runtimeResult))
+            this.peProbe("writeRuntimeObj ok=" + this.toStr(runtimeResult) +
+                    (if (runtimeResult) " (cached)" else ""))
             this.vprintln("    runtime 对象: " + runtimeObjPath +
                     (if (runtimeResult) " ✓" else " ⚠ 写入失败"))
         } else {
@@ -1035,10 +1074,20 @@ class PhotonPipeline {
     ///
     /// 逐字符用 `charCodeAt` 而非 `substring(pos, pos+1)`：旧写法每字符分配一个
     /// 临时串，而本函数**每个声明/参数**都会调用一次，是另一处无 GC 分配源。
+    ///
+    /// ⚠️ 2026-09-29：先 `indexOf` 判断是否已存在。不存在时直接追加（O(1)），
+    /// 避免旧实现无条件重建整个环境串（O(env_size) 分配/次）。只有覆盖已有项
+    /// 时才走完整重建路径。
     private fun phirEnvSet(name: String, ty: String): Unit {
         this.dbgEnvSet = this.dbgEnvSet + 1
         this.dbgEnvSetScanned = this.dbgEnvSetScanned + this.phirEnv.length
         val key: String = name + "="
+        // 快路径：不存在则直接追加，不重建
+        if (this.phirEnv.indexOf("\n" + key) < 0) {
+            this.phirEnv = this.phirEnv + name + "=" + ty + "\n"
+            return
+        }
+        // 慢路径：覆盖已有项，逐行重建
         var out: String = "\n"
         var lineStart: Int = 0
         var pos: Int = 0

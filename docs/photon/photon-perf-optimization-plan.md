@@ -10,6 +10,49 @@
 
 ---
 
+## ✅ 实施状态（2026-09-29 更新）
+
+### P0 — Rust VM 层（全部完成，`cargo build --release --features llvm` 通过 ✓）
+
+| 项 | 文件 | 状态 | 说明 |
+|---|---|---|---|
+| P0.1 | `interp.rs:1585, 1784` | ✅ | `eprintln!` 套 `trace_call_enabled()` 守卫 |
+| P0.2 | `InstructionSelection.aura:107` | ✅ | `forceReachable` 10→5 项 |
+| P0.3 | `interp.rs` | ✅ | `BytecodeNative.clone()` → 字段提取 |
+| P0.4 | `mod.rs` + `interp.rs` | ✅ | `Instr` 加 `Copy` + 去 `.clone()` |
+| P0.5 | `interp.rs` (5 处) | ✅ | `.cloned()` → `&Value::Ref(h)` |
+| P0.6 | `interp.rs:1997` | ✅ | `pop()` clone 移入错误分支 |
+
+### P1 — Aura 后端层（全部完成）
+
+| 项 | 文件 | 状态 | 说明 |
+|---|---|---|---|
+| P1.1 | `PhotonPipeline.aura` | ✅ | `traceMark` 有界截断（O(n²)→O(1)） |
+| P1.2 | `PhotonPipeline.aura` | ✅ | `phirEnvSet` 快路径（新变量不重建） |
+| P1.3 | `MachineDag` + `InstructionSelection` | ✅ | `Env.get` 缓存为字段 |
+| P1.4 | `MachineDag.aura` | ✅ | `roots`/`chains` → `List<Int>` |
+| P1.5 | `RegisterAllocator.aura` | ✅ | `callStack` → `List<Int>` |
+| P1.6 | `InstructionSelection.aura` | ✅ | `phiMovByBlock` → `List<List<String>>` |
+| P1.7 | `PhotonPipeline.aura` | ✅ | `buildRuntimeObject` 文件缓存 |
+
+### P2 — 中间层
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| P2.3 | ✅ | Phase 边界释放点（SSA/LIR 置空） |
+| P2.1 | ⏳ 后续 | HIR.kids → `List<Int>`（283+ 引用） |
+| P2.2 | ⏳ 后续 | LIR.blocks/instrs/args → `List<Int>` |
+
+### P3 — 架构级
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| P3.1 | ⏳ 后续 | 后端移出 VM（需独立编译流程） |
+| P3.2 | ⏳ 后续 | arena allocator（需新增原生函数） |
+| P3.3 | ⏳ 后续 | 对象字段 HashMap→Vec（影响全 VM） |
+
+---
+
 ## 〇、一句话结论
 
 Photon 慢是**三层叠加**，且最大单一嫌疑点**不在 `aura/photon/` 目录里**：

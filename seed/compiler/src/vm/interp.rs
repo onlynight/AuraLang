@@ -144,7 +144,9 @@ impl Vm {
             return Ok(());
         }
 
-        let instr = self.module.funcs[func].code[ip].clone();
+        // `Instr` 派生 `Copy`（所有变体仅含 u16/usize），直接拷贝 16 字节即可，
+        // 无需 `clone()`。旧写法每条指令都 clone 一次 Instr，自举 50k 行触发 ~500 万次。
+        let instr = self.module.funcs[func].code[ip];
         self.frames[top].ip += 1;
         self.exec_instr(top, func, instr)
     }
@@ -439,32 +441,37 @@ impl Vm {
             Instr::ResumeCoroutine => self.do_resume(top)?,
 
             // ── ARC 生命周期（5.10） ──
+            // ⚠️ 统一用 `&Value::Ref(h)` 借用模式而非 `.cloned()`：`Value::Ref(usize)`
+            // 的 `usize` 是 `Copy`，直接解引用取出句柄即可。`.cloned()` 会对整个
+            // `Value` 做深拷贝——若栈顶恰好是 `Value::List(Vec<Value>)` /
+            // `Map(HashMap<…>)` 会递归克隆整个嵌套树，而 ARC 指令在寄存器分配后
+            // 会大量生成（每个引用变量一对 INCREF/DECREF）。
             Instr::DropRef => {
-                if let Some(Value::Ref(h)) = self.frames[top].stack.last().cloned() {
+                if let Some(&Value::Ref(h)) = self.frames[top].stack.last() {
                     self.heap.drop_ref(h);
                 }
             }
 
             // ── 引用计数 ──
             Instr::IncRef => {
-                if let Some(Value::Ref(h)) = self.frames[top].stack.last().cloned() {
+                if let Some(&Value::Ref(h)) = self.frames[top].stack.last() {
                     self.heap.inc_ref(h);
                 }
             }
             Instr::DecRef => {
-                if let Some(Value::Ref(h)) = self.frames[top].stack.last().cloned() {
+                if let Some(&Value::Ref(h)) = self.frames[top].stack.last() {
                     self.heap.dec_ref(h);
                 }
             }
 
             // ── P7 内存管理 ──
             Instr::Retain => {
-                if let Some(Value::Ref(h)) = self.frames[top].stack.last().cloned() {
+                if let Some(&Value::Ref(h)) = self.frames[top].stack.last() {
                     self.heap.inc_ref(h);
                 }
             }
             Instr::Release => {
-                if let Some(Value::Ref(h)) = self.frames[top].stack.last().cloned() {
+                if let Some(&Value::Ref(h)) = self.frames[top].stack.last() {
                     self.heap.dec_ref(h);
                 }
             }
@@ -1452,8 +1459,17 @@ impl Vm {
                 idx
             )));
         }
-        let native = self.module.natives[idx].clone();
-        let param_count = native.param_count as usize;
+        // ⚠️ 不要 `self.module.natives[idx].clone()`：它深克隆 `name`(String)/
+        // `param_types`(Vec<u8>)/`ffi_lib`(Option<String>) 三处堆分配，而本函数
+        // 后面频繁调 `&mut self` 方法——对 `self.module` 的借用会与之冲突。
+        // 只拷出标量与函数名（下面大量 `==` 比较 / `&str` 传参需要），
+        // `param_types` 仅在 `static_call_c_with_lib` 调用处临时借用。
+        let native_name: String = self.module.natives[idx].name.clone();
+        let native_param_count: u16 = self.module.natives[idx].param_count;
+        let native_ret_type: u8 = self.module.natives[idx].ret_type;
+        let native_ffi_abi: FfiAbi = self.module.natives[idx].ffi_abi;
+        let native_ffi_lib: Option<String> = self.module.natives[idx].ffi_lib.clone();
+        let param_count = native_param_count as usize;
         let args = self.pop_n(top, param_count)?;
 
         // ── 原生调用追踪（诊断，默认关闭）─────────────────────────────────
@@ -1466,10 +1482,10 @@ impl Vm {
         // Rust 侧是注册表下标），表现为句柄为 0 / 读到垃圾。
         // 实测：`StringBuilder.create` 在 main 里派发到 Aura 实现（句柄=裸内存），
         // 在 object 方法体内落到 Rust native（返回下标 0）→ `appendN` 立刻 `sb==0`。
-        if trace_call_enabled(&native.name) {
+        if trace_call_enabled(&native_name) {
             eprintln!(
                 "[vm] native-call: {} param_count={} argc={}",
-                native.name,
+                native_name,
                 param_count,
                 args.len()
             );
@@ -1477,13 +1493,13 @@ impl Vm {
 
         // `throw expr` 由 HIR 降级为 `__throw(expr)`：在原生派发前拦截，
         // 展开到最近的异常处理器（`try/catch`），无处理器则报未捕获异常。
-        if native.name == "__throw" {
+        if native_name == "__throw" {
             let v = args.into_iter().next().unwrap_or(Value::Null);
             return self.raise(v);
         }
 
         // `__new_exception(type_name, message)`：创建异常对象
-        if native.name == "__new_exception" {
+        if native_name == "__new_exception" {
             let type_name = match args.first() {
                 Some(Value::Str(s)) => s.to_string(),
                 _ => "Exception".to_string(),
@@ -1498,7 +1514,7 @@ impl Vm {
         }
 
         // `Process.exit(code)`：记录退出码并干净地停止 VM（由 CLI 设置进程退出码）。
-        if is_exit_native(&native.name) {
+        if is_exit_native(&native_name) {
             let code = crate::std::std_process::last_int_arg(&args).unwrap_or(0) as i32;
             self.request_exit(code);
             return Ok(());
@@ -1519,7 +1535,7 @@ impl Vm {
         //
         // 因此在解释器层把可变工厂改写为堆对象，后续原位指令即可正常工作。
         let is_mut_list = matches!(
-            native.name.as_str(),
+            native_name.as_str(),
             "mutableListOf"
                 | "arrayListOf"
                 | "aura.lang.std.Collections.mutableListOf"
@@ -1534,7 +1550,7 @@ impl Vm {
             return Ok(());
         }
         let is_mut_map = matches!(
-            native.name.as_str(),
+            native_name.as_str(),
             "mutableMapOf" | "aura.lang.std.Collections.mutableMapOf"
         );
         if is_mut_map {
@@ -1545,7 +1561,7 @@ impl Vm {
 
         // 原位集合写入（`l.set(i, v)` / `arr[i] = v` → `Collections.set`）：
         // 堆列表必须原地写，否则调用方丢弃返回值后毫无效果。
-        if let Some(v) = self.try_inline_coll_set(&native.name, &args) {
+        if let Some(v) = self.try_inline_coll_set(&native_name, &args) {
             self.frames[top].stack.push(v);
             return Ok(());
         }
@@ -1554,8 +1570,8 @@ impl Vm {
         // Console.writeStdout / FileOps.open 等 extern interface 声明在 VM 中没有 AOT 机器码，
         // 必须在 `stdlib_func_map` 之前查 Rust native 注册表，否则会被嵌入 .auc 的
         // 同名 Aura 编译函数（若存在）拦截，或直接落入 call_aot_ffi 失败路径。
-        if native.ffi_abi == FfiAbi::Aura {
-            if let Some(f) = self.natives.get(&native.name) {
+        if native_ffi_abi == FfiAbi::Aura {
+            if let Some(f) = self.natives.get(&native_name) {
                 let result = f(&args);
                 self.frames[top].stack.push(result);
                 return Ok(());
@@ -1567,31 +1583,38 @@ impl Vm {
         // 仅当未找到或函数为 native 声明（is_native=true，无 Aura 实现体）时才回退到 Rust native。
         // 这确保纯逻辑模块（Math.abs / String.contains / Collections.listOf …）
         // 使用 Aura 实现，而 libm / syscall 等 native 声明仍走 Rust 实现。
-        let std_lookup = self.find_stdlib_func(&native.name, param_count).filter(|&(idx, _)| {
+        let std_lookup = self.find_stdlib_func(&native_name, param_count).filter(|&(idx, _)| {
             let func = &self.module.funcs[idx];
             !func.is_native
         });
         if let Some((std_func_idx, needs_self)) = std_lookup {
-            eprintln!(
-                "[vm] stdlib-aura: {} → Aura compiled func #{} (self={})",
-                native.name, std_func_idx, needs_self
-            );
+            // 诊断输出，受 `AURA_VM_TRACE_CALL` 开关保护（见 `trace_call_enabled`）。
+            // ⚠️ 此分支**每次 stdlib-aura 派发都命中**：Photon 后端跑在 VM 里，
+            // 自己就调用 `mutableListOf` / `String.split` / `Collections.set` 等数十万次，
+            // 无条件 `eprintln!` 会让 stderr 缓冲与 format 分配成为主要耗时/内存源
+            // （与 `warn_unlinked_once` 注释里记录的 23 GB 事故同源）。
+            if trace_call_enabled(&native_name) {
+                eprintln!(
+                    "[vm] stdlib-aura: {} → Aura compiled func #{} (self={})",
+                    native_name, std_func_idx, needs_self
+                );
+            }
 
             if needs_self {
                 // 注入 singleton 对象作为 self 参数
-                let object_name = self.extract_object_name(&native.name);
+                let object_name = self.extract_object_name(&native_name);
                 let self_value = if let Some(obj_name) = object_name {
                     self.singletons.get(obj_name).cloned().unwrap_or_else(|| {
                         eprintln!(
                             "[vm] stdlib-aura: singleton '{}' not found, using Null for {}",
-                            obj_name, native.name
+                            obj_name, native_name
                         );
                         Value::Null
                     })
                 } else {
                     eprintln!(
                         "[vm] stdlib-aura: cannot extract object name from {}, using Null",
-                        native.name
+                        native_name
                     );
                     Value::Null
                 };
@@ -1607,25 +1630,25 @@ impl Vm {
             }
         }
 
-        let result = if let Some(v) = self.intercept_object_native(&native.name, &args)? {
+        let result = if let Some(v) = self.intercept_object_native(&native_name, &args)? {
             v
-        } else if let Some(f) = self.natives.get(&native.name) {
+        } else if let Some(f) = self.natives.get(&native_name) {
             f(&args)
-        } else if let Some(f) = self.natives.resolve_c_function(&native.name) {
+        } else if let Some(f) = self.natives.resolve_c_function(&native_name) {
             f(&args)
-        } else if native.ffi_abi == FfiAbi::Aura {
+        } else if native_ffi_abi == FfiAbi::Aura {
             // extern interface: AOT 直调
-            self.call_aot_ffi(&native, &args).unwrap_or_else(|| {
-                eprintln!("[vm] AOT interface call failed: `{}`", native.name);
+            self.call_aot_ffi(&native_name, native_ffi_lib.as_deref(), &args).unwrap_or_else(|| {
+                eprintln!("[vm] AOT interface call failed: `{}`", native_name);
                 Value::Int(0)
             })
         } else {
             // P9: 如果指定了 FFI 库，先加载库
-            if let Some(ref lib_name) = native.ffi_lib {
+            if let Some(ref lib_name) = native_ffi_lib {
                 self.ensure_lib_loaded(lib_name);
             }
             // P9: 获取库句柄（如果加载了）
-            let lib_handle: Option<usize> = native.ffi_lib.as_ref().and_then(|lib| {
+            let lib_handle: Option<usize> = native_ffi_lib.as_ref().and_then(|lib| {
                 #[cfg(windows)]
                 {
                     self.loaded_libs.get(lib).copied()
@@ -1637,15 +1660,15 @@ impl Vm {
             });
             // P8.4: 尝试静态链接 — 使用库句柄解析 C 函数
             match static_call_c_with_lib(
-                &native.name,
+                &native_name,
                 &args,
                 lib_handle,
-                &native.param_types,
-                native.ret_type,
+                &self.module.natives[idx].param_types,
+                native_ret_type,
             ) {
                 Some(v) => v,
                 None => {
-                    warn_unlinked_once(&native.name, &args);
+                    warn_unlinked_once(&native_name, &args);
                     Value::Int(0)
                 }
             }
@@ -1662,15 +1685,20 @@ impl Vm {
                 idx
             )));
         }
-        let native = self.module.natives[idx].clone();
+        // 同 `do_call_native`：只拷出标量与函数名，`param_types` 在用到处临时借用。
+        let native_name: String = self.module.natives[idx].name.clone();
+        let native_param_count: u16 = self.module.natives[idx].param_count;
+        let native_ret_type: u8 = self.module.natives[idx].ret_type;
+        let native_ffi_abi: FfiAbi = self.module.natives[idx].ffi_abi;
+        let native_ffi_lib: Option<String> = self.module.natives[idx].ffi_lib.clone();
         // 使用实际参数个数而非声明的 param_count
         let mut args = self.pop_n(top, argc)?;
 
         // 原生调用追踪（诊断，默认关闭；见 `trace_call_enabled` 的说明）
-        if trace_call_enabled(&native.name) {
+        if trace_call_enabled(&native_name) {
             eprintln!(
                 "[vm] native-call(args): {} param_count={} argc={}",
-                native.name, native.param_count, argc
+                native_name, native_param_count, argc
             );
         }
 
@@ -1679,8 +1707,8 @@ impl Vm {
         // 否则 `FileSystem.writeText(path, content)` 之类会整体错位（写出到空路径等）。
         // 注意：变长原生（`println`/`listOf` 等）声明 param_count 为 0，不受此规则影响。
         let mut eff_argc = argc;
-        if native.param_count as usize >= 1
-            && argc == native.param_count as usize + 1
+        if native_param_count as usize >= 1
+            && argc == native_param_count as usize + 1
             && !args.is_empty()
         {
             args.remove(0);
@@ -1688,13 +1716,13 @@ impl Vm {
         }
 
         // 同 `do_call_native`：`throw` 走异常展开路径
-        if native.name == "__throw" {
+        if native_name == "__throw" {
             let v = args.into_iter().next().unwrap_or(Value::Null);
             return self.raise(v);
         }
 
         // 同 `do_call_native`：`__new_exception` 创建异常对象
-        if native.name == "__new_exception" {
+        if native_name == "__new_exception" {
             let type_name = match args.first() {
                 Some(Value::Str(s)) => s.to_string(),
                 _ => "Exception".to_string(),
@@ -1709,7 +1737,7 @@ impl Vm {
         }
 
         // 同 `do_call_native`：`Process.exit(code)` 请求退出
-        if is_exit_native(&native.name) {
+        if is_exit_native(&native_name) {
             let code = crate::std::std_process::last_int_arg(&args).unwrap_or(0) as i32;
             self.request_exit(code);
             return Ok(());
@@ -1722,7 +1750,7 @@ impl Vm {
         // 只对**堆表示** `Value::Ref` 做原位操作 → `l.add(x)` 静默失效
         // （`l.size` 恒 0、`l[0]` 恒 null、`l.set(i, v)` 无效果）。
         let is_mut_list = matches!(
-            native.name.as_str(),
+            native_name.as_str(),
             "mutableListOf"
                 | "arrayListOf"
                 | "aura.lang.std.Collections.mutableListOf"
@@ -1737,7 +1765,7 @@ impl Vm {
             return Ok(());
         }
         let is_mut_map = matches!(
-            native.name.as_str(),
+            native_name.as_str(),
             "mutableMapOf" | "aura.lang.std.Collections.mutableMapOf"
         );
         if is_mut_map {
@@ -1748,14 +1776,14 @@ impl Vm {
 
         // 原位集合写入（`l.set(i, v)` / `arr[i] = v` → `Collections.set`）：
         // 堆列表必须原地写，否则调用方丢弃返回值后毫无效果。
-        if let Some(v) = self.try_inline_coll_set(&native.name, &args) {
+        if let Some(v) = self.try_inline_coll_set(&native_name, &args) {
             self.frames[top].stack.push(v);
             return Ok(());
         }
 
         // Phase P4: extern interface（FfiAbi::Aura）的 Rust native 优先回退（同 do_call_native）
-        if native.ffi_abi == FfiAbi::Aura {
-            if let Some(f) = self.natives.get(&native.name) {
+        if native_ffi_abi == FfiAbi::Aura {
+            if let Some(f) = self.natives.get(&native_name) {
                 let result = f(&args);
                 self.frames[top].stack.push(result);
                 return Ok(());
@@ -1763,18 +1791,21 @@ impl Vm {
         }
 
         // Phase D: Aura 编译的标准库函数版本优先（同 do_call_native，始终先查 stdlib_func_map）
-        let args_std_lookup = self.find_stdlib_func(&native.name, eff_argc).filter(|&(idx, _)| {
+        let args_std_lookup = self.find_stdlib_func(&native_name, eff_argc).filter(|&(idx, _)| {
             let func = &self.module.funcs[idx];
             !func.is_native
         });
         if let Some((std_func_idx, needs_self)) = args_std_lookup {
-            eprintln!(
-                "[vm] stdlib-aura: {} (argc={}) → Aura compiled func #{} (self={})",
-                native.name, eff_argc, std_func_idx, needs_self
-            );
+            // 诊断输出，受 `AURA_VM_TRACE_CALL` 开关保护（同 `do_call_native` 的对应分支）。
+            if trace_call_enabled(&native_name) {
+                eprintln!(
+                    "[vm] stdlib-aura: {} (argc={}) → Aura compiled func #{} (self={})",
+                    native_name, eff_argc, std_func_idx, needs_self
+                );
+            }
 
             if needs_self {
-                let object_name = self.extract_object_name(&native.name);
+                let object_name = self.extract_object_name(&native_name);
                 let self_value = if let Some(obj_name) = object_name {
                     self.singletons.get(obj_name).cloned().unwrap_or(Value::Null)
                 } else {
@@ -1792,12 +1823,12 @@ impl Vm {
         }
 
         // P9: 如果指定了 FFI 库，先加载库
-        if let Some(ref lib_name) = native.ffi_lib {
+        if let Some(ref lib_name) = native_ffi_lib {
             self.ensure_lib_loaded(lib_name);
         }
 
         // P9: 获取库句柄（如果加载了）
-        let lib_handle: Option<usize> = native.ffi_lib.as_ref().and_then(|lib| {
+        let lib_handle: Option<usize> = native_ffi_lib.as_ref().and_then(|lib| {
             #[cfg(windows)]
             {
                 self.loaded_libs.get(lib).copied()
@@ -1808,30 +1839,30 @@ impl Vm {
             }
         });
 
-        let result = if let Some(v) = self.intercept_object_native(&native.name, &args)? {
+        let result = if let Some(v) = self.intercept_object_native(&native_name, &args)? {
             v
-        } else if let Some(f) = self.natives.get(&native.name) {
+        } else if let Some(f) = self.natives.get(&native_name) {
             f(&args)
-        } else if let Some(f) = self.natives.resolve_c_function(&native.name) {
+        } else if let Some(f) = self.natives.resolve_c_function(&native_name) {
             f(&args)
-        } else if native.ffi_abi == FfiAbi::Aura {
+        } else if native_ffi_abi == FfiAbi::Aura {
             // extern interface: AOT 直调
-            self.call_aot_ffi(&native, &args).unwrap_or_else(|| {
-                eprintln!("[vm] AOT interface call failed: `{}`", native.name);
+            self.call_aot_ffi(&native_name, native_ffi_lib.as_deref(), &args).unwrap_or_else(|| {
+                eprintln!("[vm] AOT interface call failed: `{}`", native_name);
                 Value::Int(0)
             })
         } else {
             // P8.4: 尝试静态链接 — 使用库句柄解析 C 函数
             match static_call_c_with_lib(
-                &native.name,
+                &native_name,
                 &args,
                 lib_handle,
-                &native.param_types,
-                native.ret_type,
+                &self.module.natives[idx].param_types,
+                native_ret_type,
             ) {
                 Some(v) => v,
                 None => {
-                    warn_unlinked_once(&native.name, &args);
+                    warn_unlinked_once(&native_name, &args);
                     Value::Int(0)
                 }
             }
@@ -1954,21 +1985,26 @@ impl Vm {
     }
 
     /// extern interface: AOT 直调
+    ///
+    /// ⚠️ 旧签名取 `&BytecodeNative`：调用方（`do_call_native`）在持有 `&mut self`
+    /// 的同时传入 `&self.module.natives[idx]`——对 `self` 的可变借用与共享借用冲突。
+    /// 改为只取标量与 `&str`，调用方在借用前就把需要的值拷出来。
     fn call_aot_ffi(
         &mut self,
-        native: &crate::codegen::opcode::BytecodeNative,
+        native_name: &str,
+        native_ffi_lib: Option<&str>,
         args: &[Value],
     ) -> Option<Value> {
-        let lib_name = native.ffi_lib.as_deref()?;
+        let lib_name = native_ffi_lib?;
         let module_id = self.ensure_aot_lib_loaded(lib_name)?;
 
         // 从函数名提取实际函数名（"Utils.add" → "add"）
-        let func_name = native.name.split('.').last().unwrap_or(&native.name);
+        let func_name = native_name.split('.').last().unwrap_or(native_name);
         let func_idx = self.aot_runtime.lookup_func_idx(module_id, func_name)?;
 
         eprintln!(
             "[vm] AOT interface call: {} (module={}, func_idx={})",
-            native.name, module_id, func_idx
+            native_name, module_id, func_idx
         );
 
         let jit_args: Vec<crate::vm::abi::JitValue> =
@@ -1980,14 +2016,19 @@ impl Vm {
     // ── 栈辅助 ──
 
     fn pop(&mut self, top: usize) -> Result<Value, VmError> {
-        let func_name = self.module.funcs[self.frames[top].func].name.clone();
+        // 函数名只在栈下溢时才需要（用于错误信息）。`pop` 在热路径上被每条
+        // 指令调用若干次，提前 clone 函数名是无谓的 String 分配——
+        // 实测编译 50k 行源码触发约 500 万次 `pop()`，每次 clone 一个 ~20 字节名字。
         let ip = self.frames[top].ip;
         match self.frames[top].stack.pop() {
             Some(v) => Ok(v),
-            None => Err(VmError::Runtime(format!(
-                "operand stack underflow in `{}` at ip={}",
-                func_name, ip
-            ))),
+            None => {
+                let func_name = &self.module.funcs[self.frames[top].func].name;
+                Err(VmError::Runtime(format!(
+                    "operand stack underflow in `{}` at ip={}",
+                    func_name, ip
+                )))
+            }
         }
     }
 

@@ -83,6 +83,9 @@ class PhotonObjectWriter {
     /// 偏移转换为 .text 节内绝对偏移。单函数时首函数 offset 固定为 0。
     var functionOffsets: String = ""
 
+    /// 函数偏移的内部列表（O(1) 追加，取代字符串整段拷贝）。
+    private var functionOffsetsList: List<String> = arrayListOf<String>()
+
     /// 节数据偏移（运行时计算）。
     var textOffset: Int = 0
     var rdataOffset: Int = 0
@@ -143,6 +146,7 @@ class PhotonObjectWriter {
         this.dataSymbolName = ""
         this.functions = ""
         this.functionOffsets = ""
+        this.functionOffsetsList = arrayListOf<String>()
         this.textOffset = 0
         this.rdataOffset = 0
         this.dataOffset = 0
@@ -179,6 +183,8 @@ class PhotonObjectWriter {
 
         // 单函数 API 的后向兼容入口：首函数永远位于 .text 偏移 0。
         this.functionOffsets = functionName + "|0"
+        this.functionOffsetsList = arrayListOf<String>()
+        this.functionOffsetsList.add(functionName + "|0")
 
         // 符号表依赖重定位表：重定位引用的外部符号要登记为「未定义符号」
         this.buildSymbols(functionName, stringConsts)
@@ -200,10 +206,10 @@ class PhotonObjectWriter {
         val funcOffset: Int = this.hexByteCount(this.textSection)
         if (this.functions == "") {
             this.functions = functionName
-            this.functionOffsets = functionName + "|0"
+            this.functionOffsetsList.add(functionName + "|0")
         } else {
             this.functions = this.functions + "," + functionName
-            this.functionOffsets = this.functionOffsets + ";;" + functionName + "|" + this.toStr(funcOffset)
+            this.functionOffsetsList.add(functionName + "|" + this.toStr(funcOffset))
         }
 
         // 追加机器码到 textSection
@@ -323,7 +329,7 @@ class PhotonObjectWriter {
         //    否则 call helper 会被链接到 .text 起点（main），导致调用错位。
         if (functionName != "") {
             val funcParts: List<String> = this.splitComma(functionName)
-            val offsetParts: List<String> = this.splitDoubleSemi(this.functionOffsets)
+            val offsetParts: List<String> = this.functionOffsetsList
             var fi: Int = 0
             while (fi < funcParts.size) {
                 if (funcParts[fi] != "") {
@@ -2230,6 +2236,8 @@ object PhotonObjectWriterUtils {
         writer.functions = firstFunctionName
         writer.relocs = firstRelocEntries
         writer.functionOffsets = firstFunctionName + "|0"
+        writer.functionOffsetsList = arrayListOf<String>()
+        writer.functionOffsetsList.add(firstFunctionName + "|0")
 
         var i = 0
         while (i < restFunctions.size) {

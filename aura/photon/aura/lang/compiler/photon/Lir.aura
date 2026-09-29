@@ -60,8 +60,8 @@ class LirValue {
     /// 结果类型 TypeID。
     var type: Int = 0
 
-    /// 操作数 ValueID 列表（逗号分隔字符串）。
-    var args: String = ""
+    /// 操作数 ValueID 列表（List[Int>，P2.2 取代逗号分隔字符串）。
+    var args: List<Int> = arrayListOf<Int>()
 
     /// 辅助信息（常量值、内存偏移、地址模式等）。
     var aux: String = ""
@@ -84,44 +84,28 @@ class LirValue {
         this.id = 0
         this.op = ""
         this.type = 0
-        this.args = ""
+        this.args = arrayListOf<Int>()
         this.aux = ""
         this.block = 0
         this.useCount = 0
         this.chain = -1
-        this._cachedArgs = null
-        this._argsParsed = false
     }
 
     /// 获取第 i 个操作数的 ValueID。
     fun argAt(i: Int): Int {
-        this.ensureArgsParsed()
-        if (this._cachedArgs != null && i >= 0 && i < this._cachedArgs.size) {
-            return this._cachedArgs[i]
+        if (i >= 0 && i < this.args.size) {
+            return this.args[i]
         }
         return -1
     }
 
     /// 获取操作数个数。
     fun argCount(): Int {
-        if (this.args == "") {
-            return 0
-        }
-        this.ensureArgsParsed()
-        if (this._cachedArgs != null) {
-            return this._cachedArgs.size
-        }
-        return 0
+        return this.args.size
     }
 
-    private fun ensureArgsParsed(): Unit {
-        if (!this._argsParsed) {
-            this._cachedArgs = this.parseArgs(this.args)
-            this._argsParsed = true
-        }
-    }
-
-    private fun parseArgs(text: String): List<Int> {
+    /// 从逗号分隔字符串解析为 List[Int>（P2.2 向后兼容转换）。
+    fun parseArgs(text: String): List<Int> {
         val result: List<Int> = arrayListOf<Int>()
         if (text == "") {
             return result
@@ -186,31 +170,31 @@ class LirBlock {
     /// 块 ID。
     var id: Int = 0
 
-    /// 块首 Phi 节点 ValueID（逗号分隔字符串）。
-    var phis: String = ""
+    /// 块首 Phi 节点 ValueID（List[Int>，P2.2）。
+    var phis: List<Int> = arrayListOf<Int>()
 
-    /// 块内普通指令 ValueID（逗号分隔字符串）。
-    var instrs: String = ""
+    /// 块内普通指令 ValueID（List[Int>，P2.2）。
+    var instrs: List<Int> = arrayListOf<Int>()
 
     /// 终结指令 ValueID。
     var term: Int = -1
 
-    /// 后继块 BlockID（逗号分隔字符串）。
-    var succs: String = ""
+    /// 后继块 BlockID（List[Int>，P2.2）。
+    var succs: List<Int> = arrayListOf<Int>()
 
-    /// 前驱块 BlockID（逗号分隔字符串）。
-    var preds: String = ""
+    /// 前驱块 BlockID（List[Int>，P2.2）。
+    var preds: List<Int> = arrayListOf<Int>()
 
     /// 块标签名（用于代码生成）。
     var label: String = ""
 
     init() {
         this.id = 0
-        this.phis = ""
-        this.instrs = ""
+        this.phis = arrayListOf<Int>()
+        this.instrs = arrayListOf<Int>()
         this.term = -1
-        this.succs = ""
-        this.preds = ""
+        this.succs = arrayListOf<Int>()
+        this.preds = arrayListOf<Int>()
         this.label = ""
     }
 }
@@ -228,14 +212,14 @@ class LirFunction {
     /// 函数类型 TypeID。
     var type: Int = 0
 
-    /// 基本块列表（BlockID 逗号分隔字符串）。
-    var blocks: String = ""
+    /// 基本块列表（List[Int>，P2.2）。
+    var blocks: List<Int> = arrayListOf<Int>()
 
     /// 入口块 BlockID。
     var entryBlock: Int = 0
 
-    /// 参数 ValueID 列表（逗号分隔字符串）。
-    var params: String = ""
+    /// 参数 ValueID 列表（List[Int>，P2.2）。
+    var params: List<Int> = arrayListOf<Int>()
 
     /// 返回类型 TypeID。
     var returnType: Int = 0
@@ -252,9 +236,9 @@ class LirFunction {
     init() {
         this.name = ""
         this.type = 0
-        this.blocks = ""
+        this.blocks = arrayListOf<Int>()
         this.entryBlock = -1
-        this.params = ""
+        this.params = arrayListOf<Int>()
         this.returnType = 0
         this.isNative = false
         this.stackSize = 0
@@ -312,7 +296,7 @@ class LirProgram {
         v.id = this.valueCount
         v.op = op
         v.type = typeId
-        v.args = args
+        v.args = v.parseArgs(args)
         v.aux = aux
         v.block = blockId
         v.useCount = 0
@@ -330,7 +314,7 @@ class LirProgram {
         v.id = this.valueCount
         v.op = op
         v.type = typeId
-        v.args = args
+        v.args = v.parseArgs(args)
         v.aux = aux
         v.block = blockId
         v.useCount = 0
@@ -419,9 +403,9 @@ class LirProgram {
         f.type = funcTypeId
         f.returnType = retTypeId
         f.isNative = isNative
-        f.blocks = ""
+        f.blocks = arrayListOf<Int>()
         f.entryBlock = -1
-        f.params = ""
+        f.params = arrayListOf<Int>()
         f.stackSize = 0
         f.calledFunctions = ""
         this.functions.add(f)
@@ -535,34 +519,51 @@ object LirUtils {
 object LirBlockUtils {
 
     /// 向 Phi 列表追加一个 ValueID。
-    fun phisAdd(list: String, vid: Int): String {
-        if (list == "") {
-            return LirUtils.toStr(vid)
+    /// ⚠️ 2026-09-29 P2.2：改用 List[Int>，均摊 O(1) 追加。
+    fun phisAdd(list: List<Int>, vid: Int): List<Int> {
+        val result: List<Int> = arrayListOf<Int>()
+        var i: Int = 0
+        while (i < list.size) {
+            result.add(list[i])
+            i = i + 1
         }
-        return list + "," + LirUtils.toStr(vid)
+        result.add(vid)
+        return result
     }
 
     /// 向指令列表追加一个 ValueID。
-    fun instrsAdd(list: String, vid: Int): String {
-        if (list == "") {
-            return LirUtils.toStr(vid)
+    fun instrsAdd(list: List<Int>, vid: Int): List<Int> {
+        val result: List<Int> = arrayListOf<Int>()
+        var i: Int = 0
+        while (i < list.size) {
+            result.add(list[i])
+            i = i + 1
         }
-        return list + "," + LirUtils.toStr(vid)
+        result.add(vid)
+        return result
     }
 
     /// 向后继列表追加一个 BlockID。
-    fun succsAdd(list: String, bid: Int): String {
-        if (list == "") {
-            return LirUtils.toStr(bid)
+    fun succsAdd(list: List<Int>, bid: Int): List<Int> {
+        val result: List<Int> = arrayListOf<Int>()
+        var i: Int = 0
+        while (i < list.size) {
+            result.add(list[i])
+            i = i + 1
         }
-        return list + "," + LirUtils.toStr(bid)
+        result.add(bid)
+        return result
     }
 
     /// 向前驱列表追加一个 BlockID。
-    fun predsAdd(list: String, bid: Int): String {
-        if (list == "") {
-            return LirUtils.toStr(bid)
+    fun predsAdd(list: List<Int>, bid: Int): List<Int> {
+        val result: List<Int> = arrayListOf<Int>()
+        var i: Int = 0
+        while (i < list.size) {
+            result.add(list[i])
+            i = i + 1
         }
-        return list + "," + LirUtils.toStr(bid)
+        result.add(bid)
+        return result
     }
 }

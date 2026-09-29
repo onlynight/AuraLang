@@ -1,12 +1,10 @@
 // aura:///aura/lang/compiler/photon/PhirSerializer.aura
 package aura.lang.compiler.photon
 // ─────────────────────────────────────────────────────────────
-// PhirSerializer — HIR → Photon IR (.phir) 文本格式序列化器
+// PhirSerializer �?HIR �?Photon IR (.phir) 文本格式序列化器
 //
-// 直接读取 Aura 源码，经 Lexer/Parser/HirLowerer 生成 HIR，
-// 然后遍历 HIR 树序列化为 .phir 伪代码文本（§2.5 缩进语法）。
-//
-// 用法（通过环境变量）:
+// 直接读取 Aura 源码，经 Lexer/Parser/HirLowerer 生成 HIR�?// 然后遍历 HIR 树序列化�?.phir 伪代码文本（§2.5 缩进语法）�?//
+// 用法（通过环境变量�?
 //   AURA_PHIR_SOURCE=<source.aura>
 //   AURA_PHIR_OUTPUT=<out.phir>
 //   AURA_PHIR_MODULE=<module_name>
@@ -36,20 +34,15 @@ import aura.lang.compiler.hir.Hir
 
 // HirLowerer is defined in Hir.aura
 
-/// Photon IR (.phir) 文本格式序列化器。
-class PhirSerializer {
+/// Photon IR (.phir) 文本格式序列化器�?class PhirSerializer {
 
-    /// 输出缓冲区。
-    var output: String = ""
+    /// 输出缓冲区�?    var output: String = ""
 
-    /// 模块名。
-    var moduleName: String = ""
+    /// 模块名�?    var moduleName: String = ""
 
-    /// 源码路径。
-    var sourcePath: String = ""
+    /// 源码路径�?    var sourcePath: String = ""
 
-    /// 当前缩进级别。
-    var indent: Int = 0
+    /// 当前缩进级别�?    var indent: Int = 0
 
     init() {
         this.output = ""
@@ -58,27 +51,25 @@ class PhirSerializer {
         this.indent = 0
     }
 
-    // ── 主入口 ──
+    // ── 主入�?──
 
-    /// 从源码字符串序列化为 .phir 文本。
-    fun serializeFromSource(source: String): String {
+    /// 从源码字符串序列化为 .phir 文本�?    fun serializeFromSource(source: String): String {
         this.output = ""
         this.indent = 0
 
-        // 解析源码为 AST
+        // 解析源码�?AST
         val parser: Parser = Parser(source)
         parser.parseProgram()
 
-        // AST → HIR
+        // AST �?HIR
         val hirLowerer: HirLowerer = HirLowerer()
         hirLowerer.lower(parser.ast)
         val hir: Hir = hirLowerer.hir
 
-        // 写入模块头
-        this.writeModuleHeader()
+        // 写入模块�?        this.writeModuleHeader()
 
         // 遍历 Program 的子节点（函数）
-        val rootKids: String = hir.kidsOf(hir.rootId)
+        val rootKids: List<Int> = $2.kidsOf(hir.rootId)
         val kCount: Int = HirUtils.hirKidsCount(rootKids)
         var i: Int = 0
         while (i < kCount) {
@@ -93,7 +84,7 @@ class PhirSerializer {
         return this.output
     }
 
-    // ── 模块头 ──
+    // ── 模块�?──
 
     private fun writeModuleHeader(): Unit {
         this.output = "# module " + this.moduleName + " target x86_64\n"
@@ -103,14 +94,13 @@ class PhirSerializer {
         this.output = this.output + "\n"
     }
 
-    // ── 函数序列化 ──
+    // ── 函数序列�?──
 
     private fun serializeFunction(hir: Hir, id: Int): Unit {
         val name: String = hir.textOf(id)
         val retType: String = hir.tyOf(id)
 
-        // 获取子节点
-        val kids: String = hir.kidsOf(id)
+        // 获取子节�?        val kids: List<Int> = $2.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         // 构建参数列表和函数体
@@ -136,8 +126,7 @@ class PhirSerializer {
             i = i + 1
         }
 
-        // 写函数签名
-        this.output = this.output + "fun " + name + "(" + paramsStr + ") -> " + retType + " {\n"
+        // 写函数签�?        this.output = this.output + "fun " + name + "(" + paramsStr + ") -> " + retType + " {\n"
         this.indent = 1
 
         // 写函数体
@@ -152,7 +141,7 @@ class PhirSerializer {
     // ── 块序列化 ──
 
     private fun serializeBlock(hir: Hir, id: Int): Unit {
-        val kids: String = hir.kidsOf(id)
+        val kids: List<Int> = $2.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var i: Int = 0
@@ -163,13 +152,13 @@ class PhirSerializer {
         }
     }
 
-    // ── 语句序列化 ──
+    // ── 语句序列�?──
 
     private fun serializeStatement(hir: Hir, id: Int): Unit {
         val kind: String = hir.kindOf(id)
         val text: String = hir.textOf(id)
         val ty: String = hir.tyOf(id)
-        val kids: String = hir.kidsOf(id)
+        val kids: List<Int> = $2.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         if (kind == "HirValDecl" || kind == "HirVarDecl") {
@@ -331,7 +320,7 @@ class PhirSerializer {
         val kind: String = hir.kindOf(id)
         val text: String = hir.textOf(id)
         val ty: String = hir.tyOf(id)
-        val kids: String = hir.kidsOf(id)
+        val kids: List<Int> = $2.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         if (kind == "HirLit") {
@@ -447,7 +436,7 @@ class PhirSerializer {
             this.output = this.output + ")"
 
         } else {
-            // 默认：输出 text
+            // 默认：输�?text
             if (text != "") {
                 this.output = this.output + text
             }
@@ -465,7 +454,7 @@ class PhirSerializer {
     }
 
     private fun paramsCount(hir: Hir, id: Int): Int {
-        val kids: String = hir.kidsOf(id)
+        val kids: List<Int> = $2.kidsOf(id)
         var count: Int = 0
         var i: Int = 0
         while (i < HirUtils.hirKidsCount(kids)) {
@@ -482,7 +471,7 @@ class PhirSerializer {
     }
 
     private fun serializeParams(hir: Hir, id: Int): Unit {
-        val kids: String = hir.kidsOf(id)
+        val kids: List<Int> = $2.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         this.output = this.output + "("
@@ -515,13 +504,11 @@ class PhirSerializer {
 
 object PhirSerializerUtils {
 
-    /// 创建序列化器。
-    fun emptySerializer(): PhirSerializer {
+    /// 创建序列化器�?    fun emptySerializer(): PhirSerializer {
         return PhirSerializer()
     }
 
-    /// 从源码序列化为 .phir 文本。
-    fun serialize(source: String, module: String, path: String): String {
+    /// 从源码序列化�?.phir 文本�?    fun serialize(source: String, module: String, path: String): String {
         val ser: PhirSerializer = PhirSerializer()
         ser.moduleName = module
         ser.sourcePath = path

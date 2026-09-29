@@ -97,8 +97,14 @@ class InstructionSelector {
     /// `ArrayList_add`/`HashMap_keys`/`EnvOps_keys` 一起加进来后，自举耗时
     /// 43s → **265s**、`Main.obj` 1.11MB → 1.73MB —— 收益为零（`add`/`keys`
     /// 的调用点仍未被映射，仍是未定义），代价却是 6 倍编译时间。
-    /// 只保留**确实解决未定义**的三个（且都是叶子小函数）。
-    private var forceReachable: String = "MirUtils_mirNoKids,MirUtils_mirKidsAdd,Linearizer_mirNoKids,Linearizer_mirKidsAdd,FileUtils_mkdir,ArrayList_add,HashMap_keys,Ast_add,Hir_add,Mir_add"
+    /// 只保留**确实解决未定义**的叶子小函数。
+    ///
+    /// ⚠️ 2026-09-29 瘦身：移除了 `ArrayList_add,HashMap_keys,Ast_add,Hir_add,Mir_add`
+    /// 这 5 项——本注释第 96–99 行已明确证明它们"收益为零（`add`/`keys` 的调用点
+    /// 仍未被映射，仍是未定义）"，却各拉进自己的传递闭包，代价是 6 倍编译时间
+    /// （自举 43s → 265s）。移除后若出现新的 `undefined symbol`，按"哪一项回来
+    /// 就带来哪批未定义"逐个补回，**不要一次加回全部**（调用点映射本来就没修好）。
+    private var forceReachable: String = "MirUtils_mirNoKids,MirUtils_mirKidsAdd,Linearizer_mirNoKids,Linearizer_mirKidsAdd,FileUtils_mkdir"
 
     /// Phase C 定位探针（见 `selProbe` 的说明）。
     private var probePath: String = ""
@@ -207,10 +213,18 @@ class InstructionSelector {
     ///   * 消费端 `emitPhiMovsForBlock` 对**每个块**都 `split` 整串 ⇒ O(块数 × 边数)。
     /// 自举 `Main.aura` 的 `emitCall`（547 块）实测 phiPreds 涨到 16 万字符以上
     /// 并在 Phase C 吃满 12 GB 内存闸门。按下标存即两侧都 O(1)/O(本块边数)。
-    private var phiMovByBlock: List<String> = arrayListOf<String>()
+    /// PHI-MOV 表：按「边块 ID − base」下标，每项为若干 `phiVid,incomingVid` 记录。
+    ///
+    /// ⚠️ 2026-09-29：旧实现 `List<String>` 每项是拼接串，`phiMovAdd` 每次整段
+    /// 拷贝 → 单块多 PHI 时 O(n²) 分配。改用 `List<List<String>>`，内层 `add`
+    /// 均摊 O(1)，`emitPhiMovsForBlock` 直接迭代内层列表、无需 `splitFlat`。
+    private var phiMovByBlock: List<List<String>> = arrayListOf<List<String>>()
 
     /// PHI-MOV 表的下标基准（函数内最小块 ID）。
     private var phiMovBase: Int = 0
+
+    /// 缓存的 trace 开关（入口处读一次 `Env.get`，避免 `selectBlock` 每块都读 environ）。
+    private var traceOn: Boolean = false
 
     /// 类型注册表（MIR/LIR 的类型 id → 类型名）。
     ///
@@ -221,6 +235,7 @@ class InstructionSelector {
 
     init() {
         this.dag = MachineDag()
+        this.traceOn = false
         this.funcName = ""
         this.patterns = ""
         this.selectedCount = 0
@@ -245,6 +260,8 @@ class InstructionSelector {
     /// 将 LIR 程序转换为 MachineDag（主入口）。
     fun select(src: LirProgram): MachineDag {
         this.dag = MachineDag()
+        this.traceOn = this.traceFlag()
+        this.dag.setTraceOn(this.traceOn)
         this.nodeMapIds = arrayListOf<Int>()
         this.curChain = -1
         this.tmpCount = 0
@@ -294,7 +311,6 @@ class InstructionSelector {
         // 区分「慢」与「卡死」。默认关闭（stdout 只留 `===...===` 协议标记）。
         // 任一开关为 `1` 即开启：AURA_PHOTON_VERBOSE / AURA_PHOTON_TRACE；
         // AURA_HAT_TRACE 为历史别名，继续有效。
-        val traceOn: Boolean = this.traceFlag()
         var fi: Int = 0
         while (fi < src.functionCount) {
             val func: LirFunction = src.functionOf(fi)
@@ -302,7 +318,7 @@ class InstructionSelector {
                 && !this.isRuntimeSymbol(func.name)
                 && !this.listContains(selected, func.name)) {
                 selected.add(func.name)
-                if (traceOn) {
+                if (this.traceOn) {
                     // 打印在**进入**函数之前：崩溃时最后一行就是出事的函数名。
                     println("[isel] fi=" + MachineDagUtils.toStr(fi) + "/" +
                             MachineDagUtils.toStr(src.functionCount) +
@@ -574,7 +590,7 @@ class InstructionSelector {
         val startInstr: Int = this.dag.instrCount
 
         val blockParts: List<String> = LirUtils.splitArgs(func.blocks)
-        val traceFn: Boolean = this.traceFlag() && blockParts.size > 200
+        val traceFn: Boolean = this.traceOn && blockParts.size > 200
         if (traceFn) {
             println("[isel-fn] " + func.name + " blocks=" + MachineDagUtils.toStr(blockParts.size))
         }
@@ -697,18 +713,20 @@ class InstructionSelector {
         if (base < 0) {
             return
         }
-        val predSlots: List<String> = arrayListOf<String>()
+        // ⚠️ 2026-09-29：改用 List<List<Int>>，内层 List 均摊 O(1) 追加，
+        // 取代旧版 List<String> 每次整段拷贝（O(前驱数)）。
+        val predSlots: List<List<Int>> = arrayListOf<List<Int>>()
         var slotIdx: Int = 0
         while (slotIdx <= top - base) {
-            predSlots.add("")
+            predSlots.add(arrayListOf<Int>())
             slotIdx = slotIdx + 1
         }
         // PHI-MOV 表：按「边块 ID − base」下标，每项为若干 `phiVid,incomingVid\n`。
         this.phiMovBase = base
-        this.phiMovByBlock = arrayListOf<String>()
+        this.phiMovByBlock = arrayListOf<List<String>>()
         slotIdx = 0
         while (slotIdx <= top - base) {
-            this.phiMovByBlock.add("")
+            this.phiMovByBlock.add(arrayListOf<String>())
             slotIdx = slotIdx + 1
         }
 
@@ -723,12 +741,7 @@ class InstructionSelector {
                     while (si < sp.size) {
                         val s: Int = LirUtils.strToInt(sp[si])
                         if (s >= base && s <= top) {
-                            val cur: String = predSlots[s - base]
-                            if (cur == "") {
-                                predSlots[s - base] = LirUtils.toStr(bid)
-                            } else {
-                                predSlots[s - base] = cur + "," + LirUtils.toStr(bid)
-                            }
+                            predSlots[s - base].add(bid)
                         }
                         si = si + 1
                     }
@@ -759,12 +772,9 @@ class InstructionSelector {
             }
             if (blockId >= 0) {
                 val block: LirBlock = src.blockOf(blockId)
-                var preds: List<String> = emptyList()
+                var preds: List<Int> = emptyList()
                 if (blockId >= base && blockId <= top) {
-                    val slot: String = predSlots[blockId - base]
-                    if (slot != "") {
-                        preds = LirUtils.splitArgs(slot)
-                    }
+                    preds = predSlots[blockId - base]
                 }
                 val phiParts: List<String> = LirUtils.splitArgs(block.phis)
                 var pi: Int = 0
@@ -792,7 +802,7 @@ class InstructionSelector {
                         }
                         var ri: Int = 0
                         while (ri < preds.size) {
-                            val predB: Int = LirUtils.strToInt(preds[ri])
+                            val predB: Int = preds[ri]
                             var pick: Int = -1
                             // (a) 精确定义块匹配
                             //
@@ -901,7 +911,7 @@ class InstructionSelector {
         this.emitPhiMovsForBlock(block.id)
 
         // 处理终结指令。
-        if (Env.get("AURA_PHOTON_TRACE", "") == "1") {
+        if (this.traceOn) {
             println("    [IS] selectBlock term=" + toStr(block.term) + " instrs=" + block.instrs)
         }
         if (block.term >= 0) {
@@ -923,11 +933,12 @@ class InstructionSelector {
     }
 
     /// 登记一条 PHI-MOV（边块 `blockId` 末尾：`phiVid <- incomingVid`）。
+    /// O(1) 追加到内层 List（旧写法整段字符串拷贝，单块多 PHI 时 O(n²)）。
     private fun phiMovAdd(blockId: Int, phiVid: Int, incomingVid: Int): Unit {
         val idx: Int = blockId - this.phiMovBase
         if (idx < 0 || idx >= this.phiMovByBlock.size) { return }
-        this.phiMovByBlock[idx] = this.phiMovByBlock[idx] +
-                MachineDagUtils.toStr(phiVid) + "," + MachineDagUtils.toStr(incomingVid) + "\n"
+        this.phiMovByBlock[idx].add(
+            MachineDagUtils.toStr(phiVid) + "," + MachineDagUtils.toStr(incomingVid))
     }
 
     /// 为指定块发射 PHI 前驱 MOV 指令。
@@ -935,14 +946,13 @@ class InstructionSelector {
     private fun emitPhiMovsForBlock(blockId: Int): Unit {
         val idx: Int = blockId - this.phiMovBase
         if (idx < 0 || idx >= this.phiMovByBlock.size) { return }
-        val recs: String = this.phiMovByBlock[idx]
-        if (recs == "") { return }
-        val lines: List<String> = this.splitFlat(recs, "\n")
+        val recs: List<String> = this.phiMovByBlock[idx]
+        if (recs.size == 0) { return }
         var i: Int = 0
-        while (i < lines.size) {
-            val line: String = lines[i]
-            if (line != "") {
-                val parts: List<String> = this.splitFlat(line, ",")
+        while (i < recs.size) {
+            val rec: String = recs[i]
+            if (rec != "") {
+                val parts: List<String> = this.splitFlat(rec, ",")
                 if (parts.size >= 2) {
                     val phiVid: Int = LirUtils.strToInt(parts[0])
                     val incomingVid: Int = LirUtils.strToInt(parts[1])
@@ -1791,7 +1801,8 @@ class InstructionSelector {
         // 需要跳过内存链 token：`SsaBuilder.buildCall` 会把当前 mem 状态作为
         // **最后一个**实参追加进来（OP 为 `MemToken` / aux 为 entry_mem|mem_after_store），
         // 它只是内存依赖建模，不是真正的函数参数。
-        var argNodes: String = ""
+        // ⚠️ 2026-09-29：用 List<Int> 累积 argNode，避免每次 O(n) 字符串拼接。
+        val argNodeList: List<Int> = arrayListOf<Int>()
         var k: Int = 0
         while (k < args.size) {
             val argLirId: Int = LirUtils.strToInt(args[k])
@@ -1801,14 +1812,21 @@ class InstructionSelector {
             if (!isMemToken) {
                 val argNode: Int = this.resolveNode(argLirId)
                 if (argNode >= 0) {
-                    if (argNodes == "") {
-                        argNodes = MachineDagUtils.toStr(argNode)
-                    } else {
-                        argNodes = argNodes + "," + MachineDagUtils.toStr(argNode)
-                    }
+                    argNodeList.add(argNode)
                 }
             }
             k = k + 1
+        }
+        // 按需拼字符串（仅调用者需要逗号分隔字符串时）。
+        var argNodes: String = ""
+        var ai: Int = 0
+        while (ai < argNodeList.size) {
+            if (ai == 0) {
+                argNodes = MachineDagUtils.toStr(argNodeList[ai])
+            } else {
+                argNodes = argNodes + "," + MachineDagUtils.toStr(argNodeList[ai])
+            }
+            ai = ai + 1
         }
         val callNode: DagNode = this.dag.nodeOf(nodeId)
         callNode.args = argNodes

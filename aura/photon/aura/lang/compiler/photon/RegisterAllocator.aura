@@ -68,8 +68,14 @@ class RegisterAllocator {
     /// 改用 List（均摊 O(1) 追加），字符串形态只在 `getSpilledNodes()` 里按需拼。
     private var spilledNodes: List<Int> = arrayListOf<Int>()
 
-    /// 调用栈（DFS 用，逗号分隔的 nodeId）。
-    private var callStack: String = ""
+    /// 调用栈（DFS 用）。
+    ///
+    /// ⚠️ 2026-09-29：旧实现是逗号分隔字符串，`callStackPush` 每次整段拷贝
+    /// （O(栈深)），`callStackPop` 每次 `substring` 重建，`callStackContains`
+    /// 逐位置 `charCodeAt` 比较 —— DFS 递归深时对每个节点各调一次，是
+    /// Phase D 的主要热点之一。改用 `List<Int>` 后 push/pop 均摊 O(1)、
+    /// contains 线性扫描但不分配。
+    private var callStack: List<Int> = arrayListOf<Int>()
 
     /// 溢出槽数量。
     private var spillSlots: Int = 0
@@ -132,7 +138,7 @@ class RegisterAllocator {
     init() {
         this.colors = arrayListOf<String>()
         this.spilledNodes = arrayListOf<Int>()
-        this.callStack = ""
+        this.callStack = arrayListOf<Int>()
         this.spillSlots = 0
         this.dag = null
         this.frameLayout = ""
@@ -153,7 +159,7 @@ class RegisterAllocator {
                 " instrs=" + toStr(d.instrCount))
         this.colors = arrayListOf<String>()
         this.spilledNodes = arrayListOf<Int>()
-        this.callStack = ""
+        this.callStack = arrayListOf<Int>()
         this.spillSlots = 0
         this.frameLayout = ""
         this.maxLiveRegs = 0
@@ -1173,58 +1179,24 @@ class RegisterAllocator {
         this.colors[nodeId] = ""
     }
 
-    // ── 调用栈操作 ──
+    // ── 调用栈操作（List<Int> 实现，push/pop O(1)）──
 
     private fun callStackContains(nodeId: Int): Boolean {
-        if (this.callStack == "") { return false }
-        val target: String = "," + toStr(nodeId)
-        val withBoundaries: String = "," + this.callStack
         var i: Int = 0
-        val tlen: Int = target.length
-        val len: Int = withBoundaries.length
-        // ⚠️ 不能写 `withBoundaries.substring(i, i + tlen) == target`：AOT 下
-        // `substring` 每次都要 `strlen(整个串)`（O(|s|)），逐位置比较就是
-        // O(|s|²)。本方法对每个节点各调一次，是 Phase D 的主要热点之一。
-        // 改用 charCodeAt 逐字符比较（内联访存，零分配）。
-        while (i <= len - tlen) {
-            var j: Int = 0
-            var ok: Boolean = true
-            while (j < tlen && ok) {
-                if ((withBoundaries.charCodeAt(i + j) as Int) != (target.charCodeAt(j) as Int)) {
-                    ok = false
-                }
-                j = j + 1
-            }
-            if (ok) {
-                return true
-            }
+        while (i < this.callStack.size) {
+            if (this.callStack[i] == nodeId) { return true }
             i = i + 1
         }
         return false
     }
 
     private fun callStackPush(nodeId: Int): Unit {
-        if (this.callStack == "") {
-            this.callStack = toStr(nodeId)
-        } else {
-            this.callStack = this.callStack + "," + toStr(nodeId)
-        }
+        this.callStack.add(nodeId)
     }
 
     private fun callStackPop(): Unit {
-        if (this.callStack == "") { return }
-        var lastComma: Int = -1
-        var i: Int = this.callStack.length - 1
-        while (i >= 0) {
-            // `charAt` 每次都要 strlen 整个 callStack（见 labelToIndex 的说明）。
-            if ((this.callStack.charCodeAt(i) as Int) == 44) { lastComma = i; break }
-            i = i - 1
-        }
-        if (lastComma < 0) {
-            this.callStack = ""
-        } else {
-            this.callStack = this.callStack.substring(0, lastComma)
-        }
+        if (this.callStack.size == 0) { return }
+        this.callStack.remove(this.callStack.size - 1)
     }
 
     // ── 查询 ──
@@ -1262,7 +1234,14 @@ class RegisterAllocator {
     }
 
     fun getCallStack(): String {
-        return this.callStack
+        if (this.callStack.size == 0) { return "" }
+        var out: String = toStr(this.callStack[0])
+        var i: Int = 1
+        while (i < this.callStack.size) {
+            out = out + "," + toStr(this.callStack[i])
+            i = i + 1
+        }
+        return out
     }
 
     // ── 工具 ──

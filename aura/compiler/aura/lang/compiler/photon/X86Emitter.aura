@@ -52,7 +52,13 @@ class X86Emitter {
     private var strConsts: String = ""
 
     /// 函数偏移表（多函数发射：函数名 → .text 节内起始偏移，格式 "funcName|offset" 用 ;; 分隔）。
+    ///
+    /// ⚠️ 2026-09-29：旧实现每个函数 `this.funcOffsets + ";;" + ...` 整段拷贝
+    /// （O(函数数)），改用内部 List 均摊 O(1) 追加，`getFuncOffsets()` 按需拼串。
     private var funcOffsets: String = ""
+
+    /// 函数偏移的内部列表（O(1) 追加）。
+    private var funcOffsetsList: List<String> = arrayListOf<String>()
 
     /// 当前是否正在发射 main 函数（P2：无 CRT 时需显式调用 exit）。
     private var isMainFunc: Boolean = false
@@ -79,6 +85,7 @@ class X86Emitter {
         this.fnIdx = 0
         this.strConsts = ""
         this.funcOffsets = ""
+        this.funcOffsetsList = arrayListOf<String>()
         this.isMainFunc = false
     }
 
@@ -177,6 +184,7 @@ class X86Emitter {
         this.outputHex = ""
         this.relocRecords = ""
         this.funcOffsets = ""
+        this.funcOffsetsList = arrayListOf<String>()
         this.isMainFunc = (funcName == "main")
         this.savedRegs = ""
         this.nodeStackDisp = arrayListOf<Int>()
@@ -207,11 +215,7 @@ class X86Emitter {
                 }
                 // 记录当前函数的起始偏移。
                 val offset: Int = this.enc.byteCount()
-                if (this.funcOffsets == "") {
-                    this.funcOffsets = instrFunc + "|" + toStr(offset)
-                } else {
-                    this.funcOffsets = this.funcOffsets + ";;" + instrFunc + "|" + toStr(offset)
-                }
+                this.funcOffsetsList.add(instrFunc + "|" + toStr(offset))
                 // 计算本函数用到的非易失寄存器并在 prologue 之前 push。
                 this.isMainFunc = (instrFunc == "main")
                 this.savedRegs = this.collectSavedRegs(dag, i, instrFunc)
@@ -301,7 +305,14 @@ class X86Emitter {
 
     /// 获取函数偏移表（格式 "funcName|offset;;funcName|offset"）。
     fun getFuncOffsets(): String {
-        return this.funcOffsets
+        if (this.funcOffsetsList.size == 0) { return "" }
+        var out: String = this.funcOffsetsList[0]
+        var i: Int = 1
+        while (i < this.funcOffsetsList.size) {
+            out = out + ";;" + this.funcOffsetsList[i]
+            i = i + 1
+        }
+        return out
     }
 
     // ── 非易失寄存器保存/恢复 ──

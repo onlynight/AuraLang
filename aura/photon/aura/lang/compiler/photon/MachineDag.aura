@@ -270,11 +270,22 @@ class MachineDag {
     /// 指令表（List<DagInstruction>）。
     var instrs: List<DagInstruction> = arrayListOf<DagInstruction>()
 
-    /// 根节点 ID 列表（逗号分隔字符串）。
+    /// 根节点 ID 列表（逗号分隔字符串，仅在 `getRootsStr()` 时按需构建）。
+    ///
+    /// ⚠️ 2026-09-29：旧实现每次 `addRoot` 都整段拷贝 `roots + "," + id`，
+    /// 而本表跨整个模块共用（不随函数重置），Main.aura 自举时累积数千个根节点
+    /// ⇒ O(n²) 字符串分配、无 GC 下全部常驻。改用内部 `rootsList`（List<Int>）
+    /// 均摊 O(1) 追加，字符串形态仅按需构建。`chains` 同理。
     var roots: String = ""
 
-    /// 内存链头节点 ID 列表（逗号分隔字符串）。
+    /// 内存链头节点 ID 列表（逗号分隔字符串，仅在 `getChainsStr()` 时按需构建）。
     var chains: String = ""
+
+    /// 根节点 ID 的内部列表（O(1) 追加，取代 `roots` 的字符串累加）。
+    private var rootsList: List<Int> = arrayListOf<Int>()
+
+    /// 内存链头节点 ID 的内部列表（O(1) 追加，取代 `chains` 的字符串累加）。
+    private var chainsList: List<Int> = arrayListOf<Int>()
 
     /// 可用物理寄存器单元名列表（逗号分隔，如 "rax,rbx,rcx,rdx,rsi,rdi,rbp,rsp"）。
     var regUnits: String = ""
@@ -292,17 +303,32 @@ class MachineDag {
     /// 指令总数。
     var instrCount: Int = 0
 
+    /// `AURA_PHOTON_TRACE=1` 时缓存为 true。
+    ///
+    /// ⚠️ 旧实现在 `addInstr` / `selectPattern` 里每条指令都调
+    /// `Env.get("AURA_PHOTON_TRACE")`——每次读 environ + `Allocator.free`，
+    /// 编译 Main.aura 时 5 万条指令就是 5 万次 environ 扫描。
+    var traceOn: Boolean = false
+
     init() {
         this.nodes = arrayListOf<DagNode>()
         this.instrs = arrayListOf<DagInstruction>()
         this.roots = ""
         this.chains = ""
+        this.rootsList = arrayListOf<Int>()
+        this.chainsList = arrayListOf<Int>()
         this.regUnits = "rax,rbx,rcx,rdx,rsi,rdi,rbp,rsp"
         this.spillSlots = 0
         this.patternCacheKeys = ""
         this.patternCacheVals = ""
         this.nodeCount = 0
         this.instrCount = 0
+        this.traceOn = false
+    }
+
+    /// 入口处调用一次，缓存 trace 开关。
+    fun setTraceOn(on: Boolean): Unit {
+        this.traceOn = on
     }
 
     // ── 节点管理 ──
@@ -349,7 +375,7 @@ class MachineDag {
         i.bytes = bytes
         this.instrs.add(i)
         this.instrCount = this.instrs.size
-        if (template == "ret" && Env.get("AURA_PHOTON_TRACE", "") == "1") {
+        if (template == "ret" && this.traceOn) {
             println("    [DAG] addInstr RET id=" + toStr(i.id) + " instrCount=" + toStr(this.instrCount) + " nodes=" + nodes)
         }
         return i.id
@@ -377,7 +403,7 @@ class MachineDag {
         // ⚠️ 这条打印是**逐模式**的（每个 LIR 值至少一次）：真实工程 12 万个值
         // 就是 12 万次字符串拼接 + 写管道，曾让 Phase C 成为整条管线的主要耗时。
         // 必须门控在 AURA_PHOTON_TRACE 下。
-        if (Env.get("AURA_PHOTON_TRACE", "") == "1") {
+        if (this.traceOn) {
             println("    [DAG] selectPattern patternId=" + toStr(patternId) + " inputNodes=" + inputNodes + " outputNode=" + toStr(outputNode))
         }
         // 检查模式缓存：同一模式已匹配过则复用。
@@ -441,22 +467,46 @@ class MachineDag {
 
     // ── 根/链管理 ──
 
-    /// 向根节点列表追加一个节点 ID。
+    /// 向根节点列表追加一个节点 ID（O(1)，仅追加到内部 List）。
     fun addRoot(nodeId: Int): Unit {
-        if (this.roots == "") {
-            this.roots = MachineDagUtils.toStr(nodeId)
-        } else {
-            this.roots = this.roots + "," + MachineDagUtils.toStr(nodeId)
-        }
+        this.rootsList.add(nodeId)
     }
 
-    /// 向内存链头列表追加一个节点 ID。
+    /// 向内存链头列表追加一个节点 ID（O(1)，仅追加到内部 List）。
     fun addChainHead(nodeId: Int): Unit {
-        if (this.chains == "") {
-            this.chains = MachineDagUtils.toStr(nodeId)
-        } else {
-            this.chains = this.chains + "," + MachineDagUtils.toStr(nodeId)
+        this.chainsList.add(nodeId)
+    }
+
+    /// 按需构建根节点字符串（调用方需要逗号分隔字符串时才调）。
+    fun getRootsStr(): String {
+        if (this.rootsList.size == 0) { return "" }
+        var out: String = ""
+        var i: Int = 0
+        while (i < this.rootsList.size) {
+            if (i == 0) {
+                out = MachineDagUtils.toStr(this.rootsList.get(i))
+            } else {
+                out = out + "," + MachineDagUtils.toStr(this.rootsList.get(i))
+            }
+            i = i + 1
         }
+        return out
+    }
+
+    /// 按需构建内存链头字符串（调用方需要逗号分隔字符串时才调）。
+    fun getChainsStr(): String {
+        if (this.chainsList.size == 0) { return "" }
+        var out: String = ""
+        var i: Int = 0
+        while (i < this.chainsList.size) {
+            if (i == 0) {
+                out = MachineDagUtils.toStr(this.chainsList.get(i))
+            } else {
+                out = out + "," + MachineDagUtils.toStr(this.chainsList.get(i))
+            }
+            i = i + 1
+        }
+        return out
     }
 }
 

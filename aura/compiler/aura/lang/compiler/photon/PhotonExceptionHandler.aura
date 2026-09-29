@@ -37,6 +37,9 @@ class PhotonExceptionHandler {
     /// 异常表条目（逗号分隔的 "handlerAddr|exceptionType" 格式）。
     var exceptionTable: String = ""
 
+    /// 异常表的内部列表（O(1) 追加，取代字符串整段拷贝）。
+    private var exceptionTableList: List<String> = arrayListOf<String>()
+
     /// 异常计数器。
     private var exceptionCount: Int = 0
 
@@ -48,6 +51,7 @@ class PhotonExceptionHandler {
 
     init() {
         this.exceptionTable = ""
+        this.exceptionTableList = arrayListOf<String>()
         this.exceptionCount = 0
         this.typeIdCounter = 0
         this.outputInstrs = arrayListOf<String>()
@@ -82,7 +86,7 @@ class PhotonExceptionHandler {
         this.outputInstrs.add("jmp " + catchBody)
 
         // 注册异常处理器
-        this.exceptionTable = this.exceptionTable + catchBody + "|" + toStr(exceptionType) + "\n"
+        this.exceptionTableList.add(catchBody + "|" + toStr(exceptionType))
         this.exceptionCount = this.exceptionCount + 1
     }
 
@@ -114,13 +118,13 @@ class PhotonExceptionHandler {
     /// @param encoder      x86 编码器
     /// @param tableBase    异常表基址（栈偏移或寄存器）
     fun generateExceptionTable(encoder: X86Encoder, tableBase: Int): Unit {
-        if (this.exceptionTable == "") {
+        if (this.exceptionTableList.size == 0) {
             return
         }
 
         // 异常表存储在 .rdata 段
         // 每个条目 16 字节：handlerAddr (8 bytes) + exceptionType (8 bytes)
-        val entries: List<String> = this.splitLines(this.exceptionTable)
+        val entries: List<String> = this.exceptionTableList
         var i: Int = 0
         while (i < entries.size) {
             val entry: String = entries[i]
@@ -156,7 +160,14 @@ class PhotonExceptionHandler {
 
     /// 获取异常表字符串。
     fun getExceptionTableStr(): String {
-        return this.exceptionTable
+        if (this.exceptionTableList.size == 0) { return "" }
+        var out: String = this.exceptionTableList[0]
+        var i: Int = 1
+        while (i < this.exceptionTableList.size) {
+            out = out + "\n" + this.exceptionTableList[i]
+            i = i + 1
+        }
+        return out
     }
 
     /// 获取输出指令列表。

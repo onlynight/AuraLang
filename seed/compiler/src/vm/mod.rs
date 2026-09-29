@@ -192,7 +192,10 @@ impl std::fmt::Display for VmError {
 impl std::error::Error for VmError {}
 
 /// 解码后的指令（操作数已在加载期解析为索引）
-#[derive(Debug, Clone)]
+///
+/// `Copy`：所有变体仅含 `u16`/`usize`/单元变体（最大 `PushHandler(usize,u16,u16)`=16 字节），
+/// 因此可以零拷贝。这消除了 VM 主循环每条指令的 `clone()`（~16 B + 分支预测污染）。
+#[derive(Debug, Clone, Copy)]
 pub enum Instr {
     LoadConst(u16),
     LoadVar(u16),
