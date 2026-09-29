@@ -1,10 +1,10 @@
 // aura:///cli/aura/lang/cli/Main.aura
 package aura.lang.cli
 
-import "Args.aura"
-import "Commands.aura"
-import "CompilerApi.aura"
-import "FileIO.aura"
+import aura.lang.cli.Args
+import aura.lang.cli.Commands
+import aura.lang.cli.CompilerApi
+import aura.lang.cli.FileIO
 
 // ═══════════════════════════════════════════════════════════════
 // CLI 入口（纯 Aura 实现）

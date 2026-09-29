@@ -1,4 +1,4 @@
-# -------------------------------------------------------------
+ï»¿# -------------------------------------------------------------
 # Build the Aura compiler (Self-Bootstrap) - Windows PowerShell
 #
 # Produces:
@@ -35,9 +35,9 @@ if ($Help) {
     Write-Host "Usage: scripts\build-aura-compiler.ps1 [-Aot] [-NoBootstrap] [-FrozenSeed]"
     Write-Host "  -Aot           produce a native executable via LLVM (default: .auc bytecode)"
     Write-Host "  -NoBootstrap   do not copy the bootstrap aura.exe into build/bin"
-    Write-Host "  -FrozenSeed    force the git-lfs seed (aura/seed/aura.exe) instead of rust/target"
+    Write-Host "  -FrozenSeed    force the git-lfs seed (aura/seed/aura.exe) instead of seed/target"
     Write-Host ""
-    Write-Host "Bootstrap: rust/target/{release,debug}/aura.exe (cargo-built), else aura/seed/aura.exe"
+    Write-Host "Bootstrap: seed/target/{release,debug}/aura.exe (cargo-built), else aura/seed/aura.exe"
     Write-Host ""
     Write-Host "Outputs:"
     Write-Host "  build/bin/aura.exe                        Bootstrap compiler"
@@ -50,19 +50,19 @@ if (-not (Test-Path $Entry)) {
     exit 1
 }
 
-# ÖÖ×ÓÑ¡Ôñ£ºÓÅÏÈÓÃ cargo ´Ó `rust/` ¹¹½¨µÄÖÖ×Ó£¨Â·¾¶ÕýÈ·¡¢Ç°¶ËÍêÕû£©£¬
-# Ö»ÓÐÏÔÊ½ -FrozenSeed »òÁ½Õß¶¼²»´æÔÚÊ±£¬²Å»ØÍËµ½ git-lfs ¸ú×ÙµÄ¶³½áÖÖ×Ó¡£
-# ¶³½áÖÖ×Ó°Ñ AOT ÔËÐÐ¿âÂ·¾¶Ð´ËÀÎª¾ÉÄ¿Â¼Ãû `AuraLangWithRust\...`£¬ÒÑ²»ÔÙÖ§³Ö¡£
+# ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ cargo ï¿½ï¿½ `seed/` ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó£ï¿½Â·ï¿½ï¿½ï¿½ï¿½È·ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+# Ö»ï¿½ï¿½ï¿½ï¿½Ê½ -FrozenSeed ï¿½ï¿½ï¿½ï¿½ï¿½ß¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½Å»ï¿½ï¿½Ëµï¿½ git-lfs ï¿½ï¿½ï¿½ÙµÄ¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¡ï¿½
+# ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó°ï¿½ AOT ï¿½ï¿½ï¿½Ð¿ï¿½Â·ï¿½ï¿½Ð´ï¿½ï¿½Îªï¿½ï¿½Ä¿Â¼ï¿½ï¿½ `AuraLangWithRust\...`ï¿½ï¿½ï¿½Ñ²ï¿½ï¿½ï¿½Ö§ï¿½Ö¡ï¿½
 $SeedPath = ''
 if (-not $FrozenSeed) {
-    foreach ($c in @('rust/target/release/aura.exe', 'rust/target/debug/aura.exe')) {
+    foreach ($c in @('seed/target/release/aura.exe', 'seed/target/debug/aura.exe')) {
         if (Test-Path $c) { $SeedPath = $c; break }
     }
 }
 if ($SeedPath -eq '') { $SeedPath = 'aura/seed/aura.exe' }
 if (-not (Test-Path $SeedPath)) {
     Write-Host "[build-aura-compiler] ERROR: seed not found at $SeedPath" -ForegroundColor Red
-    Write-Host "  Build it with:  cd rust; cargo build -p cli --features llvm --release"
+    Write-Host "  Build it with:  cd seed; cargo build -p compiler --features llvm --release"
     Write-Host "  (or run 'git lfs pull' to download the frozen seed at aura/seed/aura.exe)."
     exit 1
 }
@@ -75,13 +75,13 @@ Write-Host "[build-aura-compiler] auc:   $AucDir"
 if (-not (Test-Path $BinDir)) { New-Item -ItemType Directory -Path $BinDir -Force | Out-Null }
 if (-not (Test-Path $AucDir)) { New-Item -ItemType Directory -Path $AucDir -Force | Out-Null }
 
-# ---- ²»ÔÙÐèÒª¾ÉÄ¿Â¼Ãû¼æÈÝ²ã ------------------------------------------
-# ¾ÉÊ÷ `AuraLangWithRust/` ÒÑ¸ÄÃûÎª `rust/`£¨Î¨Ò»Ä¿Â¼£¬²»ÔÙ½¨Áª½Ó£©¡£
-# ÔçÆÚ¶³½áµÄÖÖ×Ó¶þ½øÖÆ°Ñ AOT µÄ C ÔËÐÐ¿âÂ·¾¶Ð´ËÀ³É `AuraLangWithRust\...`£¬
-# Îª´ËÔø½¨Á¢ `AuraLangWithRust -> rust` Ä¿Â¼Áª½Ó£»ÏÖ¸ÄÎª**ÓÅÏÈÊ¹ÓÃ cargo
-# ´Ó `rust/` ÖØÐÂ¹¹½¨µÄÖÖ×Ó**£¨ÆäÂ·¾¶°´ CARGO_MANIFEST_DIR ½âÎö£¬ÌìÈ»Ö¸Ïò
-# `seed/compiler/...` Óë `aura/runtime/cffi/...`£©£¬Òò´ËÎÞÐèÈÎºÎ¼æÈÝÁª½Ó¡£
-# ½öµ±ÏÔÊ½Ö¸¶¨ -FrozenSeed Ê±²Å»ØÍËµ½ `aura/seed/aura.exe`¡£
+# ---- ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½Ä¿Â¼ï¿½ï¿½ï¿½ï¿½ï¿½Ý²ï¿½ ------------------------------------------
+# ï¿½ï¿½ï¿½ï¿½ `AuraLangWithRust/` ï¿½Ñ¸ï¿½ï¿½ï¿½Îª `seed/`ï¿½ï¿½Î¨Ò»Ä¿Â¼ï¿½ï¿½ï¿½ï¿½ï¿½Ù½ï¿½ï¿½ï¿½ï¿½Ó£ï¿½ï¿½ï¿½
+# ï¿½ï¿½ï¿½Ú¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¶ï¿½ï¿½ï¿½ï¿½Æ°ï¿½ AOT ï¿½ï¿½ C ï¿½ï¿½ï¿½Ð¿ï¿½Â·ï¿½ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ `AuraLangWithRust\...`ï¿½ï¿½
+# Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ `AuraLangWithRust -> seed` Ä¿Â¼ï¿½ï¿½ï¿½Ó£ï¿½ï¿½Ö¸ï¿½Îª**ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½ cargo
+# ï¿½ï¿½ `seed/` ï¿½ï¿½ï¿½Â¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½**ï¿½ï¿½ï¿½ï¿½Â·ï¿½ï¿½ï¿½ï¿½ CARGO_MANIFEST_DIR ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È»Ö¸ï¿½ï¿½
+# `seed/compiler/...` ï¿½ï¿½ `aura/runtime/cffi/...`ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÎºÎ¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¡ï¿½
+# ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê½Ö¸ï¿½ï¿½ -FrozenSeed Ê±ï¿½Å»ï¿½ï¿½Ëµï¿½ `aura/seed/aura.exe`ï¿½ï¿½
 
 # 1) Bootstrap compiler -> build/bin/aura.exe
 if (-not $NoBootstrap) {

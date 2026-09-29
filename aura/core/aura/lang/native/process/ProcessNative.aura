@@ -340,6 +340,7 @@ object ProcessNative {
 
     /// 将 String 复制到内存缓冲区（NUL 终止）。
     fun stringToBuffer(s: String): Long {
+        if (s == null) { return 0 }
         val len: Long = s.length + 1  // +1 for NUL terminator
         val buf: Long = Allocator.malloc(len)
         if (buf == 0) {

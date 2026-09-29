@@ -5,9 +5,9 @@ package aura.lang.compiler.hir
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.compiler.lexer.Span
-import "HirSerializer.aura"
+import aura.lang.compiler.hir.HirSerializer
 
 /// HIR 序列化器工具类。
 object HirSerializerUtils {
@@ -25,7 +25,7 @@ object HirSerializerUtils {
 
     /// 从文件读取并解析 HIR。
     fun loadHir(filePath: String): Hir {
-        val file: FileSystem = FileSystem()
+        val file: FileUtils = FileUtils()
         val content: String = file.readText(filePath)
         if (content == "") {
             return Hir()

@@ -9,7 +9,7 @@ import aura.lang.std.IO
 import aura.lang.collection.ArrayList
 
 // ── 兄弟模块 ──
-import "DebugVm.aura"
+import aura.lang.debugger.DebugVm
 
 // ═══════════════════════════════════════════════════════════════
 // 文件 I/O 辅助（object 形式，AOT 兼容）

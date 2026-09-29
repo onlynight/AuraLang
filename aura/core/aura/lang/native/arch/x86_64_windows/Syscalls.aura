@@ -170,6 +170,8 @@ extern interface Syscalls {
     /// rax = 0x30
     /// rcx = processHandle (0 = 当前进程), rdx = exitStatus
     @native(0x30) fun ntTerminateProcess(processHandle: Long, exitStatus: Long): Long
+    /// exit — 退出进程（别名，调用 NtTerminateProcess）
+    @native(0x30) fun exit(code: Int)
 
     /// NtReadVirtualMemory — 读取虚拟内存
     /// rax = 0x32

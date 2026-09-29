@@ -1,0 +1,12 @@
+fun main(): Int {
+    val a: String = "hello"
+    val b: String = "world"
+    
+    val eq_aa: Int = if (a == a) 1 else 0
+    val eq_ab: Int = if (a == b) 1 else 0
+    val eq_ne_ab: Int = if (a != b) 1 else 0
+    
+    val result: String = "eq_aa=" + eq_aa.toStr() + " eq_ab=" + eq_ab.toStr() + " eq_ne_ab=" + eq_ne_ab.toStr()
+    println(result)
+    return 0
+}

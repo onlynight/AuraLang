@@ -1994,9 +1994,11 @@ class LlvmEmitter {
         //
         // Phase S4 修复：也检查 `name` 是否以 ".main" 结尾（包名前缀情况），
         // 确保 `main` 函数始终被正确识别为入口点。
+        // P1.12 修复：即使函数有类前缀（如 aura.lang.compiler.Main.main），
+        // 也要检查是否为入口点，否则 argc/argv 参数不会被注入。
         var isEntryMain: Boolean = false
-        if (this.methodOwnerClass(id) == "") {
-            isEntryMain = (name == "main" || aotContains(name, ".main"))
+        if (name == "main" || aotContains(name, ".main")) {
+            isEntryMain = true
         }
         if (isEntryMain) {
             retTy = "i32"
@@ -2026,6 +2028,11 @@ class LlvmEmitter {
         var ownerCls: String = this.methodOwnerClass(id)
         if (this.fForceOwnerCls != "") {
             ownerCls = this.fForceOwnerCls
+        }
+        // P1.12 修复：入口 main 必须是模块级函数（无 self 参数），否则 argc/argv
+        // 会被 self 参数覆盖，导致 Process.argCount() 返回 0。
+        if (isEntryMain) {
+            ownerCls = ""
         }
         this.fCurClass = ownerCls
         // C 入口：模块级 `main` 使用 `(i32 %argc, i8** %argv)` 签名（与 Rust 后端
@@ -2471,7 +2478,7 @@ class LlvmEmitter {
             // **标志位翻译（Linux → UCRT）**：Aura 侧用 Linux 的 `O_*` 数值
             //（O_CREAT=0x40），而 Windows `_open` 要求 `_O_CREAT=0x100`、
             // `_O_EXCL=0x400`、`_O_APPEND=0x8`。直接透传会让 `_open` 因为
-            // 「非法标志位」直接失败（`FileSystem.writeText` 静默返回 false）。
+            // 「非法标志位」直接失败（`FileUtils.writeText` 静默返回 false）。
             //   w = (f & 3) | ((f & 0x40) << 2) | (f & 0x200) | ((f & 0x80) << 3) | ((f & 0x400) >> 7)
             // 逐条指令（LLVM IR 不允许在指令操作数里嵌套 `(…)` 表达式）
             val wa: String = this.freshVar()
@@ -2532,7 +2539,7 @@ class LlvmEmitter {
             // `_S_IREAD(0x100) | _S_IWRITE(0x80)` = 384。
             // 旧实现硬编码 `i32 0`（无任何权限）→ Windows 建出的文件被标记为
             // **只读**，于是「第二次写入同一路径」一律失败（EACCES），而
-            // `FileSystem.writeText` 丢弃返回值 → **静默不落盘**：
+            // `FileUtils.writeText` 丢弃返回值 → **静默不落盘**：
             // 编译器重写 `.ll` 失败后，`llc -verify` 校验的是**上一次的旧 IR**，
             // 报出早已修掉的错误（自举产物上表现为「改了代码但错误不变」）。
             return this.winCrtFinish(pre, "_open", "i32",
@@ -3009,7 +3016,11 @@ class LlvmEmitter {
         if (arrow < 0) {
             return ""
         }
-        var retAura: String = TrimType(this.aotSlice(resolved, arrow + 2, resolved.length - arrow - 2))
+        // ⚠️ 这里**不能**写 `this.aotSlice(...)`：`aotSlice` 是 `object AotUtil`
+        // 的自由函数，`class LlvmEmitter`（本文件）并没有这个方法。
+        // 写成 `this.` 时编译器只能盲拼类前缀 → `LlvmEmitter.aotSlice` 未定义
+        // ⇒ llc: `use of undefined value '@LlvmEmitter_aotSlice'`，自举驱动编译失败。
+        var retAura: String = TrimType(aotSlice(resolved, arrow + 2, resolved.length - arrow - 2))
         var retTy: String = this.mapTy(retAura)
         if (retTy == "" || retTy == "void") {
             retTy = "i32"
@@ -6674,7 +6685,7 @@ class LlvmEmitter {
         // 回退返回 0 → 拼进字符串时被 `aura_to_str(0)` 变成 **"0"**。
         // 后果（native2 崩溃根因之一）：`Stdio.bufferToString` 逐字节
         // `result + String.fromCharCode(c)` 把**任意文件读成一串 "0"** ——
-        // 长度对、内容全错（实测 `FileSystem.readText` 得到 21 个 `'0'`）。
+        // 长度对、内容全错（实测 `FileUtils.readText` 得到 21 个 `'0'`）。
         // 这里直接内联构造：malloc 2 字节 + 存字符 + NUL。
         if (aotLastSegment(fname) == "fromCharCode") {
             var cArgIdx: Int = 0
@@ -6936,7 +6947,7 @@ class LlvmEmitter {
         // 此前映射到 C 侧 `aura_lang_std_String_charAt`（C 签名返回 `const char*`，
         // 声明 `declare i8* @aura_lang_std_String_charAt(i8*, i64)`）—— 拿到的却是
         // **指针**，Aura 侧按「字符码」使用，于是写入缓冲区的全是指针低位字节：
-        // `Stdio.stringToBuffer` 产出的路径/内容全错（`FileSystem.exists` 对存在的
+        // `Stdio.stringToBuffer` 产出的路径/内容全错（`FileUtils.exists` 对存在的
         // 文件返回 false、`readText` 长度恒 0）。
         // Aura 侧 String 的值表示就是 `i8*`（C 字符串），内联访存最稳、无 ABI 歧义。
         if (fname == "charCodeAt" && n >= 2) {
@@ -6977,7 +6988,7 @@ class LlvmEmitter {
         //      `FileOps.write`（`@native(SYS_WRITE)` 包装器）**撞名**，会被解析成
         //      文件写系统调用 —— `Stdio.stringToBuffer` 里的 `Memory.write(buf, 0)`
         //      （写 NUL 终止符）因此变成 `@write(0, buf, 0)`，缓冲区内容全错
-        //      （`FileSystem.exists` 从而对存在的文件返回 false）。
+        //      （`FileUtils.exists` 从而对存在的文件返回 false）。
         if (fname == "read" || fname == "read16" || fname == "read32" || fname == "read64"
             || fname == "write" || fname == "write16" || fname == "write32"
             || fname == "write64") {
@@ -7080,7 +7091,7 @@ class LlvmEmitter {
         //         copy  → `aura_block_copy`
         //
         //       缺此分支时：`alloc` 落到「未解析」回退**静默返回 0**（所有分配
-        //       都是空指针 → `Stdio.stringToBuffer` 恒失败 → `FileSystem.exists`
+        //       都是空指针 → `Stdio.stringToBuffer` 恒失败 → `FileUtils.exists`
         //       对存在的文件返回 false）；`free` 则会被误解析到**同名的外层类
         //       方法**（`Allocator.free`），生成 `call @Allocator_free` 自递归
         //       → 栈溢出（0xC00000FD）。
@@ -7235,7 +7246,7 @@ class LlvmEmitter {
                     // 无论哪种情况，kids[0] 的**包前缀都不是实参**，一律跳过
                     // （effArgStart = 1）；差别只在 self 从哪来：
                     //   * object / 普通 class（`%struct.X*`）：self 由发射器补单例 →
-                    //     例：`aura.fs.exists(p)` → `FileSystem_exists(obj, p)`；
+                    //     例：`aura.fs.exists(p)` → `FileUtils_exists(obj, p)`；
                     //   * value class（String 等，self 表示为 `i8*`）：跳过后剩下的
                     //     第 1 个实参**就是**接收者 → 不能再补 self →
                     //     例：`aura.string.contains(s, x)` → `String_contains(s, x)`。
@@ -7257,6 +7268,29 @@ class LlvmEmitter {
             val fs: String = this.funcSignatureOf(fname)
             if (fs != "") {
                 userSig = fs
+            }
+        }
+        // 3.1) 裸名类方法回退：`leaf` / `kidsOf` / `spanOf` 等裸方法名
+        //      在签名表中是 `ClassName_methodName`（见 `functionSignature`），
+        //      但 `lowerCall` 只取成员名 → 裸名查不到。
+        //      扫描 fMethodNodes 寻找匹配的方法名，用限定名解析。
+        if (userSig == "" && aotIndexOfSub(fname, "_") < 0) {
+            var mnIdx: Int = 0
+            var foundMn: String = ""
+            val mnLines: Int = aotLineCount(this.fMethodNodes)
+            while (mnIdx < mnLines) {
+                val mnLine: String = aotLineAt(this.fMethodNodes, mnIdx)
+                if (aotFieldAt(mnLine, 1, "|") == fname) {
+                    foundMn = aotFieldAt(mnLine, 0, "|") + "_" + fname
+                    break
+                }
+                mnIdx = mnIdx + 1
+            }
+            if (foundMn != "") {
+                val mnSig: String = this.funcSignatureOf(foundMn)
+                if (mnSig != "") {
+                    userSig = mnSig
+                }
             }
         }
 

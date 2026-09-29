@@ -28,7 +28,7 @@
 ❌ Photon 后端集成: cmd_build_photon 仅完成前端
 ❌ 代码生成: 仅支持简单函数，不支持复杂控制流
 ❌ 原生函数调用: Photon 后端不支持 @native 标记的系统调用
-❌ 运行时: 内存管理、GC 未实现
+❌ 运行时: 内存管理（ARC）未实现
 ❌ 自举验证: 未能用 Photon 编译产物重新编译自身
 ```
 
@@ -125,7 +125,7 @@ List, Map, Math...         Memory.aura
 ### 任务清单
 
 #### 1.1 修改 `cmd_build_photon` (3-5 天)
-**文件**: `rust/cli/src/main.rs`
+**文件**: `seed/compiler/src/main.rs`
 
 **当前状态**:
 ```rust
@@ -576,7 +576,7 @@ test_process.exe  # 正常退出
 ## Phase 4: 运行时系统 (3-4 周)
 
 ### 目标
-实现完整的运行时系统，支持内存管理、垃圾回收和异常处理。
+实现完整的运行时系统，支持内存管理（ARC）、异常处理。
 
 ### 任务清单
 
@@ -605,7 +605,7 @@ fun malloc(size: Long): Long {
 }
 
 fun free(ptr: Long): Unit {
-    // 简单实现: 不释放，留给 GC
+    // 简单实现: 不释放，留给 ARC 引用计数归零时释放
 }
 ```
 
@@ -621,53 +621,45 @@ fun testMemory(): Int {
 ```
 编译成功，运行结果正确 (1)。
 
-#### 4.2 垃圾回收 (2 周)
-**文件**: `core/aura/lang/runtime/GC.aura`
+#### 4.2 内存管理 (2 周)
+**文件**: `core/aura/lang/runtime/ARC.aura`
 
 **需要实现**:
 - 引用计数 (ARC)
-- 根标记 (根集合)
-- 可达性分析
-- 内存回收
+- 确定性回收（引用归零即释放）
+- 原子引用计数（线程安全）
 
 **实现方式**:
 ```aura
-// 引用计数
-class Object {
-    val rc: Int = 1  // 引用计数
+// 对象头
+class ObjectHeader {
+    var refCount: Long = 1  // 引用计数
+    var typeId: Long = 0    // 类型 ID
 }
 
-fun retain(obj: Object): Unit {
-    obj.rc = obj.rc + 1
+// 增加引用计数
+fun retain(obj: Long): Unit {
+    Memory.arcIncrement(obj)  // @native(asm = "lock inc")
 }
 
-fun release(obj: Object): Unit {
-    obj.rc = obj.rc - 1
-    if (obj.rc == 0) {
-        free(obj)
+// 减少引用计数，归零时释放
+fun release(obj: Long): Boolean {
+    val rc: Long = Memory.arcDecrement(obj)  // @native(asm = "lock dec")
+    if (rc == 0) {
+        Memory.free(obj)
+        return true
     }
-}
-
-// GC 触发
-fun gc(): Unit {
-    var objects: List<Object> = getAllObjects()
-    var freed: Int = 0
-    for (obj: Object in objects) {
-        if (obj.rc == 0) {
-            free(obj)
-            freed = freed + 1
-        }
-    }
+    return false
 }
 ```
 
 **验证标准**:
 ```aura
-fun testGC(): Int {
-    val obj1: Object = new Object()
-    val obj2: Object = new Object()
-    obj1 = null  // 引用计数减少
-    gc()
+fun testARC(): Int {
+    val obj = Memory.alloc(64)
+    retain(obj)
+    release(obj)  // rc: 2 -> 1
+    release(obj)  // rc: 1 -> 0, 对象被释放
     return 1  // 应能正常返回
 }
 ```
@@ -756,7 +748,7 @@ fun testThread(): Int {
 
 ### Phase 4 交付物
 - [ ] 内存管理: malloc, free, 内存池
-- [ ] 垃圾回收: 引用计数、根标记、可达性分析
+- [ ] ARC 引用计数: retain/release, 原子操作, 确定性回收
 - [ ] 异常处理: try/catch/finally, SEH
 - [ ] 线程支持: 创建、同步、TLS
 - [ ] 测试用例: 50+ 运行时功能编译成功
@@ -998,8 +990,7 @@ scripts\bootstrap-verify.ps1
 - [ ] 100+ 标准库函数编译成功
 
 ### 里程碑 4: 运行时完成 (第 19 周)
-- [ ] 内存管理
-- [ ] 垃圾回收
+- [ ] 内存管理（ARC）
 - [ ] 异常处理
 - [ ] 线程支持
 - [ ] 50+ 运行时功能编译成功
@@ -1063,7 +1054,7 @@ aura/
 │       │   └── Math.aura
 │       └── runtime/
 │           ├── Memory.aura
-│           ├── GC.aura
+│           ├── ARC.aura
 │           ├── Exception.aura
 │           └── Thread.aura
 ├── scripts/

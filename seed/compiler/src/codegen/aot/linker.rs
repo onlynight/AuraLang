@@ -308,6 +308,10 @@ fn needs_recompile(src: &Path, obj: &Path) -> bool {
 
 /// 执行命令并报告结果
 fn run_and_report(cmd: &mut Command, tool_name: &str) -> Result<(), AotError> {
+    // Debug: print the command being executed
+    let program = cmd.get_program().to_string_lossy().to_string();
+    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+    eprintln!("[DEBUG] Running: {} {}", program, args.join(" "));
     let output = cmd
         .output()
         .map_err(|e| AotError::ToolError(format!("failed to start {}: {}", tool_name, e)))?;

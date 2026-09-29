@@ -1,7 +1,7 @@
-// tests/photon/S3/01_bootstrap_test.aura
-// ════════════════════════════════════════════════════════════�?// S3: 编译器自举测�?�?验证 Photon 后端可编�?Aura 源码
+﻿// tests/photon/S3/01_bootstrap_test.aura
+// ═════════════════════════════════════════════════════════════// S3: 编译器自举测轥 验证 Photon 后端可编轥Aura 源码
 // 运行：aura run tests/photon/S3/01_bootstrap_test.aura
-// ════════════════════════════════════════════════════════════�?
+// ═════════════════════════════════════════════════════════════
 import aura.lang.std.String
 import "../../../aura/photon/aura/lang/compiler/photon/Lir.aura"
 import "../../../aura/photon/aura/lang/compiler/photon/MachineDag.aura"
@@ -12,7 +12,7 @@ import "../../../aura/photon/aura/lang/compiler/photon/X86Emitter.aura"
 import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
 
 fun main() {
-    println("══�?S3 自举测试 ══�?)
+    println("═══S3 自举测试 ═══")
     var pass = 0
     var total = 4
 
@@ -27,7 +27,7 @@ fun main() {
         pass = pass + 1
     }
 
-    // [2] 完整管线：LIR �?DAG �?RegAlloc �?Encode �?COFF
+    // [2] 完整管线：LIR ↀDAG ↀRegAlloc ↀEncode ↀCOFF
     println("[2] 完整管线")
     val lir = LirUtils.emptyProgram()
     val t = lir.types
@@ -48,7 +48,7 @@ fun main() {
         println("  COFF size=" + coff.length)
     }
 
-    // [3] 多指令管�?    println("[3] 多指令管�?)
+    // [3] 多指令管纀    println("[3] 多指令管纀")
     val lir2 = LirUtils.emptyProgram()
     val t2 = lir2.types
     val i32b = t2.intType(32)
@@ -80,6 +80,6 @@ fun main() {
     println("")
     println("PASS: " + pass + "/" + total)
     if (pass == total) {
-        println("ALL PASS �?自举管线就绪")
+        println("ALL PASS  自举管线就绪")
     }
 }

@@ -3,9 +3,30 @@ package aura.lang.std.io
 
 /// 输出流接口（多态）。
 ///
+/// 提供向目标写入数据的统一接口。
+/// 实现类包括：
+/// - `FileOutputStream` — 写入文件
+/// - `StdOutputStream` — 写入标准输出
+/// - `ByteArrayOutputStream` — 写入内存缓冲
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.lang.std.io.OutputStream
+/// import aura.lang.std.io.FileOutputStream
+/// ```
+///
 /// @since 0.2
 interface OutputStream {
+
+    /// 输出字符串（带换行）。
     fun println(msg: String): Unit
+
+    /// 输出字符串（不带换行）。
     fun print(msg: String): Unit
+
+    /// 刷新缓冲区。
     fun flush(): Unit
+
+    /// 关闭流并释放资源。
+    fun close(): Unit
 }

@@ -8,13 +8,13 @@ package aura.lang.compiler.hir.hat
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 // 进度心跳的开关读取（`AURA_HAT_TRACE`）：同包符号需显式导入，否则会退化为
 // 未解析调用。
 import aura.lang.std.Env
 import aura.lang.collection.ArrayList
-import "../../mir/SsaMir.aura"
-import "../../mir/TypeRegistry.aura"
+import aura.lang.compiler.mir.SsaMir
+import aura.lang.compiler.mir.TypeRegistry
 
 /// HAT 解析器：将 HAT 文本解析为 SSA MIR 程序。
 class HatParser {
@@ -188,7 +188,7 @@ class HatParser {
 
     /// 从文件路径读取并解析 HAT 文件。
     fun parseFile(path: String): MirSsaProgram {
-        val text: String = FileSystem.readText(path)
+        val text: String = FileUtils.readText(path)
         return this.parse(text)
     }
 

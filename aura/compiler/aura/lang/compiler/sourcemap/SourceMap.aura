@@ -13,7 +13,7 @@ package aura.lang.compiler.sourcemap
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Path
 import aura.lang.compiler.lexer.Span
 
@@ -26,7 +26,7 @@ object SourceMapUtils {
 
     /// 从文件路径读取源文本并注册到 SourceMap。
     fun loadFileFromPath(map: SourceMap, path: String): Int {
-        val text: String = FileSystem.readFile(path)
+        val text: String = FileUtils.readFile(path)
         return map.addFile(path, text)
     }
 

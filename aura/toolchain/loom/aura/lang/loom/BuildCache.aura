@@ -3,8 +3,8 @@ package aura.lang.loom
 
 import aura.lang.std.String
 
-import "Task.aura"
-import "FileIO.aura"
+import aura.lang.loom.Task
+import aura.lang.loom.FileIO
 
 // BuildCache — incremental build cache with simple hash
 class BuildCache {

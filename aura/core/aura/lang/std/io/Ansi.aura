@@ -1,0 +1,199 @@
+// aura:///aura/lang/std/io/Ansi.aura
+package aura.lang.std.io
+
+/// ANSI 转义序列生成器（纯逻辑，无 I/O）。
+///
+/// 所有方法只生成 ANSI 转义序列字符串，不做任何输出。
+/// 需要输出时由调用方交给 IO 或 OutputStream。
+///
+/// ```aura
+/// val s: String = Ansi.red("Error!")
+/// val c: String = Ansi.cursorShow()
+/// IO.print(Ansi.clearScreen())
+/// ```
+///
+/// @since 0.3
+object Ansi {
+
+    /// ESC 控制字符（0x1B）。
+    private val ESC: String = String.fromCharCode(27)
+
+    // ═══════════════════════════════════════════════════════════════
+    // 光标控制
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 光标上移 n 行。
+    fun cursorUp(lines: Int): String {
+        if (lines <= 0) { return "" }
+        return ESC + "[" + toStr(lines) + "A"
+    }
+
+    /// 光标下移 n 行。
+    fun cursorDown(lines: Int): String {
+        if (lines <= 0) { return "" }
+        return ESC + "[" + toStr(lines) + "B"
+    }
+
+    /// 光标左移 n 列。
+    fun cursorLeft(cols: Int): String {
+        if (cols <= 0) { return "" }
+        return ESC + "[" + toStr(cols) + "D"
+    }
+
+    /// 光标右移 n 列。
+    fun cursorRight(cols: Int): String {
+        if (cols <= 0) { return "" }
+        return ESC + "[" + toStr(cols) + "C"
+    }
+
+    /// 光标移到指定行列（1-based）。
+    fun cursorTo(line: Int, column: Int): String {
+        if (line <= 0 || column <= 0) { return "" }
+        return ESC + "[" + toStr(line) + ";" + toStr(column) + "H"
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 光标可见性
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 显示光标。
+    fun cursorShow(): String {
+        return ESC + "[?25h"
+    }
+
+    /// 隐藏光标。
+    fun cursorHide(): String {
+        return ESC + "[?25l"
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 清屏
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 清屏并把光标移到左上角。
+    fun clearScreen(): String {
+        return ESC + "[2J" + ESC + "[H"
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 重置
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 重置所有 ANSI 格式。
+    fun reset(): String {
+        return ESC + "[0m"
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 前景色
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 黑色文本。
+    fun black(text: String): String {
+        return ESC + "[30m" + text + reset()
+    }
+
+    /// 红色文本。
+    fun red(text: String): String {
+        return ESC + "[31m" + text + reset()
+    }
+
+    /// 绿色文本。
+    fun green(text: String): String {
+        return ESC + "[32m" + text + reset()
+    }
+
+    /// 黄色文本。
+    fun yellow(text: String): String {
+        return ESC + "[33m" + text + reset()
+    }
+
+    /// 蓝色文本。
+    fun blue(text: String): String {
+        return ESC + "[34m" + text + reset()
+    }
+
+    /// 紫色文本。
+    fun magenta(text: String): String {
+        return ESC + "[35m" + text + reset()
+    }
+
+    /// 青色文本。
+    fun cyan(text: String): String {
+        return ESC + "[36m" + text + reset()
+    }
+
+    /// 白色文本。
+    fun white(text: String): String {
+        return ESC + "[37m" + text + reset()
+    }
+
+    /// 256 色前景色（0-255）。
+    fun color256(text: String, index: Int): String {
+        if (index < 0 || index > 255) { return text }
+        return ESC + "[38;5;" + toStr(index) + "m" + text + reset()
+    }
+
+    /// 真彩色前景色（RGB，各分量 0-255）。
+    fun rgb(text: String, r: Int, g: Int, b: Int): String {
+        return ESC + "[38;2;" + toStr(r) + ";" + toStr(g) + ";" + toStr(b) + "m" + text + reset()
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 背景色
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 红色背景。
+    fun onRed(text: String): String {
+        return ESC + "[41m" + text + reset()
+    }
+
+    /// 绿色背景。
+    fun onGreen(text: String): String {
+        return ESC + "[42m" + text + reset()
+    }
+
+    /// 黄色背景。
+    fun onYellow(text: String): String {
+        return ESC + "[43m" + text + reset()
+    }
+
+    /// 蓝色背景。
+    fun onBlue(text: String): String {
+        return ESC + "[44m" + text + reset()
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 样式
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 粗体文本。
+    fun bold(text: String): String {
+        return ESC + "[1m" + text + reset()
+    }
+
+    /// 斜体文本。
+    fun italic(text: String): String {
+        return ESC + "[3m" + text + reset()
+    }
+
+    /// 下划线文本。
+    fun underline(text: String): String {
+        return ESC + "[4m" + text + reset()
+    }
+
+    /// 暗色文本。
+    fun dim(text: String): String {
+        return ESC + "[2m" + text + reset()
+    }
+
+    /// 反色文本。
+    fun inverse(text: String): String {
+        return ESC + "[7m" + text + reset()
+    }
+
+    /// 删除线文本。
+    fun strikethrough(text: String): String {
+        return ESC + "[9m" + text + reset()
+    }
+}

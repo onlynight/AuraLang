@@ -7,13 +7,13 @@ import aura.lang.std.String
 import aura.lang.concurrent.Mutex
 
 fun main() {
-    var mutex: Mutex = Mutex()
+    val lock_id: Long = Mutex()
     
-    println("Locked: " + toStr(mutex.isLocked()))
+    println("Locked: " + toStr(Mutex.isLocked(lock_id)))
     
-    mutex.lock()
-    println("After lock: " + toStr(mutex.isLocked()))
+    Mutex.lock(lock_id)
+    println("After lock: " + toStr(Mutex.isLocked(lock_id)))
     
-    mutex.unlock()
-    println("After unlock: " + toStr(mutex.isLocked()))
+    Mutex.unlock(lock_id)
+    println("After unlock: " + toStr(Mutex.isLocked(lock_id)))
 }

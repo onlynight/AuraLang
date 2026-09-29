@@ -6,7 +6,7 @@ import aura.lang.std.String
 import "../../../aura/photon/aura/lang/compiler/photon/Lir.aura"
 
 fun main() {
-    println("══�?Debug Lir ══�?)
+    println("═══Debug Lir ═══")
 
     println("[1] LirUtils.emptyProgram()")
     val lir = LirUtils.emptyProgram()

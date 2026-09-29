@@ -1,27 +1,27 @@
-# photon-hat-native-suite.ps1 ¡ª HAT ¶ÀÁ¢Á´Â·¶Ëµ½¶Ë²î·ÖÅÜÅú
+# photon-hat-native-suite.ps1 â€” HAT ç‹¬ç«‹é“¾è·¯ç«¯åˆ°ç«¯å·®åˆ†è·‘æ‰¹
 #
-#   Ô´Âë(.aura) ©¤©¤[Aura ×Ô¾ÙÇ°¶Ë£¬Ô­Éú]©¤©¤? HIR ©¤©¤? SSA MIR ©¤©¤? .hat ©¤©¤? HAT ºó¶Ë ©¤©¤? exe
+#   æºç (.aura) â”€â”€[Aura è‡ªä¸¾å‰ç«¯ï¼ŒåŸç”Ÿ]â”€â”€? HIR â”€â”€? SSA MIR â”€â”€? .hat â”€â”€? HAT åç«¯ â”€â”€? exe
 #
-# Óë PHIR Á´Â·£¨PhotonDriver£º.phir ¡ú HIR ¡ú SSA ¡ú ¡­£©**ÍêÈ«¶ÀÁ¢**£º
-# ±¾½Å±¾²»Éú³É¡¢²»¶ÁÈ¡ÈÎºÎ `.phir`¡£
+# ä¸ PHIR é“¾è·¯ï¼ˆPhotonDriverï¼š.phir â†’ HIR â†’ SSA â†’ â€¦ï¼‰**å®Œå…¨ç‹¬ç«‹**ï¼š
+# æœ¬è„šæœ¬ä¸ç”Ÿæˆã€ä¸è¯»å–ä»»ä½• `.phir`ã€‚
 #
-# Ç°¶Ë = Ô­ÉúÔËĞĞµÄ×Ô¾Ù±àÒëÆ÷£¨build/hat-native/PhotonHatCompile.exe£¬
-# ÓÉ `aura build --aot` ²ú³ö£©£ºÔ´Âë(º¬µİ¹é import) ¡ú AotModuleLinker ¡ú ºÏ²¢ HIR
-# ¡ú SSA MIR ¡ú .hat¡£Ô­ÉúÖ´ĞĞÊÇÕâ¸öÇ°¶Ë**Î¨Ò»¿ÉĞĞ**µÄÔØÌå£º¶³½áÖÖ×Ó VM ÏÂ
-# AotModuleLinker ²»¿ÉÓÃ£¨¿ç¶ÔÏó arena ¹²ÏíÊ§Õæ£¬std Ä£¿éÒ»Ìõ¶¼¼ÓÔØ²»ÁË£©£¬
-# ¶øÔ­ÉúÊµ²â 28 Ä£¿é / 1 Íò HIR ½Úµã½ö 1s¡£
+# å‰ç«¯ = åŸç”Ÿè¿è¡Œçš„è‡ªä¸¾ç¼–è¯‘å™¨ï¼ˆbuild/hat-native/PhotonHatCompile.exeï¼Œ
+# ç”± `aura build --aot` äº§å‡ºï¼‰ï¼šæºç (å«é€’å½’ import) â†’ AotModuleLinker â†’ åˆå¹¶ HIR
+# â†’ SSA MIR â†’ .hatã€‚åŸç”Ÿæ‰§è¡Œæ˜¯è¿™ä¸ªå‰ç«¯**å”¯ä¸€å¯è¡Œ**çš„è½½ä½“ï¼šå†»ç»“ç§å­ VM ä¸‹
+# AotModuleLinker ä¸å¯ç”¨ï¼ˆè·¨å¯¹è±¡ arena å…±äº«å¤±çœŸï¼Œstd æ¨¡å—ä¸€æ¡éƒ½åŠ è½½ä¸äº†ï¼‰ï¼Œ
+# è€ŒåŸç”Ÿå®æµ‹ 28 æ¨¡å— / 1 ä¸‡ HIR èŠ‚ç‚¹ä»… 1sã€‚
 #
-# ºó¶ËÄ¬ÈÏ×ß **Ô­Éú**£¨Ç°¶Ë+ºó¶Ë¶¼ÔÚÔ­Éú£¬`-NativeAll` Ä¬ÈÏ $true£©£º
-# VM ºó¶ËÒò Aura Ô´ÎÄ¼ş±àÂëÎÊÌâ£¨UTF-8 Ìæ»»×Ö·û£©µ¼ÖÂ½âÎöÊ§°Ü£¬Ôİ²»¿ÉÓÃ¡£
-# ÓÃ `-NativeAll:$false` ¿ÉÇĞ»Ø¡¸VM ºó¶Ë¶Á .hat ²ú³ö COFF¡¹µÄĞÎÌ¬£¨µ±Ç°»áÊ§°Ü£©¡£
+# åç«¯é»˜è®¤èµ° **åŸç”Ÿ**ï¼ˆå‰ç«¯+åç«¯éƒ½åœ¨åŸç”Ÿï¼Œ`-NativeAll` é»˜è®¤ $trueï¼‰ï¼š
+# VM åç«¯å›  Aura æºæ–‡ä»¶ç¼–ç é—®é¢˜ï¼ˆUTF-8 æ›¿æ¢å­—ç¬¦ï¼‰å¯¼è‡´è§£æå¤±è´¥ï¼Œæš‚ä¸å¯ç”¨ã€‚
+# ç”¨ `-NativeAll:$false` å¯åˆ‡å›ã€ŒVM åç«¯è¯» .hat äº§å‡º COFFã€çš„å½¢æ€ï¼ˆå½“å‰ä¼šå¤±è´¥ï¼‰ã€‚
 #
-# Ã¿¸öÓÃÀı£º
-#   1) VM ÅÜÒ»±éµÃµ½»ù×¼ stdout£¨`aura run <src>`£¬½ö×÷²ÎÕÕ£¬²»²ÎÓë HAT Á´Â·£©
-#   2) Ô­ÉúÇ°¶Ë£ºÔ´Âë ¡ú HIR ¡ú SSA ¡ú .hat£¨-NativeAll Ê±Í¬Ò»´ÎÒ²²ú³ö COFF£©
-#   3) ºó¶Ë£º.hat ¡ú COFF£¨Ä¬ÈÏ VM µÄ PhotonHatBuild£»-NativeAll ÓÃµÚ 2 ²½µÄ²úÎï£©
-#   4) COFF hex ¡ú .obj ¡ú lld-link ¡ú exe£¬ÔËĞĞ²¢Óë VM »ù×¼±È½Ï stdout
+# æ¯ä¸ªç”¨ä¾‹ï¼š
+#   1) VM è·‘ä¸€éå¾—åˆ°åŸºå‡† stdoutï¼ˆ`aura run <src>`ï¼Œä»…ä½œå‚ç…§ï¼Œä¸å‚ä¸ HAT é“¾è·¯ï¼‰
+#   2) åŸç”Ÿå‰ç«¯ï¼šæºç  â†’ HIR â†’ SSA â†’ .hatï¼ˆ-NativeAll æ—¶åŒä¸€æ¬¡ä¹Ÿäº§å‡º COFFï¼‰
+#   3) åç«¯ï¼š.hat â†’ COFFï¼ˆé»˜è®¤ VM çš„ PhotonHatBuildï¼›-NativeAll ç”¨ç¬¬ 2 æ­¥çš„äº§ç‰©ï¼‰
+#   4) COFF hex â†’ .obj â†’ lld-link â†’ exeï¼Œè¿è¡Œå¹¶ä¸ VM åŸºå‡†æ¯”è¾ƒ stdout
 #
-# ÓÃ·¨:
+# ç”¨æ³•:
 #   powershell -File scripts\photon-hat-native-suite.ps1 -Phase P1
 #   powershell -File scripts\photon-hat-native-suite.ps1 -Phase P1,P2,P3
 #   powershell -File scripts\photon-hat-native-suite.ps1 -Phase P1 -NativeAll:$false
@@ -33,8 +33,8 @@ param(
     [string]$Driver = "",
     [switch]$Rebuild,
     [bool]$NativeAll = $true,
-    # ´ò¿ª½×¶Î½ø¶È/ĞÄÌø£¨[hat-front] / [Phase A-E] / [isa] / [hat-parse]£©¡£
-    # Ä¬ÈÏ¹Ø£ºÇı¶¯ stdout Ö»±£Áô ===...=== Ğ­Òé±ê¼Ç£¬±¾½Å±¾ÖğĞĞ½âÎö COFF hex¡£
+    # æ‰“å¼€é˜¶æ®µè¿›åº¦/å¿ƒè·³ï¼ˆ[hat-front] / [Phase A-E] / [isa] / [hat-parse]ï¼‰ã€‚
+    # é»˜è®¤å…³ï¼šé©±åŠ¨ stdout åªä¿ç•™ ===...=== åè®®æ ‡è®°ï¼Œæœ¬è„šæœ¬é€è¡Œè§£æ COFF hexã€‚
     [switch]$Verbose
 )
 $ErrorActionPreference = 'Continue'
@@ -43,9 +43,9 @@ Set-Location $Root
 $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
 $env:AURA_PHOTON_DEBUG_HIR = ''
 $env:AURA_PHOTON_TRACE = ''
-# µ÷ÊÔ¿ª¹ØÄ¬ÈÏÈ«¹Ø£¨¼û PhotonPipeline.aura µÄ verboseOn ×¢ÊÍ£©£º
-#   AURA_PHOTON_VERBOSE=1  ½×¶Î½ø¶È/ĞÄÌø
-#   AURA_HAT_TRACE=1       HAT ½âÎöÆ÷ĞÄÌø
+# è°ƒè¯•å¼€å…³é»˜è®¤å…¨å…³ï¼ˆè§ PhotonPipeline.aura çš„ verboseOn æ³¨é‡Šï¼‰ï¼š
+#   AURA_PHOTON_VERBOSE=1  é˜¶æ®µè¿›åº¦/å¿ƒè·³
+#   AURA_HAT_TRACE=1       HAT è§£æå™¨å¿ƒè·³
 if ($Verbose) { $env:AURA_PHOTON_VERBOSE = '1'; $env:AURA_HAT_TRACE = '1' }
 else          { $env:AURA_PHOTON_VERBOSE = '';  $env:AURA_HAT_TRACE = '' }
 
@@ -56,7 +56,7 @@ $DriverSrc = Join-Path $Root 'aura\photon\aura\lang\compiler\photon\PhotonHatCom
 if ($Driver -eq "") { $Driver = Join-Path $Root 'build\hat-native\PhotonHatCompile.exe' }
 
 if ($Rebuild -or -not (Test-Path $Driver)) {
-    Write-Host "[build] AOT ¹¹½¨Ô­Éú HAT Çı¶¯£¨Ç°¶Ë + ¹ÜÏß£¬ĞèÒªÊıÃë£©..." -ForegroundColor Cyan
+    Write-Host "[build] AOT æ„å»ºåŸç”Ÿ HAT é©±åŠ¨ï¼ˆå‰ç«¯ + ç®¡çº¿ï¼Œéœ€è¦æ•°ç§’ï¼‰..." -ForegroundColor Cyan
     New-Item -ItemType Directory -Force -Path (Split-Path $Driver) | Out-Null
     & $Aura build --aot $DriverSrc --output $Driver 2>&1 | Select-String -Pattern "complete|failed|error" | Select-Object -Last 3
 }
@@ -122,7 +122,7 @@ if ($Files.Count -eq 0) {
 }
 if ($Files.Count -eq 0) { Write-Host "no files" -ForegroundColor Red; exit 1 }
 
-Write-Host "=== Photon HAT ¶ÀÁ¢Á´Â·²î·Ö£¨Ô´Âë ¡ú HIR ¡ú SSA ¡ú .hat ¡ú exe£©===" -ForegroundColor Cyan
+Write-Host "=== Photon HAT ç‹¬ç«‹é“¾è·¯å·®åˆ†ï¼ˆæºç  â†’ HIR â†’ SSA â†’ .hat â†’ exeï¼‰===" -ForegroundColor Cyan
 Write-Host "  driver : $Driver"
 Write-Host "  lld    : $lld"
 Write-Host "  cases  : $($Files.Count)"
@@ -140,11 +140,11 @@ foreach ($src in $Files) {
     $hat = Join-Path $outDir "$stem.hat"
     $exe = Join-Path $outDir "$stem.exe"
 
-    # 1) VM »ù×¼£¨²ÎÕÕ£©
+    # 1) VM åŸºå‡†ï¼ˆå‚ç…§ï¼‰
     $vm = Invoke-Proc $Aura "run `"$src`"" $Root $TimeoutSecs
     $vmOut = (("" + $vm.Out) -replace "`r", "").Trim()
 
-    # 2) Ô­ÉúÇ°¶Ë£ºÔ´Âë ¡ú HIR ¡ú SSA ¡ú .hat
+    # 2) åŸç”Ÿå‰ç«¯ï¼šæºç  â†’ HIR â†’ SSA â†’ .hat
     $env:AURA_HAT_AURA = $src
     $env:AURA_HAT_SRC = $hat
     $env:AURA_HAT_OUT = $outDir
@@ -155,7 +155,7 @@ foreach ($src in $Files) {
     $env:AURA_HAT_AURA = ''; $env:AURA_HAT_SRC = ''; $env:AURA_HAT_OUT = ''; $env:AURA_HAT_MODULE = ''
     $secs = [math]::Round($sw.Elapsed.TotalSeconds, 1)
 
-    # 3) ºó¶Ë£ºÄ¬ÈÏÓÃ VM ¶Á .hat ²ú³ö COFF£¨Ô­Éúºó¶ËÔÚ Phase D ±ÀÀ££©
+    # 3) åç«¯ï¼šé»˜è®¤ç”¨ VM è¯» .hat äº§å‡º COFFï¼ˆåŸç”Ÿåç«¯åœ¨ Phase D å´©æºƒï¼‰
     $b = $d
     if (-not $NativeAll -and (Test-Path $hat)) {
         $env:AURA_HAT_SRC = $hat
@@ -208,7 +208,16 @@ foreach ($src in $Files) {
         $code = $r.Code
         $tmo = -not $r.Ok
         if ($tmo) { $reasons += "run-timeout" }
-        if ($vmOut -ne $exeOut) { $reasons += "output-diff" }
+        # VM åŸºçº¿ï¼ˆ`aura run <file>`ï¼‰ä¼šæŠŠ**ç¼–è¯‘å™¨æ¨ªå¹…**æ··è¿› stdoutï¼š
+        #   [ok] D:\â€¦\01_hello_world.aura compiled (113 functions)
+        # åŸç”Ÿ exe åªæ‰“å°ç¨‹åºè‡ªèº«çš„è¾“å‡º ? æ¯”å¯¹å‰å…ˆå‰¥æ‰æ¨ªå¹…è¡Œï¼Œå¦åˆ™æ°¸è¿œ output-diffã€‚
+        $vmOutCmp = $vmOut
+        if ($vmOutCmp -match '(?m)^\[ok\].*compiled') {
+            $vmOutCmp = (($vmOutCmp -split "`n") |
+                Where-Object { $_ -notmatch '^\[ok\].*compiled' }) -join "`n"
+            $vmOutCmp = $vmOutCmp.Trim()
+        }
+        if ($vmOutCmp -ne $exeOut) { $reasons += "output-diff" }
     }
 
     if ($reasons.Count -eq 0) {

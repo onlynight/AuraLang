@@ -14,6 +14,23 @@ use crate::codegen::opcode::FfiAbi;
 use crate::vm::dynamic_ffi::DynamicLoader;
 use crate::vm::value::Value;
 
+#[cfg(windows)]
+unsafe extern "system" {
+    fn VirtualAlloc(
+        lp_address: *mut libc::c_void,
+        dw_size: usize,
+        fl_allocation_type: u32,
+        fl_protection: u32,
+    ) -> *mut libc::c_void;
+    fn VirtualFree(lp_address: *mut libc::c_void, dw_size: usize, dw_free_type: u32) -> bool;
+    fn VirtualProtect(
+        lp_address: *mut libc::c_void,
+        dw_size: usize,
+        fl_new_protection: u32,
+        lp_old_protection: *mut u32,
+    ) -> bool;
+}
+
 /// 原生函数指针类型
 pub type NativeFn = fn(&[Value]) -> Value;
 
@@ -59,6 +76,11 @@ impl NativeRegistry {
         r.register("toFloat", native_to_float);
         r.register("toStr", native_to_str);
         r.register("toString", native_to_str); // alias for toStr, used as method call
+        r.register("toChar", native_to_char);
+        r.register("toByte", native_to_byte);
+        r.register("toShort", native_to_short);
+        r.register("toBoolean", native_to_boolean);
+        r.register("toHex", native_to_hex);
         r.register("clock", native_clock);
         r.register("strlen", native_strlen);
         r.register("CString", native_cstring);
@@ -90,6 +112,11 @@ impl NativeRegistry {
         r.register("aura.lang.std.toFloat", native_to_float);
         r.register("aura.lang.std.toStr", native_to_str);
         r.register("aura.lang.std.toString", native_to_str);
+        r.register("aura.lang.std.toChar", native_to_char);
+        r.register("aura.lang.std.toByte", native_to_byte);
+        r.register("aura.lang.std.toShort", native_to_short);
+        r.register("aura.lang.std.toBoolean", native_to_boolean);
+        r.register("aura.lang.std.toHex", native_to_hex);
         r.register("aura.lang.std.clock", native_clock);
         r.register("aura.lang.std.strlen", native_strlen);
         r.register("aura.lang.std.CString", native_cstring);
@@ -146,6 +173,11 @@ impl NativeRegistry {
         r.register("toFloat", native_to_float);
         r.register("toStr", native_to_str);
         r.register("toString", native_to_str); // alias for toStr, used as method call
+        r.register("toChar", native_to_char);
+        r.register("toByte", native_to_byte);
+        r.register("toShort", native_to_short);
+        r.register("toBoolean", native_to_boolean);
+        r.register("toHex", native_to_hex);
         r.register("clock", native_clock);
         r.register("strlen", native_strlen);
         r.register("CString", native_cstring);
@@ -182,6 +214,11 @@ impl NativeRegistry {
         r.register("aura.lang.std.toFloat", native_to_float);
         r.register("aura.lang.std.toStr", native_to_str);
         r.register("aura.lang.std.toString", native_to_str);
+        r.register("aura.lang.std.toChar", native_to_char);
+        r.register("aura.lang.std.toByte", native_to_byte);
+        r.register("aura.lang.std.toShort", native_to_short);
+        r.register("aura.lang.std.toBoolean", native_to_boolean);
+        r.register("aura.lang.std.toHex", native_to_hex);
         r.register("aura.lang.std.clock", native_clock);
         r.register("aura.lang.std.strlen", native_strlen);
         r.register("aura.lang.std.CString", native_cstring);
@@ -323,10 +360,50 @@ impl NativeRegistry {
         r.register("Memory.write64", native_memory_write64);
         r.register("Memory.copy", native_memory_copy);
         r.register("Memory.set", native_memory_set);
+        // Phase P4: Memory.mmap/munmap/mprotect — 系统级内存映射
+        r.register("Memory.mmap", native_memory_mmap);
+        r.register("Memory.munmap", native_memory_munmap);
+        r.register("Memory.mprotect", native_memory_mprotect);
+        // Phase P4: Memory.atomicAdd — Mutex 自旋锁的底座（与 Cpu.atomicAdd 同源）
+        r.register("Memory.atomicAdd", native_cpu_atomic_add);
+        // Phase P4: Memory.arcIncrement/arcDecrement — ARC 原子引用计数
+        r.register("Memory.arcIncrement", native_memory_arc_increment);
+        r.register("Memory.arcDecrement", native_memory_arc_decrement);
+        // Phase P3.2: Arena 分配器（bump-pointer）
+        r.register("Arena.init", native_arena_init);
+        r.register("Arena.alloc", native_arena_alloc);
+        r.register("Arena.reset", native_arena_reset);
+        r.register("Arena.free", native_arena_free);
+        r.register("Arena.usedSize", native_arena_used_size);
+        r.register("Arena.remainingSize", native_arena_remaining_size);
+        // Phase P4: Console/FileOps/Stdio Rust native 实现（替代 AOT 接口调用）
+        r.register("Console.writeStdout", native_console_write_stdout);
+        r.register("FileOps.open", native_fileops_open);
+        r.register("FileOps.close", native_fileops_close);
+        r.register("FileOps.read", native_fileops_read);
+        r.register("FileOps.write", native_fileops_write);
+        r.register("Stdio.stringToBuffer", native_stdio_string_to_buffer);
+        r.register("Stdio.bufferToString", native_stdio_buffer_to_string);
         r.register("Cpu.rdtsc", native_cpu_rdtsc);
         r.register("Cpu.memFence", native_cpu_mem_fence);
         r.register("Cpu.cpuid", native_cpu_cpuid);
         r.register("Cpu.atomicAdd", native_cpu_atomic_add);
+        // Phase P3: Syscalls.exit — 进程退出
+        r.register("Syscalls.exit", native_syscalls_exit);
+        // Phase S1: ProcessOps C FFI 函数
+        r.register("ProcessOps.aura_process_argCount", native_process_arg_count);
+        r.register("ProcessOps.aura_process_args", native_process_args);
+        // Phase S1: AotUtil 字符串工具函数
+        r.register("aotSlice", native_aot_slice);
+        r.register("AotUtil.aotSlice", native_aot_slice);
+        r.register("aotCsvCount", native_aot_csv_count);
+        r.register("AotUtil.aotCsvCount", native_aot_csv_count);
+        r.register("aotFieldAt", native_aot_field_at);
+        r.register("AotUtil.aotFieldAt", native_aot_field_at);
+        r.register("aotToLine", native_aot_to_line);
+        r.register("AotUtil.aotToLine", native_aot_to_line);
+        r.register("aotCsvToSpaced", native_aot_csv_to_spaced);
+        r.register("AotUtil.aotCsvToSpaced", native_aot_csv_to_spaced);
         // `Builtin.cstr` 系列（`prelu.aura:CString/CStr`，前端以同名原生函数注册，
         // 见 `codegen/hir.rs` P8.5）：Aura String ↔ C 字符串的**既有接口**。
         // 之前 VM 未实现它们，`CString(s)` 落到「未链接 → 0」，导致
@@ -518,6 +595,41 @@ fn native_to_float(args: &[Value]) -> Value {
 fn native_to_str(args: &[Value]) -> Value {
     match args.first() {
         Some(v) => Value::str_(v.to_string()),
+        None => Value::str_(""),
+    }
+}
+
+fn native_to_char(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::Int(v.as_int() & 0xFFFF),
+        None => Value::Int(0),
+    }
+}
+
+fn native_to_byte(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::Int(v.as_int() & 0xFF),
+        None => Value::Int(0),
+    }
+}
+
+fn native_to_short(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::Int((v.as_int() as i16) as i64),
+        None => Value::Int(0),
+    }
+}
+
+fn native_to_boolean(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::Bool(v.as_int() != 0),
+        None => Value::Bool(false),
+    }
+}
+
+fn native_to_hex(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::str_(format!("{:x}", v.as_int())),
         None => Value::str_(""),
     }
 }
@@ -1018,6 +1130,14 @@ fn arg_i64(args: &[Value], i: usize) -> i64 {
     args.get(i).map(|v| v.as_int()).unwrap_or(0)
 }
 
+fn arg_str(args: &[Value], i: usize) -> String {
+    match args.get(i) {
+        Some(Value::Str(s)) => s.to_string(),
+        Some(v) => v.to_string(),
+        None => String::new(),
+    }
+}
+
 /// fnIndex(name) → Int：按函数名解析当前模块函数表中的下标（找不到返回 -1）。
 ///
 /// 存在的原因：`Thread.spawn(fn_id, arg)` / `ThreadOps.create(fn_id, arg)` 需要的是
@@ -1058,6 +1178,15 @@ fn native_fn_index(args: &[Value]) -> Value {
 fn native_memory_alloc(args: &[Value]) -> Value {
     let n = arg_i64(args, 0).max(0) as usize;
     let p = unsafe { libc::malloc(n.max(1)) };
+    if !p.is_null() && n > 0 {
+        // BUG FIX: 零初始化分配内存。此前未清零，导致 `Mutex()` 返回的地址
+        // 指向随机数据——`Mutex.lock(lock_id)` 的 `atomicAdd(lock_id, 1)` 永远
+        // 不等于 0，自旋锁无限循环（P4 probe_mutex / 07_mutex_ops 超时）。
+        // AOT 路径的 `runtime_emitObjectAlloc` 有 zero loop，VM 路径也必须对齐。
+        unsafe {
+            std::ptr::write_bytes(p, 0, n)
+        }
+    }
     // 返回 `Int`（不是 `Ptr`）：曾试过返回 `Ptr` 以便 `as_string()` 把
     // 缓冲按 C 字符串解读，但 VM 里 `Ptr` 会被 `as_string()` 无条件解引用，
     // 而不少指针并非 C 字符串（FFI 句柄等）→ 静默段错误（实测 Example 1 直接终止）。
@@ -1244,7 +1373,146 @@ fn native_cpu_atomic_add(args: &[Value]) -> Value {
     Value::Int(atom.fetch_add(delta, std::sync::atomic::Ordering::SeqCst))
 }
 
-/// Cpu.memFence()：内存屏障（顺序一致性）
+/// Memory.mmap(addr, length, prot, flags, fd, offset) → Long
+///
+/// 在 VM 侧用 VirtualAlloc (Windows) / mmap (Unix) 实现匿名内存映射。
+/// 参数与 `Memory.aura` 的 `@native(SYS_MMAP)` 声明一致。
+/// `MAP_FAILED` = -1 (0xFFFFFFFFFFFFFFFF) 表示失败。
+fn native_memory_mmap(args: &[Value]) -> Value {
+    let length = arg_i64(args, 1).max(1) as usize;
+    let prot = arg_i64(args, 2);
+    #[cfg(windows)]
+    {
+        let alloc_prot = if prot & 1 != 0 && prot & 2 != 0 {
+            0x04 // PAGE_READWRITE
+        } else if prot & 1 != 0 {
+            0x02 // PAGE_READONLY
+        } else {
+            0x01 // PAGE_NOACCESS
+        };
+        unsafe {
+            let addr = VirtualAlloc(
+                std::ptr::null_mut(),
+                length,
+                0x2000 | 0x1000, // MEM_COMMIT | MEM_RESERVE
+                alloc_prot,
+            );
+            if addr.is_null() {
+                Value::Int(-1)
+            } else {
+                Value::Int(addr as i64)
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        let prot_flags = if prot & 1 != 0 && prot & 2 != 0 {
+            libc::PROT_READ | libc::PROT_WRITE
+        } else if prot & 1 != 0 {
+            libc::PROT_READ
+        } else {
+            libc::PROT_NONE
+        };
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                prot_flags,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if addr == libc::MAP_FAILED {
+            Value::Int(-1)
+        } else {
+            Value::Int(addr as i64)
+        }
+    }
+}
+
+/// Memory.munmap(addr, length) → Int
+fn native_memory_munmap(args: &[Value]) -> Value {
+    let addr = arg_i64(args, 0);
+    let length = arg_i64(args, 1).max(0) as usize;
+    if addr == 0 {
+        return Value::Int(0);
+    }
+    #[cfg(windows)]
+    unsafe {
+        VirtualFree(addr as *mut libc::c_void, 0, 0x8000) // MEM_RELEASE
+    };
+    #[cfg(unix)]
+    unsafe {
+        libc::munmap(addr as *mut libc::c_void, length);
+    }
+    Value::Int(0)
+}
+
+/// Memory.mprotect(addr, length, prot) → Int
+fn native_memory_mprotect(args: &[Value]) -> Value {
+    let addr = arg_i64(args, 0);
+    let length = arg_i64(args, 1).max(0) as usize;
+    let prot = arg_i64(args, 2);
+    if addr == 0 {
+        return Value::Int(0);
+    }
+    #[cfg(windows)]
+    {
+        let new_prot = if prot & 1 != 0 && prot & 2 != 0 {
+            0x04
+        } else if prot & 1 != 0 {
+            0x02
+        } else {
+            0x01
+        };
+        unsafe {
+            let mut old_prot = 0u32;
+            VirtualProtect(
+                addr as *mut libc::c_void,
+                length,
+                new_prot,
+                &mut old_prot,
+            )
+        }
+        .then(|| Value::Int(0))
+        .unwrap_or(Value::Int(-1))
+    }
+    #[cfg(unix)]
+    {
+        let prot_flags = if prot & 1 != 0 && prot & 2 != 0 {
+            libc::PROT_READ | libc::PROT_WRITE
+        } else if prot & 1 != 0 {
+            libc::PROT_READ
+        } else {
+            libc::PROT_NONE
+        };
+        unsafe {
+            let ret = libc::mprotect(addr as *mut libc::c_void, length, prot_flags);
+            if ret == 0 { Value::Int(0) } else { Value::Int(-1) }
+        }
+    }
+}
+
+/// Memory.arcIncrement(addr) → Long：原子递增引用计数，返回**旧值**
+fn native_memory_arc_increment(args: &[Value]) -> Value {
+    let addr = arg_i64(args, 0);
+    if addr == 0 {
+        return Value::Int(0);
+    }
+    let atom = unsafe { &*(addr as *const std::sync::atomic::AtomicI64) };
+    Value::Int(atom.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+}
+
+/// Memory.arcDecrement(addr) → Long：原子递减引用计数，返回**新值**
+fn native_memory_arc_decrement(args: &[Value]) -> Value {
+    let addr = arg_i64(args, 0);
+    if addr == 0 {
+        return Value::Int(0);
+    }
+    let atom = unsafe { &*(addr as *const std::sync::atomic::AtomicI64) };
+    Value::Int(atom.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) - 1)
+}
 fn native_cpu_mem_fence(_args: &[Value]) -> Value {
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
     Value::Null
@@ -1258,6 +1526,81 @@ fn native_cpu_rdtsc(_args: &[Value]) -> Value {
 /// Cpu.cpuid(level) → CPU 信息（占位实现，返回 0）
 fn native_cpu_cpuid(_args: &[Value]) -> Value {
     Value::Int(0)
+}
+
+/// Syscalls.exit(code) — 终止进程（Phase P3）
+fn native_syscalls_exit(args: &[Value]) -> Value {
+    let code = arg_i64(args, 0) as i32;
+    std::process::exit(code);
+}
+
+/// ProcessOps.aura_process_argCount() — 返回进程参数数量
+fn native_process_arg_count(_args: &[Value]) -> Value {
+    let args = std::env::args();
+    let count = args.count() as i64;
+    Value::Int(count)
+}
+
+/// ProcessOps.aura_process_args() — 返回所有进程参数（NUL 分隔）
+fn native_process_args(_args: &[Value]) -> Value {
+    let args: Vec<String> = std::env::args().collect();
+    let joined = args.join("\0");
+    Value::str_(joined)
+}
+
+/// AotUtil.aotSlice(text, start, length) — 取字符串子串
+fn native_aot_slice(args: &[Value]) -> Value {
+    let text = arg_str(args, 0);
+    let start = arg_i64(args, 1) as usize;
+    let length = arg_i64(args, 2).max(0) as usize;
+    if start >= text.len() {
+        return Value::str_("");
+    }
+    let end = (start + length).min(text.len());
+    Value::str_(text[start..end].to_string())
+}
+
+/// AotUtil.aotCsvCount(csv) — 返回 CSV 字段数量
+fn native_aot_csv_count(args: &[Value]) -> Value {
+    let csv = arg_str(args, 0);
+    if csv.is_empty() {
+        return Value::Int(0);
+    }
+    let count = csv.matches(',').count() + 1;
+    Value::Int(count as i64)
+}
+
+/// AotUtil.aotFieldAt(text, index, sep) — 取第 index 个以 sep 分隔的字段
+fn native_aot_field_at(args: &[Value]) -> Value {
+    let text = arg_str(args, 0);
+    let index = arg_i64(args, 1) as usize;
+    let sep = arg_str(args, 2);
+    let sep_char = sep.chars().next().unwrap_or('\0');
+    let fields: Vec<&str> = text.split(sep_char).collect();
+    if index < fields.len() {
+        Value::str_(fields[index].to_string())
+    } else {
+        Value::str_("")
+    }
+}
+
+/// AotUtil.aotToLine(text, index) — 取第 index 行
+fn native_aot_to_line(args: &[Value]) -> Value {
+    let text = arg_str(args, 0);
+    let index = arg_i64(args, 1) as usize;
+    let lines: Vec<&str> = text.split('\n').collect();
+    if index < lines.len() {
+        Value::str_(lines[index].trim_end_matches('\r').to_string())
+    } else {
+        Value::str_("")
+    }
+}
+
+/// AotUtil.aotCsvToSpaced(csv) — CSV 转空格分隔
+fn native_aot_csv_to_spaced(args: &[Value]) -> Value {
+    let csv = arg_str(args, 0);
+    let fields: Vec<&str> = csv.split(',').collect();
+    Value::str_(fields.join(" "))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1451,4 +1794,259 @@ fn native_get(args: &[Value]) -> Value {
         }
         _ => Value::Null,
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase P4: Console/FileOps Rust native 实现
+// 替代 AOT 接口调用，确保在 VM 模式下可用
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Console.writeStdout(buf, len) → Unit
+fn native_console_write_stdout(args: &[Value]) -> Value {
+    let buf = arg_i64(args, 0);
+    let len = arg_i64(args, 1) as usize;
+    if buf != 0 && len > 0 {
+        unsafe {
+            let ptr = buf as *const u8;
+            std::io::Write::write_all(&mut std::io::stdout(), std::slice::from_raw_parts(ptr, len))
+                .ok();
+        }
+    }
+    Value::Null
+}
+
+/// Stdio.stringToBuffer(s) → Long: copy Aura String to heap buffer with NUL terminator
+fn native_stdio_string_to_buffer(args: &[Value]) -> Value {
+    let s = match &args[0] {
+        Value::Str(v) => v.to_string(),
+        _ => return Value::Int(0),
+    };
+    let len = s.len() as i64;
+    let alloc_size = len + 1;
+    let buf = unsafe { libc::malloc(alloc_size as usize) as i64 };
+    if buf == 0 {
+        return Value::Int(0);
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(s.as_ptr(), buf as *mut u8, s.len());
+        *(buf as *mut u8).add(s.len()) = 0;
+    }
+    Value::Int(buf)
+}
+
+/// Stdio.bufferToString(buf, len) → String
+fn native_stdio_buffer_to_string(args: &[Value]) -> Value {
+    let buf = arg_i64(args, 0);
+    let len = arg_i64(args, 1) as usize;
+    if buf == 0 || len == 0 {
+        return Value::str_("");
+    }
+    let slice = unsafe { std::slice::from_raw_parts(buf as *const u8, len) };
+    match std::str::from_utf8(slice) {
+        Ok(s) => Value::str_(s.to_string()),
+        Err(_) => Value::str_(""),
+    }
+}
+
+/// FileOps.open(path, flags) → Int (fd or -1)
+fn native_fileops_open(args: &[Value]) -> Value {
+    let path = arg_i64(args, 0);
+    let flags = arg_i64(args, 1) as i32;
+    if path == 0 {
+        return Value::Int(-1);
+    }
+    // Read the path string from memory
+    let c_str = unsafe { std::ffi::CStr::from_ptr(path as *const libc::c_char) };
+    match c_str.to_str() {
+        Ok(s) => {
+            let fd = unsafe { libc::open(s.as_ptr() as *const i8, flags) };
+            Value::Int(fd as i64)
+        }
+        Err(_) => Value::Int(-1),
+    }
+}
+
+/// FileOps.close(fd) → Int (0 on success, -1 on error)
+fn native_fileops_close(args: &[Value]) -> Value {
+    let fd = arg_i64(args, 0) as i32;
+    if fd < 0 {
+        return Value::Int(-1);
+    }
+    let ret = unsafe { libc::close(fd) };
+    Value::Int(ret as i64)
+}
+
+/// FileOps.read(fd, buf, count) → Long (bytes read or -1)
+fn native_fileops_read(args: &[Value]) -> Value {
+    let fd = arg_i64(args, 0) as i32;
+    let buf = arg_i64(args, 1);
+    let count = arg_i64(args, 2) as u32;
+    if fd < 0 || buf == 0 || count == 0 {
+        return Value::Int(-1);
+    }
+    let n = unsafe { libc::read(fd, buf as *mut libc::c_void, count) };
+    Value::Int(n as i64)
+}
+
+/// FileOps.write(fd, buf, count) → Long (bytes written or -1)
+fn native_fileops_write(args: &[Value]) -> Value {
+    let fd = arg_i64(args, 0) as i32;
+    let buf = arg_i64(args, 1);
+    let count = arg_i64(args, 2) as u32;
+    if fd < 0 || buf == 0 || count == 0 {
+        return Value::Int(-1);
+    }
+    let n = unsafe { libc::write(fd, buf as *const libc::c_void, count) };
+    Value::Int(n as i64)
+}
+
+// ─────────────────────────────────────────────────────────────
+// P3.2 Arena Allocator — bump-pointer 内存分配器
+// ─────────────────────────────────────────────────────────────
+
+use std::sync::atomic::{AtomicPtr, AtomicI64, Ordering};
+
+/// Arena 分配器全局状态（线程不安全，仅供 VM 单线程使用）
+struct ArenaState {
+    base_addr: AtomicPtr<u8>,
+    current_ptr: AtomicI64,
+    capacity: AtomicI64,
+}
+
+impl ArenaState {
+    const fn new() -> Self {
+        ArenaState {
+            base_addr: AtomicPtr::new(std::ptr::null_mut()),
+            current_ptr: AtomicI64::new(0),
+            capacity: AtomicI64::new(0),
+        }
+    }
+}
+
+static ARENA_STATE: ArenaState = ArenaState::new();
+
+/// Arena.init(size) → Boolean: 初始化 arena，分配 size 字节
+fn native_arena_init(args: &[Value]) -> Value {
+    let size = arg_i64(args, 0);
+    if size <= 0 {
+        return Value::Bool(false);
+    }
+    
+    // PROT_READ=1, PROT_WRITE=2, PROT_READ|PROT_WRITE=3
+    // MAP_PRIVATE=2, MAP_ANONYMOUS=0x20=32, MAP_PRIVATE|MAP_ANONYMOUS=34
+    #[cfg(windows)]
+    {
+        let addr = unsafe {
+            VirtualAlloc(
+                std::ptr::null_mut(),
+                size as usize,
+                0x1000, // MEM_COMMIT
+                0x04,   // PAGE_READWRITE
+            )
+        };
+        if addr.is_null() {
+            return Value::Bool(false);
+        }
+        ARENA_STATE.base_addr.store(addr as *mut u8, Ordering::SeqCst);
+        ARENA_STATE.current_ptr.store(size, Ordering::SeqCst);
+        ARENA_STATE.capacity.store(size, Ordering::SeqCst);
+    }
+    
+    #[cfg(not(windows))]
+    {
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size as usize,
+                3,   // PROT_READ|PROT_WRITE
+                34,  // MAP_PRIVATE|MAP_ANONYMOUS
+                -1,
+                0,
+            )
+        };
+        if addr == libc::MAP_FAILED {
+            return Value::Bool(false);
+        }
+        ARENA_STATE.base_addr.store(addr as *mut u8, Ordering::SeqCst);
+        ARENA_STATE.current_ptr.store(size, Ordering::SeqCst);
+        ARENA_STATE.capacity.store(size, Ordering::SeqCst);
+    }
+    
+    Value::Bool(true)
+}
+
+/// Arena.alloc(size) → Long: 从 arena 分配 size 字节，返回地址（0 = 失败）
+fn native_arena_alloc(args: &[Value]) -> Value {
+    let size = arg_i64(args, 0);
+    if size <= 0 {
+        return Value::Int(0);
+    }
+    
+    let aligned_size = (size + 7) / 8 * 8; // 8 字节对齐
+    let current = ARENA_STATE.current_ptr.load(Ordering::SeqCst);
+    let capacity = ARENA_STATE.capacity.load(Ordering::SeqCst);
+    
+    if current + aligned_size > capacity {
+        return Value::Int(0); // 内存不足
+    }
+    
+    let new_current = current + aligned_size;
+    ARENA_STATE.current_ptr.store(new_current, Ordering::SeqCst);
+    Value::Int(current)
+}
+
+/// Arena.reset() → Unit: 重置 arena（不释放内存，只重置指针）
+fn native_arena_reset(_args: &[Value]) -> Value {
+    let base = ARENA_STATE.base_addr.load(Ordering::SeqCst);
+    if base.is_null() {
+        return Value::Null;
+    }
+    ARENA_STATE.current_ptr.store(base as usize as i64, Ordering::SeqCst);
+    Value::Null
+}
+
+/// Arena.free() → Unit: 释放 arena 全部内存
+fn native_arena_free(_args: &[Value]) -> Value {
+    let base = ARENA_STATE.base_addr.load(Ordering::SeqCst);
+    if base.is_null() {
+        return Value::Null;
+    }
+    let capacity = ARENA_STATE.capacity.load(Ordering::SeqCst);
+    
+    #[cfg(windows)]
+    {
+        unsafe {
+            VirtualFree(base as *mut libc::c_void, 0, 0x8000); // MEM_RELEASE
+        }
+    }
+    
+    #[cfg(not(windows))]
+    {
+        unsafe {
+            libc::munmap(base as *mut libc::c_void, capacity as usize);
+        }
+    }
+    
+    ARENA_STATE.base_addr.store(std::ptr::null_mut(), Ordering::SeqCst);
+    ARENA_STATE.current_ptr.store(0, Ordering::SeqCst);
+    ARENA_STATE.capacity.store(0, Ordering::SeqCst);
+    Value::Null
+}
+
+/// Arena.usedSize() → Long: 获取已使用内存大小
+fn native_arena_used_size(_args: &[Value]) -> Value {
+    let base = ARENA_STATE.base_addr.load(Ordering::SeqCst);
+    if base.is_null() {
+        return Value::Int(0);
+    }
+    let current = ARENA_STATE.current_ptr.load(Ordering::SeqCst);
+    let start = base as usize as i64;
+    Value::Int(current - start)
+}
+
+/// Arena.remainingSize() → Long: 获取剩余内存大小
+fn native_arena_remaining_size(_args: &[Value]) -> Value {
+    let capacity = ARENA_STATE.capacity.load(Ordering::SeqCst);
+    let current = ARENA_STATE.current_ptr.load(Ordering::SeqCst);
+    Value::Int(capacity - current)
 }

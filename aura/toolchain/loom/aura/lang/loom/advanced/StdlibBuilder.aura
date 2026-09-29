@@ -2,7 +2,7 @@
 package aura.lang.loom.advanced
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.IO
 import aura.lang.std.Collections
 
@@ -28,7 +28,7 @@ class StdlibBuilder {
     }
 
     fun compileModule(modulePath: String): Int {
-        if (!FileSystem.exists(modulePath)) {
+        if (!FileUtils.exists(modulePath)) {
             IO.println("[stdlib] Module not found: " + modulePath)
             return 1
         }

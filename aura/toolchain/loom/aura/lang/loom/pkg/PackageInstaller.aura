@@ -2,7 +2,7 @@
 package aura.lang.loom.pkg
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.IO
 import aura.lang.std.Encoding
 import aura.lang.std.Time
@@ -27,11 +27,11 @@ class PackageInstaller {
 
         // Create install directory
         val installDir: String = cacheDir + "/" + meta.name + "-" + meta.version
-        if (!FileSystem.exists(cacheDir)) {
-            FileSystem.mkdirP(cacheDir)
+        if (!FileUtils.exists(cacheDir)) {
+            FileUtils.mkdirP(cacheDir)
         }
-        if (!FileSystem.exists(installDir)) {
-            FileSystem.mkdirP(installDir)
+        if (!FileUtils.exists(installDir)) {
+            FileUtils.mkdirP(installDir)
         }
 
         IO.println("[install] Installed: " + meta.name + "@" + meta.version)
@@ -42,8 +42,8 @@ class PackageInstaller {
 
     fun uninstall(name: String, version: String): Int {
         val uninstallDir: String = cacheDir + "/" + name + "-" + version
-        if (FileSystem.exists(uninstallDir)) {
-            FileSystem.delete(uninstallDir)
+        if (FileUtils.exists(uninstallDir)) {
+            FileUtils.delete(uninstallDir)
             IO.println("[uninstall] Removed: " + name + "@" + version)
             return 0
         }

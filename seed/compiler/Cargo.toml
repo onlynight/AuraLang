@@ -6,6 +6,10 @@ edition.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "aura"
+path = "src/main.rs"
+
 [dependencies]
 cranelift = { version = "0.116", optional = true }
 cranelift-jit = { version = "0.116", optional = true }
@@ -103,34 +107,8 @@ toml = "0.8"
 insta = { version = "1", features = ["yaml"] }
 tempfile = "3"
 
-# Integration tests under tests/complier/rust/ (relative: ../../tests/)
-[[test]]
-name = "package_management"
-path = "../../tests/complier/rust/package_management.rs"
-
-[[test]]
-name = "linker_tests"
-path = "../../tests/complier/rust/linker_tests.rs"
-
-[[test]]
-name = "lsp_tests"
-path = "../../tests/complier/rust/lsp_tests.rs"
-
-[[test]]
-name = "signing_tests"
-path = "../../tests/complier/rust/signing_tests.rs"
-
-[[test]]
-name = "source_map_tests"
-path = "../../tests/complier/rust/source_map_tests.rs"
-
-[[test]]
-name = "signature_tests"
-path = "../../tests/complier/rust/signature_tests.rs"
-
-[[test]]
-name = "auz_tests"
-path = "../../tests/complier/rust/auz_tests.rs"
+# Integration tests: 原 Rust 集成测试已迁移至 tests/complier/aura/*.aura（Aura 自测）
+# 旧路径 tests/complier/rust/*.rs 已不再存在。
 
 [[example]]
 name = "aot_bench"

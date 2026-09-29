@@ -66,6 +66,11 @@ class Parser {
     /// 模式位置由 `parseWhen` 的专用分支处理，不需要 `is` 二元运算符。
     private var prsNoBinaryIs: Boolean = false
 
+    /// 当前声明的可见性修饰符（由 `parseStatement` 在跳过修饰符时设置）。
+    /// 值：`"public"` / `"private"` / `"protected"` / `"internal"`。
+    /// 声明创建点将其以 `#` 前缀写入 AST 的 `ty` 字段。
+    private var prsCurVis: String = "public"
+
     /// 构造：词法分析并缓存全部 token。
     init(source: String) {
         this.lx = Lexer(source)
@@ -79,6 +84,12 @@ class Parser {
     }
 
     // ── token 访问 ──
+
+    /// 将当前可见性修饰符以 `#` 前缀写入类型字段。
+    /// 格式：`#visibility` 或 `#visibility|type`。
+    fun prsVisTy(ty: String): String {
+        return "#" + this.prsCurVis + "|" + ty
+    }
 
     /// 第 i 个 token 的种类（越界视为 `EOF`）。
     fun prsKind(i: Int): String {
@@ -535,7 +546,7 @@ class Parser {
         if (bodyNode >= 0) {
             kids = kidsAdd(kids, bodyNode)
         }
-        return this.ast.add("Function", name, retTy, this.prsCurSpan(), kids)
+        return this.ast.add("Function", name, this.prsVisTy(retTy), this.prsCurSpan(), kids)
     }
 
     /// 解析 val / var / const val 声明（顶层或语句内）。
@@ -623,7 +634,7 @@ class Parser {
             kids = kidsAdd(kids, this.parseExpr())
         }
         val nodeKind = if (k == "Val") { "ValDecl" } else { "VarDecl" }
-        return this.ast.add(nodeKind, name, ty, this.prsCurSpan(), kids)
+        return this.ast.add(nodeKind, name, this.prsVisTy(ty), this.prsCurSpan(), kids)
     }
 
     /// 解析类型声明（struct / class / object / enum / interface）。
@@ -710,7 +721,7 @@ class Parser {
                 val mergedEnum = this.ast.add("Block", "", "", this.prsCurSpan(), vkids)
                 kids = kidsAdd(kids, mergedEnum)
             }
-            return this.ast.add(kindName, name, parentName, this.prsCurSpan(), kids)
+            return this.ast.add(kindName, name, this.prsVisTy(parentName), this.prsCurSpan(), kids)
         }
         if (this.prsCheck("LBrace")) {
             val bodyId = this.parseBlock()
@@ -731,7 +742,7 @@ class Parser {
             val merged = this.ast.add("Block", "", "", this.prsCurSpan(), ctorFields)
             kids = kidsAdd(kids, merged)
         }
-        return this.ast.add(kindName, name, parentName, this.prsCurSpan(), kids)
+        return this.ast.add(kindName, name, this.prsVisTy(parentName), this.prsCurSpan(), kids)
     }
 
     /// 解析 extern object 声明：`extern object Name { ... }`
@@ -768,7 +779,7 @@ class Parser {
                 kids = kidsAdd(kids, merged)
             }
         }
-        return this.ast.add("ExternObject", name, "", this.prsCurSpan(), kids)
+        return this.ast.add("ExternObject", name, this.prsVisTy(""), this.prsCurSpan(), kids)
     }
 
     /// 解析带关键字的函数：`@native(...) fun` / `native fun` / `export fun`
@@ -1056,10 +1067,13 @@ class Parser {
             return this.parseDecl(false)
         }
         // 可见性修饰符（`private fun visit(...)` / `public val` …）：
-        // Aura 侧不建模可见性，直接跳过修饰符再解析后续声明
-        if (k == "Private" || k == "Protected" || k == "Public") {
+        // 设置 prsCurVis 后跳过修饰符再解析后续声明
+        if (k == "Private" || k == "Protected" || k == "Public" || k == "Internal") {
+            this.prsCurVis = k
             this.prsAdvance()
-            return this.parseStatement()
+            val result = this.parseStatement()
+            this.prsCurVis = "public"
+            return result
         }
         // 软关键字修饰符：**仅当后一个 token 是声明起始**时才跳过。
         // 否则 `value` / `data` 等作普通标识符使用会被误吞

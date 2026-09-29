@@ -239,6 +239,8 @@ fn eval_un(op: HirUnOp, v: &Literal) -> Option<Literal> {
 pub fn inline_hir(hir: &mut HirProgram) {
     // 收集内联候选：单表达式体（或单 Return(Some(expr))）的非递归函数
     let mut candidates: HashMap<String, (Vec<String>, HirExpr)> = HashMap::new();
+    // 重名（重载 / 模块被重复载入）的函数名：见下方 `candidates.insert` 处的说明
+    let mut ambiguous: HashSet<String> = HashSet::new();
     for f in &hir.functions {
         if f.is_native || f.type_params.len() > 0 {
             continue;
@@ -265,8 +267,38 @@ pub fn inline_hir(hir: &mut HirProgram) {
             if contains_lambda(&be) {
                 continue;
             }
+            // ⚠️ 内联体（含其嵌套块）里出现 `return` 时**绝不能内联**。
+            //
+            // 内联的语义是「把被调方的返回值表达式搬到调用点」，而 `return` 属于
+            // **被调方**的作用域。单表达式体里也可以藏 `return` —— 例如
+            // `fun aotListContains(lines: String, name: String): Boolean { … if (…) { return true } … }`
+            // 经 `block_with_trailing_return` 后就是一个 `[Expr(If{…})]` 体，
+            // 分支块里带 `Return`。搬到调用点后这些 `return` 变成**调用方**的返回，
+            // 且按调用方签名做类型转换：
+            // 实测 `AotUtil.aotListContains(seen, norm)` 被内联进
+            // `AotModuleLinker.loadPath`（返回 `String`）后，命中分支直接
+            // `ret i8* <装箱布尔>` —— 调用方拿到指针 `1` 当字符串用（`dep != ""`
+            // 的 `strcmp` 解引用 0x1）即 0xC0000005，且链路在此静默提前返回。
+            if expr_contains_return(&be) {
+                continue;
+            }
+            // ⚠️ **重名函数绝不能参与内联**。
+            //
+            // 候选表以**函数名**为键，而 HIR 中同名函数并不唯一（重载、以及同一模块
+            // 被两条不同路径重复载入时产生的整份重复声明）。重复插入会让后一份
+            // **覆盖**前一份，于是调用点被内联成「另一个同名声明的函数体」——
+            // 形参名对不上时替换失效，`Var("self")` 之类的自由变量直接漏进 IR：
+            //   `s.contains(x)` → `String.indexOf(<未定义的 %self>, s, x)`
+            // llc 报 `use of undefined value '%self'`（或侥幸通过时运行期 0xC0000005）。
+            // 名字有歧义时一律跳过内联，退化为普通调用即可（正确性优先）。
+            if candidates.contains_key(&f.name) {
+                ambiguous.insert(f.name.clone());
+            }
             candidates.insert(f.name.clone(), (params, be));
         }
+    }
+    for n in &ambiguous {
+        candidates.remove(n);
     }
 
     for f in &mut hir.functions {
@@ -275,6 +307,80 @@ pub fn inline_hir(hir: &mut HirProgram) {
         }
         let new_body = inline_block(&f.body, &candidates);
         f.body = new_body;
+    }
+}
+
+/// 表达式（含其嵌套块）中是否出现 `return` 语句。
+///
+/// 用于内联合法性判定，详见 `inline_hir` 中 `expr_contains_return` 的调用点注释。
+fn expr_contains_return(e: &HirExpr) -> bool {
+    match e {
+        HirExpr::Lit(_) | HirExpr::Var(_) => false,
+        HirExpr::Block(b) => block_contains_return(b),
+        HirExpr::Binary { lhs, rhs, .. } => expr_contains_return(lhs) || expr_contains_return(rhs),
+        HirExpr::Unary { operand, .. } => expr_contains_return(operand),
+        HirExpr::Box(i) | HirExpr::WeakRef(i) | HirExpr::Await(i) => expr_contains_return(i),
+        HirExpr::Call { args, .. } | HirExpr::New { args, .. } => {
+            args.iter().any(expr_contains_return)
+        }
+        HirExpr::CallVirtual { recv, args, .. } => {
+            expr_contains_return(recv) || args.iter().any(expr_contains_return)
+        }
+        HirExpr::Member { object, .. } => expr_contains_return(object),
+        HirExpr::Index { container, index } => {
+            expr_contains_return(container) || expr_contains_return(index)
+        }
+        HirExpr::If {
+            cond,
+            then_e,
+            else_e,
+        } => {
+            expr_contains_return(cond)
+                || expr_contains_return(then_e)
+                || expr_contains_return(else_e)
+        }
+        HirExpr::Lambda { body, .. } => block_contains_return(body),
+    }
+}
+
+fn block_contains_return(b: &HirBlock) -> bool {
+    b.stmts.iter().any(stmt_contains_return)
+}
+
+fn stmt_contains_return(s: &HirStmt) -> bool {
+    match s {
+        HirStmt::Return(_) => true,
+        HirStmt::Break | HirStmt::Continue => false,
+        HirStmt::Val { init, .. } | HirStmt::Var { init, .. } => {
+            init.as_ref().map(expr_contains_return).unwrap_or(false)
+        }
+        HirStmt::Assign { target, value } => {
+            expr_contains_return(target) || expr_contains_return(value)
+        }
+        HirStmt::Expr(e) => expr_contains_return(e),
+        HirStmt::If {
+            cond,
+            then_b,
+            else_b,
+        } => {
+            expr_contains_return(cond)
+                || block_contains_return(then_b)
+                || else_b.as_ref().map(block_contains_return).unwrap_or(false)
+        }
+        HirStmt::While { cond, body } => {
+            expr_contains_return(cond) || block_contains_return(body)
+        }
+        HirStmt::Block(b) | HirStmt::Defer(b) => block_contains_return(b),
+        HirStmt::Try {
+            body,
+            catch_body,
+            finally,
+            ..
+        } => {
+            block_contains_return(body)
+                || block_contains_return(catch_body)
+                || finally.as_ref().map(block_contains_return).unwrap_or(false)
+        }
     }
 }
 

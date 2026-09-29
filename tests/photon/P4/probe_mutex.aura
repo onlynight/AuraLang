@@ -5,12 +5,12 @@ import aura.lang.concurrent.Mutex
 
 fun main() {
     println("A")
-    var mutex: Mutex = Mutex()
-    println("B mutex=" + toStr(mutex))
-    println("Locked: " + toStr(mutex.isLocked()))
+    val lock_id: Long = Mutex()
+    println("B lock_id=" + toStr(lock_id))
+    println("Locked: " + toStr(Mutex.isLocked(lock_id)))
     println("C")
-    mutex.lock()
-    println("D locked=" + toStr(mutex.isLocked()))
-    mutex.unlock()
-    println("E unlocked=" + toStr(mutex.isLocked()))
+    Mutex.lock(lock_id)
+    println("D locked=" + toStr(Mutex.isLocked(lock_id)))
+    Mutex.unlock(lock_id)
+    println("E unlocked=" + toStr(Mutex.isLocked(lock_id)))
 }

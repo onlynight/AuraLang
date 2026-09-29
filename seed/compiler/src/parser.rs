@@ -641,12 +641,22 @@ impl Parser {
             if self.check(TokenKind::RBracket) {
                 // 空数组类型 Int[]
                 self.advance();
-                ty = Type::Array(Box::new(ty));
+                ty = Type::Array {
+                    inner: Box::new(ty),
+                    size: None,
+                };
             } else {
-                // 有界数组类型 Int[6]：解析大小表达式后丢弃
-                let _size_expr = self.parse_expression(0);
+                // 有界数组类型 Int[6]：解析大小表达式
+                let size_expr = self.parse_expression(0);
                 self.expect(TokenKind::RBracket);
-                ty = Type::Array(Box::new(ty));
+                let size = match &size_expr {
+                    Expr::Literal(Literal::Int(n), _) => Some(*n as usize),
+                    _ => None,
+                };
+                ty = Type::Array {
+                    inner: Box::new(ty),
+                    size,
+                };
             }
         }
 
@@ -678,7 +688,11 @@ impl Parser {
             self.advance();
             return Visibility::Private;
         }
-        // internal：模块级可见性（上下文关键字，AST 已有 Visibility::Internal 变体）
+        if self.check(TokenKind::Internal) {
+            self.advance();
+            return Visibility::Internal;
+        }
+        // internal：上下文关键字兜底（兼容旧路径）
         if self.is_internal_visibility() {
             self.advance();
             return Visibility::Internal;
@@ -857,13 +871,14 @@ impl Parser {
         if i < self.tokens.len()
             && matches!(
                 self.tokens[i].kind,
-                TokenKind::Public | TokenKind::Private | TokenKind::Protected
+                TokenKind::Public | TokenKind::Private | TokenKind::Protected | TokenKind::Internal
             )
         {
             vis = match self.tokens[i].kind {
                 TokenKind::Public => Visibility::Public,
                 TokenKind::Private => Visibility::Private,
                 TokenKind::Protected => Visibility::Protected,
+                TokenKind::Internal => Visibility::Internal,
                 _ => unreachable!(),
             };
             i += 1;
@@ -2299,8 +2314,12 @@ impl Parser {
                         None
                     };
                     if ann_name.as_deref() == Some("native") {
-                        // 解析 @native(...) 参数
-                        let native_attr = self.parse_native_annotation_args();
+                        // 解析 @native(...) 参数；无括号 @native fun → Builtin
+                        let native_attr = if self.check(TokenKind::LParen) {
+                            self.parse_native_annotation_args()
+                        } else {
+                            Some(NativeAttr::Builtin)
+                        };
                         self.pending_native_attr = native_attr;
                     } else if ann_name.as_deref() == Some("aot") {
                         self.pending_fn_mods.push(FnModifier::Aot);
@@ -2426,7 +2445,16 @@ impl Parser {
             "SYS_MMAP" => 9,
             "SYS_MUNMAP" => 11,
             "SYS_ACCESS" => 21,
-            "SYS_UNLINK" => 39,
+            // 旧值 39 与 `SYS_GETPID` 撞号（且 39 实为 getpid）⇒ `FileOps.unlink`
+            // 在 C 分发器里落空返回 -1。按 Linux x86_64 真实号修正。
+            "SYS_UNLINK" => 87,
+            // 文件/目录操作（`FileOps.mkdir/rmdir/rename` 用）。此前缺这三项，
+            // `@native(SYS_MKDIR)` 等被折叠成 **-1**，生成的
+            // `aura_syscall_dispatch(-1, …)` 恒被 C 层拒绝 ⇒ `FileUtils.mkdirP`
+            // 永不生效、`File.renameTo` 恒失败。
+            "SYS_MKDIR" => 83,
+            "SYS_RMDIR" => 84,
+            "SYS_RENAME" => 82,
             "SYS_EXECVE" => 59,
             "SYS_EXIT_GROUP" => 231,
             "SYS_WAIT4" => 61,

@@ -234,12 +234,14 @@ impl MappedRegion {
     /// 修改内存保护 (VirtualProtect)
     pub unsafe fn protect(&self, prot: MemoryProtection) -> Result<(), String> {
         let mut old_prot = 0u32;
-        let ok = VirtualProtect(
-            self.base as *mut libc::c_void,
-            self.size,
-            Self::alloc_protection(prot),
-            &mut old_prot,
-        );
+        let ok = unsafe {
+            VirtualProtect(
+                self.base as *mut libc::c_void,
+                self.size,
+                Self::alloc_protection(prot),
+                &mut old_prot,
+            )
+        };
         if ok { Ok(()) } else { Err("VirtualProtect failed".to_string()) }
     }
 }

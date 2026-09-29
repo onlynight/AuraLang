@@ -15,6 +15,9 @@ pub fn register_prelude(reg: &mut NativeRegistry) {
     reg.register("listOf", nat_list_of);
     reg.register("mutableListOf", nat_mutable_list_of);
     reg.register("arrayOf", nat_array_of);
+    reg.register("arrayOf2D", nat_array_of_2d);
+    reg.register("arrayOf3D", nat_array_of_3d);
+    reg.register("arrayImplOf", nat_array_impl_of);
     // ── List/集合裸名方法（`xs.get(i)` / `xs.size` 等）──
     //
     // ⚠️ 编译器对**接收者静态类型无法解析**的集合方法调用会发射**裸名** native
@@ -370,6 +373,48 @@ fn nat_empty_list(_args: &[Value]) -> Value {
 /// arrayOf(items...) → Array (stored as List)
 fn nat_array_of(args: &[Value]) -> Value {
     nat_list_of(args)
+}
+
+/// arrayImplOf(items...) → ArrayImpl (stored as List)
+fn nat_array_impl_of(args: &[Value]) -> Value {
+    nat_list_of(args)
+}
+
+/// arrayOf2D(rows, cols, fill) → List<List<Any>>
+fn nat_array_of_2d(args: &[Value]) -> Value {
+    let rows = args.get(0).map(|v| v.as_int() as usize).unwrap_or(0);
+    let cols = args.get(1).map(|v| v.as_int() as usize).unwrap_or(0);
+    let fill = args.get(2).cloned().unwrap_or(Value::Null);
+    let mut result = Vec::with_capacity(rows);
+    for _ in 0..rows {
+        let mut row = Vec::with_capacity(cols);
+        for _ in 0..cols {
+            row.push(fill.clone());
+        }
+        result.push(Value::List(row));
+    }
+    Value::List(result)
+}
+
+/// arrayOf3D(rows, cols, depth, fill) → List<List<List<Any>>>
+fn nat_array_of_3d(args: &[Value]) -> Value {
+    let rows = args.get(0).map(|v| v.as_int() as usize).unwrap_or(0);
+    let cols = args.get(1).map(|v| v.as_int() as usize).unwrap_or(0);
+    let depth = args.get(2).map(|v| v.as_int() as usize).unwrap_or(0);
+    let fill = args.get(3).cloned().unwrap_or(Value::Null);
+    let mut result = Vec::with_capacity(rows);
+    for _ in 0..rows {
+        let mut layer = Vec::with_capacity(cols);
+        for _ in 0..cols {
+            let mut row = Vec::with_capacity(depth);
+            for _ in 0..depth {
+                row.push(fill.clone());
+            }
+            layer.push(Value::List(row));
+        }
+        result.push(Value::List(layer));
+    }
+    Value::List(result)
 }
 
 /// listContains(list, item) → Bool

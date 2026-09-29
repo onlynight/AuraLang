@@ -1,0 +1,88 @@
+// aura:///aura/lang/collection/ArrayImpl.aura
+package aura.lang.collection
+
+import aura.lang.collection.Collection
+import aura.lang.collection.List
+
+/// Array<T> 具体实现类（基于动态数组的定长语义包装）。
+///
+/// - 实现 Collection<T> + Array<T> 接口
+/// - 内部使用 ArrayList 存储，支持按下标读写
+/// - 支持多维嵌套（Array<Array<T>>）
+///
+/// @see Array, Collection, ArrayList
+/// @since 0.5
+class ArrayImpl<T> : Array<T> {
+
+    private var data: List<T>
+
+    /// 创建空数组
+    constructor() {
+        this.data = arrayListOf<T>()
+    }
+
+    /// 基于已有列表创建数组
+    constructor(data: List<T>) {
+        this.data = data
+    }
+
+    override fun count(): Int {
+        return this.data.size
+    }
+
+    override fun getAt(index: Int): T {
+        return this.data[index]
+    }
+
+    override fun set(index: Int, value: T): Unit {
+        this.data[index] = value
+    }
+
+    override fun toList(): List<T> {
+        return this.data
+    }
+
+    override fun contains(item: T): Boolean {
+        var i: Int = 0
+        while (i < this.data.size) {
+            if (this.data[i] == item) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    override fun indexOf(item: T): Int {
+        var i: Int = 0
+        while (i < this.data.size) {
+            if (this.data[i] == item) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    override fun isEmpty(): Boolean {
+        return this.data.size == 0
+    }
+
+    override fun first(): T {
+        if (this.data.size == 0) {
+            throw "Array is empty"
+        }
+        return this.data[0]
+    }
+
+    override fun last(): T {
+        if (this.data.size == 0) {
+            throw "Array is empty"
+        }
+        return this.data[this.data.size - 1]
+    }
+
+    override fun toString(): String {
+        return this.data.toString()
+    }
+}

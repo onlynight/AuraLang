@@ -1,0 +1,51 @@
+// aura:///aura/lang/std/io/StreamImpl.aura
+package aura.lang.std.io
+
+import aura.lang.native.Memory
+import aura.lang.native.console.Console
+import aura.lang.native.io.Stdio
+import aura.lang.native.memory.Allocator
+import aura.lang.std.io.StdInputStream
+import aura.lang.std.io.StdOutputStream
+
+/// 标准流实现工厂。
+///
+/// 提供默认的标准输出流和标准输入流实现。
+/// 本模块不直接面向开发者，仅供 IO.aura 和 Console.aura 内部使用。
+///
+/// @since 0.3
+object StreamImpl {
+
+    /// 换行字节缓冲（懒初始化，全生命周期复用）。
+    var nlBuf: Long = 0
+
+    /// 将 Aura String 转换为 C 缓冲区并通过 writeStdout 写出。
+    private fun writeOut(msg: String, addNewline: Boolean): Unit {
+        val buf: Long = Stdio.stringToBuffer(msg)
+        if (buf == 0) { return }
+        val len: Long = Stdio.strlen(buf)
+        Console.writeStdout(buf, len)
+        if (addNewline) {
+            if (nlBuf == 0) {
+                nlBuf = Allocator.malloc(1)
+                if (nlBuf != 0) {
+                    Memory.write(nlBuf, 10)
+                }
+            }
+            if (nlBuf != 0) {
+                Console.writeStdout(nlBuf, 1)
+            }
+        }
+        Allocator.free(buf)
+    }
+
+    /// 创建默认标准输出流。
+    fun defaultStdout(): OutputStream {
+        return StdOutputStream()
+    }
+
+    /// 创建默认标准输入流。
+    fun defaultStdin(): InputStream {
+        return StdInputStream()
+    }
+}

@@ -39,8 +39,11 @@ pub enum Ty {
     /// 指针类型 Pointer<T>（FFI）
     Pointer(Box<Ty>),
 
-    /// 数组/集合类型
-    Array(Box<Ty>),
+    /// 数组/集合类型（含定长大小信息）
+    Array {
+        inner: Box<Ty>,
+        size: Option<usize>,
+    },
     /// 列表类型 List<T>
     List(Box<Ty>),
     /// 映射类型 Map<K, V>
@@ -116,7 +119,12 @@ impl Ty {
             crate::ast::Type::Nothing => Ty::Nothing,
             crate::ast::Type::Nullable(inner) => Ty::Nullable(Box::new(Ty::from_ast(inner))),
             crate::ast::Type::Pointer(inner) => Ty::Pointer(Box::new(Ty::from_ast(inner))),
-            crate::ast::Type::Array(inner) => Ty::Array(Box::new(Ty::from_ast(inner))),
+            crate::ast::Type::Array { inner, size } => {
+                Ty::Array {
+                    inner: Box::new(Ty::from_ast(inner)),
+                    size: *size,
+                }
+            }
             crate::ast::Type::Named { name, .. } => match name.as_str() {
                 "Int" => Ty::Int,
                 "Long" => Ty::Long,
@@ -209,12 +217,30 @@ impl Ty {
         if target == &Ty::Any || target == &Ty::Error || self == &Ty::Error {
             return true;
         }
+        // Any 可作为顶层类型赋给任何类型（字面量类型推断场景）
+        if *self == Ty::Any {
+            return true;
+        }
         if self.is_numeric() && target.is_numeric() {
             return true;
         }
         // List 类型兼容：List<T> 可赋给 List<U>（简化处理）
         if let (Ty::List(_), Ty::List(_)) = (self, target) {
             return true;
+        }
+        // List→Array 兼容：List<T> 可赋给 Array<T>（字面量赋给数组声明）
+        if let (Ty::List(e1), Ty::Array { inner: e2, .. }) = (self, target) {
+            return e1.can_assign_to(e2);
+        }
+        // Named("ArrayList") → Array 兼容
+        if let (Ty::Named(n), Ty::Array { .. }) = (self, target) {
+            if n == "ArrayList" || n == "MutableList" {
+                return true;
+            }
+        }
+        // Array→Array 兼容（多维内层赋值）
+        if let (Ty::Array { inner: i1, .. }, Ty::Array { inner: i2, .. }) = (self, target) {
+            return i1.can_assign_to(i2);
         }
         // Ty::Named("List") 可赋给 Ty::List(_) 和 Ty::Named("List")
         if let Ty::Named(n) = self {
@@ -267,7 +293,13 @@ impl Ty {
             Ty::Unit => "Unit".into(),
             Ty::Nullable(inner) => format!("{}?", inner.name()),
             Ty::Pointer(inner) => format!("Pointer<{}>", inner.name()),
-            Ty::Array(inner) => format!("Array<{}>", inner.name()),
+            Ty::Array { inner, size } => {
+                if let Some(n) = size {
+                    format!("{}[{}]", inner.name(), n)
+                } else {
+                    format!("Array<{}>", inner.name())
+                }
+            }
             Ty::List(inner) => format!("List<{}>", inner.name()),
             Ty::Map(k, v) => format!("Map<{}, {}>", k.name(), v.name()),
             Ty::Named(n) => n.clone(),

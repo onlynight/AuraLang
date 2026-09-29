@@ -1,6 +1,6 @@
 // tests/photon/S3/03_process_test.aura
 import aura.lang.std.Process
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 
 fun main() {
     println("Testing Process.run...")
@@ -8,8 +8,8 @@ fun main() {
     println("Return code: " + rc)
     
     // 测试写文件
-    FileSystem.writeText("build/photon/test_process.txt", "test content")
-    println("File exists: " + FileSystem.exists("build/photon/test_process.txt"))
+    FileUtils.writeText("build/photon/test_process.txt", "test content")
+    println("File exists: " + FileUtils.exists("build/photon/test_process.txt"))
     
     // 测试 PowerShell 命令
     val rc2 = Process.run("powershell -Command \"Write-Output 'hello_from_ps'\"")

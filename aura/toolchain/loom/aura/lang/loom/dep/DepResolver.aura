@@ -6,7 +6,7 @@ package aura.lang.loom.dep
 // @since 0.6
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Collections
 import aura.lang.loom.dep.Dependency
 import aura.lang.loom.dep.LockFile
@@ -52,7 +52,7 @@ class DepResolver {
         
         // 本地路径依赖
         if (dep.path.length > 0) {
-            if (FileSystem.exists(dep.path)) {
+            if (FileUtils.exists(dep.path)) {
                 val version: String = resolveLocalVersion(dep.path)
                 val node: DependencyNode = DependencyNode(dep.name, version)
                 graph.addNode(node)
@@ -67,8 +67,8 @@ class DepResolver {
 
     private fun resolveLocalVersion(path: String): String {
         val manifestPath: String = path + "/aura.toml"
-        if (FileSystem.exists(manifestPath)) {
-            val content: String = FileSystem.readText(manifestPath)
+        if (FileUtils.exists(manifestPath)) {
+            val content: String = FileUtils.readText(manifestPath)
             val lines: List<String> = String.splitLines(content)
             var i: Int = 0
             while (i < lines.size) {

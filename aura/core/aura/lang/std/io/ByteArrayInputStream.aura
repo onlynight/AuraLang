@@ -1,0 +1,66 @@
+// aura:///aura/lang/std/io/ByteArrayInputStream.aura
+package aura.lang.std.io
+
+import aura.lang.native.Memory
+
+/// 字节数组输入流（从内存读取）。
+///
+/// 从 Aura String 数据读取字节。
+/// `read` 逐字节写入外部缓冲区，`readLine` 读取一行，`readAll` 读取全部剩余。
+///
+/// ```aura
+/// val is: InputStream = ByteArrayInputStream("Hello, World!")
+/// val line: String = is.readLine()
+/// val all: String = is.readAll()
+/// is.close()
+/// ```
+///
+/// @since 0.3
+class ByteArrayInputStream : InputStream {
+
+    private var data: String = ""
+    private var pos: Int = 0
+
+    /// 从字符串数据创建输入流。
+    init(data: String) {
+        this.data = data
+        this.pos = 0
+    }
+
+    override fun read(buffer: Long, count: Int): Int {
+        val remaining: Int = data.length - pos
+        if (remaining <= 0) { return 0 }
+        val toRead: Int = if (count < remaining) { count } else { remaining }
+        var i: Int = 0
+        while (i < toRead) {
+            Memory.write(buffer + i, data.charCodeAt(pos + i) as Byte)
+            pos = pos + 1
+            i = i + 1
+        }
+        return toRead
+    }
+
+    override fun readLine(): String {
+        if (pos >= data.length) { return "" }
+        var end: Int = pos
+        while (end < data.length) {
+            if (data.charCodeAt(end) == 10) { break }
+            end = end + 1
+        }
+        val line: String = data.substring(pos, end)
+        pos = end + 1
+        return line
+    }
+
+    override fun readAll(): String {
+        if (pos >= data.length) { return "" }
+        val remaining: String = data.substring(pos, data.length)
+        pos = data.length
+        return remaining
+    }
+
+    override fun close(): Unit {
+        this.data = ""
+        this.pos = 0
+    }
+}

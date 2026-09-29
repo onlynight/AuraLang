@@ -17,7 +17,7 @@ package aura.lang.compiler.signature
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Json
 import aura.lang.std.Encoding
 import aura.lang.compiler.lexer.Span
@@ -749,12 +749,12 @@ object SignatureUtils {
     /// 写入 .sig 文件。
     fun writeSig(path: String, sig: ModuleSig): Boolean {
         val data: String = SignatureUtils.sigToBytes(sig)
-        return FileSystem.writeFile(path, data)
+        return FileUtils.writeFile(path, data)
     }
 
     /// 读取 .sig 文件。
     fun readSig(path: String): ModuleSig {
-        val data: String = FileSystem.readFile(path)
+        val data: String = FileUtils.readFile(path)
         return SignatureUtils.sigFromBytes(data)
     }
 

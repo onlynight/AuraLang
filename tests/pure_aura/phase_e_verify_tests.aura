@@ -1,11 +1,11 @@
-﻿// Phase E.5: �?Aura 化工具链验证测试
+// Phase E.5: �?Aura 化工具链验证测试
 //
 // 对应改造方�?E.5「验证」章节�?// 验证�?Aura 工具链（AuraCli / AuraLsp / AuraDebugger / Loom�?// 的核心功能�?//
 // 运行：aura run tests/pure_aura/phase_e_verify_tests.aura
 
 import aura.lang.std.String
 import aura.lang.std.IO
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Process
 import aura.lang.std.Collections
 import aura.lang.std.Assert
@@ -19,7 +19,7 @@ fun testExec(cmd: String): Int {
 }
 
 fun testFileExists(path: String): Boolean {
-    return FileSystem.exists(path)
+    return FileUtils.exists(path)
 }
 
 // ── E.5.1: aura --help 验证 ──

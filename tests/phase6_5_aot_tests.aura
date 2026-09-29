@@ -20,7 +20,7 @@
 // ═════════════════════════════════════════════════════════════
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Process
 
 import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
@@ -267,7 +267,7 @@ fun testStdSignatureTable(): Int {
     // 表内查询（唯一真相源）
     t.assertEq(stdSignature("aura_lang_std_Math_sqrt"), "double|double", "Math.sqrt signature")
     t.assertEq(stdSignature("aura_lang_std_String_split"), "i8*|i8*, i8*", "String.split signature")
-    t.assertEq(stdSignatureFor("FileSystem", "writeText"), "void|i8*, i8*", "FileSystem.writeText")
+    t.assertEq(stdSignatureFor("FileUtils", "writeText"), "void|i8*, i8*", "FileUtils.writeText")
     t.assertEq(stdSignatureFor("Collections", "getAt"), "i8*|i8*, i64", "Collections.getAt")
     t.assertEq(stdSignature("aura_lang_std_NoSuchFn"), "", "unknown std symbol")
 
@@ -623,8 +623,8 @@ fun testVerifyGate(): Int {
     t.assertEq(r.llcExit, 0, "llc accepted IR")
     t.assertEq(r.irError, "", "no llc error")
     t.assertTrue(r.llcLog != "", "llc log path recorded")
-    t.assertTrue(FileSystem.exists(r.llPath), ".ll retained")
-    t.assertTrue(FileSystem.exists(r.exePath), "exe produced")
+    t.assertTrue(FileUtils.exists(r.llPath), ".ll retained")
+    t.assertTrue(FileUtils.exists(r.exePath), "exe produced")
 
     // 非法 IR（返回类型不符：`Int` 函数返回结构体实例）须被 llc 门禁拦下，
     // 并保留现场供定位。
@@ -634,8 +634,8 @@ fun testVerifyGate(): Int {
         "fun main(): Int {\n    val p = P()\n    return p\n}\n")
     t.assertFalse(bad.ok, "invalid IR rejected")
     t.assertTrue(bad.irError != "", "llc error captured")
-    t.assertTrue(FileSystem.exists(bad.llPath), ".ll kept on failure")
-    t.assertTrue(FileSystem.exists(bad.llcLog), "llc log kept on failure")
+    t.assertTrue(FileUtils.exists(bad.llPath), ".ll kept on failure")
+    t.assertTrue(FileUtils.exists(bad.llcLog), "llc log kept on failure")
     t.assertEq(bad.clangExit, 0, "clang skipped after llc failure")
 
     return t.report()
@@ -655,10 +655,10 @@ fun testModuleLink(): Int {
         "aura/compiler/aura/lang/compiler/lexer/Span.aura", "dotted import resolution")
 
     // 构造双文件夹具（写入 build/，不污染源码树）
-    FileSystem.mkdirP("build/aot-p65/ml/lib")
-    FileSystem.writeText("build/aot-p65/ml/lib/util.aura",
+    FileUtils.mkdirP("build/aot-p65/ml/lib")
+    FileUtils.writeText("build/aot-p65/ml/lib/util.aura",
         "fun add(a: Int, b: Int): Int {\n    return a + b\n}\n")
-    FileSystem.writeText("build/aot-p65/ml/main.aura",
+    FileUtils.writeText("build/aot-p65/ml/main.aura",
         "import \"lib/util.aura\"\nfun main(): Int {\n    return add(40, 2)\n}\n")
 
     val l = AotModuleLinker()

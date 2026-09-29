@@ -8,7 +8,7 @@ import "../../../aura/photon/aura/lang/compiler/photon/MachineDag.aura"
 import "../../../aura/photon/aura/lang/compiler/photon/InstructionSelection.aura"
 
 fun main() {
-    println("══�?Debug Select ══�?)
+    println("═══Debug Select ═══")
 
     // Test 1: empty program
     println("[1] empty program")

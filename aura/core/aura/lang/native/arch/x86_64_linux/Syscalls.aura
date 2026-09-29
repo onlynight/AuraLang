@@ -59,6 +59,7 @@ extern interface Syscalls {
     @native(57) fun fork(): Int
     @native(59) fun execve(path: Long, argv: Long, envp: Long): Int
     @native(61) fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
+    @native(60) fun exit(code: Int)
     @native(231) fun exitGroup(code: Int)
 
     // ── 文件操作（目录）──

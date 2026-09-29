@@ -9,7 +9,7 @@ import aura.lang.std.String
 import aura.lang.std.IO
 import aura.lang.std.Collections
 import aura.lang.std.Time
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 
 // ═══════════════════════════════════════════════════════════════
 // Watch 模式
@@ -60,7 +60,7 @@ class Watcher {
         var i: Int = 0
         while (i < watchPaths.size) {
             val path: String = watchPaths[i]
-            if (FileSystem.exists(path)) {
+            if (FileUtils.exists(path)) {
                 // 简化：跳过实际文件监控
             }
             i = i + 1

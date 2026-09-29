@@ -20,7 +20,7 @@ package aura.lang.compiler.auz
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.Path
 import aura.lang.std.Tar
 import aura.lang.std.Zstd
@@ -259,7 +259,7 @@ class PackageBuilder {
 
         // 4. 源码附件
         if (this.options.includeSources && this.sourceDir.length > 0) {
-            // 源码目录处理在实际打包时由 FileSystem 扫描
+            // 源码目录处理在实际打包时由 FileUtils 扫描
         }
 
         // 5. 计算校验和
@@ -286,7 +286,7 @@ class PackageBuilder {
         result.fileCount = files.length
         result.manifest = this.manifest
 
-        FileSystem.writeFile(outputPath, compressed)
+        FileUtils.writeFile(outputPath, compressed)
 
         return result
     }
@@ -338,7 +338,7 @@ class PackageReader {
 
     /// 从文件读取 .auz 包。
     fun readFile(path: String): PackageContent {
-        val bytes: String = FileSystem.readFile(path)
+        val bytes: String = FileUtils.readFile(path)
         if (bytes == null || bytes.length < 4) {
             return null
         }

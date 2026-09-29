@@ -235,7 +235,7 @@ signature/  Signature                          — 签名表
 Main.aura   — 编译器入口骨架
 `
 
-Photon 原生后端模块位于 ura/photon/aura/lang/compiler/photon/：
+Photon 原生后端模块位于 aura/photon/aura/lang/compiler/photon/：
 
 `
 PhotonPipeline, PhotonDriver, PhotonHatCompile  — 管线与 HAT 链路驱动

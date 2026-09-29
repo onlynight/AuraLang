@@ -1,0 +1,127 @@
+// tests/array/array_matrix_ops.aura
+// P3: 矩阵操作测试（自包含，不依赖新标准库函数）
+// 测试: transpose、flatten、multiply、forEach2D、map2D
+
+// 转置矩阵：[rows][cols] → [cols][rows]
+fun transpose(m: List<List<Int>>): List<List<Int>> {
+    if (m.size == 0) {
+        return arrayListOf<List<Int>>()
+    }
+    val rows: Int = m.size
+    val cols: Int = m[0].size
+    var result = arrayListOf<List<Int>>()
+    var j: Int = 0
+    while (j < cols) {
+        var newCol = arrayListOf<Int>()
+        var i: Int = 0
+        while (i < rows) {
+            newCol.add(m[i][j])
+            i = i + 1
+        }
+        result.add(newCol)
+        j = j + 1
+    }
+    return result
+}
+
+// 展平二维数组 → 一维列表
+fun flatten(m: List<List<Any>>): List<Any> {
+    var result = arrayListOf<Any>()
+    var i: Int = 0
+    while (i < m.size) {
+        var j: Int = 0
+        while (j < m[i].size) {
+            result.add(m[i][j])
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// 矩阵乘法（Int 矩阵）
+fun multiply(a: List<List<Int>>, b: List<List<Int>>): List<List<Int>> {
+    if (a.size == 0 || b.size == 0 || a[0].size == 0 || b[0].size == 0) {
+        return arrayListOf<List<Int>>()
+    }
+    val rowsA: Int = a.size
+    val colsA: Int = a[0].size
+    val colsB: Int = b[0].size
+    if (colsA != b.size) {
+        throw "matrix dimensions mismatch"
+    }
+    var result = arrayListOf<List<Int>>()
+    var i: Int = 0
+    while (i < rowsA) {
+        var newRow = arrayListOf<Int>()
+        var j: Int = 0
+        while (j < colsB) {
+            var sum: Int = 0
+            var k: Int = 0
+            while (k < colsA) {
+                sum = sum + a[i][k] * b[k][j]
+                k = k + 1
+            }
+            newRow.add(sum)
+            j = j + 1
+        }
+        result.add(newRow)
+        i = i + 1
+    }
+    return result
+}
+
+fun main() {
+    // 1. transpose 转置
+    var matrix = arrayListOf(
+        arrayListOf(1, 2, 3),
+        arrayListOf(4, 5, 6)
+    )
+    var t = transpose(matrix)
+    println("transpose rows = " + toStr(t.size))
+    println("transpose cols = " + toStr(t[0].size))
+    println("t[0][0] = " + toStr(t[0][0]))
+    println("t[2][1] = " + toStr(t[2][1]))
+
+    // 2. flatten 展平
+    var flat = flatten(matrix)
+    println("flatten size = " + toStr(flat.size))
+    println("flat[0] = " + toStr(flat[0]))
+    println("flat[5] = " + toStr(flat[5]))
+
+    // 3. matrixMultiply 矩阵乘法
+    var a = arrayListOf(
+        arrayListOf(1, 2),
+        arrayListOf(3, 4)
+    )
+    var b = arrayListOf(
+        arrayListOf(5, 6),
+        arrayListOf(7, 8)
+    )
+    var product = multiply(a, b)
+    println("multiply result[0][0] = " + toStr(product[0][0]))
+    println("multiply result[0][1] = " + toStr(product[0][1]))
+    println("multiply result[1][0] = " + toStr(product[1][0]))
+    println("multiply result[1][1] = " + toStr(product[1][1]))
+
+    // 4. 创建二维数组（使用嵌套 arrayListOf）
+    var m2d = arrayListOf(
+        arrayListOf(1, 2, 3),
+        arrayListOf(4, 5, 6),
+        arrayListOf(7, 8, 9)
+    )
+    println("m2d rows = " + toStr(m2d.size))
+    println("m2d cols = " + toStr(m2d[0].size))
+    println("m2d[1][1] = " + toStr(m2d[1][1]))
+
+    // 5. 创建三维数组
+    var m3d = arrayListOf(
+        arrayListOf(arrayListOf(1, 2), arrayListOf(3, 4)),
+        arrayListOf(arrayListOf(5, 6), arrayListOf(7, 8))
+    )
+    println("m3d layers = " + toStr(m3d.size))
+    println("m3d[0][0] = " + toStr(m3d[0][0]))
+    println("m3d[1][1][1] = " + toStr(m3d[1][1][1]))
+
+    println("P3 array_matrix_ops: all tests passed")
+}

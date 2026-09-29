@@ -22,7 +22,7 @@ package aura.lang.compiler.aot
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.parser.Parser
 import aura.lang.compiler.hir.Hir
@@ -116,8 +116,8 @@ class AotModuleLinker {
         while (i < pathCount) {
             val p: String = aotLineAt(paths, i)
             val norm: String = ModuleLinkUtils.normalizePath(p)
-            if (norm != "" && FileSystem.exists(norm) && this.cacheGet(norm) == "") {
-                val content: String = FileSystem.readText(norm)
+            if (norm != "" && FileUtils.exists(norm) && this.cacheGet(norm) == "") {
+                val content: String = FileUtils.readText(norm)
                 this.cacheBlob = this.cacheBlob + norm + "\n" + toStr(content.length) + "\n" + content
             }
             i = i + 1
@@ -178,7 +178,7 @@ class AotModuleLinker {
         if (aotListContains(this.seen, norm)) {
             return hirNoKids()
         }
-        if (!FileSystem.exists(norm)) {
+        if (!FileUtils.exists(norm)) {
             this.missing = this.missing + norm + "\n"
             return hirNoKids()
         }
@@ -190,7 +190,7 @@ class AotModuleLinker {
         if (cached != "") {
             source = cached
         } else {
-            source = FileSystem.readText(norm)
+            source = FileUtils.readText(norm)
         }
         val p: Parser = Parser(source)
         p.parseProgram()
@@ -202,6 +202,20 @@ class AotModuleLinker {
         // 分段收集、最后一次归并：`out = appendKids(out, …)` 在整棵导入树上是
         // O(n²) 复制，且 AOT 运行时没有 GC —— 链接阶段就能吃掉数 GB 内存。
         var parts: List<String> = arrayListOf<String>()
+        // 0) 同包名自动导入：若当前文件有 package 声明，自动加载同包下所有 .aura 文件
+        val pkgName: String = this.extractPackage(ast)
+        if (pkgName != "") {
+            val siblings: String = this.findSiblingAuraFiles(pkgName, norm)
+            var si: Int = 0
+            while (si < aotLineCount(siblings)) {
+                val sib: String = aotLineAt(siblings, si)
+                val dep: String = this.loadPath(sib)
+                if (dep != "") {
+                    parts.add(dep)
+                }
+                si = si + 1
+            }
+        }
         // 1) 先展开 import（被依赖模块的声明在前）
         var i: Int = 0
         while (i < ast.count) {
@@ -284,10 +298,16 @@ class AotModuleLinker {
         // 候选根目录（按优先级）：
         //   aura/compiler/    — Aura 编译器本体
         //   aura/core/        — 核心库与标准库
+        //   aura/photon/      — Photon 后端（独立子项目树）
+        //   aura/runtime/     — 运行时
+        //   aura/seed/        — 种子 VM
         //   aura/toolchain/*  — 纯 Aura 工具链（cli / lsp / debugger / loom）
         //   <rel>             — 相对仓库根的裸路径
         val candidates: String = "aura/compiler/" + rel + ".aura\n" +
             "aura/core/" + rel + ".aura\n" +
+            "aura/photon/" + rel + ".aura\n" +
+            "aura/runtime/" + rel + ".aura\n" +
+            "aura/seed/" + rel + ".aura\n" +
             "aura/toolchain/cli/" + rel + ".aura\n" +
             "aura/toolchain/lsp/" + rel + ".aura\n" +
             "aura/toolchain/debugger/" + rel + ".aura\n" +
@@ -297,10 +317,115 @@ class AotModuleLinker {
         val n: Int = aotLineCount(candidates)
         while (i < n) {
             val c: String = ModuleLinkUtils.normalizePath(aotLineAt(candidates, i))
-            if (FileSystem.exists(c)) {
+            if (FileUtils.exists(c)) {
                 return c
             }
             i = i + 1
+        }
+        return ""
+    }
+
+    /// 从 AST 中提取 package 声明（未声明返回 ""）。
+    fun extractPackage(ast: Ast): String {
+        var i: Int = 0
+        while (i < ast.count) {
+            if (ast.kindOf(i) == "Package") {
+                return ast.textOf(i)
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 查找同包下的所有 .aura 文件（排除自身）。
+    /// 使用预生成的索引文件 `aura/.aura_index.txt`（格式：`package|relativePath`），
+    /// 避免运行时目录遍历（Aura FileUtils 在 AOT 模式下不支持 listDir）。
+    fun findSiblingAuraFiles(pkgName: String, selfPath: String): String {
+        if (pkgName == "") {
+            return ""
+        }
+        // 确定 aura/ 根目录
+        val auraRoot: String = this.findAuraRoot(selfPath)
+        if (auraRoot == "") {
+            return ""
+        }
+        // 读取索引文件
+        val indexPath: String = auraRoot + "/.aura_index.txt"
+        if (!FileUtils.exists(indexPath)) {
+            return ""
+        }
+        val indexContent: String = FileUtils.readText(indexPath)
+        if (indexContent == "") {
+            return ""
+        }
+        // 遍历索引，收集同包文件
+        var out: String = ""
+        var pos: Int = 0
+        val len: Int = indexContent.length
+        while (pos < len) {
+            // 找到下一个换行
+            var nl: Int = -1
+            var i: Int = pos
+            while (i < len) {
+                if (indexContent.charCodeAt(i) == 10) {
+                    nl = i
+                    break
+                }
+                i = i + 1
+            }
+            if (nl < 0) {
+                break
+            }
+            val line: String = aotSlice(indexContent, pos, nl - pos)
+            if (line != "") {
+                // 查找 '|' 分隔符
+                var sep: Int = -1
+                var j: Int = 0
+                while (j < line.length) {
+                    if (line.charCodeAt(j) == 124) {
+                        sep = j
+                        break
+                    }
+                    j = j + 1
+                }
+                if (sep > 0) {
+                    val pkg: String = aotSlice(line, 0, sep)
+                    val relPath: String = aotSlice(line, sep + 1, line.length - sep - 1)
+                    if (pkg == pkgName) {
+                        // 构造完整路径并排除自身
+                        val fullPath: String = ModuleLinkUtils.joinPath(auraRoot, relPath)
+                        val normFull: String = ModuleLinkUtils.normalizePath(fullPath)
+                        if (normFull != selfPath) {
+                            out = out + normFull + "\n"
+                        }
+                    }
+                }
+            }
+            pos = nl + 1
+        }
+        return out
+    }
+
+    /// 从文件路径中提取 aura/ 根目录。
+    /// 例如：`aura/compiler/...` → `aura`
+    ///       `D:\Code\AuraLang\aura\compiler\...` → `D:\Code\AuraLang\aura`
+    fun findAuraRoot(path: String): String {
+        // 查找 "aura/" 段（路径中第一个 "aura/" 之前的部分）
+        var pos: Int = 0
+        var len: Int = path.length
+        while (pos < len) {
+            // 查找 "aura" 字符串
+            if (pos + 4 <= len && aotSlice(path, pos, 4) == "aura") {
+                // 检查后面是否是分隔符
+                if (pos + 4 >= len) {
+                    return aotSlice(path, 0, pos + 4)
+                }
+                val next: Int = path.charCodeAt(pos + 4)
+                if (next == 47 || next == 92) {  // '/' or '\\'
+                    return aotSlice(path, 0, pos + 4)
+                }
+            }
+            pos = pos + 1
         }
         return ""
     }
@@ -316,7 +441,7 @@ object ModuleLinkUtils {
 
     /// Phase B.3：自动包含的 std 模块路径列表（换行分隔）。
     ///
-    /// 当用户代码引用 String/Math/FileSystem 等 std 类时，对应的 Aura 实现
+    /// 当用户代码引用 String/Math/FileUtils 等 std 类时，对应的 Aura 实现
     /// 必须参与编译。这些模块通过 `@native` 声明底层 syscall/asm，再由
     /// Phase A 的 emitNativeWrapper 直接生成 LLVM IR（无 C 运行库）。
     ///
@@ -356,7 +481,7 @@ object ModuleLinkUtils {
             // Phase P1-P3: 纯 Aura 标准库模块（已验证可自动包含）
             "aura/core/aura/lang/std/string/StringBuilder.aura\n" +
             "aura/core/aura/lang/collection/Collections.aura\n" +
-            "aura/core/aura/lang/std/FileSystem.aura\n" +
+            "aura/core/aura/lang/std/fs/FileUtils.aura\n" +
             "aura/core/aura/lang/native/file/FileOps.aura\n" +
             "aura/core/aura/lang/std/string/StringOps.aura\n" +
             "aura/core/aura/lang/native/process/ProcessNative.aura\n"

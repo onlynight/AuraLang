@@ -1,4 +1,4 @@
-# AuraLang CLI 二进制拆分方案
+﻿# AuraLang CLI 二进制拆分方案
 
 > **状态**：方案已确认 → 待实施
 > **日期**：2026-07-02
@@ -8,7 +8,7 @@
 
 ## 1. 目标
 
-将当前 Rust `rust/cli/` crate 中**大而全的 `aura.exe`** 拆分为 **四个职责单一的二进制**，同时保持 `loom.exe`、`auralsp.exe`、`aurad.exe` 三个独立工具。Photon 原生编译后端从 `aura build -b photon` 中剥离，独立为 `photon.exe`。
+将当前 Rust `seed/compiler/` crate 中**大而全的 `aura.exe`** 拆分为 **四个职责单一的二进制**，同时保持 `loom.exe`、`auralsp.exe`、`aurad.exe` 三个独立工具。Photon 原生编译后端从 `aura build -b photon` 中剥离，独立为 `photon.exe`。
 
 同一套命名和职责拆分也适用于 Aura 自举 / 纯 Aura 实现后的工具链产物：最终对外工具名保持一致，只是编译路径从 Rust 产物切换为 Aura 源码经 `photon.exe` / `aurac.exe` 生成的产物。无过渡期，所有命令直接迁移到位。
 
@@ -28,15 +28,15 @@
 
 ```
 AuraLang
-├── rust/compiler/           (lib only)
-├── rust/cli/
+├── seed/compiler/           (lib only)
+├── seed/compiler/
 │   ├── src/main.rs           → aura.exe      (运行时)
 │   ├── src/compiler_main.rs  → aurac.exe     (编译器)   [新增]
 │   ├── src/package_main.rs   → aurap.exe     (包管理)   [新增]
 │   ├── src/photon_main.rs    → photon.exe    (Photon 原生编译器)   [新增]
 │   ├── src/lsp_main.rs       → auralsp.exe   (LSP，原 aura-lsp)
 │   └── src/debugger_main.rs  → aurad.exe     (调试器，原 aura-debug)
-└── rust/loom/
+└── seed/compiler/
     └── src/main.rs           → loom.exe      (构建系统)
 ```
 
@@ -200,7 +200,7 @@ AuraLang
 
 ## 4. 各二进制产物配置
 
-### 4.1 Rust 实现路径：`rust/cli/Cargo.toml`
+### 4.1 Rust 实现路径：`seed/compiler/Cargo.toml`
 
 ```toml
 [package]
@@ -264,12 +264,12 @@ debugger = "toolchain/cli/debugger/Main.aura"
 
 | Rust 入口 | Aura 入口 | 输出二进制 |
 |-----------|-----------|------------|
-| `rust/cli/src/compiler_main.rs` | `toolchain/cli/compiler/Main.aura` | `aurac.exe` |
-| `rust/cli/src/main.rs` | `toolchain/cli/runtime/Main.aura` | `aura.exe` |
-| `rust/cli/src/package_main.rs` | `toolchain/cli/package/Main.aura` | `aurap.exe` |
-| `rust/cli/src/photon_main.rs` | `toolchain/cli/photon/Main.aura` | `photon.exe` |
-| `rust/cli/src/lsp_main.rs` | `toolchain/cli/lsp/Main.aura` | `auralsp.exe` |
-| `rust/cli/src/debugger_main.rs` | `toolchain/cli/debugger/Main.aura` | `aurad.exe` |
+| `seed/compiler/src/compiler_main.rs` | `toolchain/cli/compiler/Main.aura` | `aurac.exe` |
+| `seed/compiler/src/main.rs` | `toolchain/cli/runtime/Main.aura` | `aura.exe` |
+| `seed/compiler/src/package_main.rs` | `toolchain/cli/package/Main.aura` | `aurap.exe` |
+| `seed/compiler/src/photon_main.rs` | `toolchain/cli/photon/Main.aura` | `photon.exe` |
+| `seed/compiler/src/lsp_main.rs` | `toolchain/cli/lsp/Main.aura` | `auralsp.exe` |
+| `seed/compiler/src/debugger_main.rs` | `toolchain/cli/debugger/Main.aura` | `aurad.exe` |
 
 ### 4.3 各二进制编译 feature 建议
 
@@ -344,16 +344,16 @@ debugger = "toolchain/cli/debugger/Main.aura"
 ### Step 1：创建新入口文件
 
 ```
-rust/cli/src/compiler_main.rs   → aurac.exe 入口
-rust/cli/src/package_main.rs    → aurap.exe 入口
-rust/cli/src/photon_main.rs     → photon.exe 入口
+seed/compiler/src/compiler_main.rs   → aurac.exe 入口
+seed/compiler/src/package_main.rs    → aurap.exe 入口
+seed/compiler/src/photon_main.rs     → photon.exe 入口
 ```
 
-从 `rust/cli/src/main.rs` 中提取对应命令的函数到三个新文件中，共享的辅助函数（`extract_opt`、`first_positional`、`default_output`、`default_output_base`）提取到 `rust/cli/src/util.rs`。
+从 `seed/compiler/src/main.rs` 中提取对应命令的函数到三个新文件中，共享的辅助函数（`extract_opt`、`first_positional`、`default_output`、`default_output_base`）提取到 `seed/compiler/src/util.rs`。
 
 ### Step 2：更新 Cargo.toml
 
-在 `rust/cli/Cargo.toml` 中添加 / 调整 `[[bin]]` 条目：
+在 `seed/compiler/Cargo.toml` 中添加 / 调整 `[[bin]]` 条目：
 
 - `name = "aurac"` → `src/compiler_main.rs`
 - `name = "aura"` → `src/main.rs`
@@ -374,7 +374,7 @@ rust/cli/src/photon_main.rs     → photon.exe 入口
 
 ### Step 4：拆分 `aura.exe`
 
-从 `rust/cli/src/main.rs` 中删除已迁移到 `aurac`、`aurap`、`photon` 的命令实现，只保留运行时命令：
+从 `seed/compiler/src/main.rs` 中删除已迁移到 `aurac`、`aurap`、`photon` 的命令实现，只保留运行时命令：
 
 - `run` / `eval` / `repl` / `debug` / `lsp` / `help`
 

@@ -3,8 +3,8 @@ package aura.lang.cli
 
 import aura.lang.std.IO
 import aura.lang.std.String
-import aura.lang.std.FileSystem
-import "CompilerApi.aura"
+import aura.lang.std.fs.FileUtils
+import aura.lang.cli.CompilerApi
 import aura.lang.compiler.parser.Parser
 import aura.lang.compiler.sema.TypeChecker
 import aura.lang.compiler.hir.Hir

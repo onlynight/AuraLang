@@ -2,7 +2,7 @@
 package aura.lang.loom.pkg
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.IO
 import aura.lang.std.Encoding
 import aura.lang.loom.pkg.PackageMeta
@@ -21,12 +21,12 @@ class PackageReader {
     fun read(): Int {
         // Read metadata file
         val metaPath: String = path + ".meta"
-        if (!FileSystem.exists(metaPath)) {
+        if (!FileUtils.exists(metaPath)) {
             IO.println("[package] Meta file not found: " + metaPath)
             return 1
         }
 
-        val content: String = FileSystem.readText(metaPath)
+        val content: String = FileUtils.readText(metaPath)
         meta = parseMeta(content)
 
         IO.println("[package] Read: " + path)

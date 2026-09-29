@@ -19,7 +19,7 @@
 // ═════════════════════════════════════════════════════════════════
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 
 import "../../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
 
@@ -90,7 +90,7 @@ fun testBootstrapChain(): Int {
         if (pth == "") {
             continue
         }
-        val src: String = FileSystem.readText(pth)
+        val src: String = FileUtils.readText(pth)
         val p = Parser(src)
         p.parseProgram()
         total = total + p.errors.errorCount()

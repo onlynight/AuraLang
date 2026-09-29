@@ -321,7 +321,7 @@ fn ast_type_name(t: &crate::ast::Type) -> Option<String> {
         T::Any => Some("Any".into()),
         T::Unit => Some("Unit".into()),
         T::Nothing => Some("Nothing".into()),
-        T::Array(inner) => ast_type_name(inner).map(|n| format!("Array<{}>", n)),
+        T::Array { inner, .. } => ast_type_name(inner).map(|n| format!("Array<{}>", n)),
         _ => None,
     }
 }
@@ -379,6 +379,26 @@ fn sema_expr_class(object: &Expr) -> Option<String> {
 /// sema 常只给出 `Any` 甚至无记录，仅凭 sema 会让方法派发失败并退化成裸名调用
 /// （photon 后端大量 `instr.nodeAt(j)` / `instr.nodeCount()` 因此失败）。
 fn resolve_receiver_type(e: &Expr) -> Option<String> {
+    // `this` / `self`：接收者就是**当前所在类**（`CLASS_CTX`）。
+    //
+    // 缺这一条时 `this.m(...)` 会被判成「动态接收者」，落进
+    // `resolve_method_owner` 的「全表唯一候选」兜底 —— 于是
+    // `HatSerializer.serialize` 里的 `this.joinChunks(this.chunks)` 命中了
+    // **另一个类**的同名方法 `InstructionSelector.joinChunks`（那是 LIR 参数
+    // 拼接器，分隔符是 `,`）：整份 .hat 的换行全被换成逗号、空参数表变成 `(,)`
+    // ⇒ HAT 解析器再也认不出任何函数（`SSA functions=0`）⇒ 后端产出空 COFF。
+    // 实测（2026-09-28 第九轮）。
+    //
+    // ⚠️ 但 `resolve_receiver_type_deep` 必须**先**解析 `this.<field>` 的字段类型
+    //（见该函数），否则 `this.chunks.size`（`chunks: List<String>`）会被当成
+    //「在类上取 size」—— 实测 `chunks.size` 由 4 变 0 并随后崩溃。
+    if let Expr::This(_) = e {
+        if let Some(c) = CLASS_CTX.with(|c| c.borrow().as_ref().map(|x| x.class.clone())) {
+            if !c.is_empty() {
+                return Some(c);
+            }
+        }
+    }
     // 对于标识符，优先使用降级期记录的声明类型（LOCAL_TYPE_SCOPES 更可靠）
     if let Expr::Ident(name, _) = e {
         if let Some(t) = lookup_local_type(name) {
@@ -389,6 +409,93 @@ fn resolve_receiver_type(e: &Expr) -> Option<String> {
     }
     // 回退到 sema
     sema_expr_class(e).filter(|t| !t.is_empty())
+}
+
+/// 取 HIR 命名类型名（剥可空标记，**保留**泛型参数：`List<T>` → `List<T>`）。
+fn hir_type_name(ty: &HirType) -> Option<String> {
+    match ty {
+        HirType::Named(n) => {
+            let n = n.trim_end_matches('?').trim();
+            if n.is_empty() {
+                None
+            } else {
+                Some(n.to_string())
+            }
+        }
+        HirType::Nullable(inner) => hir_type_name(inner),
+        _ => None,
+    }
+}
+
+/// `resolve_receiver_type` 的扩展：额外解析**类内字段**（裸字段名 / `this.<field>`）
+/// 的声明类型。
+///
+/// 为什么需要：AOT 路径用 `desugar_program`（`codegen/aot/mod.rs`，**不传 sema**），
+/// 而字段名也不在 `LOCAL_TYPE_SCOPES`（那里只登记局部变量/形参）⇒ 仅靠
+/// `resolve_receiver_type` 时，字段接收者恒为 None，**列表/Map 拦截分支**
+///（`.add` / `.size` / `.get` / `.put` …）全部失手：
+///
+/// `ArrayList.aura` 的 `data: List<T>` 上的 `data.add(item)`（`fun add`）因此
+/// 落到类方法路径 `ArrayList.add` —— 而该方法体内又对 `data` 调用 `add`，形成
+/// **自递归**：`ArrayList_add: movq (%rcx), %rcx; call ArrayList_add`。
+/// 运行期 `data` 尚未初始化（null）时即 `movq (%rcx), %rcx`（rcx=0）→ 0xC0000005
+/// （自举驱动 `PhotonHatCompile.exe` 实测崩溃点 `ArrayList_add+0xe`）。
+fn resolve_receiver_type_deep(e: &Expr) -> Option<String> {
+    // ⚠️ 顺序很重要：**字段**优先于「接收者本身」。
+    // `resolve_receiver_type(This)` 会返回当前类名，若先走它，
+    // `this.chunks.size`（`chunks: List<String>`）就会被当成「在类上取 size」，
+    // 列表拦截分支失手 —— 实测 `chunks.size` 由 4 变 0 并随后崩溃。
+    let field_name: Option<String> = match e {
+        // 类内裸字段（`data.add(x)`）：字段名不是局部变量才按字段解析
+        Expr::Ident(n, _) => CLASS_CTX.with(|c| {
+            c.borrow().as_ref().and_then(|ctx| {
+                if ctx.is_local(n) {
+                    None
+                } else {
+                    Some(n.to_string())
+                }
+            })
+        }),
+        // `this.data.add(x)` / `self.data.add(x)`
+        Expr::MemberAccess {
+            object, name, ..
+        } => match object.as_ref() {
+            Expr::This(_) => Some(name.clone()),
+            Expr::Ident(base, _) if base == "self" || base == "this" => Some(name.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(field_name) = field_name {
+        if let Some(found) = field_type_of(field_name) {
+            return Some(found);
+        }
+    }
+    if let Some(t) = resolve_receiver_type(e) {
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    // 既不是已知字段、也给不出接收者类型（原逻辑：`?` 早返回 None）
+    None
+}
+
+/// 沿继承链查**类内字段**的声明类型（`resolve_receiver_type_deep` 的查表体）。
+fn field_type_of(field_name: String) -> Option<String> {
+    let table = CLASS_TABLE.with(|t| t.borrow().clone());
+    let start = CLASS_CTX.with(|c| c.borrow().as_ref().map(|x| x.class.clone()))?;
+    // 沿继承链查字段声明类型（与 `field_receiver_method` 同源）
+    let mut cur = Some(start);
+    while let Some(cn) = cur {
+        let Some(entry) = table.get(&cn) else {
+            break;
+        };
+        if let Some(ty) = entry.field_types.get(&field_name) {
+            return hir_type_name(ty);
+        }
+        cur = entry.superclass.clone();
+    }
+    None
 }
 
 /// 推断声明的静态类型：显式类型提示优先；无提示时从初始化表达式推断。
@@ -608,6 +715,28 @@ fn resolve_method_owner(
                 eprintln!("[DEBUG]   found: {}", found.0);
             }
             return Some(found);
+        }
+        // `XxxUtils`（工具对象）上的方法通常定义在类 `Xxx` 里。
+        //
+        // 反例（2026-09-28 实测）：`val enc = X86EncoderUtils.emptyEncoder()` 返回的
+        // 其实是 `X86Encoder`，但接收者静态类型记成了 `X86EncoderUtils` ⇒ 查不到
+        // `toHex` ⇒ 本函数返回 None ⇒ HIR 退化为**裸名** `toHex(enc)` ⇒ 发射器
+        // 查不到 `toHex` 的签名，按 `void` 发射（`call void @toHex(...)` 并把值占位
+        // 成 `0`）⇒ 紧跟着的 `.length` 报
+        //   `member access on non-pointer value: obj_ir=0, obj_ty=i32`，
+        // 整个自举驱动编译失败。
+        // 这里按既有约定去掉 `Utils` 后缀再查一次（与发射器的
+        // `XxxUtils.method → Xxx.method` 改派、VM 侧 `InstructionSelection`
+        // 的同名修复同源）。
+        if let Some(base) = ty.strip_suffix("Utils") {
+            if !base.is_empty() {
+                if let Some(found) = find_method_in_chain(&table, base, method) {
+                    if resolve_debug_enabled() {
+                        eprintln!("[DEBUG]   found via Utils-strip: {}", found.0);
+                    }
+                    return Some(found);
+                }
+            }
         }
         // 已知接收者类型且是成员表中的类但无此方法 → 尝试 `Any` 的默认实现
         //（所有 class / object 都隐式继承 Any，`hashCode` / `equals` / `toString`
@@ -1355,6 +1484,8 @@ pub enum HirType {
     Pointer(Box<HirType>),
     /// 函数类型（Fix 3）：`(A, B) -> R`
     Function { params: Box<Vec<HirType>>, return_type: Box<HirType> },
+    /// 定长数组类型：`Int[6]` → `Array { inner: Named("Int"), size: Some(6) }`
+    Array { inner: Box<HirType>, size: Option<usize> },
     /// 未知（由语义阶段兜底）
     Unknown,
 }
@@ -1419,11 +1550,25 @@ impl HirType {
             } if name == "Pointer" && args.len() == 1 => {
                 HirType::Pointer(Box::new(HirType::from_ast(&args[0])))
             }
+            // 定长数组类型：Int[6] → Array { inner: Named("Int"), size: Some(6) }
+            Type::Array { inner, size } => HirType::Array {
+                inner: Box::new(HirType::from_ast(inner)),
+                size: *size,
+            },
             // 参数化类型：List<Int>, Map<String, Int> 等 → Named("List<Int>")
+            // 递归处理嵌套泛型参数（如 List<List<Int>>）
             Type::Generic {
                 name, args, ..
             } => {
-                let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                let args_str: Vec<String> = args
+                    .iter()
+                    .map(|a| {
+                        match HirType::from_ast(a) {
+                            HirType::Named(n) => n,
+                            other => format!("{:?}", other),
+                        }
+                    })
+                    .collect();
                 HirType::Named(format!("{}<{}>", name, args_str.join(", ")))
             }
             _ => HirType::Named(ty.to_string()),
@@ -2138,6 +2283,22 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 });
                 for ctor in &c.constructors {
                     let arity = ctor.params.len();
+                    // 构造器形参登记（同名 `desugar_class_method` 的形参登记）。
+                    //
+                    // 缺失时 `resolve_receiver_type(param)` 在构造器体内返回 None ⇒
+                    // 接收者被当作**动态类型**：`resolve_method_owner` 走「全表唯一候选」
+                    // 兜底，于是 `init(source: String) { this.n = source.length() }` 里的
+                    // `length` 命中了**另一个类**的同名 0 参方法（Span 的访问器
+                    // `length = end - start`）—— 对 String 指针按 Span 布局取字段，
+                    // 两个字段偏移都退化成 0 ⇒ `n = load(p+0) - load(p+0) = 0`。
+                    // 实测 `Lexer.init` 的 `this.n = source.length()` 因此恒为 0：
+                    // 词法器认为源码长度为 0，`scanAll` 只吐出 EOF ⇒ `Parser.ast.count == 1`、
+                    // 自举驱动整条前端链路产出空 HIR（toks=1）。
+                    push_local_scope();
+                    for p in &ctor.params {
+                        register_local(&p.name);
+                        register_local_type(&p.name, p.type_hint.as_deref().and_then(ast_type_name));
+                    }
                     let mut body_stmts: Vec<HirStmt> = Vec::new();
                     // 委托调用：super(...)/this(...) → 对应 __ctorN(self, args)
                     if let Some(d) = &ctor.delegation {
@@ -2188,6 +2349,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         ffi_lib: None,
                         native_attr: None,
                     });
+                    // 与循环开头 `push_local_scope()` 配对（构造器形参作用域）
+                    pop_local_scope();
                 }
                 // 仅 init 块（无 0 参显式构造函数）→ 合成 `Class.__ctor0`
                 if !c.init_blocks.is_empty() && !c.constructors.iter().any(|x| x.params.is_empty())
@@ -3750,8 +3913,11 @@ fn synthesize_accessors(class: &str, fields: &[StructField]) -> Vec<HirFunction>
 fn desugar_block(b: &Expr) -> HirBlock {
     // 类上下文局部作用域（裸字段改写需要区分局部变量与字段）
     push_local_scope();
+    // 局部变量类型作用域（`register_local_type` 需要独立于形参作用域）
+    push_local_type_scope();
     let r = desugar_block_inner(b);
     pop_local_scope();
+    pop_local_type_scope();
     r
 }
 
@@ -4897,6 +5063,22 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             // 异常类构造器走原生路径（__new_exception），避免跨模块函数解析问题。
             if let Expr::Ident(n, _) = callee.as_ref() {
                 if is_type_name(n) {
+                    // BUG FIX: 单例 object（is_singleton=true）不能被 `HirExpr::New`
+                    // 分配新实例——应改为调用其 `new()` 工厂方法（如 `Mutex()` →
+                    // `Mutex.new()`）。此前直接生成 `Alloc` 指令会在堆上创建新对象，
+                    // 返回 `Value::Ref`（单例引用），导致 `Mutex()` 返回单例而非
+                    // `Memory.alloc` 的地址，后续 `Mutex.lock(ref)` 参数错位。
+                    let is_singleton_type = CLASS_TABLE.with(|t| {
+                        t.borrow().get(n).map_or(false, |e| e.is_singleton)
+                    });
+                    if is_singleton_type {
+                        // 解析为 ClassName.new(args...) 调用
+                        let mut all_args = args.iter().map(desugar_expr).collect();
+                        return HirExpr::Call {
+                            callee: format!("{}.new", n),
+                            args: all_args,
+                        };
+                    }
                     // 异常类：走原生构造路径。支持 `E()`（空消息）、`E(msg)` 与
                     // `E(msg, cause)`；cause 暂不传递（AOT/VM 的异常对象目前只承载消息）。
                     // 若只处理单参形式，`E()` 会落到 `HirExpr::New`，而异常类定义位于
@@ -5033,7 +5215,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     }
                     // P15: List 高阶方法（filter/map/take）→ 内联循环块
                     if matches!(name.as_str(), "filter" | "map" | "take") {
-                        if let Some(ty) = resolve_receiver_type(object) {
+                        if let Some(ty) = resolve_receiver_type_deep(object) {
                             if is_list_like_type(&ty) {
                                 return desugar_list_hof(name, object, args);
                             }
@@ -5045,7 +5227,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     // `ArrayList.getSize`（读私有字段 `_size`），而运行期 `l` 是
                     // `Value::List` → 字段不存在 → 取到 null。
                     if name.as_str() == "getSize" && args.is_empty() {
-                        if let Some(ty) = resolve_receiver_type(object) {
+                        if let Some(ty) = resolve_receiver_type_deep(object) {
                             if is_list_like_type(&ty) {
                                 return HirExpr::Call {
                                     callee: "__list_len".into(),
@@ -5055,7 +5237,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         }
                     }
                     if name.as_str() == "isEmpty" && args.is_empty() {
-                        if let Some(ty) = resolve_receiver_type(object) {
+                        if let Some(ty) = resolve_receiver_type_deep(object) {
                             if is_list_like_type(&ty) {
                                 return HirExpr::Call {
                                     callee: "aura.lang.std.Collections.isEmpty".into(),
@@ -5066,7 +5248,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     }
                     // List/Array/Set 的 Collection 通用方法调用 → Collections.* 原生函数
                     if name.as_str() == "get" || name.as_str() == "getAt" {
-                        if let Some(ty) = resolve_receiver_type(object) {
+                        if let Some(ty) = resolve_receiver_type_deep(object) {
                             if is_list_like_type(&ty) {
                                 let mut all_args = vec![desugar_expr(object)];
                                 for a in args {
@@ -5085,7 +5267,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     // 方法解析会退化为**裸名**（如 `put`）→ 字节码查表失败
                     // （运行期报「未定义函数」）。这里按名字显式改派到 `HashMap`：
                     // 运行期该变量必然持有 HashMap 实例（项目内 Map 的唯一实现）。
-                    if let Some(ty) = resolve_receiver_type(object) {
+                    if let Some(ty) = resolve_receiver_type_deep(object) {
                         if is_map_like_type(&ty) {
                             let mapped: Option<&str> = match name.as_str() {
                                 "get" => Some("get"),
@@ -5118,7 +5300,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         }
                     }
                     if name.as_str() == "contains" || name.as_str() == "indexOf" {
-                        if let Some(ty) = resolve_receiver_type(object) {
+                        if let Some(ty) = resolve_receiver_type_deep(object) {
                             if is_list_like_type(&ty) {
                                 let callee = if name.as_str() == "contains" {
                                     "aura.lang.std.Collections.contains".to_string()
@@ -5141,7 +5323,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         || name.as_str() == "push"
                         || name.as_str() == "append"
                     {
-                        if let Some(ty) = resolve_receiver_type(object) {
+                        if let Some(ty) = resolve_receiver_type_deep(object) {
                             if is_list_like_type(&ty) {
                                 let mut all_args = vec![desugar_expr(object)];
                                 for a in args {
@@ -5156,7 +5338,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     }
                     // set(i, v) → Collections.set(collection, i, v)，结果回赋到集合变量
                     if name.as_str() == "set" {
-                        if let Some(ty) = resolve_receiver_type(object) {
+                        if let Some(ty) = resolve_receiver_type_deep(object) {
                             if is_list_like_type(&ty) {
                                 let mut all_args = vec![desugar_expr(object)];
                                 for a in args {
@@ -5425,7 +5607,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     //     `bin_add` 的 Float 分支（`Ptr.as_float()` = 0.0）→
                     //     `ptr + 0` = `Float(0.0)`、`ptr + 8` = `Float(8.0)`，
                     //     于是 `Memory.read` 读到地址 0 → `c == 0` → NUL 扫描恒得 0。
-                    //   已在 `rust/compiler/src/vm/interp.rs` 修好：`bin_add` / `bin_sub`
+                    //   已在 `seed/compiler/src/vm/interp.rs` 修好：`bin_add` / `bin_sub`
                     //   对含 `Ptr` 的操作数一律按**地址**做整数运算（与 `value_eq_abi`
                     //   同一条「指针即地址」ABI）。
                     //   验证：`class` + `init()` + `append()` + `build()` 的完整复刻探针
@@ -5436,7 +5618,24 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         if let Some(ref t) = resolve_receiver_type(object) {
                             if !t.is_empty() && t != "Any" && t != "Nothing" {
                                 let table = CLASS_TABLE.with(|t| t.borrow().clone());
-                                if table.contains_key(t.as_str()) {
+                                // ⚠️ 必须确认该类**真的声明了**这个方法（或伴生方法），
+                                // 不能只看「类是已知的」就盲拼 `Class.name`。
+                                //
+                                // 反例（2026-09-28 实测）：`object AotUtil { fun aotSlice(...) }`
+                                // 是自由函数，而 `class LlvmEmitter` 里写了 `this.aotSlice(...)`
+                                //（源码笔误）。盲拼会产出 `LlvmEmitter.aotSlice` —— 这个符号
+                                // **不存在**，llc 直接报
+                                //   `use of undefined value '@LlvmEmitter_aotSlice'`
+                                // 整个自举驱动编译失败。检查声明后不命中 ⇒ 保留裸名，
+                                // 交给发射器的裸名路径解析到 `AotUtil.aotSlice`。
+                                let declared = table
+                                    .get(t.as_str())
+                                    .map(|e| {
+                                        e.methods.contains(name.as_str())
+                                            || e.companion_methods.contains(name.as_str())
+                                    })
+                                    .unwrap_or(false);
+                                if declared {
                                     return format!("{}.{}", t, name);
                                 }
                             }
@@ -5566,7 +5765,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             }
             // P15: List/Array 内建成员 → Collection 通用接口调用
             // （VM 的 GetField 不支持 Value::List，需降级为原生函数）
-            if let Some(ty) = resolve_receiver_type(object) {
+            if let Some(ty) = resolve_receiver_type_deep(object) {
                 if is_list_like_type(&ty) {
                     match name.as_str() {
                         "size" | "length" | "count" => {

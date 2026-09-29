@@ -15,7 +15,7 @@ package aura.lang.compiler.vm
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.IO
 import aura.lang.std.Process
 import aura.lang.std.Env
@@ -23,7 +23,7 @@ import aura.lang.std.Time
 import aura.lang.native.Memory
 import aura.lang.native.Cpu
 import aura.lang.native.time.Clock
-import aura.lang.native.thread.ThreadOps
+import aura.lang.native.ThreadOps
 import aura.lang.collection.HashMap
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.vm.Opcodes

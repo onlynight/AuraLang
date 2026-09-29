@@ -2,7 +2,7 @@
 package aura.lang.loom.advanced
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.std.IO
 import aura.lang.std.Collections
 
@@ -26,10 +26,10 @@ class SourceSet {
     }
 
     fun discover(): Int {
-        if (!FileSystem.exists(srcDir)) {
+        if (!FileUtils.exists(srcDir)) {
             return 1
         }
-        val found: List<String> = FileSystem.listFiles(srcDir)
+        val found: List<String> = FileUtils.listFiles(srcDir)
         var i: Int = 0
         while (i < found.size) {
             val file: String = found[i]

@@ -72,6 +72,9 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "listOf",
     "mutableListOf",
     "arrayOf",
+    "arrayOf2D",
+    "arrayOf3D",
+    "arrayImplOf",
     // ── 集合工厂（与 `std_collections.rs` 的注册表保持一致）──
     //
     // 缺登记时，`mutableMapOf(...)` 这类调用会被 MIR 当成**用户函数**，

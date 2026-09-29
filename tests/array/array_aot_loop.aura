@@ -1,0 +1,10 @@
+// tests/array/array_aot_loop.aura
+// Test AOT nested loop with 1D array
+fun main() {
+    var arr: Int[5] = [1, 2, 3, 4, 5]
+    var sum: Int = 0
+    for (var i: Int = 0; i < arr.size; i = i + 1) {
+        sum = sum + arr[i]
+    }
+    println("sum = " + toStr(sum))
+}

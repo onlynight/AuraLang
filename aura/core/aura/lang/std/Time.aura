@@ -53,13 +53,13 @@ object Time {
 
     /// 获取当前时间戳（秒，浮点数）。
     fun getNow(): Float {
-        val t: Clock.Time = Clock.now()
+        val t: TimeVal = ClockImpl.now()
         return t.timestamp()
     }
 
     /// 获取当前时间戳（毫秒）。
     fun getNowMs(): Int {
-        return Clock.timeMs() as Int
+        return ClockImpl.timeMs() as Int
     }
 
     // ── 休眠（委托到 native.time.Clock）──
@@ -67,7 +67,7 @@ object Time {
     /// 休眠指定秒数。
     fun sleep(seconds: Float): Unit {
         val ms: Int = (seconds * 1000.0f) as Int
-        Clock.sleep(ms as Long)
+        ClockImpl.sleep(ms as Long)
     }
 
     // ── 时间差（纯逻辑，Aura 实现）──

@@ -1,0 +1,129 @@
+// aura:///aura/lang/collection/Matrix.aura
+package aura.lang.collection
+
+import aura.lang.collection.List
+
+/// 矩阵/多维数组操作（纯函数，无状态）
+///
+/// @see Array, ArrayImpl
+/// @since 0.5
+object Matrix {
+
+    /// 转置矩阵：[rows][cols] → [cols][rows]
+    fun transpose(m: List<List<Int>>): List<List<Int>> {
+        if (m.size == 0) {
+            return arrayListOf<List<Int>>()
+        }
+        val rows: Int = m.size
+        val cols: Int = m[0].size
+        var result = arrayListOf<List<Int>>()
+        var j: Int = 0
+        while (j < cols) {
+            var newCol = arrayListOf<Int>()
+            var i: Int = 0
+            while (i < rows) {
+                newCol.add(m[i][j])
+                i = i + 1
+            }
+            result.add(newCol)
+            j = j + 1
+        }
+        return result
+    }
+
+    /// 展平二维数组 → 一维列表
+    fun flatten(m: List<List<Any>>): List<Any> {
+        var result = arrayListOf<Any>()
+        var i: Int = 0
+        while (i < m.size) {
+            var j: Int = 0
+            while (j < m[i].size) {
+                result.add(m[i][j])
+                j = j + 1
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 二维数组映射：对每个元素应用变换函数
+    fun map2D(m: List<List<Any>>, f: (Int, Int, Any) -> Any): List<List<Any>> {
+        var result = arrayListOf<List<Any>>()
+        var i: Int = 0
+        while (i < m.size) {
+            var newRow = arrayListOf<Any>()
+            var j: Int = 0
+            while (j < m[i].size) {
+                newRow.add(f(i, j, m[i][j]))
+                j = j + 1
+            }
+            result.add(newRow)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 矩阵乘法（Int 矩阵）
+    fun multiply(a: List<List<Int>>, b: List<List<Int>>): List<List<Int>> {
+        if (a.size == 0 || b.size == 0 || a[0].size == 0 || b[0].size == 0) {
+            return arrayListOf<List<Int>>()
+        }
+        val rowsA: Int = a.size
+        val colsA: Int = a[0].size
+        val colsB: Int = b[0].size
+        if (colsA != b.size) {
+            throw "matrix dimensions mismatch: " + colsA + " != " + b.size
+        }
+        var result = arrayListOf<List<Int>>()
+        var i: Int = 0
+        while (i < rowsA) {
+            var newRow = arrayListOf<Int>()
+            var j: Int = 0
+            while (j < colsB) {
+                var sum: Int = 0
+                var k: Int = 0
+                while (k < colsA) {
+                    sum = sum + a[i][k] * b[k][j]
+                    k = k + 1
+                }
+                newRow.add(sum)
+                j = j + 1
+            }
+            result.add(newRow)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 二维数组回调遍历
+    fun forEach2D(m: List<List<Any>>, f: (Int, Int, Any) -> Unit): Unit {
+        var i: Int = 0
+        while (i < m.size) {
+            var j: Int = 0
+            while (j < m[i].size) {
+                f(i, j, m[i][j])
+                j = j + 1
+            }
+            i = i + 1
+        }
+    }
+
+    /// 打印二维数组（调试用）
+    fun printMatrix(m: List<List<Int>>): Unit {
+        var i: Int = 0
+        while (i < m.size) {
+            var s: String = "["
+            var j: Int = 0
+            while (j < m[i].size) {
+                if (j > 0) {
+                    s = s + ", "
+                }
+                s = s + toStr(m[i][j])
+                j = j + 1
+            }
+            s = s + "]"
+            println(s)
+            i = i + 1
+        }
+    }
+}

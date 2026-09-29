@@ -3,8 +3,8 @@ package aura.lang.loom
 
 import aura.lang.std.String
 
-import "FileIO.aura"
-import "LoomError.aura"
+import aura.lang.loom.FileIO
+import aura.lang.loom.LoomError
 
 // Manifest — aura.toml parser/writer
 class Manifest {

@@ -1,0 +1,31 @@
+// aura:///aura/lang/std/io/StdInputStream.aura
+package aura.lang.std.io
+
+import aura.lang.native.file.FileOps
+import aura.lang.native.io.Stdio
+
+/// 标准输入流实现。
+///
+/// 从 stdin（fd=0）读取数据。
+/// `read` 使用 `FileOps.read(0, buffer, count)` 直接读取原始字节。
+/// `readLine` 和 `readAll` 委托到 `Stdio` 的高级接口。
+///
+/// @since 0.3
+class StdInputStream : InputStream {
+
+    override fun read(buffer: Long, count: Int): Int {
+        return FileOps.read(0, buffer, count)
+    }
+
+    override fun readLine(): String {
+        return Stdio.readLine()
+    }
+
+    override fun readAll(): String {
+        return Stdio.readAll()
+    }
+
+    override fun close(): Unit {
+        // stdin 不可关闭
+    }
+}

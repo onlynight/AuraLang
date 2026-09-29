@@ -1,12 +1,12 @@
 // aura:///cli/aura/lang/cli/FileIO.aura
 package aura.lang.cli
 
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 
 // ═══════════════════════════════════════════════════════════════
 // 文件 I/O 辅助
 //
-// 读/写统一委托给已验证的标准库实现（`FileSystem.readText` / `writeText`）。
+// 读/写统一委托给已验证的标准库实现（`FileUtils.readText` / `writeText`）。
 // ═══════════════════════════════════════════════════════════════
 
 /// 文件 I/O 工具对象
@@ -14,12 +14,12 @@ object FileIOUtils {
 
     /// 读取文本文件（失败返回空串）。
     fun readTextFile(path: String): String {
-        return FileSystem.readText(path)
+        return FileUtils.readText(path)
     }
 
     /// 写入文本文件；返回写入的字符数（失败返回 -1）。
     fun writeTextFile(path: String, content: String): Int {
-        FileSystem.writeText(path, content)
+        FileUtils.writeText(path, content)
         return content.length
     }
 }

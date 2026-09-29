@@ -1,0 +1,35 @@
+// tests/array/array_2d_basic.aura
+// P1: 二维数组基础测试
+// 测试: 声明、嵌套字面量、嵌套下标、嵌套赋值
+
+fun main() {
+    // 2D 数组声明 + 嵌套字面量
+    var m: Int[3][2] = [[1,2],[3,4],[5,6]]
+
+    // 嵌套下标访问
+    println("m[0][0] = " + toStr(m[0][0]))
+    println("m[0][1] = " + toStr(m[0][1]))
+    println("m[2][1] = " + toStr(m[2][1]))
+
+    // 嵌套赋值
+    m[0][0] = 100
+    println("m[0][0] = " + toStr(m[0][0]))
+
+    // 遍历二维数组
+    var sum: Int = 0
+    for (var i: Int = 0; i < m.size; i = i + 1) {
+        for (var j: Int = 0; j < m[i].size; j = j + 1) {
+            sum = sum + m[i][j]
+        }
+    }
+    println("sum = " + toStr(sum))
+
+    // 3D 数组
+    var cube: Int[2][3][4] = [[[1,2,3,4],[5,6,7,8],[9,10,11,12]],[[13,14,15,16],[17,18,19,20],[21,22,23,24]]]
+    println("cube[0][0][0] = " + toStr(cube[0][0][0]))
+    println("cube[1][2][3] = " + toStr(cube[1][2][3]))
+    cube[0][0][0] = 999
+    println("cube[0][0][0] = " + toStr(cube[0][0][0]))
+
+    println("P1 array_2d_basic: all tests passed")
+}

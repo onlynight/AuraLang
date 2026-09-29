@@ -1,25 +1,25 @@
-// tests/photon/S2/04_multifunction_test.aura
-// ════════════════════════════════════════════════════════════�?// 多函数对象文件测�?// 运行：aura run tests/photon/S2/04_multifunction_test.aura
-// ════════════════════════════════════════════════════════════�?
+﻿// tests/photon/S2/04_multifunction_test.aura
+// ═════════════════════════════════════════════════════════════// 多函数对象文件测轥// 运行：aura run tests/photon/S2/04_multifunction_test.aura
+// ═════════════════════════════════════════════════════════════
 import aura.lang.std.String
 import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
 
 fun main() {
-    println("══�?多函数对象文件测�?══�?)
+    println("═══多函数对象文件测轥═══")
     var pass = 0
     var total = 3
 
-    // [1] 单函数（向后兼容�?    println("[1] 单函�?)
+    // [1] 单函数（向后兼容）    println("[1] 单函敀")
     val b = PhotonObjectWriterUtils.emptyBackend()
     val mcHex = "554889e54881ec50000000"
     val out1 = b.emitFromMachineCode(mcHex, "", "", "main")
     if (out1 != "" && out1.length > 100) { pass = pass + 1; println("  COFF size=" + out1.length) }
 
-    // [2] 双函�?    println("[2] 双函�?)
+    // [2] 双函敀    println("[2] 双函敀")
     val out2 = b.emitFromMachineCode(mcHex, "", "", "main,helper")
     if (out2 != "" && out2.length > 100) { pass = pass + 1; println("  COFF size=" + out2.length) }
 
-    // [3] 三函�?    println("[3] 三函�?)
+    // [3] 三函敀    println("[3] 三函敀")
     val out3 = b.emitFromMachineCode(mcHex, "", "", "main,helper1,helper2")
     if (out3 != "" && out3.length > 100) { pass = pass + 1; println("  COFF size=" + out3.length) }
 

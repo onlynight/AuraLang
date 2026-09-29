@@ -1,3 +1,8 @@
+/* 定义 NOMINMAX 以避免 Windows 头文件的 min/max 宏冲突 */
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 /*
  * =============================================================================
  * aura_syscalls.c — Phase D: Syscall 分发层 & 并发运行时
@@ -392,6 +397,51 @@ int64_t aura_syscall_unlink(int64_t path) {
 }
 
 /* ---------------------------------------------------------------------------
+ * aura_syscall_mkdir(path, mode)
+ *
+ * Linux x86_64 号: 83。Windows 用 CreateDirectoryA（mode 忽略）。
+ * --------------------------------------------------------------------------- */
+int64_t aura_syscall_mkdir(int64_t path, int64_t mode) {
+    (void)mode;
+#ifdef _WIN32
+    if (!path) return -1;
+    if (!CreateDirectoryA((const char *)path, NULL)) return -1;
+    return 0;
+#else
+    return (int64_t)mkdir((const char *)path, (mode_t)mode);
+#endif
+}
+
+/* ---------------------------------------------------------------------------
+ * aura_syscall_rmdir(path) —— Linux x86_64 号: 84
+ * --------------------------------------------------------------------------- */
+int64_t aura_syscall_rmdir(int64_t path) {
+#ifdef _WIN32
+    if (!path) return -1;
+    if (!RemoveDirectoryA((const char *)path)) return -1;
+    return 0;
+#else
+    return (int64_t)rmdir((const char *)path);
+#endif
+}
+
+/* ---------------------------------------------------------------------------
+ * aura_syscall_rename(old, new) —— Linux x86_64 号: 82
+ * --------------------------------------------------------------------------- */
+int64_t aura_syscall_rename(int64_t oldpath, int64_t newpath) {
+#ifdef _WIN32
+    if (!oldpath || !newpath) return -1;
+    if (!MoveFileExA((const char *)oldpath, (const char *)newpath,
+                     MOVEFILE_REPLACE_EXISTING)) {
+        return -1;
+    }
+    return 0;
+#else
+    return (int64_t)rename((const char *)oldpath, (const char *)newpath);
+#endif
+}
+
+/* ---------------------------------------------------------------------------
  * aura_syscall_execve(path, args, env)
  *
  * 注意: Windows 上不支持 execve (替换进程映像)。
@@ -695,13 +745,16 @@ int64_t aura_syscall_pipe(int64_t pipes) {
  * 通用 syscall 分发入口。按 syscall 号（Linux x86_64 ABI）分发到
  * 上述各个 aura_syscall_* 函数。
  *
- * Syscall numbers (Linux x86_64):
+ * Syscall numbers (Linux x86_64，与 Aura 侧 `Syscalls.aura` 的常量一致):
  *   0  = read,      1  = write,     2  = open,      3  = close
- *   4  = stat,      5  = fstat,     6  = lseek,     9  = mmap
- *   10 = mprotect,  11 = munmap,    13 = access,    14 = unlink
- *   59 = execve,    60 = exit,      61 = wait4,     98 = clone
+ *   4  = stat,      5  = fstat,     8  = lseek,     9  = mmap
+ *   10 = mprotect,  11 = munmap,    21 = access,    82 = rename
+ *   83 = mkdir,     84 = rmdir,     87 = unlink,    59 = execve
+ *   60 = exit,      61 = wait4,     98 = clone
  *   201 = exit_group, 222 = pipe,   230 = clock_gettime
  *   257 = getrandom, 275 = readv,   276 = writev
+ *
+ * 兼容：旧表曾把 access/unlink 记作 13/14，这两个号仍被接受。
  * --------------------------------------------------------------------------- */
 int64_t aura_syscall_dispatch(int64_t nr, int64_t a1, int64_t a2,
                               int64_t a3, int64_t a4, int64_t a5, int64_t a6) {
@@ -712,21 +765,44 @@ int64_t aura_syscall_dispatch(int64_t nr, int64_t a1, int64_t a2,
         case 3:  return aura_syscall_close(a1);
         case 4:  /* stat - 暂不支持 */
         case 5:  return aura_syscall_fstat(a1, a2);
-        case 6:  return aura_syscall_lseek(a1, a2, a3);
+        case 6:  /* 兼容旧表（6 实为 lstat） */
+        case 8:  return aura_syscall_lseek(a1, a2, a3);
         case 9:  return aura_syscall_mmap(a1, a2, a3, a4, a5, a6);
         case 11: return aura_syscall_munmap(a1, a2);
-        case 13: return aura_syscall_access(a1, a2);
-        case 14: return aura_syscall_unlink(a1);
+        // 注意：Aura 侧 `aura/core/aura/lang/native/Syscalls.aura` 用的是
+        // **Linux x86_64 的真实系统调用号**（access=21 / unlink=87 / rename=82 /
+        // mkdir=83 / rmdir=84）。旧表把 access/unlink 写成 13/14（那是
+        // rt_sigaction / rt_sigprocmask），且完全没有 mkdir/rmdir/rename ⇒
+        // 分发全部落到 default 返回 -1：
+        //   `FileOps.access` 恒失败 ⇒ `FileUtils.exists(存在的文件)` 返回 false，
+        //   自举驱动 `PhotonHatCompile.exe` 因此永远走 "source not found" 分支
+        //   （随后用空输入跑完整管线并崩溃）；`FileUtils.mkdirP` 也永不生效。
+        // 这里按真实号补齐；13/14 保留（旧调用点兼容）。
+        case 13: /* 兼容旧表 */
+        case 21: return aura_syscall_access(a1, a2);
+        case 14: /* 兼容旧表 */
+        case 87: return aura_syscall_unlink(a1);
+        case 82: return aura_syscall_rename(a1, a2);
+        case 83: return aura_syscall_mkdir(a1, a2);
+        case 84: return aura_syscall_rmdir(a1);
         case 59: return aura_syscall_execve(a1, a2, a3);
         case 60:
         case 201:
+        case 231: /* x86_64 真实号：exit_group */
             aura_syscall_exit_group(a1);
             return 0; /* unreachable */
         case 61: return aura_syscall_wait4(a1, a2, a3, a4);
+        case 32:  /* Rust 前端 `SYS_PIPE` 历史值 */
         case 222: return aura_syscall_pipe(a1);
-        case 230: return aura_syscall_clock_gettime(a1, a2);
+        case 230:
+        case 228: /* x86_64 真实号：clock_gettime */
+            return aura_syscall_clock_gettime(a1, a2);
         case 257: return aura_syscall_getrandom(a1, a2, a3);
+        case 19: /* x86_64 真实号：readv */
+        case 62: /* Rust 前端 `SYS_READV` 历史值 */
         case 275: return aura_syscall_readv(a1, a2, a3);
+        case 20: /* x86_64 真实号：writev */
+        case 63: /* Rust 前端 `SYS_WRITEV` 历史值 */
         case 276: return aura_syscall_writev(a1, a2, a3);
         default:
             return -1; /* unknown syscall */
@@ -1347,6 +1423,60 @@ char *aura_strdup(const char *s) {
 int64_t aura_process_exit(int64_t code) {
     exit((int)code);
     return code; /* 不可达；仅为满足非 void 声明 */
+}
+
+/* =============================================================================
+ * 裸名别名（`string_method_symbol` 改派失败时的兜底）
+ *
+ * AOT 发射器在某些路径下将 `ProcessOps.exit()` 等裸名方法直接发射为
+ * `call void @exitGroup(i32)` 等自由函数调用，而非 sanitized 名
+ * `aura_syscall_exit_group`。链接器找不到裸名符号，故在此提供别名。
+ * ============================================================================= */
+
+void exitGroup(int32_t code) {
+    aura_syscall_exit_group((int64_t)code);
+}
+
+int32_t wait4(int32_t pid, int64_t status, int32_t options, int64_t rusage) {
+    return (int32_t)aura_syscall_wait4((int64_t)pid, status, (int64_t)options, rusage);
+}
+
+int32_t fork(void) {
+    /* Windows 无 fork；返回 -1 表示不支持 */
+    return -1;
+}
+
+/* =============================================================================
+ * 裸名工具函数
+ * ============================================================================= */
+
+int64_t aura_min(int64_t a, int64_t b) {
+    return (a < b) ? a : b;
+}
+
+int64_t aura_max(int64_t a, int64_t b) {
+    return (a > b) ? a : b;
+}
+
+void toChar(int32_t code) {
+    /* 当前调用点忽略返回值；实现留空以满足链接 */
+    (void)code;
+}
+
+/* 裸名 min/max 别名（先 #undef 宏，再定义 C 函数） */
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
+int64_t min(int64_t a, int64_t b) {
+    return (a < b) ? a : b;
+}
+
+int64_t max(int64_t a, int64_t b) {
+    return (a > b) ? a : b;
 }
 
 /* =============================================================================

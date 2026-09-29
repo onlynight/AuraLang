@@ -2,10 +2,10 @@
 package aura.lang.cli
 
 import aura.lang.std.String
-import "Args.aura"
-import "CompilerApi.aura"
-import "FileIO.aura"
-import "Repl.aura"
+import aura.lang.cli.Args
+import aura.lang.cli.CompilerApi
+import aura.lang.cli.FileIO
+import aura.lang.cli.Repl
 
 // ═══════════════════════════════════════════════════════════════
 // 子命令处理

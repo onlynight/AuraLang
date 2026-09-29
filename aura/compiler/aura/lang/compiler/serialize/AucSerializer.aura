@@ -26,7 +26,7 @@ import aura.lang.native.memory.Allocator
 import aura.lang.native.file.FileOps
 import aura.lang.native.Syscalls
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.compiler.serialize.PlatformFileIO
 
 /// .auc 格式常量。

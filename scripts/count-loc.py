@@ -2,7 +2,7 @@
 """count-loc.py —— 统计 AuraLang 核心代码行数。
 
 用法:
-    python scripts/count-loc.py                 # 统计默认核心目录（aura/* 与 rust/{compiler,cli,loom}）
+    python scripts/count-loc.py                 # 统计默认核心目录（aura/* 与 seed/compiler）
     python scripts/count-loc.py <dir> [...]     # 统计指定目录 / 文件
     python scripts/count-loc.py --json          # 输出 JSON
     python scripts/count-loc.py --all-ext       # 按扩展名分组（不合并为语言名）
@@ -34,15 +34,13 @@ DEFAULT_ROOTS: Tuple[str, ...] = (
     "aura/runtime",
     "aura/seed",
     "aura/toolchain",
-    "rust/compiler",
-    "rust/cli",
-    "rust/loom",
+    "seed/compiler",
 )
 
 # 目录前缀 -> 分组名
 GROUP_SPEC: Tuple[Tuple[str, str], ...] = (
     ("aura/", "aura"),
-    ("rust/", "rust"),
+    ("seed/", "seed"),
 )
 
 # 扩展名 -> 语言名
@@ -347,7 +345,7 @@ def to_json(report: Report) -> str:
 
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(
-        description="统计 AuraLang 核心代码行数（默认 aura/* 与 rust/{compiler,cli,loom}）"
+        description="统计 AuraLang 核心代码行数（默认 aura/* 与 seed/compiler）"
     )
     parser.add_argument("paths", nargs="*", help="要统计的目录或文件（默认使用内置核心目录）")
     parser.add_argument("--root", default=None, help="仓库根目录（默认脚本上一级目录）")

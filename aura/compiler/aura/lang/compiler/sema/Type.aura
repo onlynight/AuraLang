@@ -198,6 +198,25 @@ object TypeUtils {
         return ty == "<error>"
     }
 
+    /// 是否为数组类型（支持 Array<T> 和 Int[N] 两种格式）
+    fun isArray(ty: String): Boolean {
+        val base: String = TypeUtils.nonNull(ty)
+        return base.startsWith("Array<") || (base.endsWith("]") && base.contains("["))
+    }
+
+    /// 获取数组元素类型
+    fun arrayElemType(ty: String): String {
+        val base: String = TypeUtils.nonNull(ty)
+        if (base.startsWith("Array<") && base.endsWith(">")) {
+            return base.substring(6, base.length() - 1)
+        }
+        if (base.endsWith("]") && base.contains("[")) {
+            val lastBracket: Int = base.lastIndexOf("[")
+            return base.substring(0, lastBracket)
+        }
+        return "Any"
+    }
+
     // ─────────────────────────────────────────────────────────────
     // 类型赋值兼容性（简化版）
     // ─────────────────────────────────────────────────────────────
@@ -218,7 +237,30 @@ object TypeUtils {
             return canAssignTo(source.substring(0, source.length() - 1), target)
         } else if (isNothing(source)) {
             return true
-        } else {
+        }
+        // List→Array 兼容（字面量赋给数组声明）
+        else if (source.startsWith("List<") && target.endsWith("]") && target.contains("[")) {
+            return true
+        }
+        // ArrayList→Array 兼容
+        else if (source.startsWith("ArrayList") && target.endsWith("]") && target.contains("[")) {
+            return true
+        }
+        // Array→Array 兼容（多维内层赋值）
+        else if (source.startsWith("Array<") && target.startsWith("Array<")) {
+            return true
+        }
+        // List→List 兼容
+        else if (source.startsWith("List<") && target.startsWith("List<")) {
+            return true
+        }
+        // Int[N]→Int[N] 兼容（多维数组）
+        else if (source.endsWith("]") && target.endsWith("]") && source.contains("[") && target.contains("[")) {
+            val sElem: String = arrayElemType(source)
+            val tElem: String = arrayElemType(target)
+            return sElem == tElem || (sElem.startsWith("List<") && tElem.startsWith("List<"))
+        }
+        else {
             return false
         }
     }

@@ -13,7 +13,7 @@ package aura.lang.compiler.aot
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.FileSystem
+import aura.lang.std.fs.FileUtils
 import aura.lang.compiler.aot.AotUtil
 
 object RuntimeUtils {
@@ -125,8 +125,8 @@ object RuntimeUtils {
         var i: Int = 0
         while (i < files.size) {
             val path: String = base + files[i]
-            if (FileSystem.exists(path)) {
-                val content: String = FileSystem.readText(path)
+            if (FileUtils.exists(path)) {
+                val content: String = FileUtils.readText(path)
                 out.sbAdd(content)
             } else {
                 out.sbAdd("; WARNING: missing runtime file: " + path + "\n")

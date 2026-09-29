@@ -1,19 +1,19 @@
 ﻿// aura:///aura/lang/compiler/photon/PhotonIntegrationTest.aura
 package aura.lang.compiler.photon
 // ─────────────────────────────────────────────────────────────
-// 新后端集成测�?�?验证 helloworld 通过完整管线
+// 新后端集成测═?═?验证 helloworld 通过完整管线
 //
-// 测试内容�?//   1. X86Encoder: 指令编码验证
+// 测试内容═?//   1. X86Encoder: 指令编码验证
 //   2. BackendPipeline: 完整管线执行
-//   3. 机器码字节验�?// ─────────────────────────────────────────────────────────────
+//   3. 机器码字节验═?// ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
 import "../../../aura/photon/aura/lang/compiler/photon/x86_64/X86Encoder.aura"
 import "../../../aura/photon/aura/lang/compiler/photon/PhotonPipeline.aura"
 
-/// 测试入口�?fun main() {
+/// 测试入口═?fun main() {
     println("╔══════════════════════════════════════════════════╗")
-    println("�?  新编译后端集成测�?�?Phase A-E 全流程验�?     �?)
+    println("═?  新编译后端集成测═?═?Phase A-E 全流程验═?     ═?")
     println("╚══════════════════════════════════════════════════╝")
     println("")
 
@@ -29,9 +29,9 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonPipeline.aura"
     val proEpiHex = encoder.toHex()
     println("  Prologue+Epilogue: " + proEpiHex)
     if (proEpiHex != "") {
-        println("  �?编码成功 (" + encoder.byteCount() + " 字节)")
+        println("  ═?编码成功 (" + encoder.byteCount() + " 字节)")
     } else {
-        println("  �?编码失败")
+        println("  ═?编码失败")
         failures = failures + 1
     }
 
@@ -44,9 +44,9 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonPipeline.aura"
     val movHex = enc2.toHex()
     println("  MOV rax, rcx; MOV rdx, 42: " + movHex)
     if (movHex != "") {
-        println("  �?MOV 编码成功 (" + enc2.byteCount() + " 字节)")
+        println("  ═?MOV 编码成功 (" + enc2.byteCount() + " 字节)")
     } else {
-        println("  �?MOV 编码失败")
+        println("  ═?MOV 编码失败")
         failures = failures + 1
     }
 
@@ -60,15 +60,15 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonPipeline.aura"
     val arithHex = enc3.toHex()
     println("  ADD/SUB/CMP: " + arithHex)
     if (arithHex != "") {
-        println("  �?算术编码成功 (" + enc3.byteCount() + " 字节)")
+        println("  ═?算术编码成功 (" + enc3.byteCount() + " 字节)")
     } else {
-        println("  �?算术编码失败")
+        println("  ═?算术编码失败")
         failures = failures + 1
     }
 
-    // ── 测试 4: X86Encoder 控制流指�?──
+    // ── 测试 4: X86Encoder 控制流指═?──
     tests = tests + 1
-    println("[Test 4] X86Encoder: 控制流指令编�?)
+    println("[Test 4] X86Encoder: 控制流指令编═?")
     val enc4 = X86EncoderUtils.emptyEncoder()
     enc4.emitRet()
     enc4.emitNop()
@@ -78,9 +78,9 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonPipeline.aura"
     println("  RET/NOP/CALL: " + cfHex)
     println("  重定位项: " + relocCount)
     if (cfHex != "" && relocCount == 1) {
-        println("  �?控制流编码成�?(" + enc4.byteCount() + " 字节)")
+        println("  ═?控制流编码成═?(" + enc4.byteCount() + " 字节)")
     } else {
-        println("  �?控制流编码失�?)
+        println("  ═?控制流编码失═?")
         failures = failures + 1
     }
 
@@ -94,9 +94,9 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonPipeline.aura"
     val setHex = enc5.toHex()
     println("  SETcc: " + setHex)
     if (setHex != "") {
-        println("  �?SETcc 编码成功 (" + enc5.byteCount() + " 字节)")
+        println("  ═?SETcc 编码成功 (" + enc5.byteCount() + " 字节)")
     } else {
-        println("  �?SETcc 编码失败")
+        println("  ═?SETcc 编码失败")
         failures = failures + 1
     }
 
@@ -107,21 +107,21 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonPipeline.aura"
     val helloworld = "fun main() {\n    println(\"hello\")\n}\n"
     val result = pipeline.compile(helloworld, "build", "helloworld")
     if (result.success) {
-        println("  �?管线执行成功")
+        println("  ═?管线执行成功")
         println("    目标文件: " + result.objectFilePath)
-        println("    可执行文�? " + result.executablePath)
-        println("    机器�? " + result.machineCodeHex)
-        println("    字节�? " + result.encodedByteCount)
+        println("    可执行文═? " + result.executablePath)
+        println("    机器═? " + result.machineCodeHex)
+        println("    字节═? " + result.encodedByteCount)
         println("    重定位数: " + result.relocationCount)
-        println("    函数�? " + result.functionCount)
+        println("    函数═? " + result.functionCount)
     } else {
-        println("  �?管线执行失败: " + result.errorMessage)
+        println("  ═?管线执行失败: " + result.errorMessage)
         failures = failures + 1
     }
 
-    // ── 测试 7: 完整 helloworld 机器�?──
+    // ── 测试 7: 完整 helloworld 机器═?──
     tests = tests + 1
-    println("[Test 7] 完整 helloworld 机器码验�?)
+    println("[Test 7] 完整 helloworld 机器码验═?")
     val hwEncoder = X86EncoderUtils.emptyEncoder()
 
     // main 函数
@@ -137,26 +137,26 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonPipeline.aura"
 
     val hwHex = hwEncoder.toHex()
     val hwRelocs = hwEncoder.getRelocations()
-    println("  机器�? " + hwHex)
-    println("  重定�?")
+    println("  机器═? " + hwHex)
+    println("  重定═?")
     var i: Int = 0
     while (i < hwRelocs.size) {
         println("    [" + i + "] " + hwRelocs[i])
         i = i + 1
     }
     if (hwHex != "" && hwRelocs.size == 2) {
-        println("  �?helloworld 机器码验证通过 (" + hwEncoder.byteCount() + " 字节)")
+        println("  ═?helloworld 机器码验证通过 (" + hwEncoder.byteCount() + " 字节)")
     } else {
-        println("  �?helloworld 机器码验证失�?)
+        println("  ═?helloworld 机器码验证失═?")
         failures = failures + 1
     }
 
-    // ── 汇�?──
+    // ── 汇═?──
     println("")
     println("══════════════════════════════════════════════════")
     println("测试结果: " + (tests - failures) + "/" + tests + " 通过")
     if (failures == 0) {
-        println("RESULT: PASS �?新编译后端集成测试全部通过")
+        println("RESULT: PASS ═?新编译后端集成测试全部通过")
     } else {
         println("RESULT: FAIL (" + failures + " 失败)")
     }

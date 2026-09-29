@@ -193,7 +193,7 @@ object AotUtil {
         if (name == "Math") { return true }
         else if (name == "String") { return true }
         else if (name == "Collections") { return true }
-        else if (name == "FileSystem") { return true }
+        else if (name == "FileUtils") { return true }
         else if (name == "StringBuilder") { return true }
         else if (name == "Process") { return true }
         else if (name == "Random") { return true }
@@ -212,7 +212,7 @@ object AotUtil {
         else { return false }
     }
 
-    /// 规范 std 类名（含旧式小写包别名）：`fs` → `FileSystem`、`io` → `Stdio` 等。
+    /// 规范 std 类名（含旧式小写包别名）：`fs` → `FileUtils`、`io` → `Stdio` 等。
     ///
     /// 为什么需要：源码里存在 `aura.fs.writeText(...)` / `aura.io.fileExists(...)`
     /// 这类**旧包名**调用，HIR 把包前缀（`fs` / `io`）降级成接收者；
@@ -246,7 +246,7 @@ object AotUtil {
             return nm
         }
         val lc: String = aotToLower(nm)
-        if (lc == "fs") { return "FileSystem" }
+        if (lc == "fs") { return "FileUtils" }
         else if (lc == "io") { return "Stdio" }
         else if (lc == "console") { return "Console" }
         else if (lc == "process") { return "Process" }

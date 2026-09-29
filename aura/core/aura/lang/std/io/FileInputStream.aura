@@ -1,0 +1,73 @@
+// aura:///aura/lang/std/io/FileInputStream.aura
+package aura.lang.std.io
+
+import aura.lang.native.Memory
+import aura.lang.native.file.FileOps
+import aura.lang.native.io.Stdio
+import aura.lang.native.memory.Allocator
+
+/// 文件输入流。
+///
+/// 从指定路径的文件读取数据。
+/// 构造函数打开文件，`read` 读取原始字节，`readLine` 读取一行文本，
+/// `readAll` 读取全部剩余内容。
+///
+/// ```aura
+/// val is: InputStream = FileInputStream("data.txt")
+/// val line: String = is.readLine()
+/// val all: String = is.readAll()
+/// is.close()
+/// ```
+///
+/// @since 0.3
+class FileInputStream : InputStream {
+
+    private var pathBuf: Long = 0
+    private var fd: Int = -1
+
+    /// 绑定到指定路径，打开文件。
+    init(path: String) {
+        this.pathBuf = Stdio.stringToBuffer(path)
+        this.fd = FileOps.open(pathBuf, 0)  // O_RDONLY
+    }
+
+    override fun read(buffer: Long, count: Int): Int {
+        if (fd < 0) { return -1 }
+        return FileOps.read(fd, buffer, count)
+    }
+
+    override fun readLine(): String {
+        if (fd < 0) { return "" }
+        val buf: Long = Allocator.malloc(4097)
+        if (buf == 0) { return "" }
+        val bytesRead: Long = FileOps.read(fd, buf, 4096)
+        if (bytesRead <= 0) { Allocator.free(buf); return "" }
+        var end: Long = bytesRead
+        var i: Long = 0
+        while (i < bytesRead) {
+            val c: Byte = Memory.read(buf + i)
+            if (c == 10) { end = i; break }
+            i = i + 1
+        }
+        val line: String = Stdio.bufferToString(buf, end)
+        // 零拷贝：bufferToString 已将 buf 视为字符串，不能 free
+        return line
+    }
+
+    override fun readAll(): String {
+        if (fd < 0) { return "" }
+        val size: Long = FileOps.lseek(fd, 0, 2)  // SEEK_END
+        FileOps.lseek(fd, 0, 0)                   // SEEK_SET
+        if (size <= 0) { return "" }
+        val buf: Long = Allocator.malloc(size + 1)
+        if (buf == 0) { return "" }
+        val read: Long = FileOps.read(fd, buf, size)
+        if (read <= 0) { Allocator.free(buf); return "" }
+        return Stdio.bufferToString(buf, read)
+    }
+
+    override fun close(): Unit {
+        if (fd >= 0) { FileOps.close(fd); fd = -1 }
+        if (pathBuf != 0) { Allocator.free(pathBuf); pathBuf = 0 }
+    }
+}
