@@ -1,8 +1,7 @@
 // aura:///aura/lang/compiler/photon/PhotonHatCompile.aura
 // HAT v2.0 独立编译链路驱动 — 源码 → HIR → SSA MIR → .hat → LIR → DAG → X86 → COFF → Link
 //
-// 与 PHIR 链路（`PhotonDriver`：源码 → .phir → HIR → SSA → …）**完全独立**：
-// 本驱动不生成、也不读取任何 `.phir`。HAT 文本由 Aura 侧前端
+// HAT 文本由 Aura 侧前端
 // （`AotModuleLinker`：源码 + 递归 import → 合并 HIR）经 `SsaBuilder` +
 // `HatSerializer` 直接产出，随后再由 `PhotonPipeline.compileHat` 从 `.hat`
 // 文本重新解析进入后端 —— 即「HAT IR 是这条链路的真正中间表示」。

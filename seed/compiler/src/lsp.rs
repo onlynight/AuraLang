@@ -322,7 +322,13 @@ impl DocumentState {
             Type::Byte => "Byte".to_string(),
             Type::Nullable(t) => format!("{}?", self.type_to_string(t)),
             Type::Pointer(t) => format!("Pointer<{}>", self.type_to_string(t)),
-            Type::Array(t) => format!("Array<{}>", self.type_to_string(t)),
+            Type::Array { inner, size } => {
+                if let Some(n) = size {
+                    format!("{}[{}]", self.type_to_string(inner), n)
+                } else {
+                    format!("Array<{}>", self.type_to_string(inner))
+                }
+            }
             Type::Function {
                 params,
                 return_type,

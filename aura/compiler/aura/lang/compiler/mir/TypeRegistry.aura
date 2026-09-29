@@ -228,7 +228,7 @@ class TypeRegistry {
     /// 是否为整数类型。
     ///
     /// 除内部 `Int` 类型（`intType(width)`）外，还要认**按名字**注册的整型
-    ///（`fromTypeName("Int")` / `"Long"` …）。`.phir` 里的类型都是名字形式，
+    ///（`fromTypeName("Int")` / `"Long"` …）。HIR 里的类型都是名字形式，
     /// 不认它们会让 `buildLit` / 零值初始化退化成「非整数」分支。
     fun isInt(id: Int): Boolean {
         val k: String = this.kindOf(id)

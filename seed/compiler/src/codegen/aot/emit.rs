@@ -3185,6 +3185,10 @@ fn is_string_like(ctx: &EmitCtx, expr: &HirExpr) -> bool {
     if ty.is_empty() {
         return false;
     }
+    // i8* 是不透明指针，可能是装箱整数/列表/字符串，不能假定为字符串
+    if ty == "i8*" {
+        return false;
+    }
     !is_collection_aura_ty(&ty)
 }
 
@@ -3366,8 +3370,10 @@ fn emit_binary(
 
     match op {
         HirBinOp::Add => {
-            // 字符串拼接：左右操作数为字符串类型时调用 aura_string_concat
-            if is_string_type(&l_ty) || is_string_type(&r_ty) {
+            // 字符串拼接：当任一操作数是字符串常量（@str_data.* 或 %str_gep.*）时
+            let l_is_str_const = l_ir.starts_with("@str_data.") || l_ir.starts_with("%str_gep.");
+            let r_is_str_const = r_ir.starts_with("@str_data.") || r_ir.starts_with("%str_gep.");
+            if l_is_str_const || r_is_str_const {
                 let (l_ptr, l_len) = extract_string_parts(ctx, blocks, &l_ir, &l_ty);
                 let (r_ptr, r_len) = extract_string_parts(ctx, blocks, &r_ir, &r_ty);
                 let concat = ctx.fresh_var();
@@ -3388,6 +3394,49 @@ fn emit_binary(
                 let cur = blocks.last_mut();
                 cur.body.push(format!("{} = {} {}, {}", tmp, op, l_conv, r_conv));
                 Ok((tmp, result_ty.to_string()))
+            } else if l_ty == "i8*" || r_ty == "i8*" {
+                // Any 类型（i8*）加法：解箱为整数，相加，再装箱
+                let l_int = ctx.fresh_var();
+                let r_int = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                // 解箱左侧
+                let l_int = if l_ty == "i8*" {
+                    let l_raw = ctx.fresh_var();
+                    cur.body.push(format!("{} = ptrtoint i8* {} to i64", l_raw, l_ir));
+                    let l_int = ctx.fresh_var();
+                    cur.body.push(format!("{} = call i64 @aura_to_int_any(i64 {})", l_int, l_raw));
+                    l_int
+                } else if l_ty == "i64" {
+                    l_ir.clone() // Already i64 — no sext needed
+                } else {
+                    let l_int = ctx.fresh_var();
+                    cur.body.push(format!("{} = sext {} {} to i64", l_int, l_ty, l_ir));
+                    l_int
+                };
+                // 解箱右侧
+                let r_int = if r_ty == "i8*" {
+                    let r_raw = ctx.fresh_var();
+                    cur.body.push(format!("{} = ptrtoint i8* {} to i64", r_raw, r_ir));
+                    let r_int = ctx.fresh_var();
+                    cur.body.push(format!("{} = call i64 @aura_to_int_any(i64 {})", r_int, r_raw));
+                    r_int
+                } else if r_ty == "i64" {
+                    r_ir.clone() // Already i64 — no sext needed
+                } else {
+                    let r_int = ctx.fresh_var();
+                    cur.body.push(format!("{} = sext {} {} to i64", r_int, r_ty, r_ir));
+                    r_int
+                };
+                // 相加
+                let sum = ctx.fresh_var();
+                cur.body.push(format!("{} = add i64 {}, {}", sum, l_int, r_int));
+                // 装箱回 i8*
+                let sh = ctx.fresh_var();
+                cur.body.push(format!("{} = shl i64 {}, 1", sh, sum));
+                let tg = ctx.fresh_var();
+                cur.body.push(format!("{} = or i64 {}, 1", tg, sh));
+                cur.body.push(format!("{} = inttoptr i64 {} to i8*", tmp, tg));
+                Ok((tmp, "i8*".to_string()))
             } else {
                 let cur = blocks.last_mut();
                 cur.body.push(format!("{} = add {} {}, {}", tmp, l_ty, l_ir, r_ir));
@@ -3409,37 +3458,43 @@ fn emit_binary(
             } else {
                 // 指针参与减法：转换为整数后相减（sub 不支持指针类型）
                 if l_ty == "i8*" || r_ty == "i8*" {
-                    let l_int = ctx.fresh_var();
-                    let r_int = ctx.fresh_var();
                     let cur = blocks.last_mut();
                     // 左侧转换
-                    if l_ty == "i8*" {
-                        cur.body.push(format!("{} = ptrtoint i8* {} to i64", l_int, l_ir));
+                    let l_int = if l_ty == "i8*" {
+                        let l_raw = ctx.fresh_var();
+                        cur.body.push(format!("{} = ptrtoint i8* {} to i64", l_raw, l_ir));
+                        let l_int = ctx.fresh_var();
+                        cur.body.push(format!("{} = call i64 @aura_to_int_any(i64 {})", l_int, l_raw));
+                        l_int
+                    } else if l_ty == "i64" {
+                        l_ir.clone()
                     } else {
-                        // 整数 → i64（可能需要扩展）
-                        if l_ty == "i32" {
-                            cur.body.push(format!("{} = zext i32 {} to i64", l_int, l_ir));
-                        } else if l_ty == "i64" {
-                            cur.body.push(format!("{} = {}", l_int, l_ir));
-                        } else {
-                            cur.body.push(format!("{} = sext {} {} to i64", l_int, l_ty, l_ir));
-                        }
-                    }
+                        let l_int = ctx.fresh_var();
+                        cur.body.push(format!("{} = sext {} {} to i64", l_int, l_ty, l_ir));
+                        l_int
+                    };
                     // 右侧转换
-                    if r_ty == "i8*" {
-                        cur.body.push(format!("{} = ptrtoint i8* {} to i64", r_int, r_ir));
+                    let r_int = if r_ty == "i8*" {
+                        let r_raw = ctx.fresh_var();
+                        cur.body.push(format!("{} = ptrtoint i8* {} to i64", r_raw, r_ir));
+                        let r_int = ctx.fresh_var();
+                        cur.body.push(format!("{} = call i64 @aura_to_int_any(i64 {})", r_int, r_raw));
+                        r_int
+                    } else if r_ty == "i64" {
+                        r_ir.clone()
                     } else {
-                        // 整数 → i64（可能需要扩展）
-                        if r_ty == "i32" {
-                            cur.body.push(format!("{} = zext i32 {} to i64", r_int, r_ir));
-                        } else if r_ty == "i64" {
-                            cur.body.push(format!("{} = {}", r_int, r_ir));
-                        } else {
-                            cur.body.push(format!("{} = sext {} {} to i64", r_int, r_ty, r_ir));
-                        }
-                    }
-                    cur.body.push(format!("{} = sub i64 {}, {}", tmp, l_int, r_int));
-                    return Ok((tmp, "i64".to_string()));
+                        let r_int = ctx.fresh_var();
+                        cur.body.push(format!("{} = sext {} {} to i64", r_int, r_ty, r_ir));
+                        r_int
+                    };
+                    let diff = ctx.fresh_var();
+                    cur.body.push(format!("{} = sub i64 {}, {}", diff, l_int, r_int));
+                    let sh = ctx.fresh_var();
+                    cur.body.push(format!("{} = shl i64 {}, 1", sh, diff));
+                    let tg = ctx.fresh_var();
+                    cur.body.push(format!("{} = or i64 {}, 1", tg, sh));
+                    cur.body.push(format!("{} = inttoptr i64 {} to i8*", tmp, tg));
+                    return Ok((tmp, "i8*".to_string()));
                 }
                 cur.body.push(format!("{} = sub {} {}, {}", tmp, l_ty, l_ir, r_ir));
                 Ok((tmp, l_ty))
@@ -3457,6 +3512,43 @@ fn emit_binary(
                 let cur = blocks.last_mut();
                 cur.body.push(format!("{} = {} {}, {}", tmp, op, l_conv, r_conv));
                 Ok((tmp, result_ty.to_string()))
+            } else if l_ty == "i8*" || r_ty == "i8*" {
+                // Any 类型（i8*）乘法：解箱为整数，相乘，再装箱
+                let cur = blocks.last_mut();
+                let l_int = if l_ty == "i8*" {
+                    let l_raw = ctx.fresh_var();
+                    cur.body.push(format!("{} = ptrtoint i8* {} to i64", l_raw, l_ir));
+                    let l_int = ctx.fresh_var();
+                    cur.body.push(format!("{} = call i64 @aura_to_int_any(i64 {})", l_int, l_raw));
+                    l_int
+                } else if l_ty == "i64" {
+                    l_ir.clone()
+                } else {
+                    let l_int = ctx.fresh_var();
+                    cur.body.push(format!("{} = sext {} {} to i64", l_int, l_ty, l_ir));
+                    l_int
+                };
+                let r_int = if r_ty == "i8*" {
+                    let r_raw = ctx.fresh_var();
+                    cur.body.push(format!("{} = ptrtoint i8* {} to i64", r_raw, r_ir));
+                    let r_int = ctx.fresh_var();
+                    cur.body.push(format!("{} = call i64 @aura_to_int_any(i64 {})", r_int, r_raw));
+                    r_int
+                } else if r_ty == "i64" {
+                    r_ir.clone()
+                } else {
+                    let r_int = ctx.fresh_var();
+                    cur.body.push(format!("{} = sext {} {} to i64", r_int, r_ty, r_ir));
+                    r_int
+                };
+                let prod = ctx.fresh_var();
+                cur.body.push(format!("{} = mul i64 {}, {}", prod, l_int, r_int));
+                let sh = ctx.fresh_var();
+                cur.body.push(format!("{} = shl i64 {}, 1", sh, prod));
+                let tg = ctx.fresh_var();
+                cur.body.push(format!("{} = or i64 {}, 1", tg, sh));
+                cur.body.push(format!("{} = inttoptr i64 {} to i8*", tmp, tg));
+                Ok((tmp, "i8*".to_string()))
             } else {
                 cur.body.push(format!("{} = mul {} {}, {}", tmp, l_ty, l_ir, r_ir));
                 Ok((tmp, l_ty))
@@ -4796,6 +4888,21 @@ fn emit_call(
         ));
         return Ok((tmp, "i8*".to_string()));
     }
+    // HIR 未能将 `list.add(v)` 降级为 `__list_push` 时的兜底（resolve_receiver_type_deep
+    // 对 `var x = arrayListOf<T>()` 等局部泛型变量返回 None）。此处按方法调用原样处理：
+    // callee 裸名 "add"，首参是列表接收者。
+    if callee == "add" && args_ir.len() == 2 && !callee_owned.contains('.') && !callee_owned.contains("__") {
+        let (l, _) = &args_ir[0];
+        let (e, e_ty) = &args_ir[1];
+        let e_ptr = coerce_val_to_i8ptr(ctx, blocks, e, e_ty);
+        let tmp = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = call i8* @aura_lang_std_Collections_listAppend(i8* {}, i8* {})",
+            tmp, l, e_ptr
+        ));
+        return Ok((tmp, "i8*".to_string()));
+    }
     if callee == "__list_new" {
         // arrayListOf(a,b,c) → 空列表 + 逐个 append，避免可变参函数声明问题。
         // 每个元素按值规整为 i8* 再存入（与 collection 运行时约定一致）。
@@ -4907,6 +5014,12 @@ fn emit_call(
             };
             let tmp = ctx.fresh_var();
             cur.body.push(format!("{} = call i8* @toStringFloat(double {})", tmp, dv));
+            return Ok((tmp, "i8*".to_string()));
+        }
+        // i8* 可能是装箱整数（Plan A 低位标记），必须先用 aura_to_str_any 解析
+        if t == "i8*" {
+            let tmp = ctx.fresh_var();
+            cur.body.push(format!("{} = call i8* @aura_to_str_any(i8* {})", tmp, v));
             return Ok((tmp, "i8*".to_string()));
         }
     }
@@ -5539,6 +5652,26 @@ fn coerce_val_to_i8ptr(
     // `integer/byte constant must have integer/byte type`。
     if is_int_ty(from) {
         return box_int_to_i8ptr(ctx, &mut blocks.last_mut().body, val, from);
+    }
+    // 浮点入列表：浮点无法用 Plan A 低位标记装箱，退化为十进制字符串。
+    // 读回时由 aura_to_str_float / String_toFloat 还原。
+    if is_float_ty(from) {
+        let s = ctx.fresh_var();
+        if from == "double" {
+            blocks.last_mut().body.push(format!(
+                "{} = call i8* @aura_to_str_float(double {})",
+                s, val
+            ));
+        } else {
+            // float → double → 字符串
+            let e = ctx.fresh_var();
+            blocks.last_mut().body.push(format!("{} = fpext float {} to double", e, val));
+            blocks.last_mut().body.push(format!(
+                "{} = call i8* @aura_to_str_float(double {})",
+                s, e
+            ));
+        }
+        return s;
     }
     // 其它（如 %struct.*）→ 直接作为 i8*（尽力而为）
     val.to_string()
@@ -7016,6 +7149,8 @@ fn map_type_to_tag(ty: &HirType) -> Result<u8, AotError> {
         HirType::Pointer(_) => Ok(TAG_PTR),
         HirType::Function { .. } => Ok(TAG_FUNC),
         HirType::Nullable(inner) => map_type_to_tag(inner),
+        // 定长数组 → TAG_ARRAY
+        HirType::Array { .. } => Ok(TAG_ARRAY),
         HirType::Unknown => Err(AotError::UnsupportedExpr(
             "AOT does not support Unknown type".to_string(),
         )),

@@ -1,0 +1,168 @@
+// tests/array/array_p3_stdlib.aura
+// P3: 标准库集成测试
+// 测试: arrayOf2D, arrayOf3D, arrayImplOf, Matrix
+//
+// 这些函数由标准库提供：
+//   - arrayOf2D / arrayOf3D / arrayImplOf: prelu native 函数（std_collections.rs）
+//   - Matrix: 标准库对象（aura/core/aura/lang/collection/Matrix.aura）
+//
+// 编译运行: aura run tests/array/array_p3_stdlib.aura
+
+import aura.lang.collection.Matrix
+
+// ══════════════════════════════════════════════════════════════
+// 测试 1: arrayOf2D — 创建二维数组
+// ══════════════════════════════════════════════════════════════
+fun test_arrayOf2D() {
+    var m = arrayOf2D(3, 3, 0)
+    println("test_arrayOf2D:")
+    println("  rows = " + toStr(m.size))
+    println("  cols = " + toStr(m[0].size))
+    println("  m[0][0] = " + toStr(m[0][0]))
+    println("  m[2][2] = " + toStr(m[2][2]))
+    var m2 = arrayOf2D(2, 4, 42)
+    println("  m2[0][3] = " + toStr(m2[0][3]))
+    println("  m2[1][1] = " + toStr(m2[1][1]))
+    println("  OK")
+}
+
+// ══════════════════════════════════════════════════════════════
+// 测试 2: arrayOf3D — 创建三维数组
+// ══════════════════════════════════════════════════════════════
+fun test_arrayOf3D() {
+    var c = arrayOf3D(2, 3, 2, 7)
+    println("test_arrayOf3D:")
+    println("  layers = " + toStr(c.size))
+    println("  rows per layer = " + toStr(c[0].size))
+    println("  cols per row = " + toStr(c[0][0].size))
+    println("  c[0][0][0] = " + toStr(c[0][0][0]))
+    println("  c[1][2][1] = " + toStr(c[1][2][1]))
+    println("  OK")
+}
+
+// ══════════════════════════════════════════════════════════════
+// 测试 3: arrayImplOf — Array 实现类工厂函数
+// 注意: arrayImplOf 返回 ArrayList（VM 的 Value::List），
+// 支持 count/get/set/contains，但 first/last/indexOf/toList
+// 存在预存 VM bug，暂不测试。
+// ══════════════════════════════════════════════════════════════
+fun test_arrayImplOf() {
+    var arr = arrayImplOf(10, 20, 30)
+    println("test_arrayImplOf:")
+    println("  arr size = " + toStr(arr.count()))
+    println("  arr[0] = " + toStr(arr[0]))
+    println("  arr[1] = " + toStr(arr[1]))
+    println("  arr[2] = " + toStr(arr[2]))
+    println("  arr.contains(20) = " + toStr(arr.contains(20)))
+    println("  arr.isEmpty() = " + toStr(arr.isEmpty()))
+    // set 操作（VM try_inline_coll_set 支持 Value::List 原位写）
+    arr.set(1, 99)
+    println("  after set(1, 99): arr[1] = " + toStr(arr[1]))
+    println("  OK")
+}
+
+// ══════════════════════════════════════════════════════════════
+// 测试 4: Matrix.transpose — 矩阵转置
+// ══════════════════════════════════════════════════════════════
+fun test_Matrix_transpose() {
+    var m = arrayListOf(
+        arrayListOf(1, 2, 3),
+        arrayListOf(4, 5, 6)
+    )
+    var t = Matrix.transpose(m)
+    println("test_Matrix_transpose:")
+    println("  input:  2x3")
+    println("  output: " + toStr(t.size) + "x" + toStr(t[0].size))
+    println("  t[0][0] = " + toStr(t[0][0]))
+    println("  t[2][1] = " + toStr(t[2][1]))
+    println("  OK")
+}
+
+// ══════════════════════════════════════════════════════════════
+// 测试 5: Matrix.flatten — 展平二维数组
+// ══════════════════════════════════════════════════════════════
+fun test_Matrix_flatten() {
+    var m = arrayListOf(
+        arrayListOf(1, 2, 3),
+        arrayListOf(4, 5, 6)
+    )
+    var flat = Matrix.flatten(m)
+    println("test_Matrix_flatten:")
+    println("  input size: " + toStr(m.size) + "x" + toStr(m[0].size))
+    println("  output size = " + toStr(flat.size))
+    println("  flat[0] = " + toStr(flat[0]))
+    println("  flat[5] = " + toStr(flat[5]))
+    println("  OK")
+}
+
+// ══════════════════════════════════════════════════════════════
+// 测试 6: Matrix.multiply — 矩阵乘法
+// ══════════════════════════════════════════════════════════════
+fun test_Matrix_multiply() {
+    var a = arrayListOf(
+        arrayListOf(1, 2),
+        arrayListOf(3, 4)
+    )
+    var b = arrayListOf(
+        arrayListOf(5, 6),
+        arrayListOf(7, 8)
+    )
+    var product = Matrix.multiply(a, b)
+    println("test_Matrix_multiply:")
+    println("  = [" + toStr(product[0][0]) + ", " + toStr(product[0][1]) + "]")
+    println("    [" + toStr(product[1][0]) + ", " + toStr(product[1][1]) + "]")
+    // [1*5+2*7, 1*6+2*8] = [19, 22]
+    // [3*5+4*7, 3*6+4*8] = [43, 50]
+    println("  OK")
+}
+
+// ══════════════════════════════════════════════════════════════
+// 测试 7: Matrix.printMatrix — 打印矩阵
+// ══════════════════════════════════════════════════════════════
+fun test_Matrix_printMatrix() {
+    println("test_Matrix_printMatrix:")
+    var m = arrayListOf(
+        arrayListOf(1, 2, 3),
+        arrayListOf(4, 5, 6)
+    )
+    Matrix.printMatrix(m)
+    println("  OK")
+}
+
+// ══════════════════════════════════════════════════════════════
+// 测试 8: 综合测试 — arrayOf2D + Matrix 操作
+// ══════════════════════════════════════════════════════════════
+fun test_integrated() {
+    println("test_integrated:")
+    var n = arrayListOf(
+        arrayListOf(1, 2),
+        arrayListOf(3, 4)
+    )
+    var t = Matrix.transpose(n)
+    println("  transpose(2x2): [" + toStr(t[0][0]) + ", " + toStr(t[0][1]) + "], [" + toStr(t[1][0]) + ", " + toStr(t[1][1]) + "]")
+    var flat = Matrix.flatten(n)
+    println("  flatten size = " + toStr(flat.size))
+    var p = arrayListOf(
+        arrayListOf(5, 6),
+        arrayListOf(7, 8)
+    )
+    var product = Matrix.multiply(n, p)
+    println("  multiply: [" + toStr(product[0][0]) + ", " + toStr(product[0][1]) + "], [" + toStr(product[1][0]) + ", " + toStr(product[1][1]) + "]")
+    println("  OK")
+}
+
+// ══════════════════════════════════════════════════════════════
+// Main — 运行所有测试
+// ══════════════════════════════════════════════════════════════
+fun main() {
+    println("=== P3 Standard Library Integration Tests ===")
+    test_arrayOf2D()
+    test_arrayOf3D()
+    test_arrayImplOf()
+    test_Matrix_transpose()
+    test_Matrix_flatten()
+    test_Matrix_multiply()
+    test_Matrix_printMatrix()
+    test_integrated()
+    println("=== All P3 tests passed! ===")
+}

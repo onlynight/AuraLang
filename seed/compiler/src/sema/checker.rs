@@ -1156,7 +1156,10 @@ impl Checker {
                         let mut ty = p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any);
                         // vararg 参数类型为元素类型的数组
                         if p.is_vararg {
-                            ty = Ty::Array(Box::new(ty));
+                            ty = Ty::Array {
+                                inner: Box::new(ty),
+                                size: None,
+                            };
                         }
                         ParamSym {
                             name: p.name.clone(),
@@ -2358,7 +2361,10 @@ impl Checker {
             let mut pt = p.type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Any);
             // vararg 参数类型为元素类型的数组
             if p.is_vararg {
-                pt = Ty::Array(Box::new(pt));
+                pt = Ty::Array {
+                    inner: Box::new(pt),
+                    size: None,
+                };
             }
             let _ = self.symbols.insert(Symbol::new(
                 p.name.clone(),
@@ -2792,7 +2798,7 @@ impl Checker {
                             Ty::Error
                         }
                     },
-                    Ty::Array(elem) => match name.as_str() {
+                    Ty::Array { inner: elem, .. } => match name.as_str() {
                         "size" | "count" => Ty::Int,
                         "isEmpty" => Ty::Boolean,
                         "first" | "last" => (**elem).clone(),
@@ -2833,7 +2839,7 @@ impl Checker {
                 }
                 match container_ty {
                     Ty::List(elem) => *elem,
-                    Ty::Array(elem) => *elem,
+                    Ty::Array { inner: elem, .. } => *elem,
                     Ty::Map(_, v) => *v,
                     Ty::String => Ty::Char,
                     Ty::Nullable(inner) => match *inner {
@@ -4341,7 +4347,7 @@ impl Checker {
                     Ty::Error
                 }
             },
-            Ty::Array(elem) => match name {
+            Ty::Array { inner: elem, .. } => match name {
                 "size" | "count" => Ty::Int,
                 "isEmpty" => Ty::Boolean,
                 "first" | "last" => (**elem).clone(),
@@ -4577,7 +4583,7 @@ impl Checker {
         let it = self.check_expr(iterable);
         let elem = match it {
             Ty::List(e) => *e,
-            Ty::Array(e) => *e,
+            Ty::Array { inner: e, .. } => *e,
             Ty::Named(ref n) if n.contains("Range") => Ty::Int,
             Ty::String => Ty::Char,
             Ty::Any => Ty::Any,

@@ -321,7 +321,7 @@ fn ast_type_name(t: &crate::ast::Type) -> Option<String> {
         T::Any => Some("Any".into()),
         T::Unit => Some("Unit".into()),
         T::Nothing => Some("Nothing".into()),
-        T::Array(inner) => ast_type_name(inner).map(|n| format!("Array<{}>", n)),
+        T::Array { inner, .. } => ast_type_name(inner).map(|n| format!("Array<{}>", n)),
         _ => None,
     }
 }
@@ -1484,6 +1484,8 @@ pub enum HirType {
     Pointer(Box<HirType>),
     /// 函数类型（Fix 3）：`(A, B) -> R`
     Function { params: Box<Vec<HirType>>, return_type: Box<HirType> },
+    /// 定长数组类型：`Int[6]` → `Array { inner: Named("Int"), size: Some(6) }`
+    Array { inner: Box<HirType>, size: Option<usize> },
     /// 未知（由语义阶段兜底）
     Unknown,
 }
@@ -1548,11 +1550,25 @@ impl HirType {
             } if name == "Pointer" && args.len() == 1 => {
                 HirType::Pointer(Box::new(HirType::from_ast(&args[0])))
             }
+            // 定长数组类型：Int[6] → Array { inner: Named("Int"), size: Some(6) }
+            Type::Array { inner, size } => HirType::Array {
+                inner: Box::new(HirType::from_ast(inner)),
+                size: *size,
+            },
             // 参数化类型：List<Int>, Map<String, Int> 等 → Named("List<Int>")
+            // 递归处理嵌套泛型参数（如 List<List<Int>>）
             Type::Generic {
                 name, args, ..
             } => {
-                let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                let args_str: Vec<String> = args
+                    .iter()
+                    .map(|a| {
+                        match HirType::from_ast(a) {
+                            HirType::Named(n) => n,
+                            other => format!("{:?}", other),
+                        }
+                    })
+                    .collect();
                 HirType::Named(format!("{}<{}>", name, args_str.join(", ")))
             }
             _ => HirType::Named(ty.to_string()),

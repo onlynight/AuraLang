@@ -641,12 +641,22 @@ impl Parser {
             if self.check(TokenKind::RBracket) {
                 // 空数组类型 Int[]
                 self.advance();
-                ty = Type::Array(Box::new(ty));
+                ty = Type::Array {
+                    inner: Box::new(ty),
+                    size: None,
+                };
             } else {
-                // 有界数组类型 Int[6]：解析大小表达式后丢弃
-                let _size_expr = self.parse_expression(0);
+                // 有界数组类型 Int[6]：解析大小表达式
+                let size_expr = self.parse_expression(0);
                 self.expect(TokenKind::RBracket);
-                ty = Type::Array(Box::new(ty));
+                let size = match &size_expr {
+                    Expr::Literal(Literal::Int(n), _) => Some(*n as usize),
+                    _ => None,
+                };
+                ty = Type::Array {
+                    inner: Box::new(ty),
+                    size,
+                };
             }
         }
 

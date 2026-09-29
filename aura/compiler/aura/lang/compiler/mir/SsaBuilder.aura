@@ -1357,7 +1357,7 @@ class SsaBuilder {
         }
         val varName: String = src.textOf(id)
         // ⚠️ 取**最后一个** kid 作为右值：`HirAssign` 的 kids 形状有两个来源——
-        //   * Rust 前端（.phir 路径）：kids = [右值]（目标名在 text，见 Bug C）；
+        //   * Rust 前端：kids = [右值]（目标名在 text，见 Bug C）；
         //   * Aura 自举前端 `HirLowerer.lowerAssign`：kids = [目标表达式…, 右值]
         //     （它遍历 AST 的全部 kids）。
         // 旧实现固定取 kids[0]：在自举前端下拿到的是**目标**（如 `c` 的当前值），

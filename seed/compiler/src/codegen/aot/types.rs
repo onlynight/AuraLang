@@ -37,6 +37,8 @@ impl TypeMapper {
             HirType::Pointer(_inner) => "ptr".to_string(), // LLVM 13+ 不透明指针
             // Fix 3: 函数类型 → 函数指针（不透明指针）
             HirType::Function { .. } => "ptr".to_string(),
+            // 定长数组 → i8*（运行时通过堆分配）
+            HirType::Array { .. } => "i8*".to_string(),
             HirType::Unknown => "i8*".to_string(),
         }
     }

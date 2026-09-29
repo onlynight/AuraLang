@@ -283,7 +283,7 @@ class InstructionSelector {
         //
         // 否则会把 `Any.toString` / `Any.equals` / `Any.hashCode` 这些**未被使用**
         // 的方法一并编进 .text —— 它们内部会调用 runtime 未提供的符号
-        // （实测 `lld-link: undefined symbol: toStr` / 以及 .phir 玩具解析器把
+        // （实测 `lld-link: undefined symbol: toStr` / 以及前端误把
         //  某些源码行误当成调用而生成的垃圾符号名）。结果是：连
         // `println("Hello, World!")` 这种只用到 `println` 的程序都**链不出来**。
         //

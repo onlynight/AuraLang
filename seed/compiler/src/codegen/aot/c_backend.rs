@@ -44,6 +44,8 @@ fn map_type(ty: &HirType) -> &str {
         HirType::Pointer(_inner) => "void*", // 简化：所有指针 → void*
         // Fix 3: 函数类型 → void*（C 后端不支持函数指针类型）
         HirType::Function { .. } => "void*",
+        // 定长数组 → void*
+        HirType::Array { .. } => "void*",
         HirType::Unknown => "void*",
     }
 }

@@ -1699,7 +1699,7 @@ class PhotonObjectWriter {
 
     /// 去掉字符串常量外层的一对双引号（没有引号则原样返回）。
     ///
-    /// `.phir` 里的字面量带引号（`HirLit` 的 text 就是带引号的原文），而
+    /// HIR 里的字面量带引号（`HirLit` 的 text 就是带引号的原文），而
     /// .rdata 里要放**不带引号**的字节（`println` 直接写这些字节）。
     /// 对不含引号的入参（如 `PhotonRuntime.buildMainObject(text)` 直接传裸文本）
     /// 保持原样，避免破坏既有调用方。

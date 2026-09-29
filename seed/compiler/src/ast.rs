@@ -50,7 +50,10 @@ pub enum Type {
     Nothing,
     Nullable(Box<Type>),
     Pointer(Box<Type>),
-    Array(Box<Type>),
+    Array {
+        inner: Box<Type>,
+        size: Option<usize>,
+    },
     Function {
         params: Vec<Param>,
         return_type: Option<Box<Type>>,
@@ -73,7 +76,7 @@ impl Type {
             Type::Named { span, .. } => *span,
             Type::Nullable(t) => t.span(),
             Type::Pointer(t) => t.span(),
-            Type::Array(t) => t.span(),
+            Type::Array { inner, .. } => inner.span(),
             Type::Function { span, .. } => *span,
             Type::Generic { span, .. } => *span,
             _ => Span::single(0, 1, 1),
@@ -763,7 +766,21 @@ impl std::fmt::Display for Type {
             Type::Nothing => write!(f, "Nothing"),
             Type::Nullable(t) => write!(f, "{}?", t),
             Type::Pointer(t) => write!(f, "Pointer<{}>", t),
-            Type::Array(t) => write!(f, "Array<{}>", t),
+            Type::Array { inner, size } => {
+                if let Some(n) = size {
+                    write!(f, "{}[{}]", inner, n)
+                } else {
+                    write!(f, "Array<{}>", inner)
+                }
+            }
+            Type::Generic { name, args, .. } => {
+                if args.is_empty() {
+                    write!(f, "{}", name)
+                } else {
+                    let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                    write!(f, "{}<{}>", name, args_str.join(", "))
+                }
+            }
             _ => write!(f, "<type>"),
         }
     }

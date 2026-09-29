@@ -1,0 +1,45 @@
+// tests/array/array_1d_basic.aura
+// P0: 一维定长数组基础测试
+// 测试: 声明、字面量、下标访问、赋值、遍历
+
+fun main() {
+    // 1D 定长数组声明 + 字面量
+    var arr: Int[5] = [1, 2, 3, 4, 5]
+
+    // 下标访问
+    println("arr[0] = " + toStr(arr[0]))
+    println("arr[4] = " + toStr(arr[4]))
+
+    // 下标赋值
+    arr[2] = 99
+    println("arr[2] = " + toStr(arr[2]))
+
+    // 遍历数组
+    var sum: Int = 0
+    for (var i: Int = 0; i < arr.size; i = i + 1) {
+        sum = sum + arr[i]
+    }
+    println("sum = " + toStr(sum))
+
+    // Int[] 动态数组类型（无大小）
+    var dyn: Int[] = [10, 20, 30]
+    println("dyn[1] = " + toStr(dyn[1]))
+    println("dyn.size = " + toStr(dyn.size))
+
+    // String 数组
+    var words: String[3] = ["hello", "world", "aura"]
+    println("words[0] = " + words[0])
+    words[1] = "lang"
+    println("words[1] = " + words[1])
+
+    // Float 数组
+    var floats: Float[2] = [3.14f, 2.71f]
+    println("floats[0] = " + toStr(floats[0]))
+
+    // 数组元素类型测试（通过赋值验证）
+    var nums: Int[3] = [1, 2, 3]
+    var first: Int = nums[0]
+    println("first = " + toStr(first))
+
+    println("P0 array_1d_basic: all tests passed")
+}
