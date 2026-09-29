@@ -9,8 +9,6 @@ package aura.lang.native
 
 import aura.lang.std.String
 import aura.lang.native.Syscalls
-import aura.lang.native.arch.x86_64_linux.Syscalls as LinuxSyscalls
-import aura.lang.native.arch.x86_64_windows.Syscalls as WindowsSyscalls
 import aura.lang.native.Cpu
 import aura.lang.native.memory.Allocator
 import aura.lang.std.string.StringOps

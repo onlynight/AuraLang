@@ -1,0 +1,14 @@
+// Test main function for AOT argument passing
+import aura.lang.std.fs.FileUtils
+
+fun main() {
+    FileUtils.writeText("build/test_output.txt", "Hello from TestMain!\n")
+    println("Hello from TestMain!")
+    println("ArgCount=" + toStr(Process.argCount()))
+    if (Process.argCount() > 0) {
+        println("Arg0=" + Process.arg(0))
+    }
+    if (Process.argCount() > 1) {
+        println("Arg1=" + Process.arg(1))
+    }
+}

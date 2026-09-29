@@ -3935,6 +3935,160 @@ __attribute__((constructor)) static void aura_maybe_install_crash_handler(void) 
 /* POSIX 侧暂不实现：崩溃诊断目前只在 Windows 自举路径需要。 */
 #endif
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 线程操作（ThreadOps_*）— 供 AOT 编译的编译器 VM 使用
+// ─────────────────────────────────────────────────────────────────────────────
+
+#ifdef _WIN32
+#include <windows.h>
+#include <process.h>
+#define AURA_MAX_THREADS 256
+typedef struct {
+    DWORD handle;
+    volatile long active;
+} AuraThreadSlot;
+static AuraThreadSlot g_aura_threads[AURA_MAX_THREADS];
+static volatile long g_aura_thread_next = 0;
+
+int64_t ThreadOps_currentId(void) {
+    return (int64_t)(uintptr_t)GetCurrentThreadId();
+}
+
+int64_t ThreadOps_cores(void) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (int64_t)si.dwNumberOfProcessors;
+}
+
+// 线程入口函数（简化版：直接调用 fn_id 对应的函数指针）
+typedef int64_t (*AuraThreadFn)(int64_t);
+static unsigned int __stdcall aura_thread_entry(void *arg) {
+    int64_t *params = (int64_t *)arg;
+    AuraThreadFn fn = (AuraThreadFn)(uintptr_t)params[0];
+    int64_t arg_val = params[1];
+    params[2] = fn(arg_val);
+    return 0;
+}
+
+int64_t ThreadOps_create(int64_t fn_id, int64_t arg) {
+    long idx = g_aura_thread_next;
+    if (idx >= AURA_MAX_THREADS) return -1;
+    g_aura_thread_next++;
+    int64_t params[3] = { fn_id, arg, 0 };
+    g_aura_threads[idx].handle = (DWORD)_beginthreadex(NULL, 0,
+        aura_thread_entry, params, 0, NULL);
+    if (g_aura_threads[idx].handle == 0) return -1;
+    return (int64_t)(idx + 1);
+}
+
+int64_t ThreadOps_join(int64_t thread_id) {
+    long idx = (long)thread_id - 1;
+    if (idx < 0 || idx >= AURA_MAX_THREADS) return 0;
+    if (g_aura_threads[idx].handle) {
+        WaitForSingleObject((HANDLE)g_aura_threads[idx].handle, INFINITE);
+        CloseHandle((HANDLE)g_aura_threads[idx].handle);
+        g_aura_threads[idx].handle = 0;
+    }
+    return 0;
+}
+
+void ThreadOps_sleepMs(int64_t ms) {
+    Sleep((DWORD)ms);
+}
+
+#else /* !_WIN32 */
+#include <pthread.h>
+#include <unistd.h>
+
+int64_t ThreadOps_currentId(void) {
+    return (int64_t)(uintptr_t)pthread_self();
+}
+
+int64_t ThreadOps_cores(void) {
+    return (int64_t)sysconf(_SC_NPROCESSORS_ONLN);
+}
+
+int64_t ThreadOps_create(int64_t fn_id, int64_t arg) {
+    // Stub: POSIX thread creation not implemented yet
+    return -1;
+}
+
+int64_t ThreadOps_join(int64_t thread_id) {
+    return 0;
+}
+
+void ThreadOps_sleepMs(int64_t ms) {
+    usleep((useconds_t)(ms * 1000));
+}
+#endif
+
+// ─────────────────────────────────────────────────────────────────────────────
+// I/O 操作（aura_io_readFile / aura_io_writeFile）
+// ─────────────────────────────────────────────────────────────────────────────
+
+const char *aura_io_readFile(const char *path) {
+    if (!path) return NULL;
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size < 0) { fclose(f); return NULL; }
+    char *buf = (char *)malloc(size + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t read = fread(buf, 1, size, f);
+    fclose(f);
+    buf[read] = '\0';
+    return buf;
+}
+
+void aura_io_writeFile(const char *path, const char *content) {
+    if (!path || !content) return;
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    size_t len = strlen(content);
+    fwrite(content, 1, len, f);
+    fclose(f);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JIT 执行（JitExec_call*）— 简化 stub，返回 0
+// ─────────────────────────────────────────────────────────────────────────────
+
+int64_t JitExec_callI64(void *fn, int64_t arg) {
+    (void)fn; (void)arg;
+    return 0;
+}
+
+void JitExec_call0(void *fn) {
+    (void)fn;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 闭包调用（__callClosure）— 简化 stub
+// 实际实现需要加载闭包函数指针并间接调用
+// ─────────────────────────────────────────────────────────────────────────────
+
+int64_t __callClosure(int64_t closure, const char *sig, int64_t arg) {
+    (void)sig;
+    // closure 是函数指针地址，直接调用
+    if (closure == 0) return 0;
+    typedef int64_t (*fn_t)(int64_t);
+    fn_t fn = (fn_t)(uintptr_t)closure;
+    return fn(arg);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 集合操作（size）— 简化 stub
+// 实际实现需要根据集合类型返回元素数量
+// ─────────────────────────────────────────────────────────────────────────────
+
+int32_t size(void *list) {
+    (void)list;
+    // 简化：返回 0（实际实现需要解析集合结构）
+    return 0;
+}
+
 
 
 

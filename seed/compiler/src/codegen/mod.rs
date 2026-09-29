@@ -259,6 +259,42 @@ const LANG_PKG_ROOT: &str = "aura.lang.";
 /// 由使用方 `import aura.lang.native.*` 引用，而不是在各处重复声明。
 const NATIVE_PKG_ROOT: &str = "aura.lang.native.";
 
+/// 检测 `native.arch.<platform>` 导入是否匹配当前目标平台。
+///
+/// 平台字符串格式：`<arch>_<os>`，例如 `x86_64_windows` / `aarch64_linux` / `x86_64_darwin`。
+/// 与 `std::env::consts::ARCH` + `std::env::consts::OS` 比较（`macos` → `darwin`）。
+/// 不匹配时返回 `false`，调用方应跳过该导入。
+fn native_arch_matches_platform(platform: &str) -> bool {
+    // 平台字符串最后一个 `_` 后的部分是 OS（如 `x86_64_windows` → `windows`）
+    let underscore_pos = match platform.rfind('_') {
+        Some(pos) => pos,
+        None => return false,
+    };
+    let plat_arch = &platform[..underscore_pos];
+    let plat_os = &platform[underscore_pos + 1..];
+
+    // 架构匹配：`aarch64` / `x86_64` / `armv7` 等
+    let host_arch = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        "arm" => "armv7",
+        other => other,
+    };
+    if plat_arch != host_arch {
+        return false;
+    }
+
+    // 操作系统匹配：`linux` / `windows` / `darwin`
+    // 注意：`std::env::consts::OS` 在 macOS 上返回 `"macos"`，而 Aura 用 `"darwin"`。
+    let host_os = match std::env::consts::OS {
+        "linux" => "linux",
+        "windows" => "windows",
+        "macos" => "darwin",
+        other => other,
+    };
+    plat_os == host_os
+}
+
 /// 预处理：解析 `import` 语句，将外部模块内容内联。
 ///
 /// 支持三种形式：
@@ -488,6 +524,23 @@ fn resolve_aura_imports_rec(
                 // 去掉通配/别名的尾巴（如 `Memory.*` / `Memory as M`）。
                 let pkg = pkg.split_whitespace().next().unwrap_or(pkg);
                 let pkg = pkg.trim_end_matches(".*");
+                // ── 平台过滤：`arch.<platform>.<Module>` 仅在内联匹配目标平台的文件 ──
+                // 例如 `arch.x86_64_windows.Syscalls` 仅在 Windows 目标下内联，
+                // 避免 Linux + Windows 的 Syscalls.aura 同时参与编译导致
+                // `Syscalls_exit` 重复定义。
+                if pkg.starts_with("arch.") {
+                    let rest_after_arch = &pkg[5..]; // 去掉 "arch."
+                    let platform = rest_after_arch.split('.').next().unwrap_or(rest_after_arch);
+                    if !native_arch_matches_platform(platform) {
+                        if std::env::var_os("AURA_DEBUG_IMPORT").is_some() {
+                            eprintln!(
+                                "[debug] skipping native arch import: {} (platform mismatch, host: {}/{})",
+                                pkg, std::env::consts::ARCH, std::env::consts::OS
+                            );
+                        }
+                        continue; // 跳过整个 import 行
+                    }
+                }
                 find_lang_root(base_dir).map(|lang| {
                     let rel = pkg_to_aura_path(pkg);
                     lang.join("native").join(rel)

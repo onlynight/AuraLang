@@ -784,7 +784,17 @@ fun cliEnvArgCount(): Int {
 }
 
 /// 命令行参数个数（argv[0] 计入）。
+/// 
+/// ⚠️ 2026-09-29 P1.10 修复：优先使用 Process.argCount()，回退到环境变量通道。
+/// 自举编译器（AOT 产物）通过 `aura_argc_global` 全局变量接收 argv，
+/// 由 `Process.argCount()` 读取；旧版环境变量通道作为兼容保留。
 fun cliArgCount(): Int {
+    // 优先使用 Process.argCount()（AOT 路径）
+    val procN: Int = Process.argCount()
+    if (procN > 0) {
+        return procN
+    }
+    // 回退：环境变量通道（VM 路径）
     val envN: Int = cliEnvArgCount()
     if (envN >= 0) {
         return envN
@@ -794,7 +804,18 @@ fun cliArgCount(): Int {
 }
 
 /// 取第 i 个命令行参数（i=0 为可执行文件名）。
+/// 
+/// ⚠️ 2026-09-29 P1.10 修复：优先使用 Process.arg()，回退到环境变量通道。
 fun cliArg(i: Int): String {
+    // 优先使用 Process.arg()（AOT 路径）
+    val procN: Int = Process.argCount()
+    if (procN > 0) {
+        if (i < 0 || i >= procN) {
+            return ""
+        }
+        return Process.arg(i)
+    }
+    // 回退：环境变量通道（VM 路径）
     val envN: Int = cliEnvArgCount()
     if (envN >= 0) {
         if (i < 0 || i >= envN) {
@@ -813,6 +834,13 @@ fun cliArg(i: Int): String {
 fun main() {
     // 启动路径逐步标记（自举产物 `Main.exe` 启动期崩溃定位用；定位完成后可移除）
     println("BOOT-1")
+    // 诊断：检查 Process.argCount() 是否返回正确的参数个数
+    val procArgN: Int = Process.argCount()
+    println("[MAIN] Process.argCount=" + toStr(procArgN))
+    if (procArgN > 0) {
+        println("[MAIN] Process.arg(0)=" + Process.arg(0))
+        println("[MAIN] Process.arg(1)=" + Process.arg(1))
+    }
     // Determine argument base offset: when run via `aura run <file.auc> [args]`,
     // the VM passes [exe, "run", file.auc, ...].  Skip those two so that
     // arg(1) is the first user-supplied argument, matching standalone invocation.

@@ -1,0 +1,4 @@
+// Test main function without imports
+fun main() {
+    1 + 1
+}

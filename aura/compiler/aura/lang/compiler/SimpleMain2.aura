@@ -1,0 +1,6 @@
+// Test main function with explicit IO.println
+import aura.lang.std.IO
+
+fun main() {
+    IO.println("Hello!")
+}

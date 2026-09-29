@@ -14,8 +14,6 @@ package aura.lang.native
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.native.Syscalls
-import aura.lang.native.arch.x86_64_linux.Syscalls as LinuxSyscalls
-import aura.lang.native.arch.x86_64_windows.Syscalls as WindowsSyscalls
 
 // 编译器内置内存操作
 extern interface Memory {

@@ -510,6 +510,11 @@ class SsaBuilder {
             this.buildAssign(src, id)
         } else if (kind == "HirCall") {
             this.buildExpr(src, id)
+        } else if (kind == "HirExpr") {
+            // HirExpr 是 unknown-expression 叶子（Hir.aura:1494 默认分支产出）。
+            // 旧实现遗漏此分支，导致 buildStmt 对 HirExpr 静默跳过，
+            // 函数体在 HIR→SSA 转换中丢失（实测 fun main() { 1+1 } 生成空体）。
+            this.buildExpr(src, id)
         }
     }
 

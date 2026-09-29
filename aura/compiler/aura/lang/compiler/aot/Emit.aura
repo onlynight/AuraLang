@@ -1994,9 +1994,11 @@ class LlvmEmitter {
         //
         // Phase S4 修复：也检查 `name` 是否以 ".main" 结尾（包名前缀情况），
         // 确保 `main` 函数始终被正确识别为入口点。
+        // P1.12 修复：即使函数有类前缀（如 aura.lang.compiler.Main.main），
+        // 也要检查是否为入口点，否则 argc/argv 参数不会被注入。
         var isEntryMain: Boolean = false
-        if (this.methodOwnerClass(id) == "") {
-            isEntryMain = (name == "main" || aotContains(name, ".main"))
+        if (name == "main" || aotContains(name, ".main")) {
+            isEntryMain = true
         }
         if (isEntryMain) {
             retTy = "i32"
@@ -2026,6 +2028,11 @@ class LlvmEmitter {
         var ownerCls: String = this.methodOwnerClass(id)
         if (this.fForceOwnerCls != "") {
             ownerCls = this.fForceOwnerCls
+        }
+        // P1.12 修复：入口 main 必须是模块级函数（无 self 参数），否则 argc/argv
+        // 会被 self 参数覆盖，导致 Process.argCount() 返回 0。
+        if (isEntryMain) {
+            ownerCls = ""
         }
         this.fCurClass = ownerCls
         // C 入口：模块级 `main` 使用 `(i32 %argc, i8** %argv)` 签名（与 Rust 后端

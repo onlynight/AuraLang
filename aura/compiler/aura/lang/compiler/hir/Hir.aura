@@ -1335,12 +1335,20 @@ class HirLowerer {
     }
 
     /// 降级表达式语句。
+    ///
+    /// ⚠️ 必须包裹一层 `HirExprStmt`：`buildStmt` 按 `kind == "HirExprStmt"` 分派，
+    /// 直接返回 `lowerExpr` 的结果（`HirBinary` / `HirLit` 等）会落到
+    /// `buildStmt` 的 else 分支被静默丢弃 —— 实测 `fun main() { 1+1 }` 生成空函数体。
     fun lowerExprStmt(ast: Ast, id: Int): Int {
         val kids: String = ast.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount > 0) {
             val exprId: Int = HirUtils.hirKidsAt(kids, 0)
-            return this.lowerExpr(ast, exprId)
+            val exprHirId: Int = this.lowerExpr(ast, exprId)
+            if (exprHirId >= 0) {
+                return this.hir.add("HirExprStmt", "", "",
+                    ast.spanOf(id), HirUtils.hirKidsAdd(HirUtils.hirNoKids(), exprHirId))
+            }
         }
         return -1
     }

@@ -1,13 +1,39 @@
 ; ---- Command line args (pure IR, Phase C) ----
 ; Global variables for argc/argv (stored by main() entry)
-@aura_argc_global = internal global i32 0
-@aura_argv_global = internal global i8** null
+; ⚠️ 2026-09-29 P1.11: internal → global (必须跨模块可见，否则 main 无法 store)
+@aura_argc_global = global i32 0
+@aura_argv_global = global i8** null
 
 ; Get command-line argument count
 define i64 @aura_process_argCount() {
   %argc = load i32, i32* @aura_argc_global
   %argc64 = sext i32 %argc to i64
   ret i64 %argc64
+}
+
+; Get a single command-line argument (returns malloc'd copy)
+define i8* @aura_process_arg(i64 %idx) {
+entry:
+  %argc = load i32, i32* @aura_argc_global
+  %argc64 = sext i32 %argc to i64
+  %valid = icmp slt i64 %idx, %argc64
+  %valid2 = icmp sge i64 %idx, 0
+  %ok = and i1 %valid, %valid2
+  br i1 %ok, label %get_arg, label %empty
+empty:
+  %e = call i8* @malloc(i64 1)
+  store i8 0, i8* %e
+  ret i8* %e
+get_arg:
+  %argv = load i8**, i8*** @aura_argv_global
+  %aent = getelementptr i8*, i8** %argv, i64 %idx
+  %a = load i8*, i8** %aent
+  %alen = call i64 @strlen(i8* %a)
+  %buf = call i8* @malloc(i64 %alen)
+  call void @llvm.memcpy.p0.i8.p0.i8(i8* align 1 %buf, i8* align 1 %a, i64 %alen, i1 false)
+  %end = getelementptr i8, i8* %buf, i64 %alen
+  store i8 0, i8* %end
+  ret i8* %buf
 }
 
 ; Get all command-line args concatenated with '\n'

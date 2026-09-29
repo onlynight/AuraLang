@@ -1,0 +1,4 @@
+// Simple test main function
+fun main() {
+    println("Hello!")
+}

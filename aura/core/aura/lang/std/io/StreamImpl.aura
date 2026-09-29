@@ -5,6 +5,8 @@ import aura.lang.native.Memory
 import aura.lang.native.console.Console
 import aura.lang.native.io.Stdio
 import aura.lang.native.memory.Allocator
+import aura.lang.std.io.StdInputStream
+import aura.lang.std.io.StdOutputStream
 
 /// 标准流实现工厂。
 ///

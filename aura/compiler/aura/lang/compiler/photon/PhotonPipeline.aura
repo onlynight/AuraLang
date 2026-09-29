@@ -199,16 +199,16 @@ class PhotonPipeline {
     private var dbgSigCalls: Int = 0
     private var dbgSigScanned: Int = 0
 
-    /// 追加一条调试轨迹并**立即落盘**。
+    /// 追加一条调试轨迹并**定期落盘**。
     ///
     /// 为什么落盘而不是 `println`：VM 的 stdout 是带缓冲的，进程被 OOM killer
     /// 终止时缓冲区内容整体丢失（实测大工程编译崩溃时终端一行都看不到），
     /// 无法定位崩溃点。文件写入每条都同步，崩溃前的进度得以保留。
     ///
-    /// ⚠️ 2026-09-29：改为有界截断（只保留尾部 2.5KB，每次重写 ≤3KB 小文件）。
-    /// 旧写法 `traceBuf = traceBuf + msg + "\n"` + 整文件重写是 O(行数²) 分配源——
-    /// `parsePhirText` 每 20–25 个函数打一次点、每个 Phase 也打点，编译 Main.aura
-    /// 时 traceBuf 累积到数万行后每次追加都整段拷贝。照抄 `peProbe` 的做法。
+    /// ⚠️ 2026-09-29 P1.8 优化：有界截断 + 定期落盘。
+    /// 旧写法每次调用都整文件重写（O(行数²)）：编译 Main.aura 时 traceBuf
+    /// 累积到数万行后每次追加都整段拷贝，verbose 模式从 1.2s 退化到 140s。
+    /// 修复：只保留尾部 2.5KB + 每 50 步落盘一次，平衡调试可见性与性能。
     private fun traceMark(msg: String): Unit {
         if (!this.traceOn) { return }
         this.traceStep = this.traceStep + 1
@@ -216,7 +216,10 @@ class PhotonPipeline {
         if (this.traceBuf.length > 3000) {
             this.traceBuf = this.traceBuf.substring(this.traceBuf.length - 2500)
         }
-        FileUtils.writeText(this.outDir + "/photon_trace.log", this.traceBuf)
+        // 每 50 步落盘一次，避免 O(n²) 整文件重写
+        if (this.traceStep % 50 == 0) {
+            FileUtils.writeText(this.outDir + "/photon_trace.log", this.traceBuf)
+        }
     }
 
     /// 读取 Phase E 探针输出路径；空串表示关闭。
@@ -300,7 +303,12 @@ class PhotonPipeline {
             this.photonDumpSsa(ssaBuilder)
         }
         // 阶段短路开关（性能诊断用）：AURA_PHOTON_STOP=A|B|C|D
-        if (Env.get("AURA_PHOTON_STOP") == "A") {
+        // ⚠️ 2026-09-29 P1.9 调试：打印环境变量值定位「stop 不生效」问题
+        val stopVal: String = Env.get("AURA_PHOTON_STOP", "")
+        if (this.traceOn || this.verboseOn) {
+            println("[STOP-CHECK] AURA_PHOTON_STOP=[" + stopVal + "]")
+        }
+        if (stopVal == "A") {
             result.errorMessage = "STOPPED_AFTER_PHASE_A"
             return result
         }

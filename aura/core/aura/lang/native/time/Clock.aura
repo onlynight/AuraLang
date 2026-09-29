@@ -5,12 +5,12 @@ import aura.lang.native.Memory
 import aura.lang.native.Cpu
 
 /// Time structure
-struct Time {
+struct TimeVal {
     var sec: Long = 0
     var nsec: Long = 0
 
     fun timestamp(): Double {
-        return sec + nsec / 1000000000.0
+        return this.sec + this.nsec / 1000000000.0
     }
 }
 
@@ -33,9 +33,9 @@ object ClockImpl {
         return tsBuf != 0
     }
 
-    fun now(): Time {
-        if (tsBuf == 0) { return Time() }
-        var t: Time = Time()
+    fun now(): TimeVal {
+        if (tsBuf == 0) { return TimeVal() }
+        var t: TimeVal = TimeVal()
         val ret: Long = Clock.clockGettime(0, tsBuf)
         if (ret == 0) {
             t.sec = Memory.read64(tsBuf)
@@ -45,17 +45,17 @@ object ClockImpl {
     }
 
     fun timeMs(): Long {
-        val t: Time = now()
+        val t: TimeVal = now()
         return t.sec * 1000 + t.nsec / 1000000
     }
 
     fun timeUs(): Long {
-        val t: Time = now()
+        val t: TimeVal = now()
         return t.sec * 1000000 + t.nsec / 1000
     }
 
     fun timeNs(): Long {
-        val t: Time = now()
+        val t: TimeVal = now()
         return t.sec * 1000000000 + t.nsec
     }
 

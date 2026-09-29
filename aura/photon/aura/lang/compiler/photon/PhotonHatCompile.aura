@@ -104,9 +104,15 @@ fun main() {
                     " hirNodes=" + toStr(hir.count))
         }
         if (linker.missing != "") {
-            // 注意：不要用 String.replace —— VM 路径下类方法调用未链接。
+            // 注意：不要用 String.replace — VM 路径下类方法调用未链接。
             // 缺失 import 会直接变成链接期 undefined symbol，因此始终报出来。
             println("[hat-front] missing imports: " + linker.missing)
+        }
+
+        // ── 前端阶段短路：AURA_PHOTON_STOP=FRONT 在前端完成后停止 ──
+        if (Env.get("AURA_PHOTON_STOP", "") == "FRONT") {
+            println("===STOPPED_AFTER_FRONTEND===")
+            Process.exit(0)
         }
 
         // ── HIR → SSA MIR → HAT 文本（HAT 是这条链路的中间表示）──
@@ -123,6 +129,12 @@ fun main() {
         FileUtils.writeText(hatPath, hatText)
         if (verboseOn) {
             println("[hat-front] .hat = " + hatPath + " (" + toStr(hatText.length) + " 字符)")
+        }
+
+        // ── 前端阶段短路：AURA_PHOTON_STOP=HAT 在 HAT 序列化后停止 ──
+        if (Env.get("AURA_PHOTON_STOP", "") == "HAT") {
+            println("===STOPPED_AFTER_HAT===")
+            Process.exit(0)
         }
     }
 

@@ -543,13 +543,51 @@ impl EmitCtx {
         s.push_str("declare void @llvm.memcpy(i8*, i8*, i64, i1)\n");
         s.push_str("declare void @llvm.memset(i8*, i8, i64, i1)\n");
         s.push_str("declare i32 @llvm.memcmp(i8*, i8*, i64, i1)\n");
+        // __callClosure(closure, sig, args...) — 闭包间接调用（Collections.filter/map 用）
+        s.push_str("declare i64 @__callClosure(i64, i8*, i64)\n");
+        // 方法派发 bug 的临时兜底声明（Rust AOT emit 尚未实现 .size/.add 等内置集合方法）
+        s.push_str("declare i32 @size(i8*)\n");
+        s.push_str("declare void @add(i8*, i64)\n");
+        s.push_str("declare i64 @getAt(i8*, i32)\n");
+        s.push_str("declare i32 @length(i8*)\n");
 
         // 2. 为每个 @native 函数生成包装器
+        //    同名包装器去重：多个 `Syscalls.aura`（Linux + Windows）可能声明
+        //    同名 @native 函数（如 `exit`），产生 `Syscalls_exit` 的重复定义。
+        //    首个定义胜出（与 Aura 侧 `emitNativeWrapper` 行为一致）。
+        let mut seen_syms: std::collections::HashSet<String> = std::collections::HashSet::new();
         for func in &native_wrappers {
             if let Some(ref attr) = func.native_attr {
+                let sym = crate::codegen::aot::types::sanitizellvm(&func.name);
+                if seen_syms.contains(&sym) {
+                    continue;
+                }
+                seen_syms.insert(sym);
                 let wrapper_ir =
                     emit_native_wrapper(&self.type_mapper, &self.target_triple, func, attr);
                 s.push_str(&wrapper_ir);
+            } else if func.is_native {
+                // extern interface 函数（无 @native 注解）：仅声明为外部函数
+                // 由运行库（aura_std_cffi.c / 动态库）提供实现。
+                let sym = crate::codegen::aot::types::sanitizellvm(&func.name);
+                if seen_syms.contains(&sym) {
+                    continue;
+                }
+                seen_syms.insert(sym.clone());
+                let params: Vec<String> = func
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let ty = p.ty.as_ref().map(|t| self.type_mapper.map(t)).unwrap_or_else(|| "i64".to_string());
+                        format!("{} %arg.{}", ty, i)
+                    })
+                    .collect();
+                let ret_ty = match &func.ret {
+                    Some(t) => self.type_mapper.map(t),
+                    None => "void".to_string(),
+                };
+                s.push_str(&format!("declare {} @{}({})\n", ret_ty, sym, params.join(", ")));
             }
         }
 
