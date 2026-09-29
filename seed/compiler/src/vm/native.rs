@@ -369,6 +369,13 @@ impl NativeRegistry {
         // Phase P4: Memory.arcIncrement/arcDecrement — ARC 原子引用计数
         r.register("Memory.arcIncrement", native_memory_arc_increment);
         r.register("Memory.arcDecrement", native_memory_arc_decrement);
+        // Phase P3.2: Arena 分配器（bump-pointer）
+        r.register("Arena.init", native_arena_init);
+        r.register("Arena.alloc", native_arena_alloc);
+        r.register("Arena.reset", native_arena_reset);
+        r.register("Arena.free", native_arena_free);
+        r.register("Arena.usedSize", native_arena_used_size);
+        r.register("Arena.remainingSize", native_arena_remaining_size);
         // Phase P4: Console/FileOps/Stdio Rust native 实现（替代 AOT 接口调用）
         r.register("Console.writeStdout", native_console_write_stdout);
         r.register("FileOps.open", native_fileops_open);
@@ -1891,4 +1898,155 @@ fn native_fileops_write(args: &[Value]) -> Value {
     }
     let n = unsafe { libc::write(fd, buf as *const libc::c_void, count) };
     Value::Int(n as i64)
+}
+
+// ─────────────────────────────────────────────────────────────
+// P3.2 Arena Allocator — bump-pointer 内存分配器
+// ─────────────────────────────────────────────────────────────
+
+use std::sync::atomic::{AtomicPtr, AtomicI64, Ordering};
+
+/// Arena 分配器全局状态（线程不安全，仅供 VM 单线程使用）
+struct ArenaState {
+    base_addr: AtomicPtr<u8>,
+    current_ptr: AtomicI64,
+    capacity: AtomicI64,
+}
+
+impl ArenaState {
+    const fn new() -> Self {
+        ArenaState {
+            base_addr: AtomicPtr::new(std::ptr::null_mut()),
+            current_ptr: AtomicI64::new(0),
+            capacity: AtomicI64::new(0),
+        }
+    }
+}
+
+static ARENA_STATE: ArenaState = ArenaState::new();
+
+/// Arena.init(size) → Boolean: 初始化 arena，分配 size 字节
+fn native_arena_init(args: &[Value]) -> Value {
+    let size = arg_i64(args, 0);
+    if size <= 0 {
+        return Value::Bool(false);
+    }
+    
+    // PROT_READ=1, PROT_WRITE=2, PROT_READ|PROT_WRITE=3
+    // MAP_PRIVATE=2, MAP_ANONYMOUS=0x20=32, MAP_PRIVATE|MAP_ANONYMOUS=34
+    #[cfg(windows)]
+    {
+        let addr = unsafe {
+            VirtualAlloc(
+                std::ptr::null_mut(),
+                size as usize,
+                0x1000, // MEM_COMMIT
+                0x04,   // PAGE_READWRITE
+            )
+        };
+        if addr.is_null() {
+            return Value::Bool(false);
+        }
+        ARENA_STATE.base_addr.store(addr as *mut u8, Ordering::SeqCst);
+        ARENA_STATE.current_ptr.store(size, Ordering::SeqCst);
+        ARENA_STATE.capacity.store(size, Ordering::SeqCst);
+    }
+    
+    #[cfg(not(windows))]
+    {
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size as usize,
+                3,   // PROT_READ|PROT_WRITE
+                34,  // MAP_PRIVATE|MAP_ANONYMOUS
+                -1,
+                0,
+            )
+        };
+        if addr == libc::MAP_FAILED {
+            return Value::Bool(false);
+        }
+        ARENA_STATE.base_addr.store(addr as *mut u8, Ordering::SeqCst);
+        ARENA_STATE.current_ptr.store(size, Ordering::SeqCst);
+        ARENA_STATE.capacity.store(size, Ordering::SeqCst);
+    }
+    
+    Value::Bool(true)
+}
+
+/// Arena.alloc(size) → Long: 从 arena 分配 size 字节，返回地址（0 = 失败）
+fn native_arena_alloc(args: &[Value]) -> Value {
+    let size = arg_i64(args, 0);
+    if size <= 0 {
+        return Value::Int(0);
+    }
+    
+    let aligned_size = (size + 7) / 8 * 8; // 8 字节对齐
+    let current = ARENA_STATE.current_ptr.load(Ordering::SeqCst);
+    let capacity = ARENA_STATE.capacity.load(Ordering::SeqCst);
+    
+    if current + aligned_size > capacity {
+        return Value::Int(0); // 内存不足
+    }
+    
+    let new_current = current + aligned_size;
+    ARENA_STATE.current_ptr.store(new_current, Ordering::SeqCst);
+    Value::Int(current)
+}
+
+/// Arena.reset() → Unit: 重置 arena（不释放内存，只重置指针）
+fn native_arena_reset(_args: &[Value]) -> Value {
+    let base = ARENA_STATE.base_addr.load(Ordering::SeqCst);
+    if base.is_null() {
+        return Value::Null;
+    }
+    ARENA_STATE.current_ptr.store(base as usize as i64, Ordering::SeqCst);
+    Value::Null
+}
+
+/// Arena.free() → Unit: 释放 arena 全部内存
+fn native_arena_free(_args: &[Value]) -> Value {
+    let base = ARENA_STATE.base_addr.load(Ordering::SeqCst);
+    if base.is_null() {
+        return Value::Null;
+    }
+    let capacity = ARENA_STATE.capacity.load(Ordering::SeqCst);
+    
+    #[cfg(windows)]
+    {
+        unsafe {
+            VirtualFree(base as *mut libc::c_void, 0, 0x8000); // MEM_RELEASE
+        }
+    }
+    
+    #[cfg(not(windows))]
+    {
+        unsafe {
+            libc::munmap(base as *mut libc::c_void, capacity as usize);
+        }
+    }
+    
+    ARENA_STATE.base_addr.store(std::ptr::null_mut(), Ordering::SeqCst);
+    ARENA_STATE.current_ptr.store(0, Ordering::SeqCst);
+    ARENA_STATE.capacity.store(0, Ordering::SeqCst);
+    Value::Null
+}
+
+/// Arena.usedSize() → Long: 获取已使用内存大小
+fn native_arena_used_size(_args: &[Value]) -> Value {
+    let base = ARENA_STATE.base_addr.load(Ordering::SeqCst);
+    if base.is_null() {
+        return Value::Int(0);
+    }
+    let current = ARENA_STATE.current_ptr.load(Ordering::SeqCst);
+    let start = base as usize as i64;
+    Value::Int(current - start)
+}
+
+/// Arena.remainingSize() → Long: 获取剩余内存大小
+fn native_arena_remaining_size(_args: &[Value]) -> Value {
+    let capacity = ARENA_STATE.capacity.load(Ordering::SeqCst);
+    let current = ARENA_STATE.current_ptr.load(Ordering::SeqCst);
+    Value::Int(capacity - current)
 }

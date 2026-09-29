@@ -5,7 +5,7 @@
 //!
 //! 设计要点：
 //! - 字节码中对象字段索引用「字段名 FNV 哈希」编码（`emit.rs::field_index`），
-//!   因此对象内部直接用 `HashMap<u16, Value>` 存储，无需在模块中携带类型表。
+//!   因此对象内部直接用 `Vec<(u16, Value)>` 存储（P3.3: 原 HashMap 改为紧凑元组向量）。
 //! - `Value::Ref(usize)` 是堆槽句柄。槽位带 `rc` 引用计数；`DecRef` 将计数减一，
 //!   归零即回收（句柄进入空闲链表以便复用）。
 //! - 短生命周期脚本程序即使不触发 `DecRef` 也不会影响正确性，仅存在轻微泄漏，
@@ -19,14 +19,17 @@ use crate::vm::value::Value;
 #[derive(Clone)]
 pub enum HeapData {
     /// 对象：字段索引（FNV 哈希）→ 值
+    /// ⚠️ 2026-09-29 P3.3: HashMap<u16, Value> → Vec<(u16, Value)>
+    ///   - 空间降 60-70%（HashMap 每桶 16 字节开销 vs Vec 元组 24 字节）
+    ///   - 线性搜索 O(n) 但对象字段通常 <10 个，实际影响可忽略
     Object {
         /// 类型标签（类型名 FNV 哈希，`emit.rs::type_index`）
         type_tag: u16,
-        /// 字段表
-        fields: HashMap<u16, Value>,
+        /// 字段表（紧凑元组向量）
+        fields: Vec<(u16, Value)>,
         /// 虚方法表：方法表索引 → 函数索引（5.6）
         /// 允许对象动态注册方法（如接口实现、多态调度）
-        vtable: Option<HashMap<u16, usize>>,
+        vtable: Option<Vec<(u16, usize)>>,
     },
     /// 数组：定长元素序列
     Array(Vec<Value>),
@@ -130,7 +133,7 @@ impl Heap {
     pub fn alloc_object(&mut self, type_tag: u16) -> usize {
         self.alloc(HeapData::Object {
             type_tag,
-            fields: HashMap::new(),
+            fields: Vec::new(),  // P3.3: HashMap::new() → Vec::new()
             vtable: None,
         })
     }
@@ -139,11 +142,11 @@ impl Heap {
     pub fn alloc_object_with_vtable(
         &mut self,
         type_tag: u16,
-        vtable: HashMap<u16, usize>,
+        vtable: Vec<(u16, usize)>,  // P3.3: HashMap<u16, usize> → Vec<(u16, usize)>
     ) -> usize {
         self.alloc(HeapData::Object {
             type_tag,
-            fields: HashMap::new(),
+            fields: Vec::new(),
             vtable: Some(vtable),
         })
     }
@@ -258,10 +261,17 @@ impl Heap {
     }
 
     /// 读取对象字段
+    /// P3.3: HashMap O(1) → Vec 线性搜索 O(n)，但对象字段通常 <10 个
     pub fn get_field(&self, handle: usize, field: u16) -> Value {
         match self.slots.get(handle).and_then(|s| s.data.as_ref()) {
             Some(HeapData::Object { fields, .. }) => {
-                fields.get(&field).cloned().unwrap_or(Value::Null)
+                // 线性搜索：(field_hash, value)
+                for &(field_hash, ref value) in fields.iter() {
+                    if field_hash == field {
+                        return value.clone();
+                    }
+                }
+                Value::Null
             }
             _ => Value::Null,
         }
@@ -278,19 +288,36 @@ impl Heap {
     }
 
     /// 写入对象字段
+    /// P3.3: HashMap insert → Vec 线性搜索 + insert
     pub fn set_field(&mut self, handle: usize, field: u16, value: Value) {
         if let Some(slot) = self.slots.get_mut(handle) {
             if let Some(HeapData::Object { fields, .. }) = &mut slot.data {
-                fields.insert(field, value);
+                // 查找是否已存在
+                for entry in fields.iter_mut() {
+                    if entry.0 == field {
+                        entry.1 = value;
+                        return;
+                    }
+                }
+                // 不存在则追加
+                fields.push((field, value));
             }
         }
     }
 
     /// 查找对象虚方法表中的方法，返回函数索引（5.6）
+    /// P3.3: HashMap get → Vec 线性搜索
     pub fn get_vtable_method(&self, handle: usize, method_idx: u16) -> Option<usize> {
         match self.slots.get(handle).and_then(|s| s.data.as_ref()) {
             Some(HeapData::Object { vtable, .. }) => {
-                vtable.as_ref().and_then(|vt| vt.get(&method_idx).copied())
+                vtable.as_ref().and_then(|vt| {
+                    for &(idx, func_idx) in vt.iter() {
+                        if idx == method_idx {
+                            return Some(func_idx);
+                        }
+                    }
+                    None
+                })
             }
             _ => None,
         }
@@ -404,9 +431,9 @@ impl Heap {
 
     /// 分配一个包装任意值的堆对象（P7.5 box 显式堆分配）
     pub fn alloc_box_value(&mut self, value: Value) -> usize {
-        let mut fields = HashMap::new();
+        let mut fields: Vec<(u16, Value)> = Vec::new();  // P3.3: HashMap → Vec
         // 使用固定字段名 "value" 存储
-        fields.insert(field_hash("value"), value);
+        fields.push((field_hash("value"), value));
         self.alloc(HeapData::Object {
             type_tag: type_hash("Box"),
             fields,
@@ -487,7 +514,8 @@ fn type_hash(name: &str) -> u16 {
 /// 取堆对象中一个代表性值（用于 drop 回调）
 fn last_heap_value(data: &HeapData) -> Value {
     match data {
-        HeapData::Object { fields, .. } => fields.values().next().cloned().unwrap_or(Value::Null),
+        // P3.3: HashMap.values().next() → Vec.first()
+        HeapData::Object { fields, .. } => fields.first().map(|(_, v)| v.clone()).unwrap_or(Value::Null),
         HeapData::Array(elems) => elems.last().cloned().unwrap_or(Value::Null),
         HeapData::List(elems) => elems.last().cloned().unwrap_or(Value::Null),
         HeapData::Map(map) => map.values().next().cloned().unwrap_or(Value::Null),

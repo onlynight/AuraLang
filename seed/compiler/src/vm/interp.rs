@@ -235,7 +235,8 @@ impl Vm {
                 const NO_METHOD: u16 = u16::MAX;
                 let h = match self.module.module.vtables.iter().find(|vt| vt.type_tag == type_tag) {
                     Some(vt) => {
-                        let map: std::collections::HashMap<u16, usize> = vt
+                        // P3.3: HashMap → Vec<(u16, usize)>
+                        let map: Vec<(u16, usize)> = vt
                             .slots
                             .iter()
                             .enumerate()
@@ -1352,11 +1353,14 @@ impl Vm {
             {
                 // message 字段索引由 FNV-1a 哈希计算
                 let field_idx = crate::codegen::emit::field_index("message");
-                if let Some(msg) = fields.get(&field_idx) {
-                    return msg.clone();
+                // P3.3: HashMap get → Vec 线性搜索
+                for &(idx, ref msg) in fields.iter() {
+                    if idx == field_idx {
+                        return msg.clone();
+                    }
                 }
                 // 兜底：取第一个字段值
-                if let Some(msg) = fields.values().next() {
+                if let Some((_, msg)) = fields.first() {
                     return msg.clone();
                 }
             }
