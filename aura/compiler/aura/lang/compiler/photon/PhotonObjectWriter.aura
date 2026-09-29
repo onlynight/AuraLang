@@ -802,7 +802,7 @@ class PhotonObjectWriter {
 
         // ── 4. 布局偏移 ──
         val headerSize: Int = 20
-        val sectionHeaderSize: Int = 42
+        val sectionHeaderSize: Int = 40
         val sectionTableEnd: Int = headerSize + sectionHeaderSize * this.coffSectionCount
         val textRawOffset: Int = this.alignUp(sectionTableEnd, 16)
         val textRawEnd: Int = textRawOffset + this.textSize
@@ -2224,26 +2224,29 @@ object PhotonObjectWriterUtils {
         restRelocEntries: List<String>
     ): String {
         val writer = PhotonObjectWriter()
-        writer.emitFromMachineCode(
-            firstMachineCodeHex,
-            firstRelocEntries,
-            stringConsts,
-            firstFunctionName
-        )
+        // 手动设置首函数字段（不调用 buildSymbols，等所有函数添加完毕后统一构建）
+        writer.textSection = firstMachineCodeHex
+        writer.stringConsts = stringConsts
+        writer.functions = firstFunctionName
+        writer.relocs = firstRelocEntries
+        writer.functionOffsets = firstFunctionName + "|0"
 
-        var i = 1
+        var i = 0
         while (i < restFunctions.size) {
             val relocs = ""
-            if (i - 1 < restRelocEntries.size) {
-                relocs = restRelocEntries[i - 1]
+            if (i < restRelocEntries.size) {
+                relocs = restRelocEntries[i]
             }
             writer.appendFunction(
-                restMachineCodes[i - 1],
+                restMachineCodes[i],
                 restFunctions[i],
                 relocs
             )
             i = i + 1
         }
+
+        // 所有函数添加完毕后统一构建符号表
+        writer.buildSymbols(writer.functions, writer.stringConsts)
 
         return writer.emit()
     }

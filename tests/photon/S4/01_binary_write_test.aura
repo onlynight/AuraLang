@@ -1,11 +1,13 @@
 // tests/photon/S4/01_binary_write_test.aura
-// ════════════════════════════════════════════════════════════�?// S4: 二进制文件写入测�?// 运行：aura run tests/photon/S4/01_binary_write_test.aura
-// ════════════════════════════════════════════════════════════�?
+// ════════════════════════════════════════════════════════════
+// S4: 二进制文件写入测试
+// 运行：aura run tests/photon/S4/01_binary_write_test.aura
+// ════════════════════════════════════════════════════════════
 import aura.lang.std.String
 import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
 
 fun main() {
-    println("══�?S4 二进制写入测�?══�?)
+    println("═══S4 二进制写入测试═══")
     var pass = 0
     var total = 3
 
@@ -38,6 +40,6 @@ fun main() {
     println("")
     println("PASS: " + pass + "/" + total)
     if (pass == total) {
-        println("ALL PASS �?S4 二进制写入就�?)
+        println("ALL PASS ══S4 二进制写入测试══")
     }
 }

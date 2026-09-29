@@ -277,7 +277,7 @@ fn mmap_alloc(data: &[u8], _exec: bool, _read: bool) -> Result<usize, String> {
 
         // 3. VirtualProtect(RX) — 切换为可读可执行
         let mut old_prot: u32 = 0;
-        let ok = VirtualProtect(ptr, data.len(), PAGE_EXECUTE_READ, &mut old_prot);
+        let ok = unsafe { VirtualProtect(ptr, data.len(), PAGE_EXECUTE_READ, &mut old_prot) };
 
         if !ok {
             VirtualFree(ptr, 0, MEM_RELEASE);

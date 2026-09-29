@@ -1,23 +1,23 @@
-// tests/photon/S2/06_liveness_test.aura
-// ════════════════════════════════════════════════════════════�?// 寄存器分配存活分析测�?// 运行：aura run tests/photon/S2/06_liveness_test.aura
-// ════════════════════════════════════════════════════════════�?
+﻿// tests/photon/S2/06_liveness_test.aura
+// ═════════════════════════════════════════════════════════════// 寄存器分配存活分析测轥// 运行：aura run tests/photon/S2/06_liveness_test.aura
+// ═════════════════════════════════════════════════════════════
 import aura.lang.std.String
 import "../../../aura/photon/aura/lang/compiler/photon/MachineDag.aura"
 import "../../../aura/photon/aura/lang/compiler/photon/RegisterAllocator.aura"
 
 fun main() {
-    println("══�?存活分析测试 ══�?)
+    println("═══存活分析测试 ═══")
     var pass = 0
     var total = 3
 
-    // [1] �?DAG
-    println("[1] �?DAG")
+    // [1] 穀DAG
+    println("[1] 穀DAG")
     val d1 = MachineDagUtils.emptyDag()
     val alloc1 = RegisterAllocatorUtils.emptyAllocator()
     alloc1.allocate(d1)
     if (alloc1.getSpillSlots() == 0) { pass = pass + 1 }
 
-    // [2] 带节点但无冲�?    println("[2] 带节点但无冲�?)
+    // [2] 带节点但无冲窀    println("[2] 带节点但无冲窀")
     val d2 = MachineDagUtils.emptyDag()
     val n1 = d2.addNode("Value", "Const", 0, "", "", "", -1, "42")
     val n2 = d2.addNode("Value", "Add", 0, "", "", "", -1, "")
@@ -25,7 +25,7 @@ fun main() {
     d2.selectPattern(1, MachineDagUtils.toStr(n1) + "," + MachineDagUtils.toStr(n2), n2)
     val alloc2 = RegisterAllocatorUtils.emptyAllocator()
     alloc2.allocate(d2)
-    // 检查节点是否分配了寄存�?    var i: Int = 0
+    // 检查节点是否分配了寄存噀    var i: Int = 0
     var allAssigned: Boolean = true
     while (i < d2.nodeCount) {
         val node = d2.nodeOf(i)
@@ -64,7 +64,7 @@ fun main() {
     if (pass == total) { println("ALL PASS") }
 }
 
-/// 整数转字符串�?fun toStr(n: Int): String {
+/// 整数转字符串　fun toStr(n: Int): String {
     if (n == 0) { return "0" }
     var neg: Boolean = false
     if (n < 0) { neg = true; n = -n }
@@ -77,7 +77,7 @@ fun main() {
     return result
 }
 
-/// 将单个数字转为字符串�?fun digitChar(d: Int): String {
+/// 将单个数字转为字符串　fun digitChar(d: Int): String {
     if (d == 0) { return "0" }
     if (d == 1) { return "1" }
     if (d == 2) { return "2" }

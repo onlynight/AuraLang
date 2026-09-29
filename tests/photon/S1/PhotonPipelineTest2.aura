@@ -1,4 +1,4 @@
-// aura:///aura/lang/compiler/photon/PhotonPipelineTest2.aura
+﻿// aura:///aura/lang/compiler/photon/PhotonPipelineTest2.aura
 package aura.lang.compiler.photon
 import aura.lang.std.String
 import "../../../aura/photon/aura/lang/compiler/photon/MachineDag.aura"
@@ -7,7 +7,7 @@ import "../../../aura/photon/aura/lang/compiler/photon/x86_64/X86Encoder.aura"
 import "../../../aura/photon/aura/lang/compiler/photon/X86Emitter.aura"
 
 fun main() {
-    println("══�?S1 Test ══�?)
+    println("═══S1 Test ═══")
     var pc = 0
 
     println("[1] X86Encoder basic")

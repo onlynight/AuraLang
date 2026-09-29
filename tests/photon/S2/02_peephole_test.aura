@@ -1,18 +1,18 @@
-// tests/photon/S2/02_peephole_test.aura
-// ════════════════════════════════════════════════════════════�?// 窥孔优化测试
+﻿// tests/photon/S2/02_peephole_test.aura
+// ═════════════════════════════════════════════════════════════// 窥孔优化测试
 // 运行：aura run tests/photon/S2/02_peephole_test.aura
-// ════════════════════════════════════════════════════════════�?
+// ═════════════════════════════════════════════════════════════
 import aura.lang.std.String
 import "../../../aura/photon/aura/lang/compiler/photon/MachineDag.aura"
 import "../../../aura/photon/aura/lang/compiler/photon/PeepholeOptimizer.aura"
 
 fun main() {
-    println("══�?窥孔优化测试 ══�?)
+    println("═══窥孔优化测试 ═══")
     var pass = 0
     var total = 5
 
-    // [1] �?DAG
-    println("[1] �?DAG")
+    // [1] 穀DAG
+    println("[1] 穀DAG")
     val d1 = MachineDagUtils.emptyDag()
     val opt1 = PeepholeOptimizerUtils.emptyOptimizer()
     opt1.optimize(d1)

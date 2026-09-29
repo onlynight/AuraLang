@@ -1,21 +1,21 @@
 // tests/photon/S3/08_jit_pipeline_test.aura
-// ════════════════════════════════════════════════════════════�?
-// S3 Phase F: Photon JIT 管线测试（VM 安全�?
+// ═══════════════════════════════════════════════════════════════
+// S3 Phase F: Photon JIT 管线测试（VM 安全）
 //
-// 覆盖此前无法执行�?JIT 原生路径的「编�?+ 发射 + 分派」环节：
-//   1. compileEncodeOnly / compileJit：HIR �?裸机器码 hex（VM 下可用）
-//   2. JitBackend.compileMachineCode：Photon 管线 �?JIT 机器�?
-//   3. emitFunction：多函数共享可执行内存（VM 下模拟地址，不触碰 Memory�?
+// 覆盖此前无法执行的 JIT 原生路径的「编译 + 发射 + 分派」环节：
+//   1. compileEncodeOnly / compileJit：HIR → 裸机器码 hex（VM 下可用）
+//   2. JitBackend.compileMachineCode：Photon 管线 → JIT 机器码
+//   3. emitFunction：多函数共享可执行内存（VM 下模拟地址，不触碰 Memory）
 //   4. registerFunction / lookupFunction：按名分派表
 //   5. deoptimize：按函数名禁用入口（回退解释器）
-//   6. 存根（dispatch / call / return / deopt trampoline�?
+//   6. 存根（dispatch / call / return / deopt trampoline）
 //
-// 说明：`Memory` �?extern interface，仅�?AOT / 自举运行时可用；
-// 种子 VM 下不可解析。故本测试使�?JitBackend 的默认「VM 安全」模�?
-// （vmMode=true），全程不触�?Memory�?
+// 说明：`Memory` 是 extern interface，仅 AOT / 自举运行时可用；
+// 种子 VM 下不可解析。故本测试使用 JitBackend 的默认「VM 安全」模式
+// （vmMode=true），全程不触碰 Memory。
 //
 // 运行：aura run tests/photon/S3/08_jit_pipeline_test.aura
-// ════════════════════════════════════════════════════════════�?
+// ═══════════════════════════════════════════════════════════════
 
 package tests.photon.S3
 
@@ -59,7 +59,7 @@ fun main() {
     val t = TestRunner()
     t.begin("Photon JIT pipeline (S3 Phase F)")
 
-    // ── 0. 源码 �?HIR ──
+    // ── 0. 源码 → HIR ──
     val src: String = "fun main(): Int { return 42 }"
     val p = Parser(src)
     p.parseProgram()
@@ -80,7 +80,7 @@ fun main() {
     t.assertTrue(jir.machineCodeHex == enc.machineCodeHex,
         "compileJit == compileEncodeOnly")
 
-    // ── 3. JitBackend：默�?VM 安全模式 ──
+    // ── 3. JitBackend：默认 VM 安全模式 ──
     val jb = JitBackend()
     t.assertTrue(jb.isVmMode(), "JitBackend defaults to VM-safe mode")
 
@@ -126,9 +126,9 @@ fun main() {
     t.assertTrue(jb.isVmMode(), "layout reflects VM-safe mode")
     t.assertTrue(jb.functionCount() == 2, "layout reports function count")
 
-    // ── 8. 真实执行入口�?VM 下是安全空操�?──
-    // `executeNative` �?`JitExec.callI64`（extern，VM 下不可解析）�?
-    // VM 模式必须先短路返回，绝不触碰该调用�?
+    // ── 8. 真实执行入口：VM 下是安全空操作 ──
+    // `executeNative` 是 `JitExec.callI64`（extern，VM 下不可解析）；
+    // VM 模式必须先短路返回，绝不触碰该调用。
     t.assertTrue(jb.executeNative(entry0, 0) == 0, "executeNative is a no-op under VM mode")
     t.assertTrue(jb.executeNative0(entry0) == 0, "executeNative0 is a no-op under VM mode")
     t.assertTrue(jb.executeNative(0, 0) == 0, "executeNative rejects null entry")

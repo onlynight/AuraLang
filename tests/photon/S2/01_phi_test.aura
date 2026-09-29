@@ -1,18 +1,18 @@
-// tests/photon/S2/01_phi_test.aura
-// ════════════════════════════════════════════════════════════�?// Phi 节点处理测试
+﻿// tests/photon/S2/01_phi_test.aura
+// ═════════════════════════════════════════════════════════════// Phi 节点处理测试
 // 运行：aura run tests/photon/S2/01_phi_test.aura
-// ════════════════════════════════════════════════════════════�?
+// ═════════════════════════════════════════════════════════════
 import aura.lang.std.String
 import "../../../aura/photon/aura/lang/compiler/photon/Lir.aura"
 import "../../../aura/photon/aura/lang/compiler/photon/MachineDag.aura"
 import "../../../aura/photon/aura/lang/compiler/photon/InstructionSelection.aura"
 
 fun main() {
-    println("══�?Phi 节点测试 ══�?)
+    println("═══Phi 节点测试 ═══")
     var pass = 0
     var total = 3
 
-    // [1] 单块程序（无 Phi�?    println("[1] 单块程序（无 Phi�?)
+    // [1] 单块程序（无 Phi）    println("[1] 单块程序（无 Phi）")
     val lir1 = LirUtils.emptyProgram()
     val t1 = lir1.types
     val i32 = t1.intType(32)
@@ -28,7 +28,7 @@ fun main() {
     println("  nodes=" + dagg1.nodeCount + " instrs=" + dagg1.instrCount)
     if (dagg1.instrCount >= 1) { pass = pass + 1 }
 
-    // [2] �?Phi 的程序（简化：�? �?Phi 节点�?    println("[2] �?Phi 的程�?)
+    // [2] 帀Phi 的程序（简化：址 最Phi 节点）    println("[2] 帀Phi 的程庀")
     val lir2 = LirUtils.emptyProgram()
     val t2 = lir2.types
     val i32b = t2.intType(32)
@@ -37,7 +37,7 @@ fun main() {
     val bid2 = lir2.addBlock()
     func2.blocks = LirBlockUtils.succsAdd(func2.blocks, bid2)
     func2.entryBlock = bid2
-    // 两个常量�?    val va = lir2.addInstr(bid2, "Const", i32b, "", "10")
+    // 两个常量倀    val va = lir2.addInstr(bid2, "Const", i32b, "", "10")
     val vb = lir2.addInstr(bid2, "Const", i32b, "", "20")
     // Phi 节点（取第一个入边值）
     val vPhi = lir2.addPhi(bid2, i32b, LirUtils.toStr(va) + "," + LirUtils.toStr(vb), "")
@@ -45,7 +45,7 @@ fun main() {
     val sel2 = InstructionSelectorUtils.emptySelector()
     val dagg2 = sel2.select(lir2)
     println("  nodes=" + dagg2.nodeCount + " instrs=" + dagg2.instrCount)
-    // 检查是否有 MOV 指令（Phi �?MOV�?    var i: Int = 0
+    // 检查是否有 MOV 指令（Phi ↀMOV）    var i: Int = 0
     var movCount: Int = 0
     while (i < dagg2.instrCount) {
         val instr = dagg2.instrOf(i)

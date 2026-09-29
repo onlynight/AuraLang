@@ -1,8 +1,8 @@
-// tests/photon/S3/05_library_output_test.aura
-// E3: 库输出测�?�?dll/so/lib
+﻿// tests/photon/S3/05_library_output_test.aura
+// E3: 库输出测轥 dll/so/lib
 //
-// 验证 PhotonPipeline 支持不同输出类型�?//   - exe: 可执行文件（默认�?//   - dll: Windows 动态链接库
-//   - so: Linux 共享�?//   - lib: 静态库�?lib/.a�?
+// 验证 PhotonPipeline 支持不同输出类型）//   - exe: 可执行文件（默认）//   - dll: Windows 动态链接库
+//   - so: Linux 共享庀//   - lib: 静态库）lib/.a）
 import aura.lang.std.String
 import aura.lang.std.Process
 
@@ -32,7 +32,7 @@ fun check(cond: Boolean, name: String): Unit {
 }
 
 fun main(): Unit {
-    println("══�?E3 库输出测�?══�?)
+    println("═══E3 库输出测轥═══")
 
     // ── 1. exe 输出类型（默认）──
     println("[1] exe 输出类型")
@@ -72,19 +72,19 @@ fun main(): Unit {
 
     // ── 结果 ──
     println("")
-    println("══�?结果 ══�?)
+    println("═══结果 ═══")
     println("PASS: " + toStr(pass) + "/" + toStr(pass + fail))
     if (fail == 0) {
-        println("ALL PASS �?库输出就�?)
+        println("ALL PASS  库输出就绀")
     } else {
         println("FAIL: " + toStr(fail))
     }
     Process.exit(if (fail == 0) 0 else 1)
 }
 
-/// 辅助类：构建简�?HIR 用于测试�?class HirBuilder {
+/// 辅助类：构建简區HIR 用于测试　class HirBuilder {
     fun buildSimpleFunction(): Hir {
         val hir = Hir()
-        // �?HIR �?仅用于测试管线流�?        return hir
+        // 穀HIR  仅用于测试管线流稀        return hir
     }
 }

@@ -1,8 +1,8 @@
 ﻿// aura:///aura/lang/compiler/photon/PhotonValidation.aura
 package aura.lang.compiler.photon
 // ─────────────────────────────────────────────────────────────
-// Phase E 验证 �?仅使用已修复的组�?//
-// 验证内容�?//   1. X86Encoder: 指令编码
+// Phase E 验证 ═?仅使用已修复的组═?//
+// 验证内容═?//   1. X86Encoder: 指令编码
 //   2. AotBackend: COFF 目标文件生成
 //   3. COFF 文件结构验证
 // ─────────────────────────────────────────────────────────────
@@ -11,7 +11,7 @@ import aura.lang.std.String
 import "../../../aura/photon/aura/lang/compiler/photon/x86_64/X86Encoder.aura"
 import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
 
-/// 手动字符串分割辅助函数�?fun splitStr(text: String, sep: String): List<String> {
+/// 手动字符串分割辅助函数═?fun splitStr(text: String, sep: String): List<String> {
     val result: List<String> = arrayListOf<String>()
     if (text == "") {
         return result
@@ -32,7 +32,7 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
     return result
 }
 
-/// 整数转字符串�?fun toStr2(n: Int): String {
+/// 整数转字符串═?fun toStr2(n: Int): String {
     if (n == 0) { return "0" }
     var neg: Boolean = false
     if (n < 0) { neg = true; n = -n }
@@ -47,7 +47,7 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
     return result
 }
 
-/// 将单个数字转为字符串�?fun digitChar(d: Int): String {
+/// 将单个数字转为字符串═?fun digitChar(d: Int): String {
     if (d == 0) { return "0" }
     if (d == 1) { return "1" }
     if (d == 2) { return "2" }
@@ -61,19 +61,19 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
     return ""
 }
 
-/// 测试入口�?fun main() {
+/// 测试入口═?fun main() {
     println("╔══════════════════════════════════════════════════════╗")
-    println("�?  Phase E 验证 �?AOT 管线组件测试                    �?)
-    println("�?  按照 参考go rust设计新的编译后端.md 第九�?        �?)
+    println("═?  Phase E 验证 ═?AOT 管线组件测试                    ═?")
+    println("═?  按照 参考go rust设计新的编译后端.md 第九═?        ═?")
     println("╚══════════════════════════════════════════════════════╝")
     println("")
 
     var failures: Int = 0
     var tests: Int = 0
 
-    // ── 测试 1: X86Encoder helloworld 机器�?──
+    // ── 测试 1: X86Encoder helloworld 机器═?──
     tests = tests + 1
-    println("[Test 1] X86Encoder: helloworld 机器码生�?)
+    println("[Test 1] X86Encoder: helloworld 机器码生═?")
     val encoder = X86EncoderUtils.emptyEncoder()
     encoder.emitPrologue(48)
     encoder.emitLeaRIP("rcx", "@str.0")
@@ -82,20 +82,20 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
     encoder.emitEpilogue()
     val mcHex = encoder.toHex()
     val mcRelocs = encoder.getRelocations()
-    println("  机器�? " + mcHex)
-    println("  字节�? " + encoder.byteCount())
+    println("  机器═? " + mcHex)
+    println("  字节═? " + encoder.byteCount())
     println("  重定位数: " + mcRelocs.size)
     if (mcHex != "" && mcRelocs.size == 2) {
-        println("  �?PASS")
+        println("  ═?PASS")
     } else {
-        println("  �?FAIL")
+        println("  ═?FAIL")
         failures = failures + 1
     }
 
-    // ── 测试 2: 机器码解码验�?──
+    // ── 测试 2: 机器码解码验═?──
     tests = tests + 1
     println("")
-    println("[Test 2] 机器码解码验�?)
+    println("[Test 2] 机器码解码验═?")
     println("  55                   = push rbp")
     println("  48 89 E5             = mov rbp, rsp")
     println("  48 81 EC 30 00 00 00 = sub rsp, 0x30")
@@ -104,11 +104,11 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
     println("  48 31 C0             = xor rax, rax")
     println("  C9                   = leave")
     println("  C3                   = ret")
-    // 注意：`sub rsp, imm32` �?REX.W 81 /5 id�? 字节）�?    // 早期实现误用 0x83（只接受 imm8）却写了 4 字节立即数，
-    // 多出�?3 �?0 字节会被 CPU 当作后续指令执行�?    if (mcHex.startsWith("554889e54881ec30000000")) {
-        println("  �?机器码结构正�?)
+    // 注意：`sub rsp, imm32` ═?REX.W 81 /5 id═? 字节）═?    // 早期实现误用 0x83（只接受 imm8）却写了 4 字节立即数，
+    // 多出═?3 ═?0 字节会被 CPU 当作后续指令执行═?    if (mcHex.startsWith("554889e54881ec30000000")) {
+        println("  ═?机器码结构正═?")
     } else {
-        println("  �?机器码结构不正确")
+        println("  ═?机器码结构不正确")
         failures = failures + 1
     }
 
@@ -128,30 +128,30 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
     println("  重定位项: " + relocHex)
     val coffHex = aot.emitFromMachineCode(mcHex, relocHex, "hello", "main")
     println("  COFF hex 长度: " + coffHex.length + " 字符")
-    println("  COFF 字节�? " + (coffHex.length / 2))
+    println("  COFF 字节═? " + (coffHex.length / 2))
     if (coffHex != "" && coffHex.length > 100) {
-        println("  �?PASS")
+        println("  ═?PASS")
     } else {
-        println("  �?FAIL")
+        println("  ═?FAIL")
         failures = failures + 1
     }
 
-    // ── 测试 4: COFF 文件头验�?──
+    // ── 测试 4: COFF 文件头验═?──
     tests = tests + 1
     println("")
-    println("[Test 4] COFF 文件头验�?)
+    println("[Test 4] COFF 文件头验═?")
     if (coffHex.length >= 4) {
         val headerStart = coffHex.substring(0, 4)
         println("  文件头前 2 字节 (Machine): " + headerStart)
         // AMD64 = 0x8664, 小端 = 64 86
         if (headerStart == "6486") {
-            println("  �?Machine = AMD64 (0x8664)")
+            println("  ═?Machine = AMD64 (0x8664)")
         } else {
-            println("  �?Machine 值不正确")
+            println("  ═?Machine 值不正确")
             failures = failures + 1
         }
     } else {
-        println("  �?COFF 太短")
+        println("  ═?COFF 太短")
         failures = failures + 1
     }
 
@@ -159,26 +159,26 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
     tests = tests + 1
     println("")
     println("[Test 5] COFF 节表验证")
-    // 节表从第 20 字节 (hex 40) 开�?    if (coffHex.length >= 56) {
+    // 节表从第 20 字节 (hex 40) 开═?    if (coffHex.length >= 56) {
         // .text 节名从第 20 字节开始，8 字节
         val textNameHex = coffHex.substring(40, 56)
         println("  .text 节名 (hex): " + textNameHex)
         // ".text" = 2E 74 65 78 74
         if (textNameHex.substring(0, 10) == "2e74657874") {
-            println("  �?.text 节名正确")
+            println("  ═?.text 节名正确")
         } else {
-            println("  �?.text 节名不正�?)
+            println("  ═?.text 节名不正═?")
             failures = failures + 1
         }
     } else {
-        println("  �?COFF 太短")
+        println("  ═?COFF 太短")
         failures = failures + 1
     }
 
-    // ── 测试 6: .rdata 节验�?──
+    // ── 测试 6: .rdata 节验═?──
     tests = tests + 1
     println("")
-    println("[Test 6] .rdata 节验�?)
+    println("[Test 6] .rdata 节验═?")
     // 搜索 .rdata 节名 (hex: 2e7264617461)
     var foundRdata: Boolean = false
     var k: Int = 0
@@ -191,9 +191,9 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
         k = k + 2
     }
     if (foundRdata) {
-        println("  �?.rdata 节名正确")
+        println("  ═?.rdata 节名正确")
     } else {
-        println("  �?未找�?.rdata 节名")
+        println("  ═?未找═?.rdata 节名")
         failures = failures + 1
     }
 
@@ -213,37 +213,37 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
         }
         j = j + 2
     }
-    println("  找到 REL32 重定�? " + foundReloc)
+    println("  找到 REL32 重定═? " + foundReloc)
     if (foundReloc) {
-        println("  �?PASS")
+        println("  ═?PASS")
     } else {
-        println("  �?未找�?REL32 重定�?)
+        println("  ═?未找═?REL32 重定═?")
         failures = failures + 1
     }
 
     // ── 测试 8: PhotonObjectWriterUtils 验证 ──
     tests = tests + 1
     println("")
-    println("[Test 8] PhotonObjectWriterUtils: helloworld 机器�?)
+    println("[Test 8] PhotonObjectWriterUtils: helloworld 机器═?")
     val hwMc = PhotonObjectWriterUtils.helloworldMachineCode()
-    println("  机器�? " + hwMc)
+    println("  机器═? " + hwMc)
     if (hwMc != "" && hwMc.length > 10) {
-        println("  �?PASS")
+        println("  ═?PASS")
     } else {
-        println("  �?FAIL")
+        println("  ═?FAIL")
         failures = failures + 1
     }
 
-    // ── 测试 9: PhotonObjectWriterUtils 重定�?──
+    // ── 测试 9: PhotonObjectWriterUtils 重定═?──
     tests = tests + 1
     println("")
     println("[Test 9] PhotonObjectWriterUtils: helloworld 重定位项")
     val hwRelocs = PhotonObjectWriterUtils.helloworldRelocs()
-    println("  重定�? " + hwRelocs)
+    println("  重定═? " + hwRelocs)
     if (hwRelocs != "" && hwRelocs.contains("R_X86_64_REL32")) {
-        println("  �?PASS")
+        println("  ═?PASS")
     } else {
-        println("  �?FAIL")
+        println("  ═?FAIL")
         failures = failures + 1
     }
 
@@ -259,32 +259,32 @@ import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
     if (PhotonObjectWriterUtils.COFF_MACHINE_AMD64 == 34404 &&
         PhotonObjectWriterUtils.SECTION_CODE == 32 &&
         PhotonObjectWriterUtils.REL32 == 4) {
-        println("  �?PASS")
+        println("  ═?PASS")
     } else {
-        println("  �?FAIL")
+        println("  ═?FAIL")
         failures = failures + 1
     }
 
-    // ── 汇�?──
+    // ── 汇═?──
     println("")
     println("══════════════════════════════════════════════════════")
     println("测试结果: " + (tests - failures) + "/" + tests + " 通过")
     if (failures == 0) {
-        println("RESULT: PASS �?Phase E 组件验证全部通过")
+        println("RESULT: PASS ═?Phase E 组件验证全部通过")
         println("")
         println("Phase E 组件清单:")
-        println("  �?X86Encoder �?x86_64 指令编码�?(28 字节机器�?")
-        println("  �?AotBackend �?COFF 目标文件生成 (�?.text/.rdata �?")
-        println("  �?COFF 文件结构 �?文件�?节表/字符串表/重定位表/符号�?)
-        println("  �?重定位项 �?REL32 类型正确")
-        println("  �?常量定义 �?COFF/ELF 常量完整")
+        println("  ═?X86Encoder ═?x86_64 指令编码═?(28 字节机器═?")
+        println("  ═?AotBackend ═?COFF 目标文件生成 (═?.text/.rdata ═?")
+        println("  ═?COFF 文件结构 ═?文件═?节表/字符串表/重定位表/符号═?")
+        println("  ═?重定位项 ═?REL32 类型正确")
+        println("  ═?常量定义 ═?COFF/ELF 常量完整")
     } else {
         println("RESULT: FAIL (" + failures + " 失败)")
     }
     println("══════════════════════════════════════════════════════")
 }
 
-/// 整数转十六进制字符串�?fun toHexStr(n: Int): String {
+/// 整数转十六进制字符串═?fun toHexStr(n: Int): String {
     val digits: String = "0123456789abcdef"
     if (n == 0) { return "0" }
     var result: String = ""

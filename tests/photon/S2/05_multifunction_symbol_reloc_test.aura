@@ -1,12 +1,13 @@
 // tests/photon/S2/05_multifunction_symbol_reloc_test.aura
-// ════════════════════════════════════════════════════════════�?// S2 多函数单 obj：函数符号值与重定位绝对偏移测�?// 运行：aura run tests/photon/S2/05_multifunction_symbol_reloc_test.aura
-// ════════════════════════════════════════════════════════════�?
+// ═════════════════════════════════════════════════════════════// S2 多函数单 obj：函数符号值与重定位绝对偏移测试
+// 运行：aura run tests/photon/S2/05_multifunction_symbol_reloc_test.aura
+// ═════════════════════════════════════════════════════════════
 import aura.lang.std.String
 import "../../../aura/photon/aura/lang/compiler/photon/PhotonObjectWriter.aura"
 import "../../../aura/photon/aura/lang/compiler/photon/x86_64/X86Encoder.aura"
 
 fun main() {
-    println("══�?S2 多函数单 obj 测试 ══�?)
+    println("═══S2 多函数单 obj 测试 ═══")
     var pass = 0
     var total = 4
 
@@ -19,7 +20,8 @@ fun main() {
     val mainHex = encMain.toHex()
     val mainRelocs = PhotonObjectWriterUtils.joinRelocRecords(encMain.getRelocations())
 
-    // helper: 14 字节，位�?.text 偏移 19（mainHex.length / 2 = 19�?    val encHelper = X86EncoderUtils.emptyEncoder()
+    // helper: 14 字节，位于 .text 偏移 19（mainHex.length / 2 = 19）
+    val encHelper = X86EncoderUtils.emptyEncoder()
     encHelper.emitPrologue(0x30)
     encHelper.emitXorRR("eax", "eax")
     encHelper.emitEpilogue()
@@ -42,14 +44,16 @@ fun main() {
         println("  [1] FAIL: COFF 为空")
     }
 
-    // 预期：main 符号 value=0，helper 符号 value=19；rel16 指向 helper（symbol idx 1�?    if (coffHex.indexOf("6d61696e0000000000000000000000010020000200") >= 0) {
+    // 预期：main 符号 value=0，helper 符号 value=19；reloc 指向 helper（symbol idx 1）
+    // COFF IMAGE_SYMBOL: Name(8) + Value(4) + Section(2) + Type(2) + Storage(1) + NumAux(1) = 18 bytes
+    if (coffHex.indexOf("6d61696e0000000000000000010020000200") >= 0) {
         pass = pass + 1
         println("  [2] PASS: main 符号 value=0")
     } else {
         println("  [2] FAIL: main 符号 value 错误")
     }
 
-    if (coffHex.indexOf("68656c706572000000000013000000010020000200") >= 0) {
+    if (coffHex.indexOf("68656c706572000013000000010020000200") >= 0) {
         pass = pass + 1
         println("  [3] PASS: helper 符号 value=19")
     } else {
@@ -59,9 +63,9 @@ fun main() {
     // reloc: offset=14, symbol=1, type=4 (REL32)
     if (coffHex.indexOf("0e000000010000000400") >= 0) {
         pass = pass + 1
-        println("  [4] PASS: call helper 重定�?offset=14")
+        println("  [4] PASS: call helper 重定位 offset=14")
     } else {
-        println("  [4] FAIL: call helper 重定位偏移错�?)
+        println("  [4] FAIL: call helper 重定位偏移错误")
     }
 
     println("")

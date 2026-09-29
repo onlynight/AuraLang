@@ -1,26 +1,26 @@
-// tests/photon/test_photon_pipeline.aura
-// ════════════════════════════════════════════════════════════�?// P0 端到端验证：Photon 管线测试
+﻿// tests/photon/test_photon_pipeline.aura
+// ═════════════════════════════════════════════════════════════// P0 端到端验证：Photon 管线测试
 //
 // 运行：aura run tests/photon/test_photon_pipeline.aura
 //
-// 验证内容�?//   1. 创建测试 HIR (main -> return 42)
+// 验证内容）//   1. 创建测试 HIR (main -> return 42)
 //   2. 调用 compileHir() 编译管线
 //   3. 验证输出
-// ════════════════════════════════════════════════════════════�?
+// ═════════════════════════════════════════════════════════════
 import aura.lang.std.String
 import aura.lang.std.Process
 import "../../aura/photon/aura/lang/compiler/photon/PhotonPipeline.aura"
 
 fun main() {
     println("╔══════════════════════════════════════════════════════╗")
-    println("�?  P0 端到端验证：Photon 管线测试                     �?)
+    println("═  P0 端到端验证：Photon 管线测试                     ═")
     println("╚══════════════════════════════════════════════════════╝")
     println("")
 
     // ── Step 1: 创建测试 HIR ──
     println("[Step 1] 创建测试 HIR")
     val hir = createTestHir()
-    println("  �?HIR 节点�? " + toStr(hir.count))
+    println("  ✀HIR 节点敀 " + toStr(hir.count))
     println("")
 
     // ── Step 2: 调用 compileHir() 编译管线 ──
@@ -35,23 +35,23 @@ fun main() {
     println("  编译结果:")
     println("    成功: " + toStr(result.success))
     println("    目标文件: " + result.objectFilePath)
-    println("    可执行文�? " + result.executablePath)
-    println("    机器码大�? " + toStr(result.encodedByteCount) + " 字节")
+    println("    可执行文什 " + result.executablePath)
+    println("    机器码大尀 " + toStr(result.encodedByteCount) + " 字节")
     println("    COFF 大小: " + toStr(result.coffSize) + " 字节")
     println("")
 
     if (result.success) {
-        println("  �?编译管线执行成功!")
+        println("  ✀编译管线执行成功!")
     } else {
-        println("  �?编译失败: " + result.errorMessage)
+        println("  ✀编译失败: " + result.errorMessage)
     }
     
     println("")
-    println("══�?P0 验证完成 ══�?)
+    println("═══P0 验证完成 ═══")
     Process.exit(0)
 }
 
-/// 创建测试 HIR (main -> return 42)�?fun createTestHir(): Hir {
+/// 创建测试 HIR (main -> return 42)　fun createTestHir(): Hir {
     val hir: Hir = Hir()
 
     // 创建 Program 节点
@@ -61,7 +61,7 @@ fun main() {
     val mainId: Int = hir.add("HirFunction", "main", "Unit", Span(0, 0, 1, 1, 1, 1), "")
     hir.kids[programId] = HirUtils.hirKidsAdd(hir.kids[programId], mainId)
 
-    // 创建函数�?    val bodyId: Int = hir.add("HirBlock", "", "", Span(0, 0, 1, 1, 1, 1), "")
+    // 创建函数佀    val bodyId: Int = hir.add("HirBlock", "", "", Span(0, 0, 1, 1, 1, 1), "")
     hir.kids[mainId] = HirUtils.hirKidsAdd(hir.kids[mainId], bodyId)
 
     // 创建 return 语句

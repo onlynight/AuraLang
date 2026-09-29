@@ -76,6 +76,11 @@ impl NativeRegistry {
         r.register("toFloat", native_to_float);
         r.register("toStr", native_to_str);
         r.register("toString", native_to_str); // alias for toStr, used as method call
+        r.register("toChar", native_to_char);
+        r.register("toByte", native_to_byte);
+        r.register("toShort", native_to_short);
+        r.register("toBoolean", native_to_boolean);
+        r.register("toHex", native_to_hex);
         r.register("clock", native_clock);
         r.register("strlen", native_strlen);
         r.register("CString", native_cstring);
@@ -107,6 +112,11 @@ impl NativeRegistry {
         r.register("aura.lang.std.toFloat", native_to_float);
         r.register("aura.lang.std.toStr", native_to_str);
         r.register("aura.lang.std.toString", native_to_str);
+        r.register("aura.lang.std.toChar", native_to_char);
+        r.register("aura.lang.std.toByte", native_to_byte);
+        r.register("aura.lang.std.toShort", native_to_short);
+        r.register("aura.lang.std.toBoolean", native_to_boolean);
+        r.register("aura.lang.std.toHex", native_to_hex);
         r.register("aura.lang.std.clock", native_clock);
         r.register("aura.lang.std.strlen", native_strlen);
         r.register("aura.lang.std.CString", native_cstring);
@@ -163,6 +173,11 @@ impl NativeRegistry {
         r.register("toFloat", native_to_float);
         r.register("toStr", native_to_str);
         r.register("toString", native_to_str); // alias for toStr, used as method call
+        r.register("toChar", native_to_char);
+        r.register("toByte", native_to_byte);
+        r.register("toShort", native_to_short);
+        r.register("toBoolean", native_to_boolean);
+        r.register("toHex", native_to_hex);
         r.register("clock", native_clock);
         r.register("strlen", native_strlen);
         r.register("CString", native_cstring);
@@ -199,6 +214,11 @@ impl NativeRegistry {
         r.register("aura.lang.std.toFloat", native_to_float);
         r.register("aura.lang.std.toStr", native_to_str);
         r.register("aura.lang.std.toString", native_to_str);
+        r.register("aura.lang.std.toChar", native_to_char);
+        r.register("aura.lang.std.toByte", native_to_byte);
+        r.register("aura.lang.std.toShort", native_to_short);
+        r.register("aura.lang.std.toBoolean", native_to_boolean);
+        r.register("aura.lang.std.toHex", native_to_hex);
         r.register("aura.lang.std.clock", native_clock);
         r.register("aura.lang.std.strlen", native_strlen);
         r.register("aura.lang.std.CString", native_cstring);
@@ -363,6 +383,20 @@ impl NativeRegistry {
         r.register("Cpu.atomicAdd", native_cpu_atomic_add);
         // Phase P3: Syscalls.exit — 进程退出
         r.register("Syscalls.exit", native_syscalls_exit);
+        // Phase S1: ProcessOps C FFI 函数
+        r.register("ProcessOps.aura_process_argCount", native_process_arg_count);
+        r.register("ProcessOps.aura_process_args", native_process_args);
+        // Phase S1: AotUtil 字符串工具函数
+        r.register("aotSlice", native_aot_slice);
+        r.register("AotUtil.aotSlice", native_aot_slice);
+        r.register("aotCsvCount", native_aot_csv_count);
+        r.register("AotUtil.aotCsvCount", native_aot_csv_count);
+        r.register("aotFieldAt", native_aot_field_at);
+        r.register("AotUtil.aotFieldAt", native_aot_field_at);
+        r.register("aotToLine", native_aot_to_line);
+        r.register("AotUtil.aotToLine", native_aot_to_line);
+        r.register("aotCsvToSpaced", native_aot_csv_to_spaced);
+        r.register("AotUtil.aotCsvToSpaced", native_aot_csv_to_spaced);
         // `Builtin.cstr` 系列（`prelu.aura:CString/CStr`，前端以同名原生函数注册，
         // 见 `codegen/hir.rs` P8.5）：Aura String ↔ C 字符串的**既有接口**。
         // 之前 VM 未实现它们，`CString(s)` 落到「未链接 → 0」，导致
@@ -554,6 +588,41 @@ fn native_to_float(args: &[Value]) -> Value {
 fn native_to_str(args: &[Value]) -> Value {
     match args.first() {
         Some(v) => Value::str_(v.to_string()),
+        None => Value::str_(""),
+    }
+}
+
+fn native_to_char(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::Int(v.as_int() & 0xFFFF),
+        None => Value::Int(0),
+    }
+}
+
+fn native_to_byte(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::Int(v.as_int() & 0xFF),
+        None => Value::Int(0),
+    }
+}
+
+fn native_to_short(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::Int((v.as_int() as i16) as i64),
+        None => Value::Int(0),
+    }
+}
+
+fn native_to_boolean(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::Bool(v.as_int() != 0),
+        None => Value::Bool(false),
+    }
+}
+
+fn native_to_hex(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::str_(format!("{:x}", v.as_int())),
         None => Value::str_(""),
     }
 }
@@ -1054,6 +1123,14 @@ fn arg_i64(args: &[Value], i: usize) -> i64 {
     args.get(i).map(|v| v.as_int()).unwrap_or(0)
 }
 
+fn arg_str(args: &[Value], i: usize) -> String {
+    match args.get(i) {
+        Some(Value::Str(s)) => s.to_string(),
+        Some(v) => v.to_string(),
+        None => String::new(),
+    }
+}
+
 /// fnIndex(name) → Int：按函数名解析当前模块函数表中的下标（找不到返回 -1）。
 ///
 /// 存在的原因：`Thread.spawn(fn_id, arg)` / `ThreadOps.create(fn_id, arg)` 需要的是
@@ -1448,6 +1525,75 @@ fn native_cpu_cpuid(_args: &[Value]) -> Value {
 fn native_syscalls_exit(args: &[Value]) -> Value {
     let code = arg_i64(args, 0) as i32;
     std::process::exit(code);
+}
+
+/// ProcessOps.aura_process_argCount() — 返回进程参数数量
+fn native_process_arg_count(_args: &[Value]) -> Value {
+    let args = std::env::args();
+    let count = args.count() as i64;
+    Value::Int(count)
+}
+
+/// ProcessOps.aura_process_args() — 返回所有进程参数（NUL 分隔）
+fn native_process_args(_args: &[Value]) -> Value {
+    let args: Vec<String> = std::env::args().collect();
+    let joined = args.join("\0");
+    Value::str_(joined)
+}
+
+/// AotUtil.aotSlice(text, start, length) — 取字符串子串
+fn native_aot_slice(args: &[Value]) -> Value {
+    let text = arg_str(args, 0);
+    let start = arg_i64(args, 1) as usize;
+    let length = arg_i64(args, 2).max(0) as usize;
+    if start >= text.len() {
+        return Value::str_("");
+    }
+    let end = (start + length).min(text.len());
+    Value::str_(text[start..end].to_string())
+}
+
+/// AotUtil.aotCsvCount(csv) — 返回 CSV 字段数量
+fn native_aot_csv_count(args: &[Value]) -> Value {
+    let csv = arg_str(args, 0);
+    if csv.is_empty() {
+        return Value::Int(0);
+    }
+    let count = csv.matches(',').count() + 1;
+    Value::Int(count as i64)
+}
+
+/// AotUtil.aotFieldAt(text, index, sep) — 取第 index 个以 sep 分隔的字段
+fn native_aot_field_at(args: &[Value]) -> Value {
+    let text = arg_str(args, 0);
+    let index = arg_i64(args, 1) as usize;
+    let sep = arg_str(args, 2);
+    let sep_char = sep.chars().next().unwrap_or('\0');
+    let fields: Vec<&str> = text.split(sep_char).collect();
+    if index < fields.len() {
+        Value::str_(fields[index].to_string())
+    } else {
+        Value::str_("")
+    }
+}
+
+/// AotUtil.aotToLine(text, index) — 取第 index 行
+fn native_aot_to_line(args: &[Value]) -> Value {
+    let text = arg_str(args, 0);
+    let index = arg_i64(args, 1) as usize;
+    let lines: Vec<&str> = text.split('\n').collect();
+    if index < lines.len() {
+        Value::str_(lines[index].trim_end_matches('\r').to_string())
+    } else {
+        Value::str_("")
+    }
+}
+
+/// AotUtil.aotCsvToSpaced(csv) — CSV 转空格分隔
+fn native_aot_csv_to_spaced(args: &[Value]) -> Value {
+    let csv = arg_str(args, 0);
+    let fields: Vec<&str> = csv.split(',').collect();
+    Value::str_(fields.join(" "))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
