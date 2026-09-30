@@ -109,6 +109,14 @@ object JitRuntimeUtils {
         return ""
     }
 
+    /// 段表条目数（非空行数）。
+    ///
+    /// 供 `tests/phase7_jit_tests.aura` 的 `jitSegmentCount(...)` 使用；
+    /// 此前缺失导致 `Call(0xFFFF)` → 运行期 `call to undefined function #65535`。
+    fun jitSegmentCount(segs: String): Int {
+        return jitLineCount(segs)
+    }
+
     /// 校验段表；合法返回空串，否则返回错误说明（与 Rust 错误文本同构）。
     fun jitValidateSegments(segs: String, dataLen: Int): String {
         val machine: String = jitSegmentOf(segs, 1)

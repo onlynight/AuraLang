@@ -51,12 +51,25 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         .collect();
 
     // 用户函数名 -> 索引（预计算最终索引：闭包在前，用户函数在后）
-    let mut fn_index: HashMap<&str, u16> = HashMap::new();
+    //
+    // ⚠ 重载（同名不同 arity）必须以 **arity 维度**索引：`String.indexOf` 同时存在
+    //   `indexOf(text, substring)`（2 参）与 `indexOf(text, substring, fromIndex)`
+    //   （3 参），乃至实例方法 `indexOf(substring)`（self+1 = 2 参）。此前只用
+    //   函数名做 key，`HashMap::insert` 会让**最后声明者覆盖前者** → 2 参调用被
+    //   派发到 3 参函数体（`fromIndex` 取到垃圾）→ `"hello".indexOf("ll")` 恒为 -1，
+    //   进而 `sanitizeLlvm` / `targetFromTriple` / `contains` 等全部失效。
+    //
+    // 因此同时登记：
+    //   * `name#arity` —— 精确匹配（优先使用）；
+    //   * `name`       —— 兜底（保留旧行为，供 vtable / entry 等无 arity 的查询）。
+    let mut fn_index: HashMap<String, u16> = HashMap::new();
     // 统计所有闭包数量
     let total_closures: u16 = mir_funcs.iter().map(|f| f.closures.len() as u16).sum();
     // 用户函数索引 = 闭包总数 + 函数序号
     for (i, f) in mir_funcs.iter().enumerate() {
-        fn_index.insert(f.name.as_str(), total_closures + i as u16);
+        let fidx = total_closures + i as u16;
+        fn_index.insert(f.name.clone(), fidx);
+        fn_index.insert(format!("{}#{}", f.name, f.param_slots.len()), fidx);
     }
     // Phase 4: 添加内置原生短名到 natives 表（与 ctx.natives 对齐）
     // 这些短名在 NativeRegistry 中已注册，但不在 HIR 程序的 natives 中，
@@ -398,7 +411,7 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
 
 fn emit_function(
     f: &MirFunction,
-    fn_index: &HashMap<&str, u16>,
+    fn_index: &HashMap<String, u16>,
     native_index: &HashMap<&str, u16>,
     closure_index: &HashMap<&str, u16>,
     class_id_map: &HashMap<&str, u16>,
@@ -464,7 +477,7 @@ fn emit_function(
 /// 发射闭包代码（Phase 2）
 fn emit_closure(
     closure: &MirClosure,
-    fn_index: &HashMap<&str, u16>,
+    fn_index: &HashMap<String, u16>,
     native_index: &HashMap<&str, u16>,
     closure_index: &HashMap<&str, u16>,
     class_id_map: &HashMap<&str, u16>,
@@ -654,7 +667,7 @@ fn term_size(t: &Terminator) -> usize {
 fn emit_instr(
     code: &mut Vec<u8>,
     instr: &crate::codegen::mir::MirInstr,
-    fn_index: &HashMap<&str, u16>,
+    fn_index: &HashMap<String, u16>,
     native_index: &HashMap<&str, u16>,
     closure_index: &HashMap<&str, u16>,
     class_id_map: &HashMap<&str, u16>,
@@ -738,7 +751,11 @@ fn emit_instr(
             // 卡死；见 `vm::mod::remap_embedded_instrs` 的同一类说明）。
             // 这里退化为硬错误：打印未解析符号并调用一个必然越界的索引，
             // 让 VM 立即报「无效函数索引」而不是静默递归。
-            let idx = match fn_index.get(func.as_str()) {
+            // 优先按 arity 精确匹配（区分重载），失败再回退到纯名称。
+            let idx = match fn_index
+                .get(&format!("{}#{}", func, args.len()))
+                .or_else(|| fn_index.get(func.as_str()))
+            {
                 Some(i) => *i,
                 None => {
                     eprintln!(

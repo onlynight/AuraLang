@@ -39,10 +39,14 @@ value class String {
         }
 
         /// 从 Unicode 码点构造单字符字符串（非法码点返回空字符串）
-        fun fromCharCode(code: Int): String {
-            if (code < 0 || code > 65535) return ""
-            return code.toChar().toString()
-        }
+        ///
+        /// **有意不提供 Aura 实现**：旧实现 `code.toChar().toString()` 依赖
+        /// `Char` 与 `String` 的区分，而 VM 里 `Char` 就是整数、`toString` 走
+        /// 数字格式化 → `fromCharCode(65)` 得到字符串 `"65"` 而不是 `"A"`
+        /// （连带 `toUpperCase` 变成 `"656667"`）。删除后回落到原生
+        /// `String.fromCharCode`（`seed/compiler/src/std/std_string.rs` 的
+        /// `nat_from_char_code`），VM/AOT 两条路径都返回真正的单字符字符串。
+
 
         /// 用分隔符合并列表为字符串
         fun join(list: List<String>, separator: String): String {
@@ -515,10 +519,14 @@ value class String {
     // ── 查找方法 ──
 
     /// 获取位置 index 字符的 Unicode 码点（越界返回 -1）
-    fun charCodeAt(index: Int): Int {
-        if (index < 0 || index >= this.length) return -1
-        return this[index].toInt()
-    }
+    ///
+    /// 本方法**有意不再提供 Aura 实现**。此前写成 `this[index].toInt()`：
+    /// VM 下 `s[i]` 返回的是「单字符字符串」（`Value::Str`），而 `toInt` 是
+    /// **数字解析**（`native_to_int`），对 "h" 恒返回 0 → 所有按字符码驱动的
+    /// 逻辑（split / substring / indexOf / 词法分析）全部失效。
+    /// 删除 Aura 实现后，`String.charCodeAt` 会回落到原生实现
+    /// （`seed/compiler/src/std/std_string.rs` 的 `nat_char_at_code`），
+    /// 它正确地按字符取码点（越界返回 -1）。
 
     /// 获取位置 index 的字符（越界返回空字符串）
     ///
@@ -706,40 +714,14 @@ value class String {
     // ── 截取方法 ──
 
     /// 截取子字符串 [from, to)
-    fun substring(from: Int, to: Int): String {
-        // **性能关键**：旧实现 `while (i < to && i < this.length) { result = result + this[i] }`
-        // 有两个平方级问题：
-        //   1. `this.length` 在 AOT 下是 `strlen`（O(n)），却被放在循环条件里；
-        //   2. 逐字符 `result = result + …` 每次都要复制已累积前缀。
-        // 二者叠加使「按 token 切片」这类高频调用退化为 O(n²)（自举编译器
-        // 解析一个 300 KB 的模块要吃掉数十 GB 内存 / 20 秒以上）。
-        // 现改为：一次性 malloc(len+1) + 逐字节写入（charCodeAt 为内联访存）。
-        var f: Int = from
-        if (f < 0) {
-            f = 0
-        }
-        var t: Int = to
-        if (t <= f) {
-            return ""
-        }
-        var n: Int = t - f
-        val buf: Long = Memory.alloc((n + 1) as Long)
-        if (buf == 0) {
-            return ""
-        }
-        var i: Int = 0
-        while (i < n) {
-            val c: Int = this.charCodeAt(f + i) as Int
-            if (c == 0) {
-                break
-            }
-            Memory.write(buf + (i as Long), c as Byte)
-            i = i + 1
-        }
-        Memory.write(buf + (i as Long), 0 as Byte)
-        // Long → String：AOT 下 String 即 `i8*`，与 EmitBuffer.sbBuild() 同一写法
-        return buf
-    }
+    ///
+    /// **有意不提供 Aura 实现**：旧实现基于 `Memory.alloc` + 逐字节写入，
+    /// 只在 AOT（`String ≡ i8*`）下成立；在 VM 下 `String` 是 `Value::Str`，
+    /// 返回 `Long` 缓冲区地址会被当成整数/指针 → `substring` 打印出地址数值、
+    /// `split` / `trim` / `vmSubstr` 等全部失效。
+    /// 删除后 `String.substring` 回落到原生实现
+    /// （`seed/compiler/src/std/std_string.rs` 的 `nat_substring`，按字符切片），
+    /// AOT 侧则由 C FFI（`aura_lang_std_String_substring`）承载，两条路径都正确。
 
     /// 截取子字符串 [from, from+len)
     fun substringAt(from: Int, len: Int): String {
@@ -869,18 +851,14 @@ value class String {
     // ── 字符统计 ──
 
     /// 统计指定字符出现次数
+    ///
+    /// **实现**：委托 [`countCharStr`]。调用点普遍写 `text.countChar("\n")`
+    /// （传**字符串**，见 `AotUtil.aotLineCount`），而旧实现走
+    /// `char.toInt()`；VM/AOT 下 `Char` 与「单字符字符串」之间没有可靠转换，
+    /// `"\n".toInt()` 恒为 0 → 统计恒为 0（连带 `aotLineCount` / `runtimeFunctionCount`
+    /// 恒为 0）。按**首字符码**比较两条路径都成立。
     fun countChar(char: Char): Int {
-        val n: Int = this.length
-        val target: Int = char.toInt()
-        var count = 0
-        var i: Int = 0
-        while (i < n) {
-            if ((this.charCodeAt(i) as Int) == target) {
-                count = count + 1
-            }
-            i = i + 1
-        }
-        return count
+        return this.countCharStr(toStr(char))
     }
 
     /// 统计指定子字符串出现次数（AOT 发射器调用入口）。

@@ -19,20 +19,25 @@ import aura.lang.compiler.aot.AotUtil
 object RuntimeUtils {
 
     /// 全部 runtime 函数声明表。
+    ///
+    /// 格式：`name|ret_llvm_type|param_llvm_types(逗号分隔)`，每行一项。
+    /// `runtimeDeclarations()` / `isRuntimeFunction()` / `runtimeSignature()`
+    /// 以及发射器的 `callSignature()` 都依赖本表；此前被整段注释掉（Phase C），
+    /// 导致 `runtimeFunctionCount()` 恒为 0、`aura_malloc` 之类符号无法识别为
+    /// runtime 函数，`emitLlvmIr` 也不再注入 runtime `declare`
+    ///（phase6 的 AOT.runtime / AOT.emit.function / AOT.orchestrator 全挂）。
     fun runtimeTable(): String {
-        return ""
-            // Phase C: 全部 C 映射已移除（Emit.aura 改用系统 libc、内联 IR 或 Aura 函数）
-            // "toStringFloat|i8*|double\n" +
-            // "aura_mem_used_mb|i32|\n" +
-            // "aura_arc_increment|void|i8*\n" +
-            // "aura_arc_decrement|void|i8*\n" +
-            // "aura_coroutine_yield|void|i8*\n" +
-            // "aura_malloc|i8*|i64\n" +
-            // "aura_free|void|i8*\n" +
-            // "aura_string_new|i8*|i8*,i64\n" +
-            // "aura_string_length|i64|i8*\n" +
-            // "aura_string_data|i8*|i8*\n" +
-            // "aura_string_concat|i8*|i8*,i64,i8*,i64\n" +
+        return "toStringFloat|i8*|double\n" +
+            "aura_mem_used_mb|i32|\n" +
+            "aura_arc_increment|void|i8*\n" +
+            "aura_arc_decrement|void|i8*\n" +
+            "aura_coroutine_yield|void|i8*\n" +
+            "aura_malloc|i8*|i64\n" +
+            "aura_free|void|i8*\n" +
+            "aura_string_new|i8*|i8*,i64\n" +
+            "aura_string_length|i64|i8*\n" +
+            "aura_string_data|i8*|i8*\n" +
+            "aura_string_concat|i8*|i8*,i64,i8*,i64\n"
     }
 
     /// C FFI 实现（aura_std_cffi.c）的真实 ABI 签名表。
@@ -121,7 +126,7 @@ object RuntimeUtils {
         }
         val files: List<String> = list("libc.ll", "crt.ll", "args.ll", "types.ll", "exception.ll", "channel.ll")
         val out: EmitBuffer = EmitBuffer()
-        out.sbAdd("; ---- Aura Runtime Declarations (from .ll files) ----\n")
+        out.sbAdd("; ---- Aura Runtime Declarations ----\n")
         var i: Int = 0
         while (i < files.size) {
             val path: String = base + files[i]
@@ -141,8 +146,12 @@ object RuntimeUtils {
     }
 
     /// 创建字符串列表（避免依赖 List.of 等 stdlib）。
+    ///
+    /// 必须用 `arrayListOf<String>()`：`mutableListOf()`（= `ArrayList<Any>` 类构造）
+    /// 在 VM 下解析失败，返回 `Unit`（语义警告 `cannot assign 'Unit' to 'List'`），
+    /// 后续 `files.size` 恒为 0 → runtime/*.ll 一个都不读。
     fun list(a: String, b: String, c: String, d: String, e: String, f: String): List<String> {
-        val r: List<String> = mutableListOf()
+        val r: List<String> = arrayListOf<String>()
         r.add(a)
         r.add(b)
         r.add(c)
@@ -326,5 +335,21 @@ object RuntimeUtils {
     /// C FFI 函数签名（`ret|paramsSpaced`），非 C FFI 函数返回 ""。
     fun cffiSignature(name: String): String {
         return tableSignature(cffiTable(), name)
+    }
+
+    /// 独立 std 函数签名查询（返回 `ret|paramsSpaced`），未命中返回 ""。
+    fun stdSignature(name: String): String {
+        return callSignature(name)
+    }
+
+    /// 按类名和方法名查询 std 函数签名。
+    fun stdSignatureFor(cls: String, method: String): String {
+        val symbol: String = stdSymbolFor(cls, method)
+        return callSignature(symbol)
+    }
+
+    /// 构造 qualified std 符号名（`aura_lang_std_<Cls>_<method>`）。
+    fun stdSymbolFor(cls: String, method: String): String {
+        return "aura_lang_std_" + cls + "_" + method
     }
 }

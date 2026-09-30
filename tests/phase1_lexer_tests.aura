@@ -238,7 +238,7 @@ fun main() {
     // ── 套件 2：Span 数据模型 ────────────────────────────────
     val s2 = TestRunner()
     s2.begin("Phase1/span")
-    val sp = spanSingle(5, 2, 3)
+    val sp = SpanUtils.spanSingle(5, 2, 3)
     s2.assertEq(sp.start, 5, "spanSingle.start")
     s2.assertEq(sp.end, 5, "spanSingle.end")
     s2.assertTrue(sp.isEmpty(), "spanSingle.isEmpty")
@@ -248,7 +248,7 @@ fun main() {
 
     val a = Span(1, 4, 1, 1, 1, 5)
     val b = Span(3, 9, 1, 3, 2, 2)
-    val m = spanMerge(a, b)
+    val m = SpanUtils.spanMerge(a, b)
     s2.assertEq(m.start, 1, "spanMerge.start = min")
     s2.assertEq(m.end, 9, "spanMerge.end = max")
     s2.assertEq(m.startLine, 1, "spanMerge.startLine")
@@ -256,7 +256,7 @@ fun main() {
     s2.assertEq(m.endLine, 2, "spanMerge.endLine")
     s2.assertEq(m.endCol, 2, "spanMerge.endCol")
     s2.assertEq(m.length(), 8, "spanMerge.length")
-    s2.assertTrue(spanSingle(0, 1, 1).describe() == "line 1 col 1-1", "span.describe 同行")
+    s2.assertTrue(SpanUtils.spanSingle(0, 1, 1).describe() == "line 1 col 1-1", "span.describe 同行")
     failures = failures + s2.report()
 
     // ── 套件 3：Token 数据模型 ───────────────────────────────

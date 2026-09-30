@@ -3477,6 +3477,56 @@ impl Checker {
         }
     }
 
+    /// 裸名调用 `name(...)` 时，从「限定名 `Owner.name`」候选中推断返回类型。
+    ///
+    /// 仅当**按实参个数过滤后**的候选集合返回类型完全一致时才启用：多个类中的
+    /// 同名方法返回类型不同（如 `size()` 既可能返回 `Int` 也可能返回别的）时
+    /// 一律放弃，避免给出错误类型导致后续方法派发到错误的类。
+    ///
+    /// 用法场景：`val t = jitValueNull()` / `optLevelDefault().flag()` ——
+    /// 这些 `object` 方法在符号表里只有限定名，裸名查不到返回类型。
+    fn infer_bare_method_return(&mut self, name: &str, args: &[Expr]) -> Option<Ty> {
+        let suffix = format!(".{}", name);
+        // 先克隆候选（避免在迭代 `self.symbols` 的同时调用 `self.check_expr`）
+        let mut candidates: Vec<Symbol> = Vec::new();
+        for (full, fns) in self.symbols.functions.iter() {
+            if !full.ends_with(&suffix) || full.len() <= suffix.len() {
+                continue;
+            }
+            for f in fns {
+                if let SymbolKind::Function { params, .. } = &f.kind {
+                    let has_vararg = params.last().map_or(false, |p| p.is_vararg);
+                    let required =
+                        params.iter().filter(|p| !p.has_default && !p.is_vararg).count();
+                    let ok = if has_vararg {
+                        args.len() >= required
+                    } else {
+                        args.len() >= required && args.len() <= params.len()
+                    };
+                    if ok {
+                        candidates.push(f.clone());
+                    }
+                }
+            }
+        }
+        let first = candidates.iter().find_map(|c| match &c.kind {
+            SymbolKind::Function { return_type, .. } => Some(return_type.clone()),
+            _ => None,
+        })?;
+        // 所有候选返回类型必须一致
+        let consistent = candidates.iter().all(|c| match &c.kind {
+            SymbolKind::Function { return_type, .. } => *return_type == first,
+            _ => false,
+        });
+        if !consistent || first == Ty::Any || first == Ty::Error {
+            return None;
+        }
+        for a in args {
+            self.check_expr(a);
+        }
+        Some(first)
+    }
+
     fn check_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Ty {
         // 先尝试完整点分函数名解析（支持 aura.lang.concurrent.Coroutine.spawn 等）
         if let Some(full_name) = Self::extract_dotted_name(callee) {
@@ -3609,6 +3659,17 @@ impl Checker {
                 for a in args {
                     self.check_expr(a);
                 }
+                return t;
+            }
+            // 裸名调用 object / 类方法（`optLevelDefault()` / `jitValueNull()` 等）。
+            //
+            // 符号表只登记**限定名** `Owner.method`，裸名 `lookup_function(name)`
+            // 查不到 → 返回类型退化为 `Any`；调用方后续的 `.flag()` / `.text()`
+            // 便无法派发（接收者类型未知）→ 退化成裸名调用 →
+            // `[bytecode] error: 未解析的函数调用 'flag'` + 运行期 `#65535`。
+            // HIR 侧本就有「唯一 object 方法」兜底来解析 callee，这里只需把
+            // **返回类型**补上，两侧即可对齐。
+            if let Some(t) = self.infer_bare_method_return(name, args) {
                 return t;
             }
         }

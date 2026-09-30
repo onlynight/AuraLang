@@ -1502,6 +1502,35 @@ impl Vm {
             return self.raise(v);
         }
 
+        // `__callClosure(closure, sig, arg)`：闭包间接调用（Collections.filter/map）。
+        //
+        // `Collections.aura` 通过 `__callClosure(clo, "i64|i64", elem)` 间接调用
+        // 闭包。AOT 后端在 Emit.aura 中有专门的 LLVM IR 发射逻辑；字节码后端需要
+        // 在 VM 侧拦截此调用，从堆中取出闭包的 captures + func_idx，然后调用目标函数。
+        //
+        // 栈约定与 `CallClosure` 指令一致：将 captures + [arg] 以倒序压栈后调用
+        // `do_call`，返回时结果已在栈顶。
+        if native_name == "__callClosure" && args.len() >= 3 {
+            if let Value::Ref(ref_id) = &args[0] {
+                if let Some(crate::vm::heap::HeapData::Closure { captures, func_idx, .. }) =
+                    self.heap.get_data(*ref_id)
+                {
+                    let captures = captures.clone();
+                    let func_idx = *func_idx;
+                    // all_args = captures ++ [arg]
+                    let mut all_args: Vec<Value> = captures;
+                    all_args.push(args[2].clone());
+                    // 倒序压栈（pop_n 会还原顺序）
+                    for arg in all_args.iter().rev() {
+                        self.frames[top].stack.push(arg.clone());
+                    }
+                    // 调用闭包函数，返回时结果已在栈顶
+                    self.do_call(top, func_idx, false)?;
+                    return Ok(());
+                }
+            }
+        }
+
         // `__new_exception(type_name, message)`：创建异常对象
         if native_name == "__new_exception" {
             let type_name = match args.first() {

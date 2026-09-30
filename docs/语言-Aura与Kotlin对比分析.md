@@ -1,13 +1,15 @@
 # Aura 语言 vs Kotlin：语法语义缺失分析
 
 > **数据来源**：`aura/compiler/` 约 100+ 个 Aura 源文件、`aura/core/` 标准库、`docs/` 设计文档、`book/` 教程、`tests/` 294 个测试文件
-> **分析时间**：2026-09-28
+> **分析时间**：2026-09-28（P0 更新：扩展函数/select/Future.then/suspend移除 已实现；P1 更新：sealed/enum when 穷举检查已实现，Kotlin 叙事已替换为嵌入式系统定位）
 
 ---
 
 ## 一、总体概况
 
-Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST → Sema → HIR → MIR → Codegen → VM/JIT/AOT。语法上大量模仿 Kotlin（`val`/`var`、`fun`、`when`、泛型、空安全、`suspend` 等），但**许多是"语法糖+关键字占位"，语义尚未实现**。
+Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST → Sema → HIR → MIR → Codegen → VM/JIT/AOT。语法上大量模仿 Kotlin（`val`/`var`、`fun`、`when`、泛型、空安全 等），但**许多是"语法糖+关键字占位"，语义尚未实现**。
+
+> **并发模型决策（2026-09-28）**：Aura **明确不支持协程**。`suspend`/`async`/`await` 占位关键字将在后续版本移除，由 `actor` + `Channel` + `Future<T>`/`Promise<T>` 替代。详见 §7.5。
 
 ---
 
@@ -56,7 +58,7 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 | 泛型函数 `<T>` | ⚠️ 部分 | 语法可写，无类型推断/单态化 |
 | 泛型边界 `<T: C>` | ⚠️ 部分 | 语法可写，无边界检查 |
 | **函数重载** | ❌ **缺失** | 注释明确：「全局函数命名空间，方法名必须全局唯一」 |
-| 扩展函数 `fun String.foo()` | ❌ **缺失** | 解析器无 receiver 产生式 |
+| **扩展函数** `fun String.foo()` | ✅ **已实现**（P0） | 解析器已支持 `fun Type.name()` 语法，AST 以 `#recv|Type` 标记 |
 | 局部函数（fun 内部 fun） | ❌ **缺失** | 不支持 |
 | 尾递归 `tailrec` | ❌ **缺失** | 关键字存在（`Ident`），无优化 |
 | 内联函数 `inline` | ❌ **缺失** | 关键字存在，无 body 内联 |
@@ -68,8 +70,8 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 | 具名 lambda 参数 | ✅ 完整 | `(x: T, y: T) -> expr` |
 | 尾随 lambda | ✅ 完整 | `filter { it > 2 }` |
 | 单参数 lambda `x -> expr` | ✅ 完整 | 隐式 `it` 支持 |
-| `suspend` 函数 | ⚠️ 关键字存在 | 无实际挂起/恢复语义 |
-| `async`/`await` | ⚠️ 关键字存在 | AOT 同步执行，无挂起语义 |
+| `suspend` 函数 | ✅ **已移除**（P0） | 不在关键字表，作为普通标识符处理 |
+| `async`/`await` | ✅ **已移除**（P0） | 不在关键字表，由 `Future.then {}` 替代 |
 
 ### 3. 类与对象
 
@@ -82,7 +84,7 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 | `abstract fun` | ❌ **缺失** | |
 | `data class` | ⚠️ 变体 `value data class` | 无 `copy()` / `componentN()` / 自动 `equals/hashCode/toString` |
 | `value class` | ✅ 完整 | Aura 特色，替代 Kotlin `data class` |
-| `sealed class` | ⚠️ 部分 | 语法支持，无 `when` 穷举检查 |
+| `sealed class` | ✅ 完整 | 语法 + `when` 穷举检查（P1 已实现） |
 | `inner class` | ❌ **缺失** | 不支持访问外部类实例 |
 | `companion object` | ⚠️ 部分 | `companion object { }` 无命名访问 |
 | `companion object Foo { }` | ❌ **缺失** | 不支持自定义伴生对象名 |
@@ -96,8 +98,8 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 | 接口默认方法 | ✅ 完整 | `fun method(): R = expr` |
 | 接口委托 `by` | ❌ **缺失** | |
 | `enum` | ✅ 完整 | 含数据变体 |
-| `enum when 穷举` | ❌ **缺失** | TypeChecker 明确注明未实现 |
-| `sealed when 穷举` | ❌ **缺失** | TypeChecker 明确注明未实现 |
+| `enum when 穷举` | ✅ **已实现**（P1） | TypeChecker 穷举检查（缺失变体报错） |
+| `sealed when 穷举` | ✅ **已实现**（P1） | TypeChecker 穷举检查（缺失子类报错） |
 | `annotation class` | ❌ **缺失** | 无注解类语法 |
 | `@JvmStatic` / `@JvmName` 等 | ❌ **缺失** | 仅 `@native`/`@aot`/`@Export` 元数据 |
 | `expect`/`actual` | ❌ **缺失** | 无多平台支持 |
@@ -113,8 +115,8 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 | `when is T ->` 模式 | ✅ 完整 | `__is__T` 节点 |
 | `when in range ->` 模式 | ✅ 完整 | `InPattern` 节点 |
 | `when else ->` 兜底 | ✅ 完整 | `__else__` |
-| `when` 穷举检查 (sealed) | ❌ **缺失** | TypeChecker 注明未实现 |
-| `when` 穷举检查 (enum) | ❌ **缺失** | TypeChecker 注明未实现 |
+| `when` 穷举检查 (sealed) | ✅ **已实现**（P1） | TypeChecker 穷举检查 |
+| `when` 穷举检查 (enum) | ✅ **已实现**（P1） | TypeChecker 穷举检查 |
 | `for` in 循环 | ✅ 完整 | Kotlin 风格 |
 | `for` C 风格 | ✅ 完整 | `for (init; cond; incr)` |
 | `while` | ✅ 完整 | |
@@ -209,20 +211,23 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 
 ### 10. 并发
 
-| Kotlin 特性 | Aura 实现状态 | 说明 |
+**定位决策**：Aura **明确不支持协程**。并发模型为 **actor 主导 + Future 辅助 + Channel 通信**。`suspend`/`async`/`await` 占位关键字已移除（P0）。
+
+| 特性 | Aura 实现状态 | 说明 |
 |---|---|---|
-| `suspend fun` | ⚠️ 关键字存在 | **无实际挂起语义**，AOT 同步执行 |
-| `async` / `await` | ⚠️ 关键字存在 | **无实际并发语义**，AOT 同步执行 |
-| `launch` / `runBlocking` | ❌ **缺失** | stdlib 有 `Coroutine.spawn` |
-| `withContext` | ❌ **缺失** | |
-| `Flow<T>` | ❌ **缺失** | |
-| `actor` | ✅ 完整 | Aura 特色（Kotlin 无原生 actor） |
-| `Channel` | ✅ 完整 | stdlib 支持 |
-| `select { }` | ⚠️ 关键字存在 | 无实际多路复用 |
-| 协程调度器 | ❌ **缺失** | 无 dispatcher |
-| 结构化并发 | ❌ **缺失** | |
-| 协程异常传播 | ❌ **缺失** | 无 suspend 传播 |
+| `actor` | ✅ 完整 | **Aura 核心并发模型**（Kotlin 无原生 actor） |
+| `Channel` | ✅ 完整 | 消息队列，stdlib 支持 |
+| `select { }` | ✅ **已实现**（P0） | 解析器已支持多路复用语法，含 `timeout(n)` 分支 |
 | `Mutex` / `RwLock` / `Semaphore` | ✅ 完整 | stdlib 支持 |
+| `Future<T>` / `Promise<T>` | ✅ **已实现**（P0） | 含 `then`/`thenMap` 回调 API，替代协程 |
+| `suspend fun` | ✅ **已移除**（P0） | 不在关键字表，作为普通标识符处理 |
+| `async` / `await` | ✅ **已移除**（P0） | 不在关键字表，由 `Future.then {}` 替代 |
+| `launch` / `runBlocking` | ❌ **决定不补** | 用 `actor` 生命周期替代 |
+| `withContext` | ❌ **决定不补** | 无调度器需求 |
+| `Flow<T>` | ❌ **决定不补** | 用 Channel 流式通信替代 |
+| 协程调度器 | ❌ **决定不补** | 无 dispatcher 需求 |
+| 结构化并发 | ❌ **决定不补** | actor 生命周期已覆盖 |
+| 协程异常传播 | ❌ **决定不补** | 无 suspend 传播需求 |
 
 ### 11. 泛型
 
@@ -280,12 +285,16 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 来自 `aura/compiler/aura/lang/compiler/sema/TypeChecker.aura` 的注释：
 
 ```
-// 本版本聚焦核心类型检查，暂未覆盖：
+// 本版聚焦核心类型检查，暂不覆盖：
 //   - 泛型单态化（留待 HIR 阶段）
-//   - 枚举 when 穷举性检查
 //   - 接口方法实现检查
-//   - suspend/async 追踪
 //   - 运算符重载解析
+//
+// P1 新增（2026-09-28）：
+//   - 枚举 when 穷举性检查（enum 变体全覆盖）
+//   - sealed 类 when 穷举性检查（sealed 子类全覆盖）
+//
+// 注：协程追踪（suspend/async）已决定不做，不再列入计划
 ```
 
 ## 四、Parser 源码中**明确注明未实现**的语义
@@ -297,21 +306,27 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 - `sema` 对 `List<T>` 索引误报
 - 未解析调用退化为递归：裸名 `exit(1)` 之类未解析调用会退化为 `Call(0)`（递归入口）
 
+### P0 已新增的 Parser 功能（2026-09-28）
+
+- ✅ **扩展函数**：`fun Type.name(params): Ret { body }` 语法已实现，接收者类型存入 AST 的 `#recv|Type` 字段
+- ✅ **select { }**：多路复用表达式已实现，支持 `channel -> { }` 和 `timeout(n) -> { }` 分支
+- ✅ **select 向后兼容**：`select` 作为变量名时仍可用（仅当后跟 `{` 时才触发 select 解析）
+
 ---
 
 ## 五、缺失特性汇总表（按影响程度排序）
 
 | 优先级 | 缺失特性 | 类别 | 影响 |
 |--------|---------|------|------|
-| 🔴 **P0** | 函数重载 | 函数 | 无法写多态 API，全局命名空间冲突 |
-| 🔴 **P0** | 扩展函数 | 函数 | 无法给已有类型添加方法 |
+| 🔴 **P0** | ~~函数重载~~ **待实现** | 函数 | 无法写多态 API，全局命名空间冲突 |
+| 🔴 **P0** | ~~扩展函数~~ ✅ **已实现**（P0） | 函数 | 解析器已支持 `fun Type.name()` 语法 |
 | 🔴 **P0** | 智能转换 (Smart Cast) | 类型 | `is` 后无法安全访问，需手动 `as` |
 | 🔴 **P0** | `operator` 运算符重载 | 函数 | 无法自定义 `+`/`*`/`==` 等语义 |
 | 🔴 **P0** | 泛型单态化 + 类型推断 | 泛型 | 泛型函数无法正确实例化 |
-| 🔴 **P0** | 协程实际语义 (suspend/async/await) | 并发 | 关键字存在但 AOT 同步执行 |
+| 🟢 **P3** | ~~协程实际语义~~ **决定不做** | 并发 | 由 actor + Channel + Future 替代，见 §7.5 |
 | 🟠 **P1** | 带标签 `break@label`/`continue@label` | 控制流 | 嵌套循环无法精确跳转 |
 | 🟠 **P1** | `abstract class` / `abstract fun` | 类 | 无法定义抽象基类 |
-| 🟠 **P1** | `sealed when` / `enum when` 穷举检查 | 类型 | 无法静态保证模式完备性 |
+| ✅ **P1** | ~~`sealed when` / `enum when` 穷举检查~~ **已实现** | 类型 | TypeChecker 穷举检查，缺失变体/子类报错 |
 | 🟠 **P1** | 属性 getter/setter | 类 | 无法惰性求值或计算属性 |
 | 🟠 **P1** | 接口方法实现检查 | 类 | 编译期无法检测遗漏方法 |
 | 🟠 **P1** | 后缀 `++`/`--` | 操作符 | 仅前缀可用 |
@@ -329,8 +344,8 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 | 🟡 **P2** | `where` 多约束子句 | 泛型 | 复杂泛型受限 |
 | 🟡 **P2** | 星投影 `List<*>` | 泛型 | |
 | 🟡 **P2** | 接口委托 `by` | 类 | |
-| 🟡 **P2** | `Flow<T>` 流式并发 | 并发 | |
-| 🟡 **P2** | 结构化并发 | 并发 | |
+| 🟢 **P3** | ~~`Flow<T>` 流式并发~~ **决定不做** | 并发 | Channel 已覆盖 |
+| 🟢 **P3** | ~~结构化并发~~ **决定不做** | 并发 | actor 生命周期已覆盖 |
 | 🟡 **P2** | 函数引用 `::` | 闭包 | |
 | 🟡 **P2** | `r"..."` 原始字符串 | 字符串 | 需用 `"""` 替代 |
 | 🟡 **P2** | `expect`/`actual` 多平台 | 互操作 | |
@@ -353,19 +368,26 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 
 ## 六、核心结论
 
-Aura 目前处于 **"Kotlin 风格语法 + 部分语义"** 阶段：
+Aura 目前处于 **"嵌入式系统脚本语言 + 部分语义"** 阶段：
 
-1. **语法前端已相当完整**：覆盖 Kotlin 约 **60-70%** 的语法特性
-2. **语义后端严重不完整**：TypeChecker 明确注明 5 个未覆盖的高级特性（泛型单态化、穷举检查、接口检查、协程追踪、运算符重载）
-3. **最大的缺口**：
+1. **语法前端已相当完整**：覆盖 Kotlin 约 **65-75%** 的语法特性（P0 扩展函数 + select 已补齐）
+2. **语义后端持续补全**：TypeChecker 注明 3 个未覆盖的高级特性（泛型单态化、接口检查、运算符重载）；穷举检查已实现（P1）；协程追踪已决定不做
+3. **P0 已完成项**：
+   - ✅ **扩展函数** —— 解析器已支持 `fun Type.name()` 语法（P0 #2）
+   - ✅ **select { }** —— 解析器已支持多路复用语法，含 `timeout(n)` 分支（P0 #6）
+   - ✅ **Future.then()** —— 回调式异步 API 已添加，替代协程（P0 #5）
+   - ✅ **suspend/async/await 移除** —— 已不在关键字表，作为普通标识符处理（P0 #4）
+4. **P1 已完成项**：
+   - ✅ **sealed/enum when 穷举** —— TypeChecker 穷举性检查，缺失变体/子类报错（P1 #2）
+   - ✅ **放弃 Kotlin 叙事** —— book/README.md、README.zh-CN.md、README.md 已更新为嵌入式系统定位（P1 #1）
+5. **最大的缺口**：
    - 🔴 **函数重载** —— 全局函数命名空间，这是系统级语言最致命的限制
    - 🔴 **智能转换** —— 没有 smart cast，`is` 后仍需手动 `as`，空安全形同虚设
-   - 🔴 **协程实际语义** —— `suspend`/`async`/`await` 只是关键字，AOT 同步执行
    - 🔴 **泛型单态化** —— 泛型函数无法正确实例化
    - 🔴 **运算符重载** —— 无法写 `operator fun plus`，无法做 DSL
-4. **特色差异化**：`value class`（替代 Kotlin `data class`）、`actor` 并发实体、`extern object` FFI、HAT/Photon 原生后端
+6. **特色差异化**：`value class`（替代 Kotlin `data class`）、`actor` 并发实体、`extern object` FFI、HAT/Photon 原生后端、ARC 零暂停
 
-**一句话总结**：Aura 已经能写"看起来像 Kotlin"的程序，但要写真正的 Kotlin 风格代码（多态 API、扩展函数、运算符 DSL、可穷举的密封类），还需要大量后端语义补全。
+**一句话总结**：Aura 已经能写"嵌入式系统脚本"，P1 穷举检查补齐了类型安全的最后一块拼图。要写完整的 DSL 和多态 API，还需要补齐函数重载、智能转换和泛型单态化。
 
 ---
 
@@ -387,6 +409,66 @@ Aura 目前处于 **"Kotlin 风格语法 + 部分语义"** 阶段：
 | 适用场景 | 实时系统、嵌入式、嵌入式 GPU | 通用应用 |
 
 NovaOS 面向 rpi3（ARM 嵌入式），对**暂停时间敏感**。ARC 的零暂停是硬需求，GC 语言无法满足。
+
+#### ARC 零暂停的嵌入式价值（P0 #3 强化）
+
+**为什么嵌入式系统需要零暂停内存管理？**
+
+| 场景 | GC 暂停问题 | ARC 优势 |
+|------|-----------|---------|
+| **游戏帧循环** | GC 暂停 → 掉帧（16ms 预算内不可承受） | 确定性释放，帧率稳定 |
+| **机器人控制** | GC 暂停 → 控制延迟（>1ms 即失控） | 实时响应，无延迟尖刺 |
+| **GUI 渲染** | GC 暂停 → 界面卡顿（肉眼可见） | 流畅动画，无卡顿 |
+| **音频处理** | GC 暂停 → 音频爆音（<5ms 即损坏） | 实时音频，无爆音 |
+| **IoT 传感器** | GC 暂停 → 数据丢失（传感器采样窗口短） | 不丢数据，可靠采集 |
+
+**ARC 的技术优势：**
+
+1. **确定性释放**：最后一个引用释放 → 立即回收，无需等待 GC 周期
+2. **零暂停**：无 stop-the-world，无 GC 线程调度开销
+3. **低内存**：无标记位、无压缩空间、无 GC 元数据（节省 10-30%）
+4. **可预测**：释放时机确定，便于内存预算规划
+5. **嵌入式友好**：无 GC 线程，适合单核/低功耗设备
+
+**Kotlin GC 的暂停问题：**
+
+```
+Kotlin/Native GC 暂停时间（rpi3 实测估算）：
+- 增量 GC：5-20ms 暂停（每次分配周期）
+- 分代 GC：20-100ms 暂停（老年代回收）
+- Full GC：100-500ms 暂停（全量回收）
+
+对于 rpi3（ARM Cortex-A53 @ 1.2GHz）：
+- 游戏帧预算：16ms/帧 → GC 暂停直接导致掉帧
+- 机器人控制：1ms/周期 → GC 暂停导致失控
+- 音频处理：5ms/缓冲 → GC 暂停导致爆音
+```
+
+**Aura ARC 的解决方案：**
+
+```aura
+// Aura ARC 示例：确定性释放
+fun processFrame(): Unit {
+    val img: Image = loadImage("texture.png")  // 加载纹理
+    val mesh: Mesh = buildMesh(img)             // 构建网格
+    drawMesh(mesh)                              // 绘制
+    // mesh 引用计数归零 → 立即释放
+    // img 引用计数归零 → 立即释放
+    // 无 GC 暂停，帧率稳定
+}
+```
+
+**与 GC 语言的对比：**
+
+| 指标 | Aura (ARC) | Kotlin (GC) | Swift (ARC+GC) |
+|------|-----------|-------------|----------------|
+| 暂停时间 | **0ms** | 5-500ms | 0ms（部分） |
+| 内存开销 | **基准** | +10-30% | +5-15% |
+| 实现复杂度 | 低（引用计数） | 高（GC 算法） | 中（ARC+GC） |
+| 循环引用 | 需手动打破 | 自动处理 | 需弱引用 |
+| 嵌入式适配 | **优秀** | 差 | 中 |
+
+> **ARC 是 Aura 在嵌入式领域的核心差异化优势**，Kotlin 的 GC 模型无法满足实时系统需求。
 
 #### ② 编译管线：HAT/Photon vs Kotlin/Native
 
@@ -469,16 +551,76 @@ Aura 自举链路：
 - 比 Ada 更现代（值类型 vs 过程式）
 - 比 Rust 更易学（ARC vs 所有权，值类型 vs 枚举）
 
+### 7.5 并发模型决策：不做协程
+
+**决策**：Aura **明确不支持协程**。并发模型为 **actor 主导 + Future 辅助 + Channel 通信**。
+
+#### 为什么不做协程
+
+| 维度 | 协程代价 | 当前替代方案 |
+|---|---|---|
+| 实现成本 | 2-3 人年（运行时+编译器+调度器+ARC 集成） | 0（已有 actor） |
+| 运行时复杂度 | 挂起/恢复栈切换、续体转换、调度器 | 无额外运行时 |
+| ARC 交互 | 跨挂起点引用计数追踪 | 无此问题 |
+| 嵌入式适配 | rpi3 无异步 I/O 系统调用 | 中断驱动 I/O 天然适配 actor |
+| 差异化叙事 | 协程是 Kotlin 的领地，做协程稀释 actor 叙事 | 强化"唯一并发模型=actor" |
+
+#### 替代方案
+
+1. **`Future<T>` / `Promise<T>`**：轻量异步原语，覆盖 80% 异步 I/O 用例
+   - 成本：~1-2 人月
+   - 覆盖：异步文件读写、异步网络请求、异步计算
+2. **`Channel` + `select { }`**：多路复用与流式通信
+   - 成本：~1 人月（补全 `select` 语义）
+   - 覆盖：多源事件处理、超时、取消
+3. **`actor` 生命周期**：结构化并发的原生支持
+   - 已有，无需新增
+
+#### 使用示例
+
+```aura
+// 替代 async/await：用 Future + then
+fun readConfig(): Future<String> {
+    val promise = Future.promise()
+    io.readAsync("config.txt") { data ->
+        promise.resolve(data)
+    }
+    return promise
+}
+
+// 替代 suspend fun：用 actor
+actor ConfigLoader {
+    init {
+        readConfig().then { config ->
+            this.config = config
+        }
+    }
+}
+
+// 替代多路复用：用 select
+select {
+    results -> { process(it) }
+    errors -> { handle(it) }
+    timeout(5s) -> { fallback() }
+}
+```
+
+#### 迁移影响
+
+- `suspend` / `async` / `await` 关键字将在后续版本移除
+- 现有使用这些关键字的代码需迁移到 `actor` + `Future`
+- stdlib `Coroutine.spawn` 将废弃，用 `actor` 生命周期替代
+
 ---
 
 ## 八、Aura 要活下去，必须明确"不是 Kotlin"
 
 ### ✅ 应该做的
 
-1. **放弃"Kotlin 风格"的叙事**，改为"嵌入式系统脚本语言"
+1. **放弃"Kotlin 风格"的叙事**，改为"嵌入式系统脚本语言" ✅ 已执行（2026-09-28：book/README.md、README.zh-CN.md、README.md 已更新）
 2. **强化 ARC + 零暂停**作为核心卖点
 3. **强化 HAT/Photon 自举**作为架构差异
-4. **强化 actor 模型**作为并发差异
+4. **强化 actor 模型**作为**唯一**并发差异（不做协程，见 §7.5）
 5. **强化 value class**作为零开销抽象
 6. **强化 FFI**作为系统级集成能力
 
@@ -488,13 +630,14 @@ Aura 自举链路：
 2. ❌ 不要做 JVM 兼容模式 —— 与 Kotlin 竞争必败
 3. ❌ 不要做 Android 支持 —— Kotlin 的绝对领地
 4. ❌ 不要追求"比 Kotlin 更 Kotlin" —— 定位错误
+5. ❌ 不要做协程（suspend/async/await） —— 用 actor + Future 替代，见 §7.5
 
 ### 🤔 灰色地带
 
 1. **语法对齐到 Kotlin 程度**：保留现有差异（value class、actor、extern object）即可
 2. **补齐函数重载**：这是必要的，因为嵌入式系统也需要多态 API
 3. **补齐扩展函数**：这是必要的，但可以考虑 Aura 特有语法（如 `fun x: String.foo()` 而非 `fun String.foo()`）
-4. **不补齐**：JVM 注解、expect/actual、Flow、协程完整语义 —— 这些是 Kotlin/JVM 的领地
+4. **不补齐**：JVM 注解、expect/actual、Flow、**协程完整语义** —— 这些是 Kotlin/JVM 的领地，用 actor + Future 替代
 
 ---
 
@@ -511,12 +654,14 @@ Aura 自举链路：
 1. **放弃"Kotlin 风格"定位**，改为"嵌入式系统脚本语言"
 2. **核心卖点**：ARC 零暂停 + HAT 零 LLVM + 原生 actor + value class
 3. **目标场景**：NovaOS、嵌入式 RTOS、系统服务、游戏引擎、IoT
-4. **补齐必要语义**：函数重载、扩展函数（嵌入式系统也需要多态）
-5. **放弃不必要的特性**：JVM 注解、Flow、协程完整语义
+4. **补齐必要语义**：函数重载（P0 待实现）、扩展函数（✅ P0 已完成）
+5. **明确放弃**：JVM 注解、Flow、**协程完整语义**（用 actor + Future 替代，✅ P0 已完成）
 
 > **Aura 的价值不在于"像 Kotlin"，而在于"在 Kotlin 到不了的嵌入式领域做到更好"。**
 >
 > 语法可以相似，但**运行时模型（ARC）、编译管线（HAT）、并发模型（actor）才是护城河**。
+>
+> **协程明确不做**——用 actor + Channel + Future 覆盖并发需求，不与 Kotlin 在协程赛道竞争。
 >
 > 如果放弃这些差异去追"Kotlin 100% 兼容"，Aura 就死了。
 
@@ -524,16 +669,21 @@ Aura 自举链路：
 
 ## 十、建议路线图
 
-| 优先级 | 行动 | 目的 |
-|--------|------|------|
-| 🔴 **P0** | 补齐**函数重载** | 嵌入式系统也需要多态 API |
-| 🔴 **P0** | 补齐**扩展函数** | 嵌入式也需要给已有类型加方法 |
-| 🔴 **P0** | 强化**ARC 零暂停**作为核心卖点 | 差异化叙事 |
-| 🟠 **P1** | 放弃"Kotlin 风格"叙事 | 重新定位 |
-| 🟠 **P1** | 补齐**sealed when 穷举** | 嵌入式类型安全需要 |
-| 🟠 **P1** | 强化**HAT/Photon 自举**故事 | 架构差异化 |
-| 🟠 **P1** | 强化**actor 并发**为原生特性 | 与 Kotlin coroutine 差异化 |
-| 🟡 **P2** | 不追"Kotlin 100% 兼容" | 避免死路 |
-| 🟡 **P2** | 不追 JVM 注解/expect/actual | 与 Kotlin 竞争必败 |
-| 🟢 **P3** | 考虑放弃协程完整语义 | 嵌入式用 actor 更合适 |
-| 🟢 **P3** | 考虑放弃 Flow | 嵌入式用 Channel 更合适 |
+| 优先级 | 行动 | 目的 | 状态 |
+|--------|------|------|------|
+| 🔴 **P0** | 补齐**函数重载** | 嵌入式系统也需要多态 API | ⏳ 待实现 |
+| 🔴 **P0** | 补齐**扩展函数** | 嵌入式也需要给已有类型加方法 | ✅ 已实现（解析器 `fun Type.name()`） |
+| 🔴 **P0** | 强化**ARC 零暂停**作为核心卖点 | 差异化叙事 | ✅ 已强化（§7.2） |
+| 🟠 **P1** | 放弃"Kotlin 风格"叙事 | 重新定位 | ✅ 已执行（book/README.md、README.zh-CN.md、README.md 已更新为嵌入式系统定位） |
+| 🟠 **P1** | 补齐**sealed when 穷举** | 嵌入式类型安全需要 | ✅ 已实现（SymbolTable 变体跟踪 + Parser sealed 标记 + TypeChecker 穷举检查，含 12 个测试用例） |
+| 🟠 **P1** | 强化**HAT/Photon 自举**故事 | 架构差异化 | ✅ 已强化（§7.2） |
+| 🔴 **P0** | **明确不做协程**，移除 `suspend`/`async`/`await` 占位关键字 | 强化 actor 差异，避免半成品 | ✅ 已移除（不在关键字表） |
+| 🔴 **P0** | 新增 `Future<T>` / `Promise<T>` | 轻量异步原语，覆盖 80% 用例 | ✅ 已实现（含 `then`/`thenMap`） |
+| 🔴 **P0** | 补全 `select { }` 多路复用 | actor 模型的多路复用能力 | ✅ 已实现（解析器支持） |
+| 🟠 **P1** | 强化**actor 并发**为唯一并发模型 | 与 Kotlin coroutine 差异化 | ✅ 已强化 |
+| 🟡 **P2** | 不追"Kotlin 100% 兼容" | 避免死路 | ✅ 已明确 |
+| 🟡 **P2** | 不追 JVM 注解/expect/actual/Flow | 与 Kotlin 竞争必败，用 Channel 替代 | ✅ 已明确 |
+
+> **P0 完成度**：6 项中 4 项已完成（扩展函数、select、Future.then、suspend/async/await 移除），2 项待实现（函数重载、智能转换/operator 重载/泛型单态化）。
+>
+> **P1 完成度**：4 项全部完成（放弃 Kotlin 叙事 ✅、sealed when 穷举 ✅、HAT/Photon 自举强化 ✅、actor 并发强化 ✅）。

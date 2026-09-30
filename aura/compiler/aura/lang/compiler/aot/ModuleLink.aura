@@ -75,12 +75,12 @@ class AotModuleLinker {
         this.preloadCache(stdMods)
 
         // 入口文件 + 递归 import + 自动包含 std 模块
-        var kids: String = this.loadPath(entryPath)
+        var kids: List<Int> = this.loadPath(entryPath)
         var si: Int = 0
         while (si < aotLineCount(stdMods)) {
             val sp: String = aotLineAt(stdMods, si)
-            val dep: String = this.loadPath(sp)
-            if (dep != "") {
+            val dep: List<Int> = this.loadPath(sp)
+            if (dep.size > 0) {
                 kids = ModuleLinkUtils.appendKids(kids, dep)
             }
             si = si + 1
@@ -169,18 +169,18 @@ class AotModuleLinker {
         return aotLineCount(this.seen)
     }
 
-    /// 加载单个文件（去重）→ 其递归依赖 + 本文件顶层声明的 HIR kids 串。
-    fun loadPath(path: String): String {
+    /// 加载单个文件（去重）→ 其递归依赖 + 本文件顶层声明的 HIR kids 列表。
+    fun loadPath(path: String): List<Int> {
         val norm: String = ModuleLinkUtils.normalizePath(path)
         if (norm == "") {
-            return hirNoKids()
+            return HirUtils.hirNoKids()
         }
         if (aotListContains(this.seen, norm)) {
-            return hirNoKids()
+            return HirUtils.hirNoKids()
         }
         if (!FileUtils.exists(norm)) {
             this.missing = this.missing + norm + "\n"
-            return hirNoKids()
+            return HirUtils.hirNoKids()
         }
         this.seen = this.seen + norm + "\n"
 
@@ -201,7 +201,7 @@ class AotModuleLinker {
         val dir: String = ModuleLinkUtils.dirOf(norm)
         // 分段收集、最后一次归并：`out = appendKids(out, …)` 在整棵导入树上是
         // O(n²) 复制，且 AOT 运行时没有 GC —— 链接阶段就能吃掉数 GB 内存。
-        var parts: List<String> = arrayListOf<String>()
+        var parts: List<List<Int>> = arrayListOf<List<Int>>()
         // 0) 同包名自动导入：若当前文件有 package 声明，自动加载同包下所有 .aura 文件
         val pkgName: String = this.extractPackage(ast)
         if (pkgName != "") {
@@ -209,8 +209,8 @@ class AotModuleLinker {
             var si: Int = 0
             while (si < aotLineCount(siblings)) {
                 val sib: String = aotLineAt(siblings, si)
-                val dep: String = this.loadPath(sib)
-                if (dep != "") {
+                val dep: List<Int> = this.loadPath(sib)
+                if (dep.size > 0) {
                     parts.add(dep)
                 }
                 si = si + 1
@@ -224,8 +224,8 @@ class AotModuleLinker {
                 var j: Int = 0
                 val tn: Int = aotLineCount(targets)
                 while (j < tn) {
-                    val dep: String = this.loadPath(aotLineAt(targets, j))
-                    if (dep != "") {
+                    val dep: List<Int> = this.loadPath(aotLineAt(targets, j))
+                    if (dep.size > 0) {
                         parts.add(dep)
                     }
                     j = j + 1
@@ -234,11 +234,18 @@ class AotModuleLinker {
             i = i + 1
         }
         // 2) 再降级本文件顶层声明
-        val own: String = this.loader.lowerTopLevel(ast)
-        if (own != "") {
+        val own: List<Int> = this.loader.lowerTopLevel(ast)
+        if (own.size > 0) {
             parts.add(own)
         }
-        return joinPieces(parts, ",")
+        // 归并各分段为单一 kids 列表（树形归并见 `joinPieces` 的说明）。
+        var out: List<Int> = HirUtils.hirNoKids()
+        var pi: Int = 0
+        while (pi < parts.size) {
+            out = HirUtils.hirKidsConcat(out, parts[pi])
+            pi = pi + 1
+        }
+        return out
     }
 
     /// 把一条 import 文本解析为若干「完整文件路径」（换行分隔）。
@@ -528,15 +535,13 @@ object ModuleLinkUtils {
         }
     }
 
-    /// 追加两个 kids 串（逗号分隔），空串安全。
-    fun appendKids(a: String, b: String): String {
-        if (a == "") {
-            return b
-        } else if (b == "") {
-            return a
-        } else {
-            return a + "," + b
-        }
+    /// 追加两个 kids 列表（`List<Int>`；P2.1 取代逗号分隔串）。
+    ///
+    /// 必须按列表拼接而非字符串拼接：`Hir.add(..., children: List<Int>)` 与
+    /// `synthesizeMainInKids(kids: List<Int>, …)` 都要求堆列表，把 `ArrayList`
+    /// 句柄当字符串传下去会在 AOT 下被 `strlen` / `list.size` 误读为野值。
+    fun appendKids(a: List<Int>, b: List<Int>): List<Int> {
+        return HirUtils.hirKidsConcat(a, b)
     }
 
     /// 反斜杠 → 正斜杠（手写，避免依赖 String.replace 的类调用链接）。

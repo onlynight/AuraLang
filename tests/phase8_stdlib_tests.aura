@@ -85,12 +85,12 @@ fun testAssertAndHelper(): Int {
 
     t.assertEq(Assert.assertApprox(1.0, 1.001, 0.01, "approx"), "OK: approx", "Assert.assertApprox")
 
-    // TestHelper 顶层函数（无 self，名称唯一）
-    t.assertEq(add(2, 3), 5, "TestHelper.add")
-    t.assertEq(multiply(4, 5), 20, "TestHelper.multiply")
-    t.assertTrue(isEven(4), "TestHelper.isEven")
-    t.assertFalse(isEven(5), "TestHelper.isEven false")
-    t.assertEq(reverse("aura"), "arua", "TestHelper.reverse")
+    // TestHelper 对象方法
+    t.assertEq(TestHelperUtils.add(2, 3), 5, "TestHelper.add")
+    t.assertEq(TestHelperUtils.multiply(4, 5), 20, "TestHelper.multiply")
+    t.assertTrue(TestHelperUtils.isEven(4), "TestHelper.isEven")
+    t.assertFalse(TestHelperUtils.isEven(5), "TestHelper.isEven false")
+    t.assertEq(TestHelperUtils.reverse("aura"), "arua", "TestHelper.reverse")
 
     return t.report()
 }

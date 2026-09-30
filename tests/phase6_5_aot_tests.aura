@@ -265,20 +265,20 @@ fun testStdSignatureTable(): Int {
     t.begin("p6.5.stdsigs")
 
     // 表内查询（唯一真相源）
-    t.assertEq(stdSignature("aura_lang_std_Math_sqrt"), "double|double", "Math.sqrt signature")
-    t.assertEq(stdSignature("aura_lang_std_String_split"), "i8*|i8*, i8*", "String.split signature")
-    t.assertEq(stdSignatureFor("FileUtils", "writeText"), "void|i8*, i8*", "FileUtils.writeText")
-    t.assertEq(stdSignatureFor("Collections", "getAt"), "i8*|i8*, i64", "Collections.getAt")
-    t.assertEq(stdSignature("aura_lang_std_NoSuchFn"), "", "unknown std symbol")
+    t.assertEq(RuntimeUtils.stdSignature("aura_lang_std_Math_sqrt"), "double|double", "Math.sqrt signature")
+    t.assertEq(RuntimeUtils.stdSignature("aura_lang_std_String_split"), "i8*|i8*, i8*", "String.split signature")
+    t.assertEq(RuntimeUtils.stdSignatureFor("FileUtils", "writeText"), "void|i8*, i8*", "FileUtils.writeText")
+    t.assertEq(RuntimeUtils.stdSignatureFor("Collections", "getAt"), "i8*|i8*, i64", "Collections.getAt")
+    t.assertEq(RuntimeUtils.stdSignature("aura_lang_std_NoSuchFn"), "", "unknown std symbol")
 
     // 符号构造 + callSignature 兜底
-    t.assertEq(stdSymbolFor("Collections", "listAppend"), "aura_lang_std_Collections_listAppend",
+    t.assertEq(RuntimeUtils.stdSymbolFor("Collections", "listAppend"), "aura_lang_std_Collections_listAppend",
         "qualified symbol")
-    t.assertEq(callSignature("aura_lang_std_String_lastIndexOf"), "i64|i8*, i8*",
+    t.assertEq(RuntimeUtils.callSignature("aura_lang_std_String_lastIndexOf"), "i64|i8*, i8*",
         "callSignature falls back to std table")
 
     // runtimeDeclarations 覆盖完整表（此前 Math.sqrt 缺失 → 链接期 undefined symbol）
-    val decls: String = runtimeDeclarations()
+    val decls: String = RuntimeUtils.runtimeDeclarations()
     t.assertTrue(decls.contains("declare double @aura_lang_std_Math_sqrt(double)"), "Math.sqrt declared")
     t.assertTrue(decls.contains("declare i8* @aura_lang_std_String_replace(i8*, i8*, i8*)"),
         "String.replace declared")

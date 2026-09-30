@@ -65,7 +65,20 @@ fn real_main() {
                     process::exit(1);
                 }
                 let use_aot = args.iter().any(|a| a == "--aot");
-                let use_photon = backend.as_deref() == Some("photon");
+                // `-b photon` 由 **Aura 自举编译器**（`aura/compiler/.../Main.aura`
+                // 的 `photonBuildExeFile`）实现，Rust 种子没有 photon 后端。
+                // 旧实现把它静默忽略、照样产出 `.auc` 字节码 —— 调用方以为拿到了
+                // PE/COFF 产物，实际是字节码，属**静默误报**。此处显式报错。
+                if backend.as_deref() == Some("photon") {
+                    eprintln!(
+                        "Error: the `photon` backend is not available in the Rust seed compiler.\n\
+                         Use the Aura-native compiler instead:\n\
+                         \x20 build/bin/aura.exe build -b photon <entry> --output <path>\n\
+                         \x20 (or: aura/compiler/aura/lang/compiler/Main.aura with -b photon)"
+                    );
+                    process::exit(1);
+                }
+                // 其余未知后端保持旧行为（忽略），`aot` 由 `--aot` 选择。
                 match fs::read_to_string(entry) {
                     Ok(source) => {
                         // 先解析 import，内联所有引用的模块

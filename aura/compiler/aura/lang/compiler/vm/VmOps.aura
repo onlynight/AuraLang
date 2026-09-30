@@ -122,6 +122,31 @@ object VmOps {
         return total
     }
 
+    /// 字符串转整数（不依赖 charCodeAt，避免 AOT 转换问题）。
+    fun vrToInt(text: String): Int {
+        if (text == null || text == "") return 0
+        var total: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        var neg: Boolean = false
+        if (len > 0 && text.charCodeAt(0) == 45) {
+            neg = true
+            i = 1
+        }
+        while (i < len) {
+            val c: Int = text.charCodeAt(i)
+            if (c < 48 || c > 57) {
+                break
+            }
+            total = total * 10 + (c - 48)
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
+    }
+
     /// Any -> Long（64 位）。
     ///
     /// 直接解析为 Long，不经过 toI32（后者仅 32 位，会丢失高 32 位）。
@@ -501,6 +526,35 @@ object VmOps {
     /// 与 `VmOps.toI32(toStr(x))` 等既有可靠路径一致。
     fun toStrAny(v: Any): String {
         return toStr(v)
+    }
+
+    /// Int → String（不依赖 toStr，避免 AOT 转换问题）。
+    fun intToStr(n: Int): String {
+        if (n == 0) return "0"
+        var neg: Boolean = false
+        if (n < 0) {
+            neg = true
+            n = -n
+        }
+        var result: String = ""
+        while (n > 0) {
+            val digit: Int = n % 10
+            var ch: String = ""
+            if (digit == 0) ch = "0"
+            else if (digit == 1) ch = "1"
+            else if (digit == 2) ch = "2"
+            else if (digit == 3) ch = "3"
+            else if (digit == 4) ch = "4"
+            else if (digit == 5) ch = "5"
+            else if (digit == 6) ch = "6"
+            else if (digit == 7) ch = "7"
+            else if (digit == 8) ch = "8"
+            else ch = "9"
+            result = ch + result
+            n = n / 10
+        }
+        if (neg) result = "-" + result
+        return result
     }
 
     /// 字符串是否全为十进制数字（用于「函数序号」形式的调用目标）。

@@ -30,10 +30,10 @@ object TokenUtils {
             + "\nfor|For\nin|In\nwhile|While\ndo|Do\nbreak|Break\ncontinue|Continue\ntry|Try"
             + "\ncatch|Catch\nfinally|Finally\nthrow|Throw\nis|Is\nas|As\npublic|Public"
             + "\nprivate|Private\nprotected|Protected\ninternal|Internal\nnull|Null\nthis|This\nsuper|Super"
-            + "\nobject|Object\nunit|Unit\ntypealias|Typealias\noverride|Override\nsuspend|Suspend"
+            + "\nobject|Object\nunit|Unit\ntypealias|Typealias\noverride|Override"
             + "\ninline|Inline\nconst|Const\ncomptime|Comptime\ndefer|Defer\nextern|Extern"
-            + "\nimport|Import\npackage|Package\nlazy|Lazy\nlateinit|Lateinit\ndata|Data\nvalue|Value\nawait|Await"
-            + "\nto|To\nasync|Async\nselect|Select\nbox|Box\nweak|Weak"
+            + "\nimport|Import\npackage|Package\nlazy|Lazy\nlateinit|Lateinit\ndata|Data\nvalue|Value"
+            + "\nto|To\nselect|Select\nbox|Box\nweak|Weak"
             // 注意：`malloc` / `free` / `retain` / `release` 不再作为保留字。
             // 它们没有语法/语义用途，却与标准库同名标识符冲突
             //（`Allocator.malloc`、`Memory.free` 等），导致声明名解析失效。

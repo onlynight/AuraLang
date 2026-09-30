@@ -269,7 +269,7 @@ class Vm {
         this.ops = arrayListOf<String>()
         this.argCache = arrayListOf<List<String>>()
         var i: Int = 0
-        while (i < this.lines.size) {
+        while (i < this.lines.size()) {
             val ln: String = this.lines[i]
             var pos: Int = 0
             var lineLen: Int = ln.length
@@ -769,6 +769,23 @@ class Vm {
         } else if (funcName == "throw") {
             val msg: Any = this.stack.pop()
             this.throwException()
+            return
+        } else if (funcName == "__callClosure" && argc >= 3) {
+            // __callClosure(closure, sig, arg) — 闭包间接调用（Collections.filter/map）。
+            // 栈顺序：arg, sig, closure（closure 在栈顶）。
+            val closureId: Any = this.stack.pop()
+            val sig: Any = this.stack.pop()  // 忽略
+            val arg: Any = this.stack.pop()
+            val cid: Int = VmOps.toI32(toStr(closureId))
+            val funcName2: String = this.closureTable.getOrDefault(cid, "")
+            if (funcName2 == "") {
+                this.error = "Invalid closure id: " + toStr(cid)
+                this.running = false
+                return
+            }
+            // 将参数压回栈，递归调用目标函数
+            this.stack.push(arg)
+            this.callOrBuiltin(funcName2, 1)
             return
         } else if (funcName == "abs") {
             val v: Any = this.stack.pop()
@@ -2258,5 +2275,62 @@ class Vm {
         if (cfName != null) this.currentFunc = cfName as String
         this.suspended = false
         this.running = true
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  测试/工具方法（供 VmRunner 委托）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 压栈（测试用）。
+    fun push(value: String): Unit {
+        this.stack.push(value)
+    }
+
+    /// 栈顶（测试用）。
+    fun peek(): String {
+        val v = this.stack.peek()
+        if (v == null) return ""
+        return toStr(v)
+    }
+
+    /// 弹栈（测试用）。
+    fun pop(): String {
+        val v = this.stack.pop()
+        if (v == null) return ""
+        return toStr(v)
+    }
+
+    /// 设置局部变量（测试用）。
+    fun setLocal(idx: Int, value: String): Unit {
+        this.locals.put(idx, value)
+    }
+
+    /// 获取局部变量（测试用）。
+    fun getLocal(idx: Int): String {
+        val v = this.locals.get(idx)
+        if (v == null) return ""
+        return toStr(v)
+    }
+
+    /// 加法（测试用）。
+    fun arithAdd(a: String, b: String): String {
+        return VmOps.intToStr(VmOps.vrToInt(a) + VmOps.vrToInt(b))
+    }
+
+    /// 减法（测试用）。
+    fun arithSub(a: String, b: String): String {
+        return VmOps.intToStr(VmOps.vrToInt(a) - VmOps.vrToInt(b))
+    }
+
+    /// 乘法（测试用）。
+    fun arithMul(a: String, b: String): String {
+        return VmOps.intToStr(VmOps.vrToInt(a) * VmOps.vrToInt(b))
+    }
+
+    /// 除法（测试用）。
+    fun arithDiv(a: String, b: String): String {
+        val div: Int = VmOps.vrToInt(b)
+        if (div == 0) return "0"
+        return VmOps.intToStr(VmOps.vrToInt(a) / div)
     }
 }

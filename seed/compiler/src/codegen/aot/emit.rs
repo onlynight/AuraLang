@@ -543,7 +543,9 @@ impl EmitCtx {
         s.push_str("declare void @llvm.memcpy(i8*, i8*, i64, i1)\n");
         s.push_str("declare void @llvm.memset(i8*, i8, i64, i1)\n");
         s.push_str("declare i32 @llvm.memcmp(i8*, i8*, i64, i1)\n");
-        // __callClosure(closure, sig, args...) — 闭包间接调用（Collections.filter/map 用）
+        // __callClosure(closure, sig, arg) — 闭包间接调用（Collections.filter/map 用）
+        // 硬编码 declare（非 @native fun wrapper），避免与 aura_std_cffi.c 的 C 实现
+        // 冲突产生 duplicate symbol。调用点由 emitCall 的 __callClosure 特殊分支生成。
         s.push_str("declare i64 @__callClosure(i64, i8*, i64)\n");
         // 方法派发 bug 的临时兜底声明（Rust AOT emit 尚未实现 .size/.add 等内置集合方法）
         s.push_str("declare i32 @size(i8*)\n");
@@ -686,6 +688,13 @@ fn emit_native_wrapper(
     };
 
     // 函数体
+    //
+    // `object`/`class` 的 `@native` 方法带隐式 `self` 形参（`desugar_class_method(_, _, true)`），
+    // 但 syscall 参数只应取**业务形参**（如 `exitGroup(code)` 的 `code`），
+    // 否则 `self` 会顶到第 1 个系统调用参数位。故此处统一计算需要跳过的前缀个数。
+    let self_offset = if func.params.first().map(|p| p.name == "self").unwrap_or(false) { 1 } else { 0 };
+    let syscall_arity = func.params.len().saturating_sub(self_offset);
+
     let body = match attr {
         crate::ast::NativeAttr::Syscall(nr) => {
             // Phase 0: 直接生成内联 syscall 指令 IR，不依赖 aura_syscall_dispatch
@@ -718,8 +727,8 @@ fn emit_native_wrapper(
             if is_windows {
                 let mut call_args: Vec<String> = vec![format!("i64 {}", nr_str)];
                 for i in 0..6 {
-                    let a = if i < func.params.len() {
-                        format!("i64 %arg.{}", i)
+                    let a = if i < syscall_arity {
+                        format!("i64 %arg.{}", i + self_offset)
                     } else {
                         "i64 0".to_string()
                     };
@@ -762,7 +771,7 @@ fn emit_native_wrapper(
             let mut constraints_parts: Vec<String> = Vec::new();
             constraints_parts.push("={rax}".to_string());
             constraints_parts.push("0".to_string()); // syscall number in rax (same as output)
-            for i in 0..func.params.len() {
+            for i in 0..syscall_arity {
                 if i < arg_regs.len() {
                     constraints_parts.push(arg_regs[i].clone());
                 } else {
@@ -775,8 +784,8 @@ fn emit_native_wrapper(
             // 构建参数列表: syscall number + args
             let mut arg_list: Vec<String> = Vec::new();
             arg_list.push(format!("i64 {}", nr_str)); // syscall number
-            for i in 0..func.params.len() {
-                arg_list.push(format!("i64 %arg.{}", i));
+            for i in 0..syscall_arity {
+                arg_list.push(format!("i64 %arg.{}", i + self_offset));
             }
 
             // 使用纯 "syscall" 指令，所有寄存器通过约束设置
@@ -1383,8 +1392,10 @@ pub fn emit_program(
 
     for (idx, func) in program.functions.iter().enumerate() {
         if func.is_native {
-            // native 函数生成空指针槽
-            fn_ptrs.push("null".to_string());
+            // native 函数生成空指针槽。
+            // 必须写 `ptr null`（带类型）——裸 `null` 在聚合初始化列表里 llc 会报
+            // `error: expected type`（object 的 @native 方法纳入 functions 后首现）。
+            fn_ptrs.push("ptr null".to_string());
             continue;
         }
 
@@ -1423,7 +1434,7 @@ pub fn emit_program(
             match trampoline_arg_from_i64(&param_tys[0], "%arg_i64") {
                 Some((pal, carg)) => (carg, pal),
                 None => {
-                    fn_ptrs.push("null".to_string());
+                    fn_ptrs.push("ptr null".to_string());
                     continue;
                 }
             }
@@ -3057,7 +3068,22 @@ fn aura_ty_of_expr(ctx: &EmitCtx, e: &HirExpr) -> String {
     use crate::ast::Literal;
     match e {
         HirExpr::Lit(Literal::String(_)) => "String".to_string(),
-        HirExpr::Var(n) => ctx.lookup_var_aura_ty(n),
+        HirExpr::Var(n) => {
+            // `this` / `self`：Aura 类型就是当前类名。
+            //
+            // `lookup_var_aura_ty("this")` 恒为空（`this` 不按普通变量登记），
+            // 于是 `is_string_like(ctx, this)` 在 `class String` 的方法体内返回
+            // false —— `String.countCharStr` 的 `this.length` 落到下方「动态列表」
+            // 分支，发射成 `Collections.count(this)`，对裸字符串指针按集合句柄读
+            // `data`/`size` 字段直接段错误（0xC0000005）。
+            // 这正是 Photon 前端 `AotUtil.aotLineCount` → `countChar` 一启动即崩的根因。
+            if (n == "this" || n == "self") {
+                if let Some(cls) = &ctx.current_class {
+                    return cls.clone();
+                }
+            }
+            ctx.lookup_var_aura_ty(n)
+        }
         HirExpr::Call {
             callee,
             args,
@@ -3172,6 +3198,16 @@ fn aura_ty_of_expr(ctx: &EmitCtx, e: &HirExpr) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// 表达式的 Aura 类型是否为 `String`。
+///
+/// 与 [`is_string_like`] 的区别：后者把「任何已知的非集合 Aura 类型」都当字符串
+/// （`p.length` / `p[i]` 那类判定成立的前提），因此会**误判数值** ——
+/// `ArenaAllocator.alloc` 的 `(size + 7) / 8`（`size: Long`）被当成字符串拼接，
+/// 生成 `sdiv i8* …` 非法 IR。`+` 的拼接判定必须只用精确的 `String`。
+fn is_string_aura_ty(ctx: &EmitCtx, e: &HirExpr) -> bool {
+    aura_ty_of_expr(ctx, e) == "String"
 }
 
 /// 判断表达式是否应按**字符串**语义处理。
@@ -3370,10 +3406,28 @@ fn emit_binary(
 
     match op {
         HirBinOp::Add => {
-            // 字符串拼接：当任一操作数是字符串常量（@str_data.* 或 %str_gep.*）时
+            // 字符串拼接：任一侧为**字符串**即走 concat。
+            //
+            // 不能只看 IR 文本是不是字符串常量（`@str_data.*` / `%str_gep.*`）：
+            // 两个**堆字符串**（函数返回值、`String` 变量）相加时两侧都不是常量，
+            // 于是落到下方「`i8*` 装箱整数相加」分支 —— 把指针位 `ptrtoint` 成整数
+            // `add` 再 `(v<<1)|1` 装箱回 `i8*`，结果是一条野指针。
+            //
+            // 实测 `object` 内兄弟方法调用 `d(n % 10) + result` 正是这样静默失真：
+            // `SsaMirUtils.toStr` 输出的数字全是垃圾值，进而 `toStr(mods.length)`
+            // 打印出 `147652875920752` 这类地址，最终在 `AotUtil.aotLineCount`
+            // 走 `countChar` 时对野指针 `strlen` 段错误（0xC0000005）—— Photon
+            // 前端一启动即崩的根因。
+            //
+            // `String` 与 `Any`/`List` 在 LLVM 层同为 `i8*`，必须按 Aura 类型判定
+            // （同族判定见 `emit_member_access` / `emit_index_access` 的
+            // `is_string_like`，但那里不能复用——见 `is_string_aura_ty` 说明）。
+            // 装箱整数相加的分支保留给「两侧都**不是**字符串」的情形。
             let l_is_str_const = l_ir.starts_with("@str_data.") || l_ir.starts_with("%str_gep.");
             let r_is_str_const = r_ir.starts_with("@str_data.") || r_ir.starts_with("%str_gep.");
-            if l_is_str_const || r_is_str_const {
+            let l_is_string = l_is_str_const || is_string_aura_ty(ctx, lhs);
+            let r_is_string = r_is_str_const || is_string_aura_ty(ctx, rhs);
+            if l_is_string || r_is_string {
                 let (l_ptr, l_len) = extract_string_parts(ctx, blocks, &l_ir, &l_ty);
                 let (r_ptr, r_len) = extract_string_parts(ctx, blocks, &r_ir, &r_ty);
                 let concat = ctx.fresh_var();
@@ -3396,9 +3450,30 @@ fn emit_binary(
                 Ok((tmp, result_ty.to_string()))
             } else if l_ty == "i8*" || r_ty == "i8*" {
                 // Any 类型（i8*）加法：解箱为整数，相加，再装箱
-                let l_int = ctx.fresh_var();
-                let r_int = ctx.fresh_var();
-                let cur = blocks.last_mut();
+                if l_ty == "i8*" && r_ty == "i8*" {
+                    // 两侧都是 `i8*`：编译期**无法区分**装箱整数与真实字符串指针。
+                    //
+                    // 静态判定（上方 `is_string_aura_ty`）只能覆盖「Aura 类型已知」的
+                    // 情形。调用返回值的类型常在 `func_ret_aura_types` 里缺失——例如
+                    // `this.methodOwners.substring(0, start)` 走 C 原生 `substring` 短名
+                    // 注册，签名表里查不到——于是 `s1 + s2` 落入下方装箱整数分支，被
+                    // 发射成 `ptrtoint` → `add` → `(v<<1)|1` → `inttoptr`：两个字符串
+                    // 指针被当成整数相加，结果是野指针，写回对象字段后下一次 `strlen`
+                    // 直接 0xC0000005（Photon 前端 `SsaBuilder.addClassMethod` 的
+                    // `methodOwners` 拼接即如此）。
+                    //
+                    // 改由运行时按 Plan A 低位标记分派（装箱整数恒奇、分配器指针恒偶），
+                    // 见 `aura_add_i8` 注释。
+                    let cur = blocks.last_mut();
+                    cur.body.push(format!(
+                        "{} = call i8* @aura_add_i8(i8* {}, i8* {})",
+                        tmp, l_ir, r_ir
+                    ));
+                    Ok((tmp, "i8*".to_string()))
+                } else {
+                    let l_int = ctx.fresh_var();
+                    let r_int = ctx.fresh_var();
+                    let cur = blocks.last_mut();
                 // 解箱左侧
                 let l_int = if l_ty == "i8*" {
                     let l_raw = ctx.fresh_var();
@@ -3437,6 +3512,7 @@ fn emit_binary(
                 cur.body.push(format!("{} = or i64 {}, 1", tg, sh));
                 cur.body.push(format!("{} = inttoptr i64 {} to i8*", tmp, tg));
                 Ok((tmp, "i8*".to_string()))
+                }
             } else {
                 let cur = blocks.last_mut();
                 cur.body.push(format!("{} = add {} {}, {}", tmp, l_ty, l_ir, r_ir));

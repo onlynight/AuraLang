@@ -1,0 +1,114 @@
+// aura:///aura/lang/concurrent/Promise.aura
+package aura.lang.concurrent
+
+import aura.lang.native.Memory
+import aura.lang.concurrent.Thread
+
+/// Promise —— 可外部写入的异步结果占位符。
+///
+/// 与 Future 共享内存布局（24 字节）：
+///   +0   线程 ID（Future 使用，Promise 留空）
+///   +8   完成标志（0 未完成 / 1 已完成 / -1 已拒绝）
+///   +16  结果值
+///
+/// 使用模式：
+/// ```aura
+/// val fid = Promise.create()
+/// // 在另一个线程或回调中：
+/// Promise.resolve(fid, 42)
+/// // 在等待方：
+/// val result = Promise.await(fid)  // 返回 42
+/// ```
+///
+/// @since 0.7
+object Promise {
+
+    /// 创建一个待解析的 Promise（返回句柄）。
+    ///
+    /// - 返回：Promise 句柄（24 字节内存块地址，Long），0 表示创建失败
+    fun create(): Long {
+        val cell: Long = Memory.alloc(24L)
+        if (cell == 0L) {
+            return 0L
+        }
+        Memory.write64(cell, 0L)       // +0: thread_id = 0
+        Memory.write64(cell + 8L, 0L)  // +8: completion = 0 (pending)
+        Memory.write64(cell + 16L, 0L) // +16: result = 0
+        return cell
+    }
+
+    /// 解析 Promise：写入结果值并标记完成。
+    ///
+    /// - 参数：`fid` — Promise 句柄
+    /// - 参数：`value` — 要写入的结果值
+    fun resolve(fid: Long, value: Int): Unit {
+        if (fid == 0L) {
+            return
+        }
+        Memory.write64(fid + 16L, value as Long)
+        Memory.write64(fid + 8L, 1L)
+    }
+
+    /// 拒绝 Promise：写入错误码并标记拒绝。
+    ///
+    /// - 参数：`fid` — Promise 句柄
+    /// - 参数：`error_code` — 错误码（正数表示错误类型）
+    fun reject(fid: Long, error_code: Int): Unit {
+        if (fid == 0L) {
+            return
+        }
+        Memory.write64(fid + 16L, -error_code as Long)
+        Memory.write64(fid + 8L, -1L)
+    }
+
+    /// 阻塞等待 Promise 完成并返回结果。
+    ///
+    /// - 参数：`fid` — Promise 句柄
+    /// - 返回：结果值（负数表示被拒绝，取绝对值为错误码）
+    fun await(fid: Long): Int {
+        if (fid == 0L) {
+            return 0
+        }
+        // 轮询等待完成（与 Future.await 不同，这里不依赖线程）
+        while (Memory.read64(fid + 8L) == 0L) {
+            Thread.sleep(1)
+        }
+        return Memory.read64(fid + 16L) as Int
+    }
+
+    /// 非阻塞检查 Promise 是否已完成。
+    ///
+    /// - 参数：`fid` — Promise 句柄
+    /// - 返回：true 表示已完成（已 resolve 或已 reject）
+    fun isDone(fid: Long): Boolean {
+        if (fid == 0L) {
+            return false
+        }
+        return Memory.read64(fid + 8L) != 0L
+    }
+
+    /// 检查 Promise 是否被拒绝。
+    ///
+    /// - 参数：`fid` — Promise 句柄
+    /// - 返回：true 表示被拒绝
+    fun isRejected(fid: Long): Boolean {
+        if (fid == 0L) {
+            return false
+        }
+        return Memory.read64(fid + 8L) == -1L
+    }
+
+    /// 非阻塞尝试获取结果。
+    ///
+    /// - 参数：`fid` — Promise 句柄
+    /// - 返回：结果值（正数表示成功），或 -1 表示未完成
+    fun tryAwait(fid: Long): Int {
+        if (fid == 0L) {
+            return -1
+        }
+        if (Memory.read64(fid + 8L) == 0L) {
+            return -1
+        }
+        return Memory.read64(fid + 16L) as Int
+    }
+}

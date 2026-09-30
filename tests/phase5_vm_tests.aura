@@ -324,7 +324,7 @@ fun testVmRunnerConst(): Int {
     )
     vm.run()
 
-    t.assertEq(toStr(vm.returnValue), "84", "result")
+    t.assertEq(toStr(vm.getReturnValue()), "84", "result")
     t.assertEq(vm.getInstructionCount(), 4, "instr count")
     t.assertFalse(vm.isRunning(), "not running after return")
 
@@ -439,7 +439,7 @@ fun testVmRunnerFullExec(): Int {
     vm.run()
 
     // 42 + 100 = 142
-    t.assertEq(toStr(vm.returnValue), "142", "result")
+    t.assertEq(toStr(vm.getReturnValue()), "142", "result")
     t.assertEq(vm.getInstructionCount(), 4, "instr count")
 
     return t.report()

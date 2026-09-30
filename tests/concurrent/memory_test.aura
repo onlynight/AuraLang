@@ -1,0 +1,35 @@
+// 简单内存操作测试
+import aura.lang.native.Memory
+
+fun main(): Int {
+    println("Memory test")
+    val p = Memory.alloc(64L)
+    println("alloc = " + p.toString())
+    
+    if (p == 0L) {
+        println("alloc failed")
+        return 1
+    }
+    
+    // Write and read back
+    Memory.write64(p, 42L)
+    val v1 = Memory.read64(p)
+    println("write64(42), read64 = " + v1.toString())
+    
+    Memory.write64(p + 8L, 100L)
+    val v2 = Memory.read64(p + 8L)
+    println("write64(100) at +8, read64 = " + v2.toString())
+    
+    Memory.write64(p + 16L, 200L)
+    val v3 = Memory.read64(p + 16L)
+    println("write64(200) at +16, read64 = " + v3.toString())
+    
+    if (v1 == 42L && v2 == 100L && v3 == 200L) {
+        println("Memory test PASS")
+        Memory.free(p)
+        return 0
+    } else {
+        println("Memory test FAIL")
+        return 1
+    }
+}

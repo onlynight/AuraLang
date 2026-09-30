@@ -15,15 +15,16 @@ package aura.lang.compiler.sema
 //
 // ── 简化说明 ──
 //
-// Rust 版 checker 涉及大量高级特性（泛型推断、枚举穷举、接口方法检查、
-// 协程追踪等）。本版聚焦核心类型检查，暂不覆盖：
+// 本版聚焦核心类型检查，暂不覆盖：
 //   - 泛型单态化（留待 HIR 阶段）
-//   - 枚举 when 穷举性检查
 //   - 接口方法实现检查
-//   - suspend/async 追踪
 //   - 运算符重载解析
 //
-// 后续可按需扩展。
+// P1 新增（2026-09-28）：
+//   - 枚举 when 穷举性检查（enum 变体全覆盖）
+//   - sealed 类 when 穷举性检查（sealed 子类全覆盖）
+//
+// 注：协程追踪（suspend/async）已决定不做，不再列入计划
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
@@ -214,29 +215,106 @@ class TypeChecker {
     }
 
     /// 收集函数声明。
+    /// P0 新增：提取参数签名，支持同名重载。
     fun tcCollectFunDecl(ast: Ast, id: Int) {
         val name: String = ast.textOf(id)
         val rawTy: String = ast.tyOf(id)
         val vis: String = this.tcExtractVis(rawTy)
         val ty: String = this.tcExtractTy(rawTy)
-        this.st.stInsert(name, "Fn", vis, false, "", ty)
+        // 提取参数签名（P0：支持函数重载）
+        val params: String = this.tcExtractParams(ast, id)
+        this.st.stInsert(name, "Fn", vis, false, params, ty)
+    }
+
+    /// 从函数 AST 节点提取参数签名。
+    /// 格式：`Int,String`（逗号分隔的类型名列表）
+    fun tcExtractParams(ast: Ast, id: Int): String {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount > 0) {
+            val paramsNodeId: Int = kidsAt(kids, 0)
+            val paramsKids: String = ast.kidsOf(paramsNodeId)
+            val pkCount: Int = kidsCount(paramsKids)
+            var sig: String = ""
+            var pi: Int = 0
+            while (pi < pkCount) {
+                val pId: Int = kidsAt(paramsKids, pi)
+                val paramTy: String = ast.tyOf(pId)
+                if (sig != "") {
+                    sig = sig + ","
+                }
+                sig = sig + paramTy
+                pi = pi + 1
+            }
+            return sig
+        }
+        return ""
     }
 
     /// 收集类型声明（struct/class/object）。
+    /// P1 新增：检测 sealed 标记，注册 sealed 子类关系，用于 when 穷举性检查。
     fun tcCollectTypeDecl(ast: Ast, id: Int) {
         val name: String = ast.textOf(id)
         val rawTy: String = ast.tyOf(id)
         val vis: String = this.tcExtractVis(rawTy)
-        val parentTy: String = this.tcExtractTy(rawTy)
         this.st.stInsert(name, "Type", vis, false, "", name)
+        // P1：如果标记为 sealed，注册为 sealed 基类
+        if (this.tcIsSealed(rawTy)) {
+            this.st.stAddSealedType(name)
+        }
+        // P1：如果父类是 sealed 基类，注册为子类
+        val parent: String = this.tcExtractParent(rawTy)
+        if (parent != "" && this.st.stIsSealedType(parent)) {
+            this.st.stAddSealedSub(parent, name)
+        }
     }
 
     /// 收集枚举声明。
+    /// P1 新增：从枚举体中提取变体名，用于 when 穷举性检查。
     fun tcCollectEnumDecl(ast: Ast, id: Int) {
         val name: String = ast.textOf(id)
         val rawTy: String = ast.tyOf(id)
         val vis: String = this.tcExtractVis(rawTy)
         this.st.stInsert(name, "Type", vis, false, "", name)
+        // P1：提取枚举变体
+        this.tcExtractEnumVariants(ast, id, name)
+        // 如果枚举继承自 sealed 基类，也注册为子类
+        val parent: String = this.tcExtractParent(rawTy)
+        if (parent != "" && this.st.stIsSealedType(parent)) {
+            this.st.stAddSealedSub(parent, name)
+        }
+    }
+
+    /// 从枚举 AST 节点中提取变体名并注册到符号表。
+    /// 枚举体格式：Enum → Block → ExprStmt(Ident(name)) × N
+    fun tcExtractEnumVariants(ast: Ast, id: Int, enumName: String) {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = kidsAt(kids, i)
+            if (ast.kindOf(childId) == "Block") {
+                val blockKids: String = ast.kidsOf(childId)
+                val bkCount: Int = kidsCount(blockKids)
+                var j: Int = 0
+                while (j < bkCount) {
+                    val stmtId: Int = kidsAt(blockKids, j)
+                    if (ast.kindOf(stmtId) == "ExprStmt") {
+                        val stmtKids: String = ast.kidsOf(stmtId)
+                        val scCount: Int = kidsCount(stmtKids)
+                        if (scCount > 0) {
+                            val identId: Int = kidsAt(stmtKids, 0)
+                            if (ast.kindOf(identId) == "Ident") {
+                                val variantName: String = ast.textOf(identId)
+                                this.st.stAddEnumVariant(enumName, variantName)
+                            }
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
     }
 
     /// 收集全局变量声明。
@@ -304,6 +382,40 @@ class TypeChecker {
             i = i + 1
         }
         return -1
+    }
+
+    /// 判断类型字段的 `#vis|...` 格式是否标记为 sealed（P1 穷举检查）。
+    /// 格式：`#vis|sealed|parent` 时为 sealed，`#vis|parent` 时为普通类型。
+    fun tcIsSealed(rawTy: String): Boolean {
+        if (rawTy.length == 0 || rawTy.charAt(0) != "#") {
+            return false
+        }
+        val pipeIdx: Int = this.tcIndexOf(rawTy, "|")
+        if (pipeIdx < 0) {
+            return false
+        }
+        val rest: String = rawTy.substring(pipeIdx + 1)
+        return rest == "sealed" || rest.startsWith("sealed|")
+    }
+
+    /// 从 `#vis|...` 格式的类型字段中提取父类名（P1 穷举检查）。
+    /// 处理 `#vis|sealed|parent` 和 `#vis|parent` 两种格式。
+    fun tcExtractParent(rawTy: String): String {
+        if (rawTy.length == 0 || rawTy.charAt(0) != "#") {
+            return ""
+        }
+        val pipeIdx: Int = this.tcIndexOf(rawTy, "|")
+        if (pipeIdx < 0) {
+            return ""
+        }
+        var rest: String = rawTy.substring(pipeIdx + 1)
+        if (rest == "sealed") {
+            return ""
+        }
+        if (rest.startsWith("sealed|")) {
+            return rest.substring(7)
+        }
+        return rest
     }
 
     // ── 阶段 2：检查函数体 ──
@@ -643,6 +755,9 @@ class TypeChecker {
         if (kind == "IfExpr") {
             ty = this.tcCheckIfExpr(ast, id)
         }
+        if (kind == "When") {
+            ty = this.tcCheckWhen(ast, id)
+        }
         if (kind == "Block") {
             ty = this.tcCheckBlockExpr(ast, id)
         }
@@ -719,6 +834,7 @@ class TypeChecker {
     }
 
     /// 检查函数调用表达式。
+    /// P0 新增：支持函数重载解析（按参数数量匹配）。
     fun tcCheckCall(ast: Ast, id: Int): String {
         val kids: String = ast.kidsOf(id)
         val kCount: Int = kidsCount(kids)
@@ -726,12 +842,15 @@ class TypeChecker {
             val calleeId: Int = kidsAt(kids, 0)
             val calleeName: String = ast.textOf(calleeId)
 
-            // 查找函数签名
-            val fnSig: String = this.st.stFindFunction(calleeName)
+            // 计算调用时的参数数量（排除 callee 本身）
+            val argCount: Int = kCount - 1
+
+            // 查找函数签名（P0：支持同名重载）
+            val fnSig: String = this.st.stFindFunctionOverloaded(calleeName, argCount)
             if (fnSig != "") {
                 val parts: List<String> = fnSig.split("|")
                 if (parts.size >= 2) {
-                    return parts[1]
+                    return parts[parts.size - 1]  // 最后一个字段是返回类型
                 }
             }
         }
@@ -849,6 +968,185 @@ class TypeChecker {
             return thenTy
         }
         return "Any"
+    }
+
+    /// 检查 when 表达式（P1 新增：穷举性检查）。
+    ///
+    /// AST 结构：When → [subject?, WhenArms → WhenArm(pattern, body) × N]
+    fun tcCheckWhen(ast: Ast, id: Int): String {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount == 0) {
+            return "Any"
+        }
+        // 最后一个子节点是 WhenArms
+        val lastId: Int = kidsAt(kids, kCount - 1)
+        if (ast.kindOf(lastId) != "WhenArms") {
+            return "Any"
+        }
+        // 第一个子节点是 subject（如果存在）
+        var subjectId: Int = -1
+        if (kCount >= 2) {
+            subjectId = kidsAt(kids, 0)
+        }
+        // 检查每个分支体的类型
+        val armsId: Int = lastId
+        val armsKids: String = ast.kidsOf(armsId)
+        val armCount: Int = kidsCount(armsKids)
+        var resultTy: String = ""
+        var i: Int = 0
+        while (i < armCount) {
+            val armId: Int = kidsAt(armsKids, i)
+            val armKids: String = ast.kidsOf(armId)
+            val armKCount: Int = kidsCount(armKids)
+            if (armKCount >= 2) {
+                val bodyId: Int = kidsAt(armKids, 1)
+                val bodyTy: String = this.tcCheckExpr(ast, bodyId)
+                if (resultTy == "") {
+                    resultTy = bodyTy
+                }
+            }
+            i = i + 1
+        }
+        // P1：穷举性检查
+        if (subjectId >= 0) {
+            this.tcCheckExhaustive(ast, subjectId, armsId)
+        }
+        return resultTy
+    }
+
+    /// P1：when 穷举性检查。
+    ///
+    /// 当 subject 是 enum 或 sealed 类型时，检查所有变体/子类是否被覆盖。
+    /// 存在 `else` 分支或无法分析的范围模式时跳过检查。
+    fun tcCheckExhaustive(ast: Ast, subjectId: Int, armsId: Int) {
+        // 从符号表直接查找 subject 类型（不依赖 tcCheckExpr 的递归）
+        var subjectTy: String = ""
+        val kind: String = ast.kindOf(subjectId)
+        if (kind == "Ident" || kind == "Var") {
+            val name: String = ast.textOf(subjectId)
+            // 先查局部变量环境
+            subjectTy = this.tcFindVar(name)
+            if (subjectTy == "") {
+                // 再查全局符号表
+                val idx: Int = this.st.stFind(name)
+                if (idx >= 0) {
+                    subjectTy = this.st.stEntryType(idx)
+                }
+            }
+        }
+        // 兜底：如果不是简单标识符，用 tcCheckExpr
+        if (subjectTy == "") {
+            subjectTy = this.tcCheckExpr(ast, subjectId)
+        }
+        if (subjectTy == "" || subjectTy == "Any") {
+            return
+        }
+        // 可空类型无法穷举检查（null 也是可能的值）
+        if (isNullable(subjectTy)) {
+            return
+        }
+        // 获取期望的变体/子类列表
+        val expected: String = this.tcGetExpectedVariants(subjectTy)
+        if (expected == "") {
+            return  // 非 enum/sealed 类型，不检查
+        }
+        // 收集已覆盖的模式
+        val armsKids: String = ast.kidsOf(armsId)
+        val armCount: Int = kidsCount(armsKids)
+        var covered: String = ""
+        var hasElse: Boolean = false
+        var hasRangePattern: Boolean = false
+        var i: Int = 0
+        while (i < armCount) {
+            val armId: Int = kidsAt(armsKids, i)
+            val armKids: String = ast.kidsOf(armId)
+            val armKCount: Int = kidsCount(armKids)
+            if (armKCount >= 1) {
+                val patId: Int = kidsAt(armKids, 0)
+                val patKind: String = ast.kindOf(patId)
+                if (patKind == "Ident") {
+                    val patName: String = ast.textOf(patId)
+                    if (patName == "__else__") {
+                        hasElse = true
+                    } else {
+                        covered = covered + "," + patName
+                    }
+                } else if (patKind == "InPattern") {
+                    hasRangePattern = true
+                }
+            }
+            i = i + 1
+        }
+        // 有 else 或范围模式时跳过检查（保守策略）
+        if (hasElse || hasRangePattern) {
+            return
+        }
+        // 检查每个期望的变体/子类是否被覆盖
+        var variants = expected.split(",")
+        var uncovered: String = ""
+        var j: Int = 0
+        while (j < variants.size) {
+            val v: String = variants[j]
+            if (v != "" && !this.tcIsCovered(v, covered)) {
+                if (uncovered != "") {
+                    uncovered = uncovered + ", "
+                }
+                uncovered = uncovered + v
+            }
+            j = j + 1
+        }
+        if (uncovered != "") {
+            val sp: Span = ast.spanOf(subjectId)
+            this.tcError(
+                "when 表达式未穷举：缺少分支 " + uncovered,
+                sp.start, sp.end,
+                sp.startLine, sp.startCol,
+                sp.endLine, sp.endCol
+            )
+        }
+    }
+
+    /// 获取类型的所有变体/子类名（逗号分隔）。
+    /// 枚举 → 变体名；sealed 基类 → 直接子类名；其他 → ""。
+    fun tcGetExpectedVariants(typeName: String): String {
+        if (this.st.stIsEnumType(typeName)) {
+            return this.st.stGetEnumVariants(typeName)
+        }
+        if (this.st.stIsSealedType(typeName)) {
+            return this.st.stGetSealedSubs(typeName)
+        }
+        return ""
+    }
+
+    /// 判断一个变体/子类名是否被覆盖集覆盖。
+    /// 支持字面量匹配（`RED`）和类型匹配（`__is__Circle`）。
+    fun tcIsCovered(variant: String, covered: String): Boolean {
+        // 字面量匹配
+        if (this.tcCsvContains(covered, variant)) {
+            return true
+        }
+        // 类型匹配：__is__T 覆盖 T
+        if (this.tcCsvContains(covered, "__is__" + variant)) {
+            return true
+        }
+        return false
+    }
+
+    /// 判断逗号分隔的字符串是否包含某个值。
+    fun tcCsvContains(csv: String, value: String): Boolean {
+        if (value == "" || csv == "") {
+            return false
+        }
+        var parts = csv.split(",")
+        var i: Int = 0
+        while (i < parts.size) {
+            if (parts[i] == value) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
     }
 
     /// 检查块表达式（返回最后一个表达式的类型）。

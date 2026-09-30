@@ -1,0 +1,123 @@
+// ════════════════════════════════════════════════════════════
+// Promise 异步原语测试 — create / resolve / reject / await
+// ════════════════════════════════════════════════════════════
+// 验证：
+//   1. Promise 创建、resolve、阻塞等待结果
+//   2. reject 错误码
+//   3. isDone 非阻塞状态检查
+//   4. tryAwait 非阻塞尝试获取
+//
+// 验证命令：
+//   seed/target/release/aura.exe run tests/concurrent/promise_test.aura
+// ════════════════════════════════════════════════════════════
+
+import aura.lang.concurrent.*
+
+fun main(): Int {
+    var passed = 0
+    var total = 0
+
+    // ── 1. Promise.create + resolve + await ────────────────
+    total = total + 1
+    println("--- 测试 1: Promise resolve + await ---")
+    do {
+        val fid = Promise.create()
+        if (fid > 0L) {
+            Promise.resolve(fid, 42)
+            val result = Promise.await(fid)
+            if (result == 42) {
+                println("  resolve(42) -> await = " + result.toString() + " ✓")
+            } else {
+                println("  FAIL: result=" + result.toString())
+                return 1
+            }
+        } else {
+            println("  FAIL: Promise.create 返回无效 ID")
+            return 1
+        }
+        passed = passed + 1
+    } while (false)
+
+    // ── 2. Promise.reject + await ──────────────────────────
+    total = total + 1
+    println("--- 测试 2: Promise reject + await ---")
+    do {
+        val fid = Promise.create()
+        Promise.reject(fid, 100)
+        val result = Promise.await(fid)
+        if (result == -100) {
+            println("  reject(100) -> await = " + result.toString() + " ✓")
+        } else {
+            println("  FAIL: result=" + result.toString())
+            return 1
+        }
+        passed = passed + 1
+    } while (false)
+
+    // ── 3. Promise.isDone 状态检查 ─────────────────────────
+    total = total + 1
+    println("--- 测试 3: Promise.isDone ---")
+    do {
+        val fid = Promise.create()
+        val notDone = Promise.isDone(fid)
+        Promise.resolve(fid, 10)
+        val done = Promise.isDone(fid)
+        if (!notDone && done) {
+            println("  创建时 isDone=false, resolve 后 isDone=true ✓")
+        } else {
+            println("  FAIL: notDone=" + notDone.toString() + " done=" + done.toString())
+            return 1
+        }
+        passed = passed + 1
+    } while (false)
+
+    // ── 4. Promise.isRejected 检查 ─────────────────────────
+    total = total + 1
+    println("--- 测试 4: Promise.isRejected ---")
+    do {
+        val fid1 = Promise.create()
+        Promise.resolve(fid1, 5)
+        val rejected1 = Promise.isRejected(fid1)
+
+        val fid2 = Promise.create()
+        Promise.reject(fid2, 200)
+        val rejected2 = Promise.isRejected(fid2)
+
+        if (!rejected1 && rejected2) {
+            println("  resolve 后 isRejected=false, reject 后 isRejected=true ✓")
+        } else {
+            println("  FAIL: rejected1=" + rejected1.toString() + " rejected2=" + rejected2.toString())
+            return 1
+        }
+        passed = passed + 1
+    } while (false)
+
+    // ── 5. Promise.tryAwait 非阻塞 ─────────────────────────
+    total = total + 1
+    println("--- 测试 5: Promise.tryAwait ---")
+    do {
+        val fid = Promise.create()
+        val pending = Promise.tryAwait(fid)
+        Promise.resolve(fid, 77)
+        val resolved = Promise.tryAwait(fid)
+        if (pending == -1 && resolved == 77) {
+            println("  tryAwait 未完成=-1, 完成=77 ✓")
+        } else {
+            println("  FAIL: pending=" + pending.toString() + " resolved=" + resolved.toString())
+            return 1
+        }
+        passed = passed + 1
+    } while (false)
+
+    // ── 总结 ────────────────────────────────────────────────
+    println("")
+    println("===================================================")
+    println("  promise_test: " + passed.toString() + "/" + total.toString() + " passed")
+    if (passed == total) {
+        println("concurrent.promise_test ok")
+        return 0
+    } else {
+        println("concurrent.promise_test FAIL")
+        return 1
+    }
+}
