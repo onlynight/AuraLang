@@ -2491,8 +2491,37 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     is_singleton: true,
                 });
                 // 方法降级：object 方法带 self 参数（类上下文）
+                // @native 方法 → 注册为原生函数（加入 natives），不是普通函数
                 for m in &o.methods {
-                    functions.push(desugar_class_method(m, &o.name, true));
+                    if m.native_attr.is_some() {
+                        natives.push(HirFunction {
+                            name: format!("{}.{}", o.name, m.name),
+                            params: m
+                                .params
+                                .iter()
+                                .map(|p| HirParam {
+                                    name: p.name.clone(),
+                                    ty: HirType::from_ast_opt(&p.type_hint),
+                                    default_value: p
+                                        .default_value
+                                        .as_ref()
+                                        .map(|e| Box::new(desugar_expr(e))),
+                                    is_vararg: p.is_vararg,
+                                })
+                                .collect(),
+                            ret: HirType::from_ast_opt(&m.return_type),
+                            body: HirBlock {
+                                stmts: vec![],
+                            },
+                            is_native: true,
+                            type_params: vec![],
+                            ffi_abi: FfiAbi::Aura,
+                            ffi_lib: None,
+                            native_attr: m.native_attr.clone(),
+                        });
+                    } else {
+                        functions.push(desugar_class_method(m, &o.name, true));
+                    }
                 }
                 // 字段 → 零参读取函数（单例实例字段访问）
                 for f in &o.fields {

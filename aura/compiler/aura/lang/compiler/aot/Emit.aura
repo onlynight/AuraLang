@@ -6279,8 +6279,8 @@ class LlvmEmitter {
         // Plan A 低位标记给出保守判定：奇数 → "Int"，偶数非空 → "String"，空 → "Null"。
         // 此前该调用没有分支，落到「未解析符号」兜底**恒返回 0**，使
         // `VmOps.isString/isInt` 等全部误判（`add(2,5)` 被当成字符串拼接得到 "25"）。
-        if ((fname == "typeof" || fname == "typeOf") && n == 1) {
-            val fId: Int = hirKidsAt(kids, 0)
+        if ((fname == "typeof" || fname == "typeOf") && n - argStart == 1) {
+            val fId: Int = hirKidsAt(kids, argStart)
             val fTy: String = this.inferType(hir, fId)
             val fv: String = this.coerceValue(this.emitExpr(hir, fId), fTy, "i8*")
             val tt: String = this.freshVar()

@@ -172,6 +172,32 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
             });
         }
     }
+    // ProcessNative @native 函数：HIR 降级时应已注册到 `natives`，
+    // 但当前因 `@native` 注解在普通 `object` 中的注册路径存在缺陷，
+    // 这些调用被 MIR 发射为 `Call`（而非 `CallNative`），导致 emit 阶段
+    // 在 `native_index` 中找不到。在此补齐以确保字节码发射不中断。
+    for (name, argc) in [
+        ("ProcessNative.exitGroup", 1u16),
+        ("ProcessNative.openFile", 2),
+        ("ProcessNative.closeFile", 1),
+        ("ProcessNative.readSyscall", 3),
+        ("ProcessNative.killSyscall", 2),
+        ("ProcessNative.wait4", 4),
+        ("ProcessNative.execve", 3),
+        ("ProcessNative.getpid", 0),
+        ("ProcessNative.fork", 0),
+    ] {
+        if !natives.iter().any(|n| n.name == name) {
+            natives.push(BytecodeNative {
+                name: name.to_string(),
+                param_count: argc,
+                ffi_abi: FfiAbi::None,
+                ffi_lib: None,
+                param_types: Vec::new(),
+                ret_type: TYPE_ID_VOID,
+            });
+        }
+    }
     // ── 与 MIR 的原生分类保持一致 ──
     //
     // MIR 侧（`MirContext::register_builtin_native_names`）现在以**运行期
@@ -752,20 +778,36 @@ fn emit_instr(
             // 这里退化为硬错误：打印未解析符号并调用一个必然越界的索引，
             // 让 VM 立即报「无效函数索引」而不是静默递归。
             // 优先按 arity 精确匹配（区分重载），失败再回退到纯名称。
+            // 如果 fn_index 找不到，尝试 native_index（@native 注解的 object 方法）
             let idx = match fn_index
                 .get(&format!("{}#{}", func, args.len()))
                 .or_else(|| fn_index.get(func.as_str()))
             {
-                Some(i) => *i,
-                None => {
-                    eprintln!(
-                        "[bytecode] error: 未解析的函数调用 '{}'（既非用户函数、也非原生函数）",
-                        func
-                    );
-                    u16::MAX
+                Some(i) => {
+                    OpCode::Call(*i).write(code);
+                    if let Some(d) = dst {
+                        OpCode::StoreVar(*d as u16).write(code);
+                    }
+                    return;
                 }
+                None => {}
             };
-            OpCode::Call(idx).write(code);
+            // 尝试 native_index（@native 注解的 object 方法被降级为 Call 而非 CallNative）
+            if let Some(native_idx) = native_index.get(func.as_str()) {
+                for a in args {
+                    OpCode::LoadVar(*a as u16).write(code);
+                }
+                OpCode::CallNativeArgs(*native_idx, args.len() as u16).write(code);
+                if let Some(d) = dst {
+                    OpCode::StoreVar(*d as u16).write(code);
+                }
+                return;
+            }
+            eprintln!(
+                "[bytecode] error: 未解析的函数调用 '{}'（既非用户函数、也非原生函数）",
+                func
+            );
+            OpCode::Call(u16::MAX).write(code);
             if let Some(d) = dst {
                 OpCode::StoreVar(*d as u16).write(code);
             }

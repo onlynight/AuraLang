@@ -108,6 +108,29 @@ class SsaBuilder {
     /// 字段表（`\nClass|field|index|auraTy|defaultNodeId\n`）。
     private var classFields: String = ""
 
+    // ── 类字段布局缓存（`buildClassIndex` 收尾一次性填充）──
+    //
+    // ⚠️ `classFields` 只在此阶段被写入，`buildClassIndex` 返回后**只读** ——
+    // 因此可以在登记阶段结束后一次性把每张字段记录解析成下标表，运行期查表 O(1)。
+    // 此前的 `fieldTailOfIndex` 对整张 CSV 逐字符线性扫描、且每个字段被
+    // `fieldTypeOfIndex` 与 `fieldDefaultOfIndex` **各扫一遍**；构造器/单例合成
+    // 阶段合计约 8000 次全量扫描（每次数千字符比较），是 SSA 阶段的可归因热点。
+    //
+    // ⚠️ 不能用 `mutableListOf<Int>`：本仓库已记录 `List<Int>` + 索引/`add` 组合
+    // 在 AOT 运行时下的崩溃坑（见 `scanInitArities` 注释、`Emit.aura:9502`）。
+    // 因此整型表沿用本文件惯例 —— **定宽 8 字符**的 `|` 分隔字符串
+    // （`|` 兼作填充与分隔，槽宽恒为 9），下标 `k` 的值起于偏移 `1 + k * 9`。
+    // 类型行槽宽可变（类型名长度不定），用 `flatPart` 按需切到第 `idx` 段。
+    //
+    // 下标 = 类序（`names` 列表下标），只覆盖**有字段**的类；类名 → 类序走
+    // `nameToIdx`（`names` 规模小，线性扫描可接受）。
+    private var names: List<String> = arrayListOf<String>()
+    private var clsLayoutTys: List<String> = arrayListOf<String>()
+    private var clsLayoutDefaults: List<String> = arrayListOf<String>()
+    private var clsLayoutTotal: List<String> = arrayListOf<String>()
+    private var clsLayoutSize: List<String> = arrayListOf<String>()
+    private var clsOwnCount: List<String> = arrayListOf<String>()
+
     /// 方法节点 → 属主类名（下标 = HIR 节点 id）。
     ///
     /// ⚠️ 刻意**不用**扁平字符串：`funcOwners` 要登记 ~2800 个方法，逐条拼接
@@ -214,6 +237,11 @@ class SsaBuilder {
         this.classList = arrayListOf<String>()
         this.classParents = ""
         this.classFields = ""
+        this.clsLayoutTys = arrayListOf<String>()
+        this.clsLayoutDefaults = arrayListOf<String>()
+        this.clsLayoutTotal = arrayListOf<String>()
+        this.clsLayoutSize = arrayListOf<String>()
+        this.clsOwnCount = arrayListOf<String>()
         this.classMethods = ""
         this.methodOwners = ""
         this.methodRetTypes = ""
@@ -252,6 +280,7 @@ class SsaBuilder {
         this.synthesizeSingletons(src)
 
         this.buildAllFunctions(src)
+
 
         return this.program
     }
@@ -2245,8 +2274,12 @@ class SsaBuilder {
     }
 
     /// 类**自有**字段数（不含继承）。
+    ///
+    /// 只在 `buildClassIndex` 的登记期被 `registerClass` / `classBaseIndex` 调用
+    /// （算字段序号起点）—— 缓存要到登记全部结束才构建，故这里只能扫 CSV。
+    /// 缓存期所有调用方改走 `classFieldTotal` / `classSizeOf`，本函数不在热路径。
     private fun ownFieldCount(cls: String): Int {
-        if (cls == "" || this.classFields == "") {
+        if (cls == "") {
             return 0
         }
         return this.flatCount(this.classFields, "\n" + cls + "|")
@@ -2256,7 +2289,13 @@ class SsaBuilder {
     ///
     /// 子类布局 = 父类字段前缀 + 自有字段，因此父类名必须**先**登记。
     /// HIR arena 顺序不保证这一点，所以这里按需递归计算而不是靠扫描顺序。
+    ///
+    /// 只在 `buildClassIndex` 的登记期被 `registerClass` 调用（算字段序号起点）；
+    /// 缓存构建完成后所有调用方改走 `classFieldTotal` / `classSizeOf`。
     private fun classBaseIndex(cls: String): Int {
+        if (cls == "") {
+            return 0
+        }
         val p: String = this.parentOfClass(cls)
         if (p == "") {
             return 0
@@ -2266,12 +2305,90 @@ class SsaBuilder {
 
     /// 类字段总层数（含继承）。
     private fun classFieldTotal(cls: String): Int {
-        return this.classBaseIndex(cls) + this.ownFieldCount(cls)
+        val ci: Int = this.nameToIdx(cls)
+        if (ci < 0) {
+            return this.classBaseIndex(cls) + this.ownFieldCount(cls)
+        }
+        return this.fwInt(this.clsLayoutTotal[ci], 0, 0)
     }
 
     /// 对象分配大小（字节）：头 16B + 每个字段 8B。
     private fun classSizeOf(cls: String): Int {
-        return 16 + this.classFieldTotal(cls) * 8
+        val ci: Int = this.nameToIdx(cls)
+        if (ci < 0) {
+            return 16 + this.classFieldTotal(cls) * 8
+        }
+        return this.fwInt(this.clsLayoutSize[ci], 0, 16)
+    }
+
+    /// 字符串名 → 该名字在 `names` 列表中的**首次**下标（不存在返回 -1）。
+    ///
+    /// 列表内不重复（本文件所有名表都以「名唯一」为约定），首次命中即正确。
+    /// 下标数组查找，不产生临时分配。`names` 只含**有字段**的类（几十~几百项），
+    /// 且只被 `buildFieldLayoutCache` 与冷路径的 `classFieldTotal`/`classSizeOf`
+    /// 调用，线性扫描可接受。
+    private fun nameToIdx(name: String): Int {
+        if (name == "") {
+            return -1
+        }
+        var j: Int = 0
+        while (j < this.names.size) {
+            if (this.names[j] == name) {
+                return j
+            }
+            j = j + 1
+        }
+        return -1
+    }
+
+    /// 整数值格式化为**定宽 8 字符**（不足右侧补空格，超长截断前 8 字符）。
+    ///
+    /// ⚠️ 填充**不能**用 `|`：`|` 在本文件惯例里是行分隔符（`|<槽>|<槽>|`），
+    /// 拿它当填充会与分隔符混淆，使「值 + 填充」在拼接后无法切回槽位 ——
+    /// `fwGet` 读到全 `|` 槽位、`fwSlotCount` 也算错（实测整表退化为默认值，
+    /// 构造器因此丢字段）。填充字符选 ` `（空格）：类型名/字段名从不以纯空格
+    /// 结尾，`parseIntDef` 也容忍尾随空白。槽宽恒 8，分隔符 1，槽 `k` 起于
+    /// 偏移 `1 + k * 9`，取数无需切分、不分配。
+    private fun fw(v: String): String {
+        if (v.length >= 8) {
+            return v.substring(0, 8)
+        }
+        var pad: String = ""
+        var g: Int = 8 - v.length
+        while (g > 0) {
+            pad = pad + " "
+            g = g - 1
+        }
+        return v + pad
+    }
+
+    /// 从定宽整型行（`|<8>|<8>|…`，槽内右补空格）取下标 `idx` 的值；越界返回 ""。
+    private fun fwGet(row: String, idx: Int): String {
+        if (row == "" || idx < 0) {
+            return ""
+        }
+        val start: Int = 1 + idx * 9
+        if (start + 8 > row.length) {
+            return ""
+        }
+        return row.substring(start, start + 8)
+    }
+
+    /// 定宽整型行取下标 `idx` 的整数值；越界/空返回 `def`。
+    private fun fwInt(row: String, idx: Int, def: Int): Int {
+        return this.parseIntDef(this.fwGet(row, idx), def)
+    }
+
+    /// 定宽行的**槽数**（非字符数）。
+    ///
+    /// 行形态为 `|<8>|<8>|…`（首字符为分隔符，每槽 8 值 + 1 分隔 = 9 字符），
+    /// 故槽数 = `length / 9`。⚠️ 用 `length` 直接当槽数会把字符数（含 `|` 分隔符
+    /// 与填充空格）误当槽位，导致「按最大序号扩槽」的判断整体错位。
+    private fun fwSlotCount(row: String): Int {
+        if (row == "") {
+            return 0
+        }
+        return row.length / 9
     }
 
     /// 取 `|` 分隔文本的第 `idx` 段（越界返回 ""）。只用于**短**字段尾部。
@@ -2328,37 +2445,22 @@ class SsaBuilder {
         return ""
     }
 
-    /// 按布局序号取字段记录**尾部**（先本类，再沿继承链向上）。
-    private fun fieldTailOfIndex(cls: String, idx: Int): String {
-        val text: String = this.classFields
-        val len: Int = text.length
-        var i: Int = 0
-        while (i < len) {
-            if (text.charCodeAt(i) == 10) {
-                val start: Int = i + 1
-                var j: Int = start
-                while (j < len) {
-                    if (text.charCodeAt(j) == 10) {
-                        break
-                    }
-                    j = j + 1
-                }
-                val line: String = text.substring(start, j)
-                if (this.flatPart(line, 0) == cls
-                    && this.parseIntDef(this.flatPart(line, 2), -1) == idx) {
-                    return this.flatPart(line, 2) + "|" + this.flatPart(line, 3)
-                        + "|" + this.flatPart(line, 4)
-                }
-                i = j
-            } else {
-                i = i + 1
-            }
+    /// 按布局序号取字段声明类型（未命中返回 ""）。
+    private fun fieldTypeOfIndex(cls: String, idx: Int): String {
+        val ci: Int = this.fieldRowOfClass(cls, idx)
+        if (ci < 0) {
+            return ""
         }
-        val p: String = this.parentOfClass(cls)
-        if (p != "") {
-            return this.fieldTailOfIndex(p, idx)
+        return this.flatPart(this.clsLayoutTys[ci], idx)
+    }
+
+    /// 按布局序号取字段默认值表达式节点（无默认值返回 -1）。
+    private fun fieldDefaultOfIndex(cls: String, idx: Int): Int {
+        val ci: Int = this.fieldRowOfClass(cls, idx)
+        if (ci < 0) {
+            return -1
         }
-        return ""
+        return this.fwInt(this.clsLayoutDefaults[ci], idx, -1)
     }
 
     /// 字段在类（含继承链）中的布局序号；未命中返回 -1。
@@ -2375,14 +2477,20 @@ class SsaBuilder {
         return this.flatPart(this.fieldTailByName(cls, field), 1)
     }
 
-    /// 按布局序号取字段声明类型（未命中返回 ""）。
-    private fun fieldTypeOfIndex(cls: String, idx: Int): String {
-        return this.flatPart(this.fieldTailOfIndex(cls, idx), 1)
-    }
-
-    /// 按布局序号取字段默认值表达式节点（无默认值返回 -1）。
-    private fun fieldDefaultOfIndex(cls: String, idx: Int): Int {
-        return this.parseIntDef(this.flatPart(this.fieldTailOfIndex(cls, idx), 2), -1)
+    /// 定位字段缓存行：返回（类序, idx）对应的行下标，未命中返回 -1。
+    ///
+    /// ⚠️ `fieldTypeOfIndex` 与 `fieldDefaultOfIndex` 共用此入口，
+    /// 保证两类字段号的一致性校验只做一次（旧实现里两次全量 CSV 扫描）。
+    private fun fieldRowOfClass(cls: String, idx: Int): Int {
+        val ci: Int = this.nameToIdx(cls)
+        if (ci < 0 || idx < 0) {
+            return -1
+        }
+        val total: Int = this.fwInt(this.clsLayoutTotal[ci], 0, 0)
+        if (idx >= total) {
+            return -1
+        }
+        return ci
     }
 
     /// 本类是否已登记该字段（去重，避免重复登记打乱序号）。
@@ -2660,6 +2768,10 @@ class SsaBuilder {
             }
             i = i + 1
         }
+
+        // 字段布局缓存：登记阶段到此结束，`classFields` 后续只读。
+        // 必须放在**最后**（见 `buildFieldLayoutCache` 的注释）。
+        this.buildFieldLayoutCache(src)
     }
 
     /// 是否为顶层自由函数。
@@ -2669,6 +2781,209 @@ class SsaBuilder {
         }
         return this.freeFuncs.indexOf("\n" + name + "\n") >= 0
     }
+
+    /// 一次性构建**类字段布局缓存**（`buildClassIndex` 的收尾步骤）。
+    ///
+    /// 把 `classFields` 里 `Class|field|index|auraTy|defaultNodeId` 的每张记录
+    /// 按「(类名, 布局序号)」填进两张下标数组，使
+    /// `classFieldTotal` / `classSizeOf` / `fieldTypeOfIndex` / `fieldDefaultOfIndex`
+    /// 从「整张 CSV 全量线性扫描」降为 O(1)。
+    ///
+    /// **必须放在 `buildClassIndex` 的**最后**（见其注释）**：缓存只覆盖
+    /// `classList`（真类）与 `singletonList`（`object` 单例）—— 而
+    /// `HirExternObject` 的成员虽走 `registerClassBodyEx` 登记字段，却**不**进
+    /// 这两张遍历列表。它们从不走 `classFieldTotal`（`classSizeOf` 只对 `__new`
+    /// 与 `_getInstance` 调用），缓存缺它们是**有意为之**；把它们纳入遍历反而会
+    /// 在布局查找里引入空项。
+    ///
+    /// ⚠️ 不能用 `mutableListOf<Int>`：本仓库已在多处记录 `List<Int>` +
+    /// 索引/`add` 组合在 AOT 运行时下的崩溃坑（见 `scanInitArities` 注释、
+    /// `Emit.aura:9502`）。因此整型表沿用本文件惯例 —— **定宽 8 字符**的
+    /// `|` 分隔字符串，槽宽恒为 9 字符，下标 `k` 的值起于偏移 `1 + k * 9`。
+    /// 缓存构建是一次性、规模小（类数 + 字段数），字符串拼接总量可忽略。
+    private fun buildFieldLayoutCache(src: Hir) {
+        val text: String = this.classFields
+        if (text == "") {
+            return
+        }
+
+        // ── 第一遍：解析全部记录（每条只 `substring` 一次，之后不再触碰 CSV）──
+        // ⚠️ 每条记录都要自己解析属主，**不能**复用上一张的：单例
+        // （`HirObject`/`HirExternObject`）的成员挂在节点下、无 HirBlock 包裹，
+        // 字段与方法的登记顺序交错，相邻字段属主可能不同。
+        val recs: List<String> = arrayListOf<String>()
+        val recNames: List<String> = arrayListOf<String>()
+        val recIdxs: List<String> = arrayListOf<String>()
+        val recTys: List<String> = arrayListOf<String>()
+        val recDefs: List<String> = arrayListOf<String>()
+        // ⚠️ 用 `i <= textLen` 并在 `i == textLen` 时把边界字符视作换行：
+        // `classFields` 由 `addField` 拼成 `\nClass|...|...\n` 串，**不**保证结尾有
+        // 换行（`addField` 只在追加时补 `\n`，最后一个字符可能就是记录内容）。
+        // 用 `i < textLen` 会静默丢掉**最后一条记录** —— 实测自举 `ArrayList` /
+        // `ObjectHeader` 的字段布局因此整体丢失，构造器退化成
+        // `Memory_alloc(16)`（无字段初始化）+ exit 16 空输出。
+        val textLen: Int = text.length
+        var i: Int = 0
+        while (i <= textLen) {
+            val c: Int = if (i == textLen) { 10 } else { text.charCodeAt(i) }
+            if (c == 10) {
+                val recStart: Int = i + 1
+                var j: Int = recStart
+                while (j < textLen && text.charCodeAt(j) != 10) {
+                    j = j + 1
+                }
+                if (j > recStart) {
+                    val rec: String = text.substring(recStart, j)
+                    recs.add(rec)
+                    // 行格式实际是 `Class|field|index|vis|auraTy|defNodeId`：
+                    // `addField` 写 `toStr(index) + "|" + fty + "|" + defId`，而
+                    // `fty = src.tyOf()` 自带 `#<vis>|` 前缀（如 `#Private|List<T>`），
+                    // `recPart` 按 `|` 切分，于是可见性**独占一段**（第 3 段）。
+                    // 类型取第 4 段、默认值节点取第 5 段 —— 取第 3/4 段会得到
+                    // 可见性串与类型串（实测 `recTys[0]=#Private`），缓存整体错位。
+                    recNames.add(this.recPart(rec, 0))
+                    recIdxs.add(this.recPart(rec, 2))
+                    recTys.add(this.recPart(rec, 4))
+                    recDefs.add(this.recPart(rec, 5))
+                }
+                if (i == textLen) {
+                    break
+                }
+                i = j
+            } else {
+                i = i + 1
+            }
+        }
+
+        val rn: Int = recs.size
+        if (rn == 0) {
+            return
+        }
+
+        // ── 第二遍：收集**用到的类名**（`names` 下标 == 类序）──
+        this.names = arrayListOf<String>()
+        var r: Int = 0
+        while (r < rn) {
+            if (this.nameToIdx(recNames[r]) < 0) {
+                this.names.add(recNames[r])
+            }
+            r = r + 1
+        }
+        val nc: Int = this.names.size
+
+        // ── 第三遍：按「(类序, 布局序号)」归位 ──
+        // 每类一条记录：`|<槽0 固定宽度>|<槽1>|…`。槽宽 = 8 字符（整型表）或
+        // 原样拼接（类型表，类型名无分隔符）。布局序号在同一类内连续
+        // （`registerClass` 用 `classBaseIndex` 递推起点、登记时 `idx + 1`），
+        // 故每类字段数 = 该类最大序号 + 1，必然无缺号。
+        this.clsLayoutTys = arrayListOf<String>()
+        this.clsLayoutDefaults = arrayListOf<String>()
+        this.clsLayoutTotal = arrayListOf<String>()
+        this.clsLayoutSize = arrayListOf<String>()
+        this.clsOwnCount = arrayListOf<String>()
+        var c: Int = 0
+        while (c < nc) {
+            this.clsLayoutTys.add("|")
+            this.clsLayoutDefaults.add("|")
+            this.clsLayoutTotal.add(this.fw("0"))
+            this.clsLayoutSize.add(this.fw("16"))
+            // 槽 0 留空占位（定宽 `8` 字符宽），字段数在第三遍末尾统一回填。
+            this.clsOwnCount.add("|" + this.fw(""))
+            c = c + 1
+        }
+        r = 0
+        while (r < rn) {
+            val ci: Int = this.nameToIdx(recNames[r])
+            if (ci < 0) {
+                r = r + 1
+                continue
+            }
+            val idx: Int = this.parseIntDef(recIdxs[r], -1)
+            if (idx < 0) {
+                r = r + 1
+                continue
+            }
+            // ⚠️ 必须按**最大序号**扩槽，而非按到达顺序追加：单例的字段与方法
+            // 登记交错，布局序号由祖先字段数决定，类内到达顺序不保证升序。
+            //
+            // ⚠️ 扩槽时**只能**追加空白槽，**绝不能**改写已有槽的值。
+            // `clsOwnCount` 的槽 0 由 `clsOwnCountOf` 当作用途字段读，若在这里
+            // 每次登记都 `clsOwnCount[ci] + fw(rows+1)` 覆写，槽 0 会退化成
+            // 「本条记录的到达序号」（实测 ArrayList 得到 `1` 而非真实字段数 2），
+            // 整类布局随之丢失、构造器退化为 `Memory_alloc(16)`。
+            // 用法：类型/默认值两张表按布局序号原位存放；`clsOwnCount` 只用来
+            // 记录「每类字段数」这一个整数值（占槽 0），其余槽留空。
+            var rows: Int = this.fwSlotCount(this.clsOwnCount[ci])
+            if (idx >= rows) {
+                var gap: Int = idx - rows
+                while (gap > 0) {
+                    this.clsLayoutTys[ci] = this.clsLayoutTys[ci] + "|"
+                    this.clsLayoutDefaults[ci] = this.clsLayoutDefaults[ci] + this.fw("")
+                    this.clsOwnCount[ci] = this.clsOwnCount[ci] + this.fw("")
+                    gap = gap - 1
+                }
+            }
+            this.clsLayoutTys[ci] = this.clsLayoutTys[ci] + this.normAuraType(recTys[r]) + "|"
+            this.clsLayoutDefaults[ci] = this.clsLayoutDefaults[ci] + this.fw(recDefs[r])
+            r = r + 1
+        }
+
+        // ── 第三遍半：回填每类**自有**字段数（= 该类布局槽位数）──
+        c = 0
+        while (c < nc) {
+            val n: Int = this.fwSlotCount(this.clsLayoutTys[c]) - 1
+            this.clsOwnCount[c] = "|" + this.fw(toStr(if (n < 0) 0 else n))
+            c = c + 1
+        }
+
+        // ── 第四遍：算每类的**含继承**字段总数与对象大小 ──
+        c = 0
+        while (c < nc) {
+            var total: Int = 0
+            var cur: String = this.names[c]
+            var depth: Int = 0
+            while (cur != "" && depth < 16) {
+                val ci2: Int = this.nameToIdx(cur)
+                if (ci2 < 0) {
+                    break
+                }
+                total = total + this.clsOwnCountOf(ci2)
+                cur = this.parentOfClass(cur)
+                depth = depth + 1
+            }
+            this.clsLayoutTotal[c] = this.fw(toStr(total))
+            this.clsLayoutSize[c] = this.fw(toStr(16 + total * 8))
+            c = c + 1
+        }
+    }
+
+    /// 类**自有**字段数（缓存，下标 = 类序）。
+    private fun clsOwnCountOf(ci: Int): Int {
+        return this.fwInt(this.clsOwnCount[ci], 0, 0)
+    }
+
+    /// 取 `|` 分隔记录的第 `idx` 段（越界返回 ""）。只用于**单行短记录**。
+    private fun recPart(rec: String, idx: Int): String {
+        if (rec == "") {
+            return ""
+        }
+        var cur: Int = 0
+        var start: Int = 0
+        var i: Int = 0
+        val len: Int = rec.length
+        while (i <= len) {
+            if (i == len || rec.charCodeAt(i) == 124) {
+                if (cur == idx) {
+                    return rec.substring(start, i)
+                }
+                cur = cur + 1
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
 
     /// 登记单个类/结构体：继承关系 + 字段布局 + 方法属主。
     /// `kind` 区分真类（`HirClass`/`HirStruct`）与单例模块

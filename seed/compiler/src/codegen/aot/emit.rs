@@ -4258,8 +4258,8 @@ fn emit_call(
         return Ok((val_ir, val_ty));
     }
 
-    // typeOf：AOT 中由静态类型在编译期折叠为字符串常量
-    if callee == "typeOf" && args.len() == 1 {
+    // typeOf / typeof：AOT 中由静态类型在编译期折叠为字符串常量
+    if (callee == "typeOf" || callee == "typeof") && args.len() == 1 {
         let (_val_ir, val_ty) = emit_expr_val(ctx, blocks, &args[0])?;
         let type_name = llvm_ty_to_aura_name(&val_ty).unwrap_or("Any");
         return emit_literal(

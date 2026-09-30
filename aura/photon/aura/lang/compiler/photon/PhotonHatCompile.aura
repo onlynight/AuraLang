@@ -30,6 +30,8 @@
 //   AURA_HAT_TRACE=1        HAT 解析器心跳（长任务区分「慢」与「卡死」）
 //   AURA_PHOTON_DEBUG_HIR=1 SSA / LIR / DAG 全量转储
 //   AURA_PHOTON_STOP=A|B|C|D  阶段短路（性能二分）
+//   AURA_PHOTON_TIME=1       逐阶段耗时（`[time] link= ssa= hatSerialize=
+//                            compileHat= total=`，供耗时归因用）
 //
 // 输出标记（供构建脚本解析）:
 //   ===COFF-MAIN===<hex>
@@ -41,6 +43,7 @@ import aura.lang.std.String
 import aura.lang.std.fs.FileUtils
 import aura.lang.std.Env
 import aura.lang.std.Process
+import aura.lang.native.time.Clock
 
 
 // ── 自举前端（源码 → HIR）的模块闭包 ──
@@ -66,6 +69,24 @@ import aura.lang.compiler.aot.Emit
 import aura.lang.compiler.aot.ModuleLink
 import "PhotonPipeline.aura"
 import "PhotonRuntime.aura"
+
+/// 单调纳秒时钟（`clock_gettime(CLOCK_REALTIME)`，Windows 上走
+/// `GetSystemTimeAsFileTime`）。`Time.getNow()` 返回 Float 且从未调用
+/// `ClockImpl.init()`，差值恒为 0 —— 这里直接用 `ClockImpl.timeNs()`
+/// （Long 差值精确），供 AURA_PHOTON_TIME=1 的逐阶段计时用。
+/// 每次调用前 `init()`：`tsBuf` 未初始化时 `now()` 会静默返回 0。
+fun tNs(): Long {
+    ClockImpl.init()
+    return ClockImpl.timeNs()
+}
+
+fun secOf(deltaNs: Long): String {
+    val sec: Long = deltaNs / 1000000000
+    val ms: Long = (deltaNs % 1000000000) / 1000000
+    val mss: String = toStr(ms)
+    val pad: String = if (mss.length == 1) { "00" } else if (mss.length == 2) { "0" } else { "" }
+    return toStr(sec) + "." + pad + mss
+}
 
 fun main() {
     val srcPath = Env.get("AURA_HAT_AURA", "")
@@ -93,15 +114,21 @@ fun main() {
     val verboseOn = Env.get("AURA_PHOTON_VERBOSE", "") == "1"
             || Env.get("AURA_PHOTON_TRACE", "") == "1"
 
+    // AURA_PHOTON_TIME=1 时逐阶段计时（秒）；默认不打印，保持协议标记纯净。
+    val timeOn: Boolean = Env.get("AURA_PHOTON_TIME", "") == "1"
+    val tAll0: Long = tNs()
+
     if (Env.get("AURA_HAT_SKIP_FRONT", "") == "1") {
         if (verboseOn) { println("[hat-front] skipped (reuse " + hatPath + ")") }
     } else {
+        val tLink0: Long = tNs()
         val linker = AotModuleLinker()
         val hir: Hir = linker.link(srcPath)
         if (verboseOn) {
             println("[hat-front] modules=" + toStr(linker.loadedCount()) +
                     " hirNodes=" + toStr(hir.count))
         }
+        if (timeOn) { println("[time] link=" + secOf(tNs() - tLink0) + " s") }
         if (linker.missing != "") {
             // 注意：不要用 String.replace — VM 路径下类方法调用未链接。
             // 缺失 import 会直接变成链接期 undefined symbol，因此始终报出来。
@@ -115,8 +142,10 @@ fun main() {
         }
 
         // ── HIR → SSA MIR → HAT 文本（HAT 是这条链路的中间表示）──
+        val tSsa0: Long = tNs()
         if (verboseOn) { println("[hat-front] ssa start (nodes=" + toStr(hir.count) + ")") }
         val ssa: MirSsaProgram = SsaBuilderUtils.build(hir)
+        if (timeOn) { println("[time] ssa=" + secOf(tNs() - tSsa0) + " s") }
         if (verboseOn) {
             println("[hat-front] ssa done")
             println("[hat-front] ssa functions=" + toStr(ssa.functionCount) +
@@ -124,8 +153,10 @@ fun main() {
                     " blocks=" + toStr(ssa.blockCount))
         }
 
+        val tHat0: Long = tNs()
         val hatText: String = HatSerializerUtils.serializeHat(ssa, moduleName)
         FileUtils.writeText(hatPath, hatText)
+        if (timeOn) { println("[time] hatSerialize=" + secOf(tNs() - tHat0) + " s") }
         if (verboseOn) {
             println("[hat-front] .hat = " + hatPath + " (" + toStr(hatText.length) + " 字符)")
         }
@@ -138,10 +169,12 @@ fun main() {
     }
 
     // ── HAT 文本 → SSA MIR → LIR → DAG → RegAlloc → X86 → COFF ──
+    val tBack0: Long = tNs()
     val pipeline = PhotonPipelineUtils.emptyPipeline()
     pipeline.outDir = outDir
     pipeline.moduleName = moduleName
     val result = pipeline.compileHat(hatPath)
+    if (timeOn) { println("[time] compileHat=" + secOf(tNs() - tBack0) + " s") }
 
     // 输出 COFF hex（主对象）
     println("===COFF-MAIN===")
@@ -155,6 +188,8 @@ fun main() {
     // 输出链接信息
     println("===LINK===")
     println(result.linkCommand)
+
+    if (timeOn) { println("[time] total=" + secOf(tNs() - tAll0) + " s") }
 
     println("===RESULT===" + (if (result.success) "success" else "fail"))
     if (!result.success) {
