@@ -957,6 +957,51 @@ impl Parser {
     fn parse_class_member(&mut self, m: &mut ClassMembers) {
         self.collect_doc();
 
+        // `@native(...)` / `@aot` 前缀注解（class / object 成员）。
+        //
+        // ⚠️ 此前这里**完全丢失**成员上的 `@native`：`@` 被逐 token 跳过，
+        // `pending_native_attr` 从未被设置。于是
+        //   `object ProcessNative { @native(SYS_EXIT_GROUP) fun exitGroup(code: Int) }`
+        // 被解析成一个**无 body、无 native_attr** 的普通方法 → AOT 发射出空函数体
+        //（`define void @ProcessNative_exitGroup(...) { ret void }`）→
+        // `Process.exit(code)` 变成 **no-op**。Photon HAT 驱动
+        //（`PhotonHatCompile.aura`）在「source not found」分支调用 `Process.exit(1)`
+        // 后并未退出，继续带着空路径跑完整条前端链路 → ACCESS_VIOLATION。
+        // extern interface 的解析路径（见 `@native` 分支）一直是对的，这里与之一致。
+        if self.check(TokenKind::At) {
+            let n1 = self.peek_ahead(1);
+            if (n1.kind == TokenKind::Ident || n1.kind == TokenKind::Native) && n1.literal == "native"
+            {
+                self.advance(); // @
+                self.advance(); // native
+                let native_attr = if self.check(TokenKind::LParen) {
+                    self.parse_native_annotation_args()
+                } else {
+                    Some(NativeAttr::Builtin)
+                };
+                self.pending_native_attr = native_attr;
+                let f = self.parse_fn_decl();
+                m.methods.push(f);
+                return;
+            }
+            if n1.kind == TokenKind::Ident && n1.literal == "aot" {
+                self.advance(); // @
+                self.advance(); // aot
+                self.pending_fn_mods.push(FnModifier::Aot);
+                let f = self.parse_fn_decl();
+                m.methods.push(f);
+                return;
+            }
+        }
+        // `native fun xxx()`（编译器内置）作为成员声明
+        if self.check(TokenKind::Native) && self.peek_ahead(1).kind == TokenKind::Fun {
+            self.advance(); // native
+            self.pending_native_attr = Some(NativeAttr::Builtin);
+            let f = self.parse_fn_decl();
+            m.methods.push(f);
+            return;
+        }
+
         // 直接 val/var/const 字段
         if self.check(TokenKind::Val) || self.check(TokenKind::Var) || self.check(TokenKind::Const)
         {

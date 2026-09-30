@@ -44,6 +44,18 @@ class SymbolTable {
     /// P0 新增：支持同名重载（多个不同签名的函数）。
     private var fnIndex: String = ""
 
+    /// 枚举变体表（`EnumName|Var1,Var2,...`，每行一项）。
+    /// P1 新增：用于 when 穷举性检查。
+    private var enumVariants: String = ""
+
+    /// sealed 类型名集合（`TypeName`，每行一项）。
+    /// P1 新增：用于 when 穷举性检查。
+    private var sealedTypes: String = ""
+
+    /// sealed 子类表（`BaseName|Sub1,Sub2,...`，每行一项）。
+    /// P1 新增：用于 sealed when 穷举性检查。
+    private var sealedSubs: String = ""
+
     /// 作用域总数。
     private var scopeCount: Int = 0
 
@@ -340,6 +352,157 @@ class SymbolTable {
         }
         // 如果没有精确匹配，返回 fallback（第一个同名函数）
         return fallback
+    }
+
+    // ── 枚举变体 / sealed 类型跟踪（P1 穷举检查）──
+
+    /// 为枚举添加一个变体名。重复添加忽略。
+    fun stAddEnumVariant(enumName: String, variant: String) {
+        if (variant == "") return
+        val key: String = enumName + "|"
+        // 查找是否已存在该枚举行
+        var lines = this.enumVariants.split("\n")
+        var found = false
+        var i = 0
+        while (i < lines.size) {
+            val line = lines[i]
+            if (line.startsWith(key)) {
+                val variants = line.substring(enumName.length + 1)
+                // 检查是否已存在
+                if (variants == "") {
+                    lines[i] = key + variant
+                } else {
+                    var dup = false
+                    var parts = variants.split(",")
+                    var j = 0
+                    while (j < parts.size) {
+                        if (parts[j] == variant) { dup = true; break }
+                        j = j + 1
+                    }
+                    if (!dup) {
+                        lines[i] = key + variants + "," + variant
+                    }
+                }
+                found = true
+                break
+            }
+            i = i + 1
+        }
+        if (!found) {
+            this.enumVariants = this.enumVariants + key + variant + "\n"
+        } else {
+            var rebuilt = ""
+            var k = 0
+            while (k < lines.size) {
+                if (k > 0) rebuilt = rebuilt + "\n"
+                rebuilt = rebuilt + lines[k]
+                k = k + 1
+            }
+            this.enumVariants = rebuilt
+        }
+    }
+
+    /// 获取枚举的所有变体名（逗号分隔），未找到返回 ""。
+    fun stGetEnumVariants(enumName: String): String {
+        var lines = this.enumVariants.split("\n")
+        var i = 0
+        while (i < lines.size) {
+            val line = lines[i]
+            if (line.startsWith(enumName + "|")) {
+                return line.substring(enumName.length + 1)
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 判断某枚举是否有已注册的变体。
+    fun stIsEnumType(name: String): Boolean {
+        return this.stGetEnumVariants(name) != ""
+    }
+
+    /// 注册一个 sealed 类型名。
+    fun stAddSealedType(name: String) {
+        if (name == "") return
+        var lines = this.sealedTypes.split("\n")
+        var found = false
+        var i = 0
+        while (i < lines.size) {
+            if (lines[i] == name) { found = true; break }
+            i = i + 1
+        }
+        if (!found) {
+            this.sealedTypes = this.sealedTypes + name + "\n"
+        }
+    }
+
+    /// 判断某类型是否为 sealed 基类。
+    fun stIsSealedType(name: String): Boolean {
+        if (name == "") return false
+        var lines = this.sealedTypes.split("\n")
+        var i = 0
+        while (i < lines.size) {
+            if (lines[i] == name) return true
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 注册 sealed 基类的子类。
+    fun stAddSealedSub(baseName: String, subName: String) {
+        if (baseName == "" || subName == "") return
+        val key: String = baseName + "|"
+        var lines = this.sealedSubs.split("\n")
+        var found = false
+        var i = 0
+        while (i < lines.size) {
+            if (lines[i].startsWith(key)) {
+                val subs = lines[i].substring(baseName.length + 1)
+                if (subs == "") {
+                    lines[i] = key + subName
+                } else {
+                    var dup = false
+                    var parts = subs.split(",")
+                    var j = 0
+                    while (j < parts.size) {
+                        if (parts[j] == subName) { dup = true; break }
+                        j = j + 1
+                    }
+                    if (!dup) {
+                        lines[i] = key + subs + "," + subName
+                    }
+                }
+                found = true
+                break
+            }
+            i = i + 1
+        }
+        if (!found) {
+            this.sealedSubs = this.sealedSubs + key + subName + "\n"
+        } else {
+            var rebuilt = ""
+            var k = 0
+            while (k < lines.size) {
+                if (k > 0) rebuilt = rebuilt + "\n"
+                rebuilt = rebuilt + lines[k]
+                k = k + 1
+            }
+            this.sealedSubs = rebuilt
+        }
+    }
+
+    /// 获取 sealed 基类的所有直接子类（逗号分隔），未找到返回 ""。
+    fun stGetSealedSubs(baseName: String): String {
+        if (baseName == "") return ""
+        var lines = this.sealedSubs.split("\n")
+        var i = 0
+        while (i < lines.size) {
+            if (lines[i].startsWith(baseName + "|")) {
+                return lines[i].substring(baseName.length + 1)
+            }
+            i = i + 1
+        }
+        return ""
     }
 
     // ── 工具 ──

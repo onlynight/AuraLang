@@ -411,7 +411,7 @@ class SsaBuilder {
         }
 
         // 处理参数
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (traceOn) println("    [bf5] kCount=" + kCount)
         var i: Int = 0
@@ -502,7 +502,7 @@ class SsaBuilder {
         } else if (kind == "HirReturn") {
             this.buildReturn(src, id)
         } else if (kind == "HirExprStmt") {
-            val kids: String = src.kidsOf(id)
+            val kids: List<Int> = src.kidsOfList(id)
             if (HirUtils.hirKidsCount(kids) > 0) {
                 this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
             }
@@ -521,7 +521,7 @@ class SsaBuilder {
     /// 构建变量声明（val/var）。
     fun buildVarDecl(src: Hir, id: Int) {
         val varName: String = src.textOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         val declaredTy: String = src.tyOf(id)
         this.localTypeAdd(varName, declaredTy)
@@ -583,7 +583,7 @@ class SsaBuilder {
     ///（then 在前、else 在后，与 CondBr 的操作数顺序一致，后端据此配对前驱）；
     /// merge 块取 Phi 作为表达式值。
     fun buildIfExpr(src: Hir, id: Int): Int {
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount < 2) {
             return -1
@@ -701,7 +701,7 @@ class SsaBuilder {
                 }
             }
             // (c) 裸名 + 接收者：先定出接收者的类，再查类限定返回类型
-            val ck: String = src.kidsOf(nodeId)
+            val ck: List<Int> = src.kidsOfList(nodeId)
             if (HirUtils.hirKidsCount(ck) >= 1) {
                 val recvCls: String = this.receiverClassOf(src, HirUtils.hirKidsAt(ck, 0))
                 if (recvCls != "") {
@@ -727,7 +727,7 @@ class SsaBuilder {
     ///   merge → Phi 插入（若有变量被两分支定义）
     fun buildIf(src: Hir, id: Int) {
         val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount < 2) {
             return
@@ -1143,7 +1143,7 @@ class SsaBuilder {
     ///   3. 构建循环体 —— 所有引用自然解析到 Phi；
     ///   4. 回填 Phi 的入边 1 = 循环体末尾该变量的值。
     fun buildWhile(src: Hir, id: Int) {
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount < 2) {
             return
@@ -1295,7 +1295,7 @@ class SsaBuilder {
                 }
             }
         }
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         var i: Int = 0
         while (i < kCount) {
@@ -1309,7 +1309,7 @@ class SsaBuilder {
     fun buildBlock(src: Hir, id: Int) {
         val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
         this.dbgBlocks = this.dbgBlocks + 1
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (traceOn) println("    [bb0] buildBlock id=" + id + " kCount=" + kCount)
         var i: Int = 0
@@ -1328,7 +1328,7 @@ class SsaBuilder {
     fun buildReturn(src: Hir, id: Int) {
         val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
         if (traceOn) println("      [ret0] buildReturn id=" + id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (traceOn) println("      [ret1] kCount=" + kCount)
         if (kCount > 0) {
@@ -1350,7 +1350,7 @@ class SsaBuilder {
     /// 赋值可能是寄存器赋值或内存 Store。
     /// 当 memHead >= 0 时，创建 Store 指令并更新内存链。
     fun buildAssign(src: Hir, id: Int) {
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount < 1) {
             return
@@ -1374,7 +1374,7 @@ class SsaBuilder {
             val targetId: Int = HirUtils.hirKidsAt(kids, 0)
             if (src.kindOf(targetId) == "HirMember") {
                 val fname: String = src.textOf(targetId)
-                val tk: String = src.kidsOf(targetId)
+                val tk: List<Int> = src.kidsOfList(targetId)
                 if (HirUtils.hirKidsCount(tk) >= 1) {
                     val recvNode: Int = HirUtils.hirKidsAt(tk, 0)
                     val owner: String = this.receiverClassOf(src, recvNode)
@@ -1445,7 +1445,7 @@ class SsaBuilder {
         }
         if (kind == "HirBlock") {
             // 块表达式：构建块，返回最后一个表达式的值
-            val kids: String = src.kidsOf(id)
+            val kids: List<Int> = src.kidsOfList(id)
             val kCount: Int = HirUtils.hirKidsCount(kids)
             if (kCount == 0) {
                 return -1
@@ -1456,7 +1456,7 @@ class SsaBuilder {
             while (i < kCount) {
                 val childKind: String = src.kindOf(HirUtils.hirKidsAt(kids, i))
                 if (childKind == "HirExprStmt") {
-                    val ek: String = src.kidsOf(HirUtils.hirKidsAt(kids, i))
+                    val ek: List<Int> = src.kidsOfList(HirUtils.hirKidsAt(kids, i))
                     if (HirUtils.hirKidsCount(ek) > 0) {
                         lastVal = this.buildExpr(src, HirUtils.hirKidsAt(ek, 0))
                     }
@@ -1539,7 +1539,7 @@ class SsaBuilder {
     /// 构建二元运算。
     fun buildBinary(src: Hir, id: Int): Int {
         val op: String = src.textOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount < 2) {
             return -1
@@ -1591,7 +1591,7 @@ class SsaBuilder {
     /// 构建一元运算。
     fun buildUnary(src: Hir, id: Int): Int {
         val op: String = src.textOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount < 1) {
             return -1
@@ -1621,7 +1621,7 @@ class SsaBuilder {
         this.dbgCalls = this.dbgCalls + 1
         var funcName: String = src.textOf(id)
         val bareName: String = funcName
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         // ── 单例模块调用：丢弃降级进来的「接收者」实参 ──
@@ -1813,7 +1813,7 @@ class SsaBuilder {
     /// 构建成员访问。
     fun buildMember(src: Hir, id: Int): Int {
         val fieldName: String = src.textOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount < 1) {
             return -1
@@ -1900,7 +1900,7 @@ class SsaBuilder {
     /// HirIndex 表示 a[i] 形式的元素访问，属于内存读取操作。
     /// 依赖 memHead 建立内存顺序，访问后更新内存链。
     fun buildIndex(src: Hir, id: Int): Int {
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount < 2) {
             return -1
@@ -2507,7 +2507,7 @@ class SsaBuilder {
         // `addBlock` / `leaf` / `emit` …），lld-link 因此失败。
         if (kind == "HirMember") {
             val fname: String = src.textOf(recvNode)
-            val mk: String = src.kidsOf(recvNode)
+            val mk: List<Int> = src.kidsOfList(recvNode)
             if (fname != "" && HirUtils.hirKidsCount(mk) >= 1) {
                 val inner: Int = HirUtils.hirKidsAt(mk, 0)
                 val recvCls: String = this.receiverClassOf(src, inner)
@@ -2723,7 +2723,7 @@ class SsaBuilder {
 
         // 字段序号起点 = 继承链上祖先的字段总数（父类字段占据前缀）
         var idx: Int = this.classBaseIndex(name)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kn: Int = HirUtils.hirKidsCount(kids)
         var j: Int = 0
         while (j < kn) {
@@ -2778,7 +2778,7 @@ class SsaBuilder {
                                     startIdx: Int, classNode: Int,
                                     isExternDecl: Boolean): Int {
         var idx: Int = startIdx
-        val kids: String = src.kidsOf(blockId)
+        val kids: List<Int> = src.kidsOfList(blockId)
         val kn: Int = HirUtils.hirKidsCount(kids)
         var j: Int = 0
         while (j < kn) {
@@ -2790,8 +2790,6 @@ class SsaBuilder {
             } else if (ck == "HirFunction" || ck == "HirNativeFunction") {
                 this.addMethodOwner(child, cls)
                 this.addClassMethod(cls, src.textOf(child))
-                // `extern interface` 声明的方法要逐个登记（只跳这些，不跳整个属主：
-                // 同名 `object` 的真实实现必须保留，见 `externMethodsCsv` 的说明）。
                 if (isExternDecl) {
                     this.externMethodsCsv = this.externMethodsCsv + "\n" + cls + "|" + src.textOf(child) + "\n"
                 }
@@ -2831,7 +2829,7 @@ class SsaBuilder {
     /// `HirCall` 不引用 `this`/局部变量（`arrayListOf()` 是纯函数调用），
     /// 在构造器合成阶段求值安全。
     private fun fieldDefaultNode(src: Hir, declNode: Int): Int {
-        val kids: String = src.kidsOf(declNode)
+        val kids: List<Int> = src.kidsOfList(declNode)
         if (HirUtils.hirKidsCount(kids) < 1) {
             return -1
         }
@@ -2993,7 +2991,7 @@ class SsaBuilder {
         if (kind == "HirMember") {
             // 字段接收者：类型 = 字段声明类型（先定出「哪个类」，再查字段表）
             val fname: String = src.textOf(recvNode)
-            val mk: String = src.kidsOf(recvNode)
+            val mk: List<Int> = src.kidsOfList(recvNode)
             if (fname != "" && HirUtils.hirKidsCount(mk) >= 1) {
                 val inner: Int = HirUtils.hirKidsAt(mk, 0)
                 val recvCls: String = this.receiverClassOf(src, inner)
@@ -3065,7 +3063,7 @@ class SsaBuilder {
     /// 必须成对改，属高风险）。只有 `HirClass` / `HirStruct` 需要属主前缀，
     /// 由 `registerClass` 负责。
     private fun scanDeclMethodReturnTypes(src: Hir, declNode: Int) {
-        val kids: String = src.kidsOf(declNode)
+        val kids: List<Int> = src.kidsOfList(declNode)
         val kn: Int = HirUtils.hirKidsCount(kids)
         var j: Int = 0
         while (j < kn) {
@@ -3082,7 +3080,7 @@ class SsaBuilder {
 
     /// 下钻块登记 `HirFunction` 的返回类型（含嵌套块）。
     private fun scanBlockMethodReturnTypes(src: Hir, blockNode: Int) {
-        val kids: String = src.kidsOf(blockNode)
+        val kids: List<Int> = src.kidsOfList(blockNode)
         val kn: Int = HirUtils.hirKidsCount(kids)
         var j: Int = 0
         while (j < kn) {
@@ -3123,7 +3121,7 @@ class SsaBuilder {
     }
 
     /// 调用点的被调名解析：裸名 → `Class_method`（无法判定时原样返回）。
-    private fun resolveMethodSymbol(src: Hir, kids: String, kCount: Int, bare: String): String {
+    private fun resolveMethodSymbol(src: Hir, kids: List<Int>, kCount: Int, bare: String): String {
         if (bare == "") {
             return bare
         }
@@ -3275,7 +3273,7 @@ class SsaBuilder {
     /// kids 里的 `HirParam` 即可。供构造器重载按元数消歧
     ///（`Exception_init1` / `Exception__new1`）。
     private fun hirExplicitParamCount(src: Hir, id: Int): Int {
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kn: Int = HirUtils.hirKidsCount(kids)
         var cnt: Int = 0
         var j: Int = 0
@@ -3326,7 +3324,7 @@ class SsaBuilder {
                 // 判据用 `initAritiesOf` 的返回：无任何登记时返回 ""。
                 if (callee != "" && this.isClassName(callee)
                         && this.initAritiesOf(callee) == "") {
-                    val kn: Int = HirUtils.hirKidsCount(src.kidsOf(i))
+                    val kn: Int = HirUtils.hirKidsCount(src.kidsOfList(i))
                     if (kn > 0) {
                         this.addCtorArity(callee, kn)
                         this.addCtorArity(callee, kn - 1)

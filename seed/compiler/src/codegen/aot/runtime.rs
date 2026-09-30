@@ -321,6 +321,15 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("blen", "i64"),
         ],
     },
+    // `i8* + i8*` 运行时分派（Plan A 低位标记）：两侧都是装箱整数则整型相加，
+    // 否则字符串拼接。编译期无法可靠区分装箱整数与字符串指针（调用返回值的
+    // Aura 类型常在签名表里缺失），故不能只做静态判定 —— 见 emit.rs 的
+    // `HirBinOp::Add` 分支与 aura_std_cffi.c 中 `aura_add_i8` 的注释。
+    RuntimeFn {
+        name: "aura_add_i8",
+        ret: "i8*",
+        params: &[("a", "i8*"), ("b", "i8*")],
+    },
     // 集合/列表内建（对应 Aura 自举编译器中大量使用的列表/数组操作）。
     // AOT 下 List/Array 用不透明指针 `i8*`（底层 AuraList 结构，元素以 i64 句柄存储），
     // 这些内建由 C 运行时 `aura_std_cffi.c` 中的 aura_lang_std_Collections_* 实现。

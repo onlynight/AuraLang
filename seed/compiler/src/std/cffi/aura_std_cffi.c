@@ -1348,6 +1348,30 @@ const char *aura_to_str_any(uint64_t v) {
     /* 偶数：真实字符串数据指针 */
     return (const char *)(uintptr_t)v;
 }
+
+/* `i8* + i8*` 的**运行时分派**（Plan A）。
+ *
+ * 两个 `i8*` 操作数在编译期不可区分：可能是装箱整数，也可能是真实字符串指针。
+ * 静态判定不可靠——调用返回值（如 `s.substring(a, b)` / `s.indexOf(...)`）的 Aura
+ * 类型常常在 `func_ret_aura_types` 里缺失，于是 `HirBinOp::Add` 一律落入「装箱整数
+ * 相加」分支，把两个字符串指针 `ptrtoint` 后 `add` 再 `(v<<1)|1` 装箱回 `i8*`：
+ * 结果是一条野指针，写回对象字段后，下一次 `strlen` 直接 0xC0000005。
+ *
+ * 判定依据是 Plan A 的低位标记：装箱整数恒为奇数，分配器返回的指针至少 2 字节
+ * 对齐故低位恒为 0。两侧都奇 ⇒ 都是装箱整数；否则按字符串拼接。
+ * 一奇一偶是源码层的类型错误，此处统一走字符串拼接（与旧的编译期启发式一致）。
+ */
+const char *aura_add_i8(const char *a, const char *b) {
+    uint64_t pa = (uint64_t)(uintptr_t)a;
+    uint64_t pb = (uint64_t)(uintptr_t)b;
+    if ((pa & (uint64_t)1) && (pb & (uint64_t)1)) {
+        int64_t x = (int64_t)((int64_t)pa >> 1);
+        int64_t y = (int64_t)((int64_t)pb >> 1);
+        int64_t sum = x + y;
+        return (const char *)(uintptr_t)(((uint64_t)((int64_t)sum << 1)) | (uint64_t)1);
+    }
+    return aura_string_concat(a, (int64_t)strlen(a), b, (int64_t)strlen(b));
+}
 /* `toStr` 与 `toString` 语义一致：AOT 下调用点会把整数经 inttoptr 打成 i8* 句柄，
  * 指针与 int64 在 x86-64 上均用整数寄存器传递，故 ABI 兼容，此处直接按整数解释。 */
 /* toStr 接收的是「已按 Plan A 装箱」的 i8*（低位标记），故必须经 aura_to_str_any 解析：
@@ -3795,6 +3819,7 @@ static AuraFnEnt g_fn_table[AURA_FN_COUNT] = {
     AURA_FN(aura_to_float),
     AURA_FN(aura_to_int),
     AURA_FN(aura_to_int_any),
+    AURA_FN(aura_add_i8),
     AURA_FN(aura_to_str),
     AURA_FN(aura_to_str_any),
     AURA_FN(aura_to_str_bool),

@@ -296,6 +296,9 @@ const char *toStr(int64_t x);
 /* Plan A 低位标记值的拆箱助手（见 aura_std_cffi.c 中同名注释） */
 int64_t aura_to_int_any(uint64_t v);
 const char *aura_to_str_any(uint64_t v);
+/* `i8* + i8*` 运行时分派：两侧均为装箱整数则整型相加，否则字符串拼接。
+ * 见 aura_std_cffi.c 中同名注释（编译期无法可靠区分装箱整数与字符串指针）。 */
+const char *aura_add_i8(const char *a, const char *b);
 /* `toStr(Boolean)` 专用：VM 语义为 "true"/"false"（AOT 下布尔与整数共用装箱通道） */
 const char *aura_to_str_bool(int64_t v);
 double aura_clock_wrapper(void);

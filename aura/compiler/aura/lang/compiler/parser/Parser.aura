@@ -71,6 +71,10 @@ class Parser {
     /// 声明创建点将其以 `#` 前缀写入 AST 的 `ty` 字段。
     private var prsCurVis: String = "public"
 
+    /// 当前声明是否被标记为 `sealed`（由 `parseStatement` 在跳过 `Sealed`
+    /// 软关键字时设置）。P1 新增：用于 sealed when 穷举性检查。
+    private var prsCurSealed: Boolean = false
+
     /// 构造：词法分析并缓存全部 token。
     init(source: String) {
         this.lx = Lexer(source)
@@ -86,8 +90,11 @@ class Parser {
     // ── token 访问 ──
 
     /// 将当前可见性修饰符以 `#` 前缀写入类型字段。
-    /// 格式：`#visibility` 或 `#visibility|type`。
+    /// 格式：`#visibility|type` 或 `#visibility|sealed|type`（P1 新增 sealed 标记）。
     fun prsVisTy(ty: String): String {
+        if (this.prsCurSealed) {
+            return "#" + this.prsCurVis + "|sealed|" + ty
+        }
         return "#" + this.prsCurVis + "|" + ty
     }
 
@@ -1131,7 +1138,12 @@ class Parser {
                 || nkMod == "Override" || nkMod == "Inline"
                 || nkMod == "Lateinit" || nkMod == "Const") {
                 this.prsAdvance()
-                return this.parseStatement()
+                if (k == "Sealed") {
+                    this.prsCurSealed = true
+                }
+                val modResult: Int = this.parseStatement()
+                this.prsCurSealed = false
+                return modResult
             }
         }
         // 软关键字修饰符：`tailrec fun` / `operator fun` / `infix fun` /

@@ -1,0 +1,447 @@
+// ═════════════════════════════════════════════════════════════
+// P1 验证用例：sealed when / enum when 穷举性检查
+//
+// 验证内容：
+//   1. 枚举 when 穷举性检查（全覆盖 → 无错误，缺失 → 报错）
+//   2. sealed 类 when 穷举性检查（is T 模式 / else 分支）
+//   3. 非 enum/sealed 类型不触发穷举检查
+//   4. 范围模式 (InPattern) 跳过穷举检查
+//
+// 运行：aura run tests/phase2_sealed_when_test.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Span.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Token.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Lexer.aura"
+import "../aura/compiler/aura/lang/compiler/ast/Ast.aura"
+import "../aura/compiler/aura/lang/compiler/parser/Parser.aura"
+import "../aura/compiler/aura/lang/compiler/errors/CompileError.aura"
+import "../aura/compiler/aura/lang/compiler/sema/Type.aura"
+import "../aura/compiler/aura/lang/compiler/sema/SymbolTable.aura"
+import "../aura/compiler/aura/lang/compiler/sema/TypeInfo.aura"
+import "../aura/compiler/aura/lang/compiler/sema/TypeChecker.aura"
+
+// ═════════════════════════════════════════════════════════════
+// 辅助：解析源码并执行 TypeChecker，返回错误数量
+// ═════════════════════════════════════════════════════════════
+
+fun tcCheckSource(src: String): Int {
+    val p = Parser(src)
+    p.parseProgram()
+    val checker = TypeChecker()
+    checker.tcCheck(p.ast)
+    return checker.tcErrorCount()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 1: 枚举 when 穷举（全覆盖 → 无错误）
+// ═════════════════════════════════════════════════════════════
+
+fun testEnumExhaustiveWhen(): Int {
+    val t = TestRunner()
+    t.begin("SealedWhen.enumExhaustive")
+
+    val src = """
+        enum Color { RED, GREEN, BLUE }
+        fun describe(c: Color): String {
+            return when (c) {
+                RED -> "red"
+                GREEN -> "green"
+                BLUE -> "blue"
+            }
+        }
+    """
+    val errCount = tcCheckSource(src)
+    t.assertEq(errCount, 0, "all variants covered: no error")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 2: 枚举 when 缺失变体（应报错）
+// ═════════════════════════════════════════════════════════════
+
+fun testEnumMissingVariant(): Int {
+    val t = TestRunner()
+    t.begin("SealedWhen.enumMissingVariant")
+
+    val src = """
+        enum Color { RED, GREEN, BLUE }
+        fun describe(c: Color): String {
+            return when (c) {
+                RED -> "red"
+                GREEN -> "green"
+            }
+        }
+    """
+    val errCount = tcCheckSource(src)
+    t.assertTrue(errCount > 0, "missing BLUE variant: error expected")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 3: 枚举 when 带 else 分支（跳过穷举检查）
+// ═════════════════════════════════════════════════════════════
+
+fun testEnumWithElse(): Int {
+    val t = TestRunner()
+    t.begin("SealedWhen.enumWithElse")
+
+    val src = """
+        enum Color { RED, GREEN, BLUE }
+        fun describe(c: Color): String {
+            return when (c) {
+                RED -> "red"
+                GREEN -> "green"
+                else -> "unknown"
+            }
+        }
+    """
+    val errCount = tcCheckSource(src)
+    t.assertEq(errCount, 0, "else branch covers rest: no error")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 4: sealed 类 when 穷举（is T 模式全覆盖）
+// ═════════════════════════════════════════════════════════════
+
+fun testSealedClassExhaustiveWhen(): Int {
+    val t = TestRunner()
+    t.begin("SealedWhen.sealedClassExhaustive")
+
+    val src = """
+        sealed class Shape { }
+        class Circle : Shape() { }
+        class Rect : Shape() { }
+        fun describe(s: Shape): String {
+            return when (s) {
+                is Circle -> "circle"
+                is Rect -> "rect"
+            }
+        }
+    """
+    val errCount = tcCheckSource(src)
+    t.assertEq(errCount, 0, "all sealed subs covered: no error")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 5: sealed 类 when 缺失子类（应报错）
+// ═════════════════════════════════════════════════════════════
+
+fun testSealedClassMissingSub(): Int {
+    val t = TestRunner()
+    t.begin("SealedWhen.sealedClassMissingSub")
+
+    val src = """
+        sealed class Shape { }
+        class Circle : Shape() { }
+        class Rect : Shape() { }
+        fun describe(s: Shape): String {
+            return when (s) {
+                is Circle -> "circle"
+            }
+        }
+    """
+    val errCount = tcCheckSource(src)
+    t.assertTrue(errCount > 0, "missing Rect sub: error expected")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 6: sealed 类 when 带 else 分支（跳过穷举检查）
+// ═════════════════════════════════════════════════════════════
+
+fun testSealedClassWithElse(): Int {
+    val t = TestRunner()
+    t.begin("SealedWhen.sealedClassWithElse")
+
+    val src = """
+        sealed class Shape { }
+        class Circle : Shape() { }
+        class Rect : Shape() { }
+        fun describe(s: Shape): String {
+            return when (s) {
+                is Circle -> "circle"
+                else -> "unknown"
+            }
+        }
+    """
+    val errCount = tcCheckSource(src)
+    t.assertEq(errCount, 0, "else branch covers rest: no error")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 7: 非 enum/sealed 类型不触发穷举检查
+// ═════════════════════════════════════════════════════════════
+
+fun testNonSealedNoCheck(): Int {
+    val t = TestRunner()
+    t.begin("SealedWhen.nonSealedNoCheck")
+
+    // Int 不是 enum/sealed，不应触发穷举检查
+    val src = """
+        fun describe(x: Int): String {
+            return when (x) {
+                1 -> "one"
+                2 -> "two"
+            }
+        }
+    """
+    val errCount = tcCheckSource(src)
+    t.assertEq(errCount, 0, "non-enum/sealed type: no exhaustive check")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 8: 枚举 when 带范围模式（跳过穷举检查）
+// ═════════════════════════════════════════════════════════════
+
+fun testEnumWithRangePattern(): Int {
+    val t = TestRunner()
+    t.begin("SealedWhen.enumWithRangePattern")
+
+    val src = """
+        enum Color { RED, GREEN, BLUE }
+        fun describe(c: Color): String {
+            return when (c) {
+                in RED..GREEN -> "warm"
+                BLUE -> "blue"
+            }
+        }
+    """
+    val errCount = tcCheckSource(src)
+    t.assertEq(errCount, 0, "range pattern: exhaustive check skipped")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 9: sealed 类 when 字面量子类名匹配
+// ═════════════════════════════════════════════════════════════
+
+fun testSealedClassLiteralMatch(): Int {
+    val t = TestRunner()
+    t.begin("SealedWhen.sealedClassLiteralMatch")
+
+    // 使用子类名字面量（而非 is T）也可以覆盖
+    val src = """
+        sealed class Shape { }
+        class Circle : Shape() { }
+        class Rect : Shape() { }
+        fun describe(s: Shape): String {
+            return when (s) {
+                Circle -> "circle"
+                Rect -> "rect"
+            }
+        }
+    """
+    val errCount = tcCheckSource(src)
+    t.assertEq(errCount, 0, "literal sub name match: no error")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 10: SymbolTable 枚举变体跟踪
+// ═════════════════════════════════════════════════════════════
+
+fun testEnumVariantTracking(): Int {
+    val t = TestRunner()
+    t.begin("SealedWhen.enumVariantTracking")
+
+    val st = SymbolTable()
+
+    // 添加枚举变体
+    st.stAddEnumVariant("Color", "RED")
+    st.stAddEnumVariant("Color", "GREEN")
+    st.stAddEnumVariant("Color", "BLUE")
+
+    val variants = st.stGetEnumVariants("Color")
+    t.assertEq(variants, "RED,GREEN,BLUE", "enum variants tracked")
+    t.assertTrue(st.stIsEnumType("Color"), "Color is enum type")
+    t.assertFalse(st.stIsEnumType("Unknown"), "Unknown is not enum type")
+
+    // 重复添加不产生重复
+    st.stAddEnumVariant("Color", "RED")
+    val variants2 = st.stGetEnumVariants("Color")
+    t.assertEq(variants2, "RED,GREEN,BLUE", "no duplicate variants")
+
+    // 未注册的枚举返回空
+    t.assertEq(st.stGetEnumVariants("Nonexistent"), "", "nonexistent enum returns empty")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 11: SymbolTable sealed 类型跟踪
+// ═════════════════════════════════════════════════════════════
+
+fun testSealedTypeTracking(): Int {
+    val t = TestRunner()
+    t.begin("SealedWhen.sealedTypeTracking")
+
+    val st = SymbolTable()
+
+    // 注册 sealed 基类
+    st.stAddSealedType("Shape")
+    t.assertTrue(st.stIsSealedType("Shape"), "Shape is sealed")
+    t.assertFalse(st.stIsSealedType("Circle"), "Circle is not sealed")
+
+    // 注册子类
+    st.stAddSealedSub("Shape", "Circle")
+    st.stAddSealedSub("Shape", "Rect")
+    st.stAddSealedSub("Shape", "Triangle")
+
+    val subs = st.stGetSealedSubs("Shape")
+    t.assertEq(subs, "Circle,Rect,Triangle", "sealed subs tracked")
+
+    // 重复添加不产生重复
+    st.stAddSealedSub("Shape", "Circle")
+    val subs2 = st.stGetSealedSubs("Shape")
+    t.assertEq(subs2, "Circle,Rect,Triangle", "no duplicate subs")
+
+    // 未注册的基类返回空
+    t.assertEq(st.stGetSealedSubs("Nonexistent"), "", "nonexistent base returns empty")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 12: 多子类 sealed 类穷举检查
+// ═════════════════════════════════════════════════════════════
+
+fun testSealedClassMultipleSubs(): Int {
+    val t = TestRunner()
+    t.begin("SealedWhen.sealedClassMultipleSubs")
+
+    val src = """
+        sealed class Shape { }
+        class Circle : Shape() { }
+        class Rect : Shape() { }
+        class Triangle : Shape() { }
+        fun area(s: Shape): Int {
+            return when (s) {
+                is Circle -> 100
+                is Rect -> 200
+                is Triangle -> 150
+            }
+        }
+    """
+    val errCount = tcCheckSource(src)
+    t.assertEq(errCount, 0, "all 3 subs covered: no error")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 调试：检查 AST 结构
+// ═════════════════════════════════════════════════════════════
+
+fun debugASTStructure(): Int {
+    val t = TestRunner()
+    t.begin("DEBUG.astStructure")
+
+    val src = """
+        enum Color { RED, GREEN, BLUE }
+        fun describe(c: Color): String {
+            return when (c) {
+                RED -> "red"
+                GREEN -> "green"
+            }
+        }
+    """
+    val p = Parser("")
+    p.init(src)
+    p.parseProgram()
+    val ast = p.ast
+
+    println("  AST count: " + toStr(ast.count))
+    
+    // 遍历所有节点
+    var i = 0
+    while (i < ast.count) {
+        println("  node[" + toStr(i) + "]: kind=" + ast.kindOf(i) + " text=" + ast.textOf(i))
+        i = i + 1
+    }
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 调试：检查 TypeChecker 行为
+// ═════════════════════════════════════════════════════════════
+
+fun debugTypeChecker(): Int {
+    val t = TestRunner()
+    t.begin("DEBUG.typeChecker")
+
+    val src = """
+        enum Color { RED, GREEN, BLUE }
+        fun describe(c: Color): String {
+            return when (c) {
+                RED -> "red"
+                GREEN -> "green"
+            }
+        }
+    """
+    val p = Parser(src)
+    p.parseProgram()
+    val checker = TypeChecker()
+    checker.tcCheck(p.ast)
+    
+    println("  Error count: " + toStr(checker.tcErrorCount()))
+    println("  Error messages:")
+    val errors = checker.tcGetErrors()
+    var i = 0
+    while (i < errors.size) {
+        val e = errors[i]
+        println("    [" + toStr(i) + "] " + e.msg)
+        i = i + 1
+    }
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// Main
+// ═════════════════════════════════════════════════════════════
+
+fun main(): Int {
+    println("P1 Sealed/Enum When Exhaustive Check Test Suite")
+    println("===============================================")
+
+    val r1 = testEnumExhaustiveWhen()
+    val r2 = testEnumMissingVariant()
+    val r3 = testEnumWithElse()
+    val r4 = testSealedClassExhaustiveWhen()
+    val r5 = testSealedClassMissingSub()
+    val r6 = testSealedClassWithElse()
+    val r7 = testNonSealedNoCheck()
+    val r8 = testEnumWithRangePattern()
+    val r9 = testSealedClassLiteralMatch()
+    val r10 = testEnumVariantTracking()
+    val r11 = testSealedTypeTracking()
+    val r12 = testSealedClassMultipleSubs()
+    val r13 = debugASTStructure()
+    val r14 = debugTypeChecker()
+
+    val total = r1 + r2 + r3 + r4 + r5 + r6 + r7 + r8 + r9 + r10 + r11 + r12 + r13 + r14
+    if (total == 0) {
+        println("RESULT: PASS")
+        return 0
+    } else {
+        println("RESULT: FAIL ($total failures)")
+        return 1
+    }
+}

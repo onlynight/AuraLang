@@ -528,7 +528,8 @@ class HirLowerer {
     /// **脚本模式：隐式 main 合成**（对应 Rust 侧
     /// `synthesize_main_if_missing`，compiler/src/codegen/hir.rs）。
     ///
-    /// 入参 `kids` 是顶层节点的 HIR id 串，其中混排着两类节点：
+    /// 入参 `kids` 是顶层节点的 HIR id 列表（`List<Int>`，P2.1 取代逗号分隔串），
+    /// 其中混排着两类节点：
     ///   * **声明**：`HirFunction` / `HirValDecl` / `HirVarDecl` / `HirTypeDecl`
     ///     / `HirTypealias` / `HirExternObject` / `HirNativeFunction` / `HirAotDecl`
     ///   * **顶层可执行语句**：`HirCall` / `HirAssign` / `HirWhile` / `HirFor` /
@@ -543,7 +544,7 @@ class HirLowerer {
     /// 与 Rust 侧「splice 到已有 main 体首」的差异：Rust 的 HIR 是可变树，
     /// 可原位改 body；Aura 侧受 VM 列表不可按下标赋值（见 Ast.aura 注释）
     /// 与发射器全量扫描的双重约束，暂只支持「无 main」这一分支。
-    fun synthesizeMainInKids(kids: String, sp: Span): String {
+    fun synthesizeMainInKids(kids: List<Int>, sp: Span): List<Int> {
         // 第一遍：是否已有 main
         var mainId: Int = -1
         var i: Int = 0
@@ -625,11 +626,20 @@ class HirLowerer {
         this.hir = target
     }
 
-    /// 把 `program` 的顶层声明降级进当前 HIR，返回声明 id 列表（逗号分隔）。
+    /// 把 `program` 的顶层声明降级进当前 HIR，返回声明 id 列表（`List<Int>`）。
     ///
     /// 与 [`lower`] 的区别：不新建 HIR、不添加 `HirProgram` 根，
     /// 只产出顶层声明，供模块链接器拼接。
-    fun lowerTopLevel(program: Ast): String {
+    ///
+    /// **必须返回 `List<Int>`（而非逗号分隔串）**：`Hir.kids` 与
+    /// `Hir.add(..., children: List<Int>)` 自 P2.1 起全部以堆列表承载子节点。
+    /// 旧实现声明返回 `String` 却直接 `return out`（`out: List<Int>`），把列表
+    /// 句柄当字符串一路传给 `ModuleLinkUtils.appendKids` / `synthesizeMainInKids`；
+    /// 后者按 `list.size` 读取该句柄 —— `ArrayList<Int>` 的 `len` 字段是
+    /// 小端 8 字节，被 `strlen` 读成 1~2，再被逗号拼接成垃圾串，最终在
+    /// `synthesizeMainInKids` 里被 `hirKidsAt` 解成野 id（Photon 前端链接阶段
+    /// 0xC0000005 的根因）。
+    fun lowerTopLevel(program: Ast): List<Int> {
         this.ast = program
         val n: Int = program.count
         var rootIdx: Int = -1
@@ -667,7 +677,7 @@ class HirLowerer {
         val text: String = ast.textOf(id)
         val ty: String = ast.tyOf(id)
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         if (kind == "Function") {
@@ -718,7 +728,7 @@ class HirLowerer {
         val name: String = ast.textOf(id)
         val retTy: String = ast.tyOf(id)
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var paramsStr: List<Int> = HirUtils.hirNoKids()
@@ -727,7 +737,7 @@ class HirLowerer {
         // 子节点 0: Params 节点
         if (kCount > 0) {
             val paramsNodeId: Int = HirUtils.hirKidsAt(kids, 0)
-            val paramsKids: String = ast.kidsOf(paramsNodeId)
+            val paramsKids: List<Int> = ast.kidsOfList(paramsNodeId)
             val pkCount: Int = HirUtils.hirKidsCount(paramsKids)
             var pi: Int = 0
             while (pi < pkCount) {
@@ -737,7 +747,7 @@ class HirLowerer {
                 val pSp: Span = ast.spanOf(pId)
                 // 默认参数值：作为 HirParam 的 kids[0]，供调用点补齐实参
                 var pKids: List<Int> = HirUtils.hirNoKids()
-                val pAstKids: String = ast.kidsOf(pId)
+                val pAstKids: List<Int> = ast.kidsOfList(pId)
                 if (HirUtils.hirKidsCount(pAstKids) > 0) {
                     val dId: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(pAstKids, 0))
                     if (dId >= 0) {
@@ -794,14 +804,14 @@ class HirLowerer {
     fun lowerExternObject(ast: Ast, id: Int): Int {
         val name: String = ast.textOf(id)
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         var hirKids: List<Int> = HirUtils.hirNoKids()
         var i: Int = 0
         while (i < kCount) {
             val bodyId: Int = HirUtils.hirKidsAt(kids, i)
             if (ast.kindOf(bodyId) == "Block") {
-                val bodyKids: String = ast.kidsOf(bodyId)
+                val bodyKids: List<Int> = ast.kidsOfList(bodyId)
                 val bn: Int = HirUtils.hirKidsCount(bodyKids)
                 var j: Int = 0
                 while (j < bn) {
@@ -827,7 +837,7 @@ class HirLowerer {
     /// AST 形状：`NativeMethod(kids=[NativeInfo(metadata), Function])`；
     /// metadata 取值：`native|SYS_READ`（syscall）/ `asm|<code>` / `native`（内置）。
     fun lowerNativeMethod(ast: Ast, id: Int): Int {
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         if (HirUtils.hirKidsCount(kids) < 2) {
             return -1
         }
@@ -847,7 +857,7 @@ class HirLowerer {
     /// 降级 `export fun`：按普通函数发射（LLVM `define` 默认外部链接，
     /// 符号即可被 C/其他模块解析）。
     fun lowerExportMethod(ast: Ast, id: Int): Int {
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         if (HirUtils.hirKidsCount(kids) < 1) {
             return -1
         }
@@ -860,7 +870,7 @@ class HirLowerer {
 
     /// 降级 `@aot fun`：AOT 库函数，发射为外部 `declare`（库在链接期解析）。
     fun lowerAotMethod(ast: Ast, id: Int): Int {
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         if (HirUtils.hirKidsCount(kids) < 2) {
             return -1
         }
@@ -875,14 +885,14 @@ class HirLowerer {
 
     /// 降级函数形参 → `HirParam` id 列表（逗号分隔；fkids[0] 为 Params）。
     fun lowerParamIds(ast: Ast, fnId: Int): String {
-        val kids: String = ast.kidsOf(fnId)
+        val kids: List<Int> = ast.kidsOfList(fnId)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         var out: List<Int> = HirUtils.hirNoKids()
         var i: Int = 0
         while (i < kCount) {
             val kidId: Int = HirUtils.hirKidsAt(kids, i)
             if (ast.kindOf(kidId) == "Params") {
-                val pk: String = ast.kidsOf(kidId)
+                val pk: List<Int> = ast.kidsOfList(kidId)
                 val pn: Int = HirUtils.hirKidsCount(pk)
                 var j: Int = 0
                 while (j < pn) {
@@ -905,7 +915,7 @@ class HirLowerer {
         val name: String = ast.textOf(id)
         var ty: String = ast.tyOf(id)
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -926,7 +936,7 @@ class HirLowerer {
         val name: String = ast.textOf(id)
         var ty: String = ast.tyOf(id)
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -946,7 +956,7 @@ class HirLowerer {
         val kind: String = ast.kindOf(id)
         val name: String = ast.textOf(id)
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -1008,7 +1018,7 @@ class HirLowerer {
     /// 降级语句块。
     fun lowerBlock(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -1082,7 +1092,7 @@ class HirLowerer {
     /// AOT 的 `X()` 构造在字段初始化后调用它。
     fun lowerInitBlock(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         var bodyId: Int = -1
         if (HirUtils.hirKidsCount(kids) > 0) {
             bodyId = this.lowerBlockOrExpr(ast, HirUtils.hirKidsAt(kids, 0))
@@ -1097,7 +1107,7 @@ class HirLowerer {
     /// 降级 return 语句。
     fun lowerReturn(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -1116,7 +1126,7 @@ class HirLowerer {
     /// `Expr/Block/If` 过滤，导致条件被丢弃）。
     fun lowerIfStmt(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -1149,7 +1159,7 @@ class HirLowerer {
     /// 降级 while 循环。
     fun lowerWhile(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -1168,7 +1178,7 @@ class HirLowerer {
     /// 降级 for 循环。
     fun lowerFor(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -1199,7 +1209,7 @@ class HirLowerer {
     /// 用 BoolLiteral/Block 占位补齐可选部分）。
     fun lowerCFor(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         if (HirUtils.hirKidsCount(kids) < 4) {
             return this.hir.add("HirBlock", "", "", sp, HirUtils.hirNoKids())
         }
@@ -1244,7 +1254,7 @@ class HirLowerer {
     /// （Value::List 不可变，set 返回新列表，需回赋到目标变量）
     fun lowerAssign(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         if (kCount >= 2) {
@@ -1254,7 +1264,7 @@ class HirLowerer {
 
             // 下标赋值：array[i] = v → array = Collections.set(array, i, v)
             if (targetKind == "Index") {
-                val idxKids: String = ast.kidsOf(targetId)
+                val idxKids: List<Int> = ast.kidsOfList(targetId)
                 val idxKCount: Int = HirUtils.hirKidsCount(idxKids)
                 if (idxKCount >= 2) {
                     val containerId: Int = HirUtils.hirKidsAt(idxKids, 0)
@@ -1323,7 +1333,7 @@ class HirLowerer {
     /// 「不求值」的空操作，但**解析不再中断**（vm/*.aura 里大量 `throw Runtime(…)`）。
     fun lowerThrow(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         var hkids: List<Int> = HirUtils.hirNoKids()
         if (HirUtils.hirKidsCount(kids) > 0) {
             val v: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(kids, 0))
@@ -1340,7 +1350,7 @@ class HirLowerer {
     /// 直接返回 `lowerExpr` 的结果（`HirBinary` / `HirLit` 等）会落到
     /// `buildStmt` 的 else 分支被静默丢弃 —— 实测 `fun main() { 1+1 }` 生成空函数体。
     fun lowerExprStmt(ast: Ast, id: Int): Int {
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount > 0) {
             val exprId: Int = HirUtils.hirKidsAt(kids, 0)
@@ -1360,7 +1370,7 @@ class HirLowerer {
         val kind: String = ast.kindOf(id)
         val text: String = ast.textOf(id)
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         // 字面量（携带类型信息，供 AOT 发射器选择表示；Phase 6.5.5/6.5.7）
@@ -1392,7 +1402,7 @@ class HirLowerer {
         //  按 `__range` 生成 `aura_lang_std_Collections_range` 调用。）
         if (kind == "Range") {
             val rangeSp: Span = ast.spanOf(id)
-            val rangeKids: String = ast.kidsOf(id)
+            val rangeKids: List<Int> = ast.kidsOfList(id)
             var incText: String = "1"
             if (ast.textOf(id) == "0") {
                 incText = "0"
@@ -1417,7 +1427,7 @@ class HirLowerer {
         // 但必须存在分支——否则落到「未知 AST 种类」返回 -1，
         // 整个表达式被静默丢弃并可能触发编译器崩溃。
         if (kind == "Unwrap") {
-            val ukids: String = ast.kidsOf(id)
+            val ukids: List<Int> = ast.kidsOfList(id)
             if (HirUtils.hirKidsCount(ukids) > 0) {
                 return this.lowerExpr(ast, HirUtils.hirKidsAt(ukids, 0))
             }
@@ -1427,7 +1437,7 @@ class HirLowerer {
         // 命名实参 `f(name = v)` → `HirNamedArg(name, [value])`
         if (kind == "NamedArg") {
             val naSp: Span = ast.spanOf(id)
-            val naKids: String = ast.kidsOf(id)
+            val naKids: List<Int> = ast.kidsOfList(id)
             var naHir: List<Int> = HirUtils.hirNoKids()
             if (HirUtils.hirKidsCount(naKids) > 0) {
                 val v: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(naKids, 0))
@@ -1506,7 +1516,7 @@ class HirLowerer {
     fun lowerBinary(ast: Ast, id: Int): Int {
         val op: String = ast.textOf(id)
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         // 中缀 `a to b` → Pair 构造 `Collections.pairOf(a, b)`
@@ -1551,7 +1561,7 @@ class HirLowerer {
     fun lowerUnary(ast: Ast, id: Int): Int {
         val op: String = ast.textOf(id)
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -1619,7 +1629,7 @@ class HirLowerer {
     ///
     /// 见 `lowerCall` 里该分支的说明：不拦下就会被当成集合取值。
     private fun isEnvReceiver(ast: Ast, calleeId: Int): Boolean {
-        val ck: String = ast.kidsOf(calleeId)
+        val ck: List<Int> = ast.kidsOfList(calleeId)
         if (HirUtils.hirKidsCount(ck) < 1) {
             return false
         }
@@ -1633,7 +1643,7 @@ class HirLowerer {
     /// 降级函数调用表达式。
     fun lowerCall(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         // List/Array/Set.get(i) / getAt(i) → Collections.getAt(collection, i)
@@ -1668,7 +1678,7 @@ class HirLowerer {
                 }
 
                 if (memberName == "get" || memberName == "getAt") {
-                    val calleeKids: String = ast.kidsOf(calleeId)
+                    val calleeKids: List<Int> = ast.kidsOfList(calleeId)
                     val calleeKCount: Int = HirUtils.hirKidsCount(calleeKids)
                     if (calleeKCount >= 1
                         && !this.receiverNotForCollections(HirUtils.hirKidsAt(calleeKids, 0))) {
@@ -1700,7 +1710,7 @@ class HirLowerer {
                 }
                 // set(i, v) → Collections.set(collection, i, v)
                 if (memberName == "set") {
-                    val calleeKids: String = ast.kidsOf(calleeId)
+                    val calleeKids: List<Int> = ast.kidsOfList(calleeId)
                     val calleeKCount: Int = HirUtils.hirKidsCount(calleeKids)
                     if (calleeKCount >= 1
                         && !this.receiverNotForCollections(HirUtils.hirKidsAt(calleeKids, 0))) {
@@ -1734,7 +1744,7 @@ class HirLowerer {
                 // String.indexOf(sub) 应保留为方法调用，由 AOT 后端解析到
                 // aura_lang_std_String_indexOf。
                 if (memberName == "contains" || memberName == "indexOf") {
-                    val calleeKids: String = ast.kidsOf(calleeId)
+                    val calleeKids: List<Int> = ast.kidsOfList(calleeId)
                     if (HirUtils.hirKidsCount(calleeKids) >= 1) {
                         val recvId: Int = HirUtils.hirKidsAt(calleeKids, 0)
                         val recvTy: String = ast.tyOf(recvId)
@@ -1773,7 +1783,7 @@ class HirLowerer {
                 // 对 List 与 Map 都成立（内部按对象长度取值），因此不需要区分接收者。
                 if (memberName == "count" || memberName == "getSize" || memberName == "size"
                     || memberName == "isEmpty" || memberName == "clear") {
-                    val calleeKids: String = ast.kidsOf(calleeId)
+                    val calleeKids: List<Int> = ast.kidsOfList(calleeId)
                     if (HirUtils.hirKidsCount(calleeKids) >= 1) {
                         val recvId: Int = HirUtils.hirKidsAt(calleeKids, 0)
                         val recvTy: String = ast.tyOf(recvId)
@@ -1825,7 +1835,7 @@ class HirLowerer {
                 if (memberName == "containsKey" || memberName == "containsValue"
                     || memberName == "keys" || memberName == "values"
                     || memberName == "put") {
-                    val mapKids: String = ast.kidsOf(calleeId)
+                    val mapKids: List<Int> = ast.kidsOfList(calleeId)
                     if (HirUtils.hirKidsCount(mapKids) >= 1
                         && !this.receiverNotForCollections(HirUtils.hirKidsAt(mapKids, 0))) {
                         var mapHirKids: List<Int> = HirUtils.hirNoKids()
@@ -1875,7 +1885,7 @@ class HirLowerer {
                 // 必须降级「成员节点的接收者子节点」本身，而不是成员节点：若降级成员节点，
                 // kids[0] 会变成一次成员访问（求值得到 0/null），方法调用丢失接收者，
                 // 生成 `toString(i32 0)` 这类错误 IR。
-                val mKids: String = ast.kidsOf(calleeId)
+                val mKids: List<Int> = ast.kidsOfList(calleeId)
                 if (HirUtils.hirKidsCount(mKids) > 0) {
                     val recvId: Int = HirUtils.hirKidsAt(mKids, 0)
                     // P1 fix: 若接收者是简单标识符且大写开头（类名约定），
@@ -1926,7 +1936,7 @@ class HirLowerer {
     fun lowerMember(ast: Ast, id: Int): Int {
         val memberName: String = ast.textOf(id)
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -1949,7 +1959,7 @@ class HirLowerer {
     /// 降级下标访问表达式。
     fun lowerIndex(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -1968,7 +1978,7 @@ class HirLowerer {
     /// 降级 if 表达式。
     fun lowerIfExpr(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -2003,7 +2013,7 @@ class HirLowerer {
     /// 源码中第一个 arm 在最外层），`else ->` 分支条件恒为 `true`。
     fun lowerWhen(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         // 可选 subject（非 WhenArms 的子节点）
@@ -2023,7 +2033,7 @@ class HirLowerer {
             return this.hir.add("HirLit", "0", "Int", sp, HirUtils.hirNoKids())
         }
 
-        val armsKids: String = ast.kidsOf(armsId)
+        val armsKids: List<Int> = ast.kidsOfList(armsId)
         val armCount: Int = HirUtils.hirKidsCount(armsKids)
 
         var result: Int = -1
@@ -2031,7 +2041,7 @@ class HirLowerer {
         while (j >= 0) {
             val armId: Int = HirUtils.hirKidsAt(armsKids, j)
             j = j - 1
-            val armKids: String = ast.kidsOf(armId)
+            val armKids: List<Int> = ast.kidsOfList(armId)
             if (HirUtils.hirKidsCount(armKids) < 2) {
                 continue
             }
@@ -2059,10 +2069,10 @@ class HirLowerer {
                 // （`a..<b` → `subject < b`）。分解区间上下界、复用既有比较/逻辑
                 // 发射路径，避免为「区间成员测试」新增运行库/发射器分支。
                 if (subjectHir >= 0) {
-                    val pk: String = ast.kidsOf(patId)
+                    val pk: List<Int> = ast.kidsOfList(patId)
                     if (HirUtils.hirKidsCount(pk) > 0) {
                         val rngAst: Int = HirUtils.hirKidsAt(pk, 0)
-                        val rk: String = ast.kidsOf(rngAst)
+                        val rk: List<Int> = ast.kidsOfList(rngAst)
                         if (HirUtils.hirKidsCount(rk) >= 2) {
                             val loHir: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(rk, 0))
                             val hiHir: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(rk, 1))
@@ -2130,7 +2140,7 @@ class HirLowerer {
     fun lowerTry(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val catchVar: String = ast.textOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -2152,7 +2162,7 @@ class HirLowerer {
     /// HIR 形状：`HirLambda([HirParam...], body)`
     fun lowerLambda(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
-        val kids: String = ast.kidsOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
@@ -2161,7 +2171,7 @@ class HirLowerer {
         // 子节点 0：参数列表
         if (kCount >= 1) {
             val paramsNodeId: Int = HirUtils.hirKidsAt(kids, 0)
-            val paramsKids: String = ast.kidsOf(paramsNodeId)
+            val paramsKids: List<Int> = ast.kidsOfList(paramsNodeId)
             val pkCount: Int = HirUtils.hirKidsCount(paramsKids)
             var pi: Int = 0
             while (pi < pkCount) {
@@ -2171,7 +2181,7 @@ class HirLowerer {
                 val pSp: Span = ast.spanOf(pId)
                 // 默认参数值：作为 HirParam 的 kids[0]，供调用点补齐实参
                 var pKids: List<Int> = HirUtils.hirNoKids()
-                val pAstKids: String = ast.kidsOf(pId)
+                val pAstKids: List<Int> = ast.kidsOfList(pId)
                 if (HirUtils.hirKidsCount(pAstKids) > 0) {
                     val dId: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(pAstKids, 0))
                     if (dId >= 0) {

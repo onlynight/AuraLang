@@ -1,6 +1,6 @@
 # Aura Programming Language
 
-> A system-level scripting language for NovaOS — Kotlin-style syntax, **pure Aura implementation (self-bootstrapping)**, AOT + JIT hybrid compilation, zero-cost FFI, ARC memory management, plus a **direct-to-COFF native backend (HAT / Photon)** that emits a native executable without LLVM IR.
+> An embedded systems scripting language for NovaOS — **pure Aura implementation (self-bootstrapping)**, AOT + JIT hybrid compilation, zero-cost FFI, ARC memory management (no GC pauses), plus a **direct-to-COFF native backend (HAT / Photon)** that emits a native executable without LLVM IR.
 >
 > **中文文档** → [README.zh-CN.md](README.zh-CN.md)
 

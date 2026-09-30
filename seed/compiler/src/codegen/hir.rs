@@ -5160,7 +5160,20 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             //（object 方法带 self 形参，见 `desugar_class_method(_, _, true)`）。
             // 仅当**没有同名自由函数**且无导入别名解析时才改写（自由函数优先）。
             if let Expr::Ident(n, _) = callee.as_ref() {
-                let is_free_fn = FUNCTION_PARAMS.with(|f| f.borrow().contains_key(n.as_str()));
+                // `FUNCTION_PARAMS` 只含**当前模块**的自由函数与类/object 方法；
+                // prelude 内置（`toStr` / `toInt` / `toString` …）定义在
+                // `prelu.aura` 里，**不在当前模块**，因此必须单独登记为「自由函数」，
+                // 否则会被下面的单例兜底错误改写成 `Obj.toStr(null, …)`。
+                //
+                // 实测症状（自举前端启动即崩）：`aura.lang.compiler.mir.SsaMir` 参与编译
+                // 后，其 `object SsaMirUtils { fun toStr(n: Int) }` 成为「唯一拥有
+                // toStr 的单例」，于是 `String.countChar` 被内联后留在调用点的
+                // `toStr(char)` 被改写为 `SsaMirUtils.toStr(null, "\n")` —— 字符串
+                // 指针被 `ptrtoint` 当装箱整数喂进去，`countChar` 恒返回 0，
+                // `AotUtil.aotLineCount` 因此永远为 0（AOT 下更直接段错误）。
+                let is_free_fn = FUNCTION_PARAMS
+                    .with(|f| f.borrow().contains_key(n.as_str()))
+                    || crate::std::decl::is_prelude(n.as_str());
                 if !is_free_fn && lookup_import_short(n).is_none() {
                     if let Some(cls) = unique_singleton_with_method(n) {
                         let mut all_args = vec![HirExpr::Lit(Literal::Null)];
@@ -5553,6 +5566,20 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                                         all_args.push(HirExpr::Call {
                                             callee: "listOf".to_string(),
                                             args: vararg_exprs,
+                                        });
+                                    } else if provided == named_count {
+                                        // 无 vararg 实参：仍显式传空列表。
+                                        //
+                                        // ⚠ 不能省略：调用点实参数会因此比形参数少 1，
+                                        // mono 的单态化按**实参个数**截断形参
+                                        //（`mono_hir` 的 `spec.params.truncate(arity)`），
+                                        // 于是把 vararg 形参 `pairs` 整个截掉，函数体内
+                                        // `pairs.size` 找不到声明 → AOT 报
+                                        // `member access on non-pointer value: obj_ir=%pairs`。
+                                        // 自由函数路径（`Expr::Call` 分支）已有同样的空列表兜底。
+                                        all_args.push(HirExpr::Call {
+                                            callee: "listOf".to_string(),
+                                            args: vec![],
                                         });
                                     }
                                 }

@@ -1,7 +1,7 @@
 # Aura 语言 vs Kotlin：语法语义缺失分析
 
 > **数据来源**：`aura/compiler/` 约 100+ 个 Aura 源文件、`aura/core/` 标准库、`docs/` 设计文档、`book/` 教程、`tests/` 294 个测试文件
-> **分析时间**：2026-09-28（P0 更新：扩展函数/select/Future.then/suspend移除 已实现）
+> **分析时间**：2026-09-28（P0 更新：扩展函数/select/Future.then/suspend移除 已实现；P1 更新：sealed/enum when 穷举检查已实现，Kotlin 叙事已替换为嵌入式系统定位）
 
 ---
 
@@ -84,7 +84,7 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 | `abstract fun` | ❌ **缺失** | |
 | `data class` | ⚠️ 变体 `value data class` | 无 `copy()` / `componentN()` / 自动 `equals/hashCode/toString` |
 | `value class` | ✅ 完整 | Aura 特色，替代 Kotlin `data class` |
-| `sealed class` | ⚠️ 部分 | 语法支持，无 `when` 穷举检查 |
+| `sealed class` | ✅ 完整 | 语法 + `when` 穷举检查（P1 已实现） |
 | `inner class` | ❌ **缺失** | 不支持访问外部类实例 |
 | `companion object` | ⚠️ 部分 | `companion object { }` 无命名访问 |
 | `companion object Foo { }` | ❌ **缺失** | 不支持自定义伴生对象名 |
@@ -98,8 +98,8 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 | 接口默认方法 | ✅ 完整 | `fun method(): R = expr` |
 | 接口委托 `by` | ❌ **缺失** | |
 | `enum` | ✅ 完整 | 含数据变体 |
-| `enum when 穷举` | ❌ **缺失** | TypeChecker 明确注明未实现 |
-| `sealed when 穷举` | ❌ **缺失** | TypeChecker 明确注明未实现 |
+| `enum when 穷举` | ✅ **已实现**（P1） | TypeChecker 穷举检查（缺失变体报错） |
+| `sealed when 穷举` | ✅ **已实现**（P1） | TypeChecker 穷举检查（缺失子类报错） |
 | `annotation class` | ❌ **缺失** | 无注解类语法 |
 | `@JvmStatic` / `@JvmName` 等 | ❌ **缺失** | 仅 `@native`/`@aot`/`@Export` 元数据 |
 | `expect`/`actual` | ❌ **缺失** | 无多平台支持 |
@@ -115,8 +115,8 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 | `when is T ->` 模式 | ✅ 完整 | `__is__T` 节点 |
 | `when in range ->` 模式 | ✅ 完整 | `InPattern` 节点 |
 | `when else ->` 兜底 | ✅ 完整 | `__else__` |
-| `when` 穷举检查 (sealed) | ❌ **缺失** | TypeChecker 注明未实现 |
-| `when` 穷举检查 (enum) | ❌ **缺失** | TypeChecker 注明未实现 |
+| `when` 穷举检查 (sealed) | ✅ **已实现**（P1） | TypeChecker 穷举检查 |
+| `when` 穷举检查 (enum) | ✅ **已实现**（P1） | TypeChecker 穷举检查 |
 | `for` in 循环 | ✅ 完整 | Kotlin 风格 |
 | `for` C 风格 | ✅ 完整 | `for (init; cond; incr)` |
 | `while` | ✅ 完整 | |
@@ -285,11 +285,14 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 来自 `aura/compiler/aura/lang/compiler/sema/TypeChecker.aura` 的注释：
 
 ```
-// 本版本聚焦核心类型检查，暂未覆盖：
+// 本版聚焦核心类型检查，暂不覆盖：
 //   - 泛型单态化（留待 HIR 阶段）
-//   - 枚举 when 穷举性检查
 //   - 接口方法实现检查
 //   - 运算符重载解析
+//
+// P1 新增（2026-09-28）：
+//   - 枚举 when 穷举性检查（enum 变体全覆盖）
+//   - sealed 类 when 穷举性检查（sealed 子类全覆盖）
 //
 // 注：协程追踪（suspend/async）已决定不做，不再列入计划
 ```
@@ -323,7 +326,7 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 | 🟢 **P3** | ~~协程实际语义~~ **决定不做** | 并发 | 由 actor + Channel + Future 替代，见 §7.5 |
 | 🟠 **P1** | 带标签 `break@label`/`continue@label` | 控制流 | 嵌套循环无法精确跳转 |
 | 🟠 **P1** | `abstract class` / `abstract fun` | 类 | 无法定义抽象基类 |
-| 🟠 **P1** | `sealed when` / `enum when` 穷举检查 | 类型 | 无法静态保证模式完备性 |
+| ✅ **P1** | ~~`sealed when` / `enum when` 穷举检查~~ **已实现** | 类型 | TypeChecker 穷举检查，缺失变体/子类报错 |
 | 🟠 **P1** | 属性 getter/setter | 类 | 无法惰性求值或计算属性 |
 | 🟠 **P1** | 接口方法实现检查 | 类 | 编译期无法检测遗漏方法 |
 | 🟠 **P1** | 后缀 `++`/`--` | 操作符 | 仅前缀可用 |
@@ -365,23 +368,26 @@ Aura 已经实现了**相当完整的前端管线**：Lexer → Parser → AST �
 
 ## 六、核心结论
 
-Aura 目前处于 **"Kotlin 风格语法 + 部分语义"** 阶段：
+Aura 目前处于 **"嵌入式系统脚本语言 + 部分语义"** 阶段：
 
 1. **语法前端已相当完整**：覆盖 Kotlin 约 **65-75%** 的语法特性（P0 扩展函数 + select 已补齐）
-2. **语义后端严重不完整**：TypeChecker 明确注明 4 个未覆盖的高级特性（泛型单态化、穷举检查、接口检查、运算符重载）；协程追踪已决定不做
+2. **语义后端持续补全**：TypeChecker 注明 3 个未覆盖的高级特性（泛型单态化、接口检查、运算符重载）；穷举检查已实现（P1）；协程追踪已决定不做
 3. **P0 已完成项**：
    - ✅ **扩展函数** —— 解析器已支持 `fun Type.name()` 语法（P0 #2）
    - ✅ **select { }** —— 解析器已支持多路复用语法，含 `timeout(n)` 分支（P0 #6）
    - ✅ **Future.then()** —— 回调式异步 API 已添加，替代协程（P0 #5）
    - ✅ **suspend/async/await 移除** —— 已不在关键字表，作为普通标识符处理（P0 #4）
-4. **最大的缺口**：
+4. **P1 已完成项**：
+   - ✅ **sealed/enum when 穷举** —— TypeChecker 穷举性检查，缺失变体/子类报错（P1 #2）
+   - ✅ **放弃 Kotlin 叙事** —— book/README.md、README.zh-CN.md、README.md 已更新为嵌入式系统定位（P1 #1）
+5. **最大的缺口**：
    - 🔴 **函数重载** —— 全局函数命名空间，这是系统级语言最致命的限制
    - 🔴 **智能转换** —— 没有 smart cast，`is` 后仍需手动 `as`，空安全形同虚设
    - 🔴 **泛型单态化** —— 泛型函数无法正确实例化
    - 🔴 **运算符重载** —— 无法写 `operator fun plus`，无法做 DSL
-5. **特色差异化**：`value class`（替代 Kotlin `data class`）、`actor` 并发实体、`extern object` FFI、HAT/Photon 原生后端
+6. **特色差异化**：`value class`（替代 Kotlin `data class`）、`actor` 并发实体、`extern object` FFI、HAT/Photon 原生后端、ARC 零暂停
 
-**一句话总结**：Aura 已经能写"看起来像 Kotlin"的程序，但要写真正的 Kotlin 风格代码（多态 API、扩展函数、运算符 DSL、可穷举的密封类），还需要大量后端语义补全。
+**一句话总结**：Aura 已经能写"嵌入式系统脚本"，P1 穷举检查补齐了类型安全的最后一块拼图。要写完整的 DSL 和多态 API，还需要补齐函数重载、智能转换和泛型单态化。
 
 ---
 
@@ -611,7 +617,7 @@ select {
 
 ### ✅ 应该做的
 
-1. **放弃"Kotlin 风格"的叙事**，改为"嵌入式系统脚本语言"
+1. **放弃"Kotlin 风格"的叙事**，改为"嵌入式系统脚本语言" ✅ 已执行（2026-09-28：book/README.md、README.zh-CN.md、README.md 已更新）
 2. **强化 ARC + 零暂停**作为核心卖点
 3. **强化 HAT/Photon 自举**作为架构差异
 4. **强化 actor 模型**作为**唯一**并发差异（不做协程，见 §7.5）
@@ -668,8 +674,8 @@ select {
 | 🔴 **P0** | 补齐**函数重载** | 嵌入式系统也需要多态 API | ⏳ 待实现 |
 | 🔴 **P0** | 补齐**扩展函数** | 嵌入式也需要给已有类型加方法 | ✅ 已实现（解析器 `fun Type.name()`） |
 | 🔴 **P0** | 强化**ARC 零暂停**作为核心卖点 | 差异化叙事 | ✅ 已强化（§7.2） |
-| 🟠 **P1** | 放弃"Kotlin 风格"叙事 | 重新定位 | ⏳ 待执行 |
-| 🟠 **P1** | 补齐**sealed when 穷举** | 嵌入式类型安全需要 | ⏳ 待实现 |
+| 🟠 **P1** | 放弃"Kotlin 风格"叙事 | 重新定位 | ✅ 已执行（book/README.md、README.zh-CN.md、README.md 已更新为嵌入式系统定位） |
+| 🟠 **P1** | 补齐**sealed when 穷举** | 嵌入式类型安全需要 | ✅ 已实现（SymbolTable 变体跟踪 + Parser sealed 标记 + TypeChecker 穷举检查，含 12 个测试用例） |
 | 🟠 **P1** | 强化**HAT/Photon 自举**故事 | 架构差异化 | ✅ 已强化（§7.2） |
 | 🔴 **P0** | **明确不做协程**，移除 `suspend`/`async`/`await` 占位关键字 | 强化 actor 差异，避免半成品 | ✅ 已移除（不在关键字表） |
 | 🔴 **P0** | 新增 `Future<T>` / `Promise<T>` | 轻量异步原语，覆盖 80% 用例 | ✅ 已实现（含 `then`/`thenMap`） |
@@ -679,3 +685,5 @@ select {
 | 🟡 **P2** | 不追 JVM 注解/expect/actual/Flow | 与 Kotlin 竞争必败，用 Channel 替代 | ✅ 已明确 |
 
 > **P0 完成度**：6 项中 4 项已完成（扩展函数、select、Future.then、suspend/async/await 移除），2 项待实现（函数重载、智能转换/operator 重载/泛型单态化）。
+>
+> **P1 完成度**：4 项全部完成（放弃 Kotlin 叙事 ✅、sealed when 穷举 ✅、HAT/Photon 自举强化 ✅、actor 并发强化 ✅）。

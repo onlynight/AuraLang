@@ -1,6 +1,6 @@
 # Aura 编程语言
 
-> 为 NovaOS 从零构建的系统级脚本语言 —— **纯 Aura 实现（自举编译）**、Kotlin 风格语法、AOT + JIT 混合编译、零开销 FFI、ARC 内存管理，以及一条**直接生成 COFF 的原生后端（HAT / Photon）**—— 不经 LLVM IR 即可产出原生可执行文件。
+> 为 NovaOS 从零构建的嵌入式系统脚本语言 —— **纯 Aura 实现（自举编译）**、AOT + JIT 混合编译、零开销 FFI、ARC 内存管理（无 GC 停顿），以及一条**直接生成 COFF 的原生后端（HAT / Photon）**—— 不经 LLVM IR 即可产出原生可执行文件。
 >
 > **English** → [README.md](README.md)
 
