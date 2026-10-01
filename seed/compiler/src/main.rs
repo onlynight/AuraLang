@@ -153,6 +153,9 @@ fn real_main() {
                                                     process::exit(1);
                                                 }
                                             }
+                                            if let Some(code) = vm.requested_exit_code() {
+                                                process::exit(code);
+                                            }
                                         }
                                         Err(e) => {
                                             eprintln!("VM init error: {}", e);

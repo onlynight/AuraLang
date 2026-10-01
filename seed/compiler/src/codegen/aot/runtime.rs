@@ -1058,7 +1058,7 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
             ],
         ),
         "aura_lang_std_StringBuilder_length" => ("i64", &["i64"]),
-        "aura_lang_std_StringBuilder_finish" => (P, &["i64"]),
+        "aura_lang_std_StringBuilder_build" => (P, &["i64"]),
         "aura_lang_std_StringBuilder_reset" => ("i64", &["i64"]),
         // aura.fs
         "aura_fs_exists" | "aura_fs_isFile" | "aura_fs_isDirectory" => ("i1", &[P]),

@@ -3,8 +3,10 @@ package aura.lang.std.string
 // ─────────────────────────────────────────────────────────────
 // 原生可变字符串缓冲区 — Phase P1
 //
-// 句柄为 i64（实为 AuraSb* 指针）。
-// 内存布局：
+// 每个 StringBuilder 是独立实例（class），持有自己的内部句柄 h（AuraSb* 指针）。
+// 不再依赖单例 object，避免并发编译时共享同一缓冲区导致数据互踩。
+//
+// 内存布局（AuraSb 结构体，由 C 层 aura_std_cffi.c 管理）：
 //   offset 0  : buf ptr (i64, 数据区)
 //   offset 8  : len (i64, 已用字节)
 //   offset 16 : cap (i64, 容量)
@@ -16,103 +18,65 @@ package aura.lang.std.string
 import aura.lang.native.Memory
 import aura.lang.std.string.StringOps
 
-/// 原生可变字符串缓冲区（纯 Aura 实现）。
-///
-/// 契约（与 Rust VM std_sb.rs 对齐）：
-///   create()                  -> Long 句柄
-///   append(h, s)              -> Long 句柄（返回自身，便于链式）
-///   appendChar(h, ch)         -> Long 句柄
-///   appendInt(h, v)           -> Long 句柄
-///   length(h)                 -> Long 当前字节长度
-///   finish(h)                 -> Long 字符串指针（**转移缓冲区所有权**，原句柄失效）
-///   reset(h)                  -> Long 句柄（清空，保留容量）
-object StringBuilder {
+/// 原生可变字符串缓冲区（纯 Aura 实现，每个实例独立）。
+class StringBuilder {
+
+    /// 内部句柄（AuraSb* 指针，i64 承载）。
+    var h: Long = 0
 
     /// 初始容量（字节）。
     const val SB_INIT_CAP: Long = 256
 
+    init() {
+        this.h = newHandle()
+    }
+
     // ── 公开接口 ──
 
-    /// 创建字符串缓冲区，返回句柄。
-    fun create(): Long {
-        val sb: Long = Memory.alloc(24)
-        if (sb == 0) { return 0 }
-        val buf: Long = Memory.alloc(SB_INIT_CAP)
-        if (buf == 0) {
-            Memory.write64(sb, 0)       // buf = NULL
-            Memory.write64(sb + 8, 0)   // len = 0
-            Memory.write64(sb + 16, 0)  // cap = 0
-            return sb
-        }
-        Memory.write64(sb, buf)
-        Memory.write(buf, 0 as Byte)    // buf[0] = '\0'
-        Memory.write64(sb + 8, 0)
-        Memory.write64(sb + 16, SB_INIT_CAP)
-        return sb
-    }
-
-    /// 追加字符串（返回自身句柄，便于链式调用）。
-    fun append(handle: Long, text: Long): Long {
-        if (text == 0) { return handle }
-        // ── 长度就地算（不调 `StringOps.strlen`）────────────────────────────
-        // 历史现象：`n` 恒为 0 → 缓冲长度恒为 0 → 发射内容全空。当时的排查把
-        // 它记成「`StringOps.strlen` 在 object 方法体内被前端错解析」（见
-        // `seed/compiler/src/codegen/hir.rs:5322` 起的长注释）。
-        // **真实根因（2026-09-23 查明）在 VM 的指针算术**：`CString(s)` 产出的是
-        // `Value::Ptr`，经 `Long` 形参传进来后，`Memory.read(text + n)` 里的
-        // `text + n` 落进了 `bin_add` 的 Float 分支（`Ptr` 的 `as_float()` = 0.0）
-        // → 读到地址 0 → `c == 0` → 扫描立刻结束、`n = 0`。
-        // 该缺陷已在 `seed/compiler/src/vm/interp.rs` 的 `bin_add`/`bin_sub` 修好
-        //（含 `Ptr` 的加减一律按地址做整数运算）。
-        //
-        // 这里仍保留**就地扫描**：它只依赖 `Memory.read`（同 `appendN` 一直在用的
-        // native 原语族），少一次跨对象调用，语义与本 API 完全一致。
+    /// 追加字符串（返回 self，便于链式调用）。
+    fun append(text: String): StringBuilder {
+        if (text == "") { return this }
+        val ptr: Long = CString(text)
+        if (ptr == 0) { return this }
         var n: Long = 0
-        var c: Byte = Memory.read(text + n)
+        var c: Byte = Memory.read(ptr + n)
         while (c != 0) {
             n = n + 1
-            c = Memory.read(text + n)
+            c = Memory.read(ptr + n)
         }
-        appendN(handle, text, n)
-        return handle
+        appendN(this.h, ptr, n)
+        return this
     }
 
-    /// 追加单个字符（返回自身句柄）。
-    fun appendChar(handle: Long, ch: Short): Long {
-        val sb: Long = handle
-        val len: Long = Memory.read64(sb + 8)
-        reserve(sb, len + 2)
-        val buf: Long = Memory.read64(sb)
-        if (buf == 0) { return handle }
+    /// 追加单个字符（返回 self）。
+    fun appendChar(ch: Char): StringBuilder {
+        val sb: Long = this.h
+        val len: Long = sbLen(sb)
+        sbReserve(sb, len + 2)
+        val buf: Long = sbBuf(sb)
+        if (buf == 0) { return this }
         Memory.write(buf + len, ch as Byte)
         Memory.write64(sb + 8, len + 1)
         Memory.write(buf + len + 1, 0 as Byte)
-        return handle
+        return this
     }
 
-    /// 追加整数（返回自身句柄）。
-    fun appendInt(handle: Long, value: Int): Long {
-        val sb: Long = handle
-        val len: Long = Memory.read64(sb + 8)
-        reserve(sb, len + 12)
-
-        val buf: Long = Memory.read64(sb)
-        if (buf == 0) { return handle }
-
-        // 整数转字符串：逐位取模 10，逆序写入
+    /// 追加整数（返回 self）。
+    fun appendInt(value: Int): StringBuilder {
+        val sb: Long = this.h
+        val len: Long = sbLen(sb)
+        sbReserve(sb, len + 12)
+        val buf: Long = sbBuf(sb)
+        if (buf == 0) { return this }
         var v: Long = value as Long
         var neg: Boolean = false
         if (v < 0) { neg = true; v = -v }
-
-        // 临时缓冲区（栈上不够，用 alloc）
         val tmp: Long = Memory.alloc(32)
-        if (tmp == 0) { return handle }
-
+        if (tmp == 0) { return this }
         if (v == 0) {
-            Memory.write(tmp, '0' as Byte)
+            Memory.write(tmp, 48 as Byte)
             v = 1
         }
-
         var pos: Long = 0
         while (v > 0) {
             val digit: Long = v % 10
@@ -121,11 +85,9 @@ object StringBuilder {
             v = v / 10
         }
         if (neg) {
-            Memory.write(tmp + pos, 45 as Byte)  // '-'
+            Memory.write(tmp + pos, 45 as Byte)
             pos = pos + 1
         }
-
-        // 反转（数字是逆序写入的）
         var start: Long = 0
         var end: Long = pos - 1
         while (start < end) {
@@ -136,36 +98,71 @@ object StringBuilder {
             start = start + 1
             end = end - 1
         }
-
-        // 追加到 sb.buf
         val newLen: Long = len + pos
         Memory.copy(buf + len, tmp, pos)
         Memory.write64(sb + 8, newLen)
         Memory.write(buf + newLen, 0 as Byte)
         Memory.free(tmp)
-        return handle
+        return this
     }
 
     /// 当前字节长度。
-    fun length(handle: Long): Long {
-        return Memory.read64(handle + 8)
+    fun length(): Int {
+        return sbLen(this.h) as Int
     }
 
-    /// 结束并交出内容（转移缓冲区所有权，原句柄失效）。
-    fun finish(handle: Long): Long {
-        val sb: Long = handle
-        val buf: Long = Memory.read64(sb)
-        Memory.write64(sb, 0)
-        Memory.write64(sb + 8, 0)
-        Memory.write64(sb + 16, 0)
-        if (buf == 0) { return 0 }
-        return buf
+    /// 检查缓冲区是否包含指定子串。
+    fun contains(sub: String): Boolean {
+        if (sub == "") {
+            return true
+        }
+        val buf: Long = sbBuf(this.h)
+        val len: Long = sbLen(this.h)
+        if (buf == 0 || len <= 0) {
+            return false
+        }
+        val subPtr: Long = CString(sub)
+        // 在缓冲区中搜索子串（类似 C 的 strstr）
+        val subLen: Long = sub.length as Long
+        if (subLen > len) {
+            return false
+        }
+        // 逐字符比较
+        var i: Long = 0
+        while (i + subLen <= len) {
+            var found: Boolean = true
+            var j: Long = 0
+            while (j < subLen) {
+                if (Memory.read(buf + i + j) != Memory.read(subPtr + j)) {
+                    found = false
+                    break
+                }
+                j = j + 1
+            }
+            if (found) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
     }
 
-    /// 清空（保留容量）。
-    fun reset(handle: Long): Long {
-        val sb: Long = handle
-        var buf: Long = Memory.read64(sb)
+    /// 获取当前内容快照（**不重置**缓冲区，之后可继续 append）。
+    ///
+    /// 返回的 String 是独立分配（与缓冲区解耦），
+    /// 后续 append 不影响已取出的 String 内容。
+    fun build(): String {
+        val sb: Long = this.h
+        val buf: Long = sbBuf(sb)
+        val len: Long = sbLen(sb)
+        if (buf == 0 || len <= 0) { return "" }
+        return ReadCStr(buf)
+    }
+
+    /// 清空（保留容量，返回 self）。
+    fun reset(): StringBuilder {
+        val sb: Long = this.h
+        var buf: Long = sbBuf(sb)
         if (buf == 0) {
             buf = Memory.alloc(SB_INIT_CAP)
             if (buf == 0) {
@@ -179,23 +176,53 @@ object StringBuilder {
             Memory.write(buf, 0 as Byte)
         }
         Memory.write64(sb + 8, 0)
-        return handle
+        return this
     }
 
-    // ── 内部辅助 ──
+    /// 深拷贝当前内容到新实例。
+    fun copy(): StringBuilder {
+        val newSb: StringBuilder = StringBuilder()
+        val newH: Long = newSb.h
+        val srcH: Long = this.h
+        val srcLen: Long = sbLen(srcH)
+        if (srcLen > 0) {
+            val srcBuf: Long = sbBuf(srcH)
+            if (srcBuf != 0) {
+                appendN(newH, srcBuf, srcLen)
+            }
+        }
+        return newSb
+    }
 
-    /// 确保容量 >= need（几何增长，保证 append 摊还 O(1)）。
-    ///
-    /// ⚠ 死循环防护（2026-09-23）：此前的写法在 `need` 异常巨大时**永久空转** ——
-    /// `newcap = newcap * 2` 会先溢出成负数、再溢出成 0，于是 `newcap < need`
-    /// 恒成立，纯整数运算、不分配内存，表现为「CPU 100%、内存不动、永不返回」。
-    /// 实测自举编译器跑到 AOT/字节码发射阶段时因此卡死（`need` 读到
-    /// 1972206093664 ≈ 1.8TB，来自对**非法句柄**调用 `strlen`）。
-    /// 现在：先夹取 need，再保证 newcap 每轮**严格增长**且不超过上限，否则直接放弃扩容。
-    private fun reserve(sb: Long, need: Long) {
-        // 非法句柄（0/null）：不做任何事，避免基于垃圾指针算出天文数字
+    // ── 内部辅助方法 ──
+
+    private fun newHandle(): Long {
+        val sb: Long = Memory.alloc(24)
+        if (sb == 0) { return 0 }
+        val buf: Long = Memory.alloc(SB_INIT_CAP)
+        if (buf == 0) {
+            Memory.write64(sb, 0)
+            Memory.write64(sb + 8, 0)
+            Memory.write64(sb + 16, 0)
+            return sb
+        }
+        Memory.write64(sb, buf)
+        Memory.write(buf, 0 as Byte)
+        Memory.write64(sb + 8, 0)
+        Memory.write64(sb + 16, SB_INIT_CAP)
+        return sb
+    }
+
+    private fun sbBuf(handle: Long): Long {
+        return Memory.read64(handle)
+    }
+
+    private fun sbLen(handle: Long): Long {
+        return Memory.read64(handle + 8)
+    }
+
+    private fun sbReserve(sb: Long, need: Long) {
         if (sb == 0) { return }
-        // 上限 256MB：正常发射量远小于此；超过说明参数已错乱，直接放弃（不扩容）
         val SB_MAX_CAP: Long = 268435456
         var want: Long = need
         if (want < 0 || want > SB_MAX_CAP) { return }
@@ -203,7 +230,6 @@ object StringBuilder {
         if (cap >= want) { return }
         var newcap: Long = cap
         if (newcap < SB_INIT_CAP) { newcap = SB_INIT_CAP }
-        // 倍增 + 严格增长 + 上限三重保护：任一轮不增长即退出循环
         while (newcap < want) {
             val next: Long = newcap * 2
             if (next <= newcap || next > SB_MAX_CAP) {
@@ -225,22 +251,15 @@ object StringBuilder {
         Memory.write64(sb + 16, newcap)
     }
 
-    /// 底层追加 n 字节（不含 NUL）。
-    ///
-    /// ⚠ 安全检查（2026-09-23）：`n` 由调用方给出（`append` 就地扫描得到）。当
-    /// `n` 异常（负数 / 天文数字，实测曾出现 `n = 1972206093664`）时，旧实现会拿它
-    /// 去 `reserve` 扩容 —— 先触发倍增死循环（`newcap*2` 溢出成 0），即便侥幸返回
-    /// 也会**越界写**。这里对「句柄 / n / 扩容后实际容量」三重校验，
-    /// 任何一项不成立就放弃本次追加（丢数据总好过崩或死循环）。
     private fun appendN(handle: Long, src: Long, n: Long) {
         val sb: Long = handle
         if (sb == 0) { return }
         if (n < 0 || n > 67108864) { return }
-        val len: Long = Memory.read64(sb + 8)
-        reserve(sb, len + n + 1)
+        val len: Long = sbLen(sb)
+        sbReserve(sb, len + n + 1)
         val cap: Long = Memory.read64(sb + 16)
         if (cap < len + n + 1) { return }
-        val buf: Long = Memory.read64(sb)
+        val buf: Long = sbBuf(sb)
         if (buf == 0) { return }
         if (src != 0 && n > 0) {
             Memory.copy(buf + len, src, n)

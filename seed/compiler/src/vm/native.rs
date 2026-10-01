@@ -396,6 +396,8 @@ impl NativeRegistry {
         r.register("Cpu.atomicAdd", native_cpu_atomic_add);
         // Phase P3: Syscalls.exit — 进程退出
         r.register("Syscalls.exit", native_syscalls_exit);
+        // ProcessNative.exitGroup — VM 中 @native(SYS_EXIT_GROUP) 的实际调用名
+        r.register("ProcessNative.exitGroup", native_syscalls_exit);
         // Phase S1: ProcessOps C FFI 函数
         r.register("ProcessOps.aura_process_argCount", native_process_arg_count);
         r.register("ProcessOps.aura_process_args", native_process_args);

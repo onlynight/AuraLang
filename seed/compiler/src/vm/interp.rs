@@ -1611,6 +1611,21 @@ impl Vm {
             }
         }
 
+        // Env.* / FileUtils.* / FileSystem.* 函数优先使用 Rust native
+        // （Aura 实现依赖 /proc/self/environ，在 Windows 上不可用）。
+        if native_name.starts_with("aura.lang.std.Env.")
+            || native_name.starts_with("aura.lang.std.fs.FileUtils.")
+            || native_name.starts_with("aura.lang.std.FileSystem.")
+            || native_name == "ProcessNative.exitGroup"
+            || native_name.starts_with("aura.lang.std.Process.")
+        {
+            if let Some(f) = self.natives.get(&native_name) {
+                let result = f(&args);
+                self.frames[top].stack.push(result);
+                return Ok(());
+            }
+        }
+
         // Phase D: Aura 编译的标准库函数版本优先。
         // 始终先查 `stdlib_func_map`（嵌入 .auc 的 Aura 编译函数），
         // 仅当未找到或函数为 native 声明（is_native=true，无 Aura 实现体）时才回退到 Rust native。

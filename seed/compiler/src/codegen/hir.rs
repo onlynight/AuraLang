@@ -3742,7 +3742,6 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 name,
                 "aura.lang.std.Process.argCount"
                     | "aura.lang.std.Process.args"
-                    | "aura.lang.std.StringBuilder.create"
             );
             let ret = (params.iter().any(|(_, pt)| *pt != "Unit") || value_returning_no_arg)
                 .then(|| HirType::Named("Any".into()));
@@ -7632,41 +7631,7 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.lang.std.Env.platform", vec![]),
         ("aura.lang.std.Env.os", vec![]),
         ("aura.lang.std.Env.arch", vec![]),
-        // ── std.sb（StringBuilder：原生可变字符串缓冲区）──
-        ("aura.lang.std.StringBuilder.create", vec![]),
-        (
-            "aura.lang.std.StringBuilder.append",
-            vec![
-                ("handle", "Long"),
-                ("text", "String"),
-            ],
-        ),
-        (
-            "aura.lang.std.StringBuilder.appendChar",
-            vec![
-                ("handle", "Long"),
-                ("ch", "Char"),
-            ],
-        ),
-        (
-            "aura.lang.std.StringBuilder.appendInt",
-            vec![
-                ("handle", "Long"),
-                ("value", "Int"),
-            ],
-        ),
-        (
-            "aura.lang.std.StringBuilder.length",
-            vec![("handle", "Long")],
-        ),
-        (
-            "aura.lang.std.StringBuilder.finish",
-            vec![("handle", "Long")],
-        ),
-        (
-            "aura.lang.std.StringBuilder.reset",
-            vec![("handle", "Long")],
-        ),
+        // ── std.sb（StringBuilder 已改为 class，不再注册为原生函数）──
         // ── std.process ──
         ("aura.lang.std.Process.exit", vec![("code", "Int")]),
         ("aura.lang.std.Process.exitCode", vec![]),
