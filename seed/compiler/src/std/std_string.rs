@@ -398,9 +398,21 @@ fn nat_contains_all(args: &[Value]) -> Value {
 }
 
 /// String.fromCharCode(code) — 从 Unicode 码点创建单字符字符串
+///
+/// ⚠ 参数布局兼容（2026-10-01 修复）：`fromCharCode` 经 VM 调用时可能被
+/// 注入 self 前缀（同 `nat_char_at_code` 修过的缺陷），此时 `i0(args)` 取到
+/// 的是接收者（Str → as_int → 0），产出 `'\0'` 而非目标字符 —— 实测
+/// `fromCharCode(65)` 得到 1 字节 NUL 串（打印为空白、`charCodeAt==0`、
+/// `!= "A"`），连带 `.auc` 加载器的 `readStr`/`readMagic`（逐字节
+/// fromCharCode 拼串）全部产出 NUL 串 → **`.auc` 在 Aura VM 上从未成功
+/// 执行过的直接根因**。此处按「末位 Int 即码点」的布局兼容两种调用形态。
 fn nat_from_char_code(args: &[Value]) -> Value {
-    let code = i0(args) as u32;
-    match char::from_u32(code) {
+    let code: i64 = if args.len() >= 2 && matches!(args.get(1), Some(Value::Int(_))) {
+        args.get(1).map(|v| v.as_int()).unwrap_or(0)
+    } else {
+        i0(args)
+    };
+    match char::from_u32(code as u32) {
         Some(c) => Value::str_(c.to_string()),
         None => Value::Null,
     }

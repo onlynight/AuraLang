@@ -1,0 +1,28 @@
+// aura:///examples/compiler/auc_diff_runner.aura
+// ═════════════════════════════════════════════════════════════
+// P2.4 差分测试运行器：用 **Aura VM** 执行 .auc 文件。
+//
+// 用法：aura run examples/compiler/auc_diff_runner.aura
+// 被测文件固定为 `build/diff/current.auc` —— 由差分脚本（diff-test.ps1）
+// 在每次运行前把目标 .auc 复制到该路径。
+// 输出 = 被测程序 stdout + "EXIT=<退出码>"（或 "VM-ERROR=<错误>"）。
+// 与 Rust VM（`aura run <源码>`）的输出做逐行对比。
+//
+// 实现说明：路径不用命令行/环境变量传入 —— 冻结种子的 `Process.arg*` 有
+// 形参错位缺陷（Main.aura:748），而 `Env.get` 与 VmRunner 大规模内联共存时
+// 亦有取值异常（实测），固定路径是最可靠通道。
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
+
+fun main() {
+    val path: String = "build/diff/current.auc"
+    val vm = VmRunner()
+    vm.loadAucAndRun(path)
+    val err: String = vm.getError()
+    if (err.length > 0) {
+        println("VM-ERROR=" + err)
+    }
+    println("EXIT=" + toStr(vm.getExitCode()))
+}

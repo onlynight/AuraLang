@@ -1,0 +1,20 @@
+open class Animal {
+    var legs: Int
+    fun speak(): String {
+        return "..."
+    }
+    fun legs(): Int {
+        return legs
+    }
+}
+class Dog : Animal {
+    override fun speak(): String {
+        return "woof"
+    }
+}
+fun main() {
+    val d: Dog = Dog()
+    println(d.speak())
+    val a: Animal = Animal()
+    println(a.speak())
+}

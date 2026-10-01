@@ -84,6 +84,10 @@ impl Value {
             Value::Float(f) => *f,
             Value::Int(i) => *i as f64,
             Value::Bool(b) => *b as i64 as f64,
+            // 2026-10-01 修复：字符串 → 浮点解析缺失（`_ => 0.0` 兜底吞掉），
+            // `toFloat("2.5")` 恒得 0.0 —— 连带 `.auc` 常量池的浮点常量
+            // （LOAD_CONST_F 经 parseFloat 文本解析）全部归零（差分实测）。
+            Value::Str(s) => s.trim().parse::<f64>().unwrap_or(0.0),
             _ => 0.0,
         }
     }

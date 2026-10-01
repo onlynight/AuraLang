@@ -1,0 +1,10 @@
+fun main() {
+    val xs: List<Int> = listOf(3, 1, 2)
+    println(xs.size)
+    println(xs.get(0))
+    println(xs.get(2))
+    xs.set(0, 30)
+    println(xs.get(0))
+    val total: Int = xs.get(0) + xs.get(1) + xs.get(2)
+    println(total)
+}

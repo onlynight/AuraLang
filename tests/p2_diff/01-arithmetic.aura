@@ -1,0 +1,14 @@
+fun main() {
+    val a: Int = 17
+    val b: Int = 5
+    println(a + b)
+    println(a - b)
+    println(a * b)
+    println(a / b)
+    println(a % b)
+    val x: Float = 2.5
+    println(x * 2.0)
+    println(-a)
+    println(a > b)
+    println(a == 17)
+}

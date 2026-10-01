@@ -272,7 +272,10 @@ class AucReader {
         val pathBuf: Long = stringToBuffer(path)
         if (pathBuf == 0) { return 0 }
 
-        val fd: Int = FileOps.open(pathBuf, 0x8000)  // O_RDONLY | 二进制位（见 winCrtWrapper）
+        // P2.2 修复：打开标志用 O_RDONLY(0)。原 `0x8000`（_O_BINARY）在 Windows
+        // 宿主 CRT 下 read 读出垃圾/0 字节（实测 bad magic）；二进制语义由
+        // 平台默认（Linux open 无文本模式差异）与宿主映射保证。
+        val fd: Int = FileOps.open(pathBuf, 0)
         Allocator.free(pathBuf)
         if (fd < 0) { return 0 }
 

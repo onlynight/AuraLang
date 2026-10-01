@@ -1,0 +1,14 @@
+fun fact(n: Int): Int {
+    if (n <= 1) { return 1 }
+    return n * fact(n - 1)
+}
+
+fun fib(n: Int): Int {
+    if (n < 2) { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fun main() {
+    println(fact(10))
+    println(fib(15))
+}

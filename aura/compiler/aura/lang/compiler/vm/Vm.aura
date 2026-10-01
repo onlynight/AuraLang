@@ -145,6 +145,9 @@ class Vm {
     // 装箱值侧表（P1.1 boxAlloc 类型感知）：非数值装箱值无法写裸内存，
     // 以 "<objPtr>" 键存放于托管侧表（box 释放时同步摘除）。
     private var boxValues: HashMap<String, Any> = HashMap<String, Any>()
+    // 模块注册表（P2.3）：已登记模块名 -> 导出表文本（`name|funcIdx` 每行）。
+    // 完整跨模块执行需多代码段 VM（P4 自举时单模块合并即覆盖主场景）。
+    private var loadedModuleExports: HashMap<String, String> = HashMap<String, String>()
 
     // ── 加速派发钩子（P0.8，接口预留不实现加速逻辑）──
     // 热函数直呼表：funcName -> 入口行号；callOrBuiltin 用户函数路径优先查询。
@@ -231,6 +234,9 @@ class Vm {
     }
 
     /// 从二进制 .auc 文件加载并执行。
+    ///
+    /// P2.2：加载器产出**数值化指令数组**（无文本中间层）时走 `loadPredecoded`
+    /// 直读路径；类定义表自动注册进类继承注册表（继承/虚方法分派生效）。
     fun loadAucAndRun(path: String): Any {
         val mod: AucModule = AucLoaderUtils.loadModule(path)
         if (!mod.isValid()) {
@@ -238,6 +244,14 @@ class Vm {
             this.running = false
             return null
         }
+        if (mod.numericMode) {
+            // P2.2c：类表 → 类继承注册表（parent_id 0 = Any；防自环）
+            this.registerAucClasses(mod.classNames, mod.classParentIds)
+            this.loadPredecoded(mod.numOpNames, mod.numArgs, mod.constPool,
+                mod.funcTable, mod.exports, mod.imports)
+            return this.run()
+        }
+        // 遗留文本路径（数值模式失败时的回退）
         this.bytecode = mod.bytecode
         this.constPool = mod.constPool
         // 加载器已从 .auc 的函数区还原出 `name|起始行|参数个数` 文本函数表
@@ -271,6 +285,68 @@ class Vm {
         this.currentClosure = -1
         this.buildLineCache()
         return this.run()
+    }
+
+    /// 加载预解码指令数组（P2.2b：.auc 数值直读路径）。
+    ///
+    /// 助记符经 `Opcodes.fromName` 数值化（加载期一次），参数为加载器已解析的
+    /// 最终形态（函数名/常量下标/全局行号）；执行期零解析。
+    /// `.auc` 调用约定：形参槽从 1 开始（`aucArgBase = 1`）。
+    fun loadPredecoded(opNames: List<String>, args: List<List<String>>, consts: String,
+        funcs: String, exports: String, imports: String): Unit {
+        this.bytecode = ""
+        this.constPool = consts
+        this.funcTable = funcs
+        this.exportsTable = exports
+        this.importsTable = imports
+        this.ops = opNames
+        this.argCache = args
+        this.opCodes = arrayListOf<Int>()
+        var i: Int = 0
+        while (i < opNames.size()) {
+            this.opCodes.add(Opcodes.fromName(opNames.get(i)))
+            i = i + 1
+        }
+        this.lines = arrayListOf<String>()
+        this.ip = 0
+        this.running = true
+        this.error = ""
+        this.returnValue = null
+        this.exitCode = 0
+        this.stack = VmStack()
+        this.locals = HashMap<Int, Any>()
+        this.globals = HashMap<String, Any>()
+        this.callStack = VmStrStack()
+        this.savedLocals = VmFrameStack()
+        this.handlerStack = VmStrStack()
+        this.instructionCount = 0
+        this.currentFrame = 0
+        this.currentFunc = ""
+        this.suspended = false
+        this.aucArgBase = 1
+        this.aucMode = true
+        this.objectFields = HashMap<String, HashMap<String, Any>>()
+        this.objectClass = HashMap<String, String>()
+        this.heapKinds = HashMap<String, String>()
+        this.boxValues = HashMap<String, Any>()
+        this.closureCaptures = HashMap<Int, List<Any>>()
+        this.currentClosure = -1
+        this.accelEnabled = false
+        this.accelTable = HashMap<String, Int>()
+    }
+
+    /// 注册 .auc 类定义表（P2.2c）：类名 + 父类下标 → 类继承注册表。
+    fun registerAucClasses(names: List<String>, parentIds: List<Int>): Unit {
+        var i: Int = 0
+        while (i < names.size()) {
+            var parent: String = ""
+            val pid: Int = parentIds.get(i)
+            if (pid >= 0 && pid < names.size() && pid != i) {
+                parent = names.get(pid)
+            }
+            this.classParents.put(names.get(i), parent)
+            i = i + 1
+        }
     }
 
     /// 从二进制数据加载（P1 预留接口）。
@@ -1076,6 +1152,54 @@ class Vm {
             return
         }
 
+        // ── `.auc` 原生名别名（P2.2：.auc 的原生表使用 std 全名，
+        //    与上方短名不同；差分框架实测补齐）──
+        else if (funcName == "String.toUpperCase" || funcName == "toUpperCase") {
+            val v: Any = this.stack.pop()
+            this.stack.push(toStr(v).toUpperCase())
+            return
+        } else if (funcName == "String.toLowerCase" || funcName == "toLowerCase") {
+            val v: Any = this.stack.pop()
+            this.stack.push(toStr(v).toLowerCase())
+            return
+        } else if (funcName == "String.charAt" || funcName == "charAt") {
+            val idx: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            val s: String = toStr(v)
+            val i: Int = VmOps.toI32(toStr(idx))
+            if (i < 0 || i >= s.length) {
+                this.stack.push("")
+            } else {
+                this.stack.push(VmOps.vmSubstr(s, i, 1))
+            }
+            return
+        } else if (funcName == "String.indexOf" || funcName == "indexOf") {
+            val sub: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.indexOf(toStr(v), toStr(sub), 0))
+            return
+        } else if (funcName == "String.substring" || funcName == "substring") {
+            val endI: Any = this.stack.pop()
+            val startI: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            val s: String = toStr(v)
+            val st: Int = VmOps.toI32(toStr(startI))
+            var en: Int = VmOps.toI32(toStr(endI))
+            if (st < 0) { this.stack.push(""); return }
+            if (st >= s.length) { this.stack.push(""); return }
+            if (en > s.length) { en = s.length }
+            if (en <= st) { this.stack.push(""); return }
+            this.stack.push(VmOps.vmSubstr(s, st, en - st))
+            return
+        } else if (funcName == "Collections.set" || funcName == "aura.lang.std.Collections.set") {
+            // xs.set(idx, value)：栈顶 value、其下 idx、其下列表
+            val value: Any = this.stack.pop()
+            val idx: Any = this.stack.pop()
+            val list: Any = this.stack.pop()
+            this.stack.push(VmCollections.vmListSet(list, idx, value))
+            return
+        }
+
         // ── 文件 I/O ──
         else if (funcName == "fileRead" || funcName == "IO.fileRead"
             || funcName == "aura.lang.std.IO.fileRead") {
@@ -1534,6 +1658,28 @@ class Vm {
     /// 省略时按无参方法处理，接收者 = 栈顶）。解析失败退让旧路径
     /// `callOrBuiltin(name, 0)`，兼容遗留字节码。
     private fun callMethod(methodName: String, args: List<String>): Unit {
+        if (this.aucMode) {
+            // `.auc` 布局（Rust emit.rs CallMethod）：[self, args..., receiverCopy]，
+            // 栈顶是接收者**副本**，仅用于虚分派（Rust VM 同样丢弃该副本）。
+            // 绑定：丢弃副本后按目标函数形参个数（含 self）整体绑定。
+            val cls0: String = this.receiverClassAt(0)
+            var resolved: String = methodName
+            if (cls0 != "") {
+                val chainHit: String = this.resolveMethodInChain(cls0, methodName)
+                if (chainHit != "") { resolved = chainHit }
+            }
+            if (this.stack.size() > 0) {
+                this.stack.pop()  // 丢弃接收者副本
+            }
+            val pc: Int = this.funcParamCount(resolved)
+            if (pc < 0) {
+                this.error = "Unknown method: " + resolved
+                this.running = false
+                return
+            }
+            this.callOrBuiltin(resolved, pc)
+            return
+        }
         var argc: Int = -1
         if (args.size() >= 2) {
             argc = VmOps.toI32(args.get(1))
@@ -2477,10 +2623,55 @@ class Vm {
             }
         }
 
-        this.error = "CallExternal: module=" + parts.get(1)
-            + " symbol=" + targetSymbol
-            + " (cross-module linking requires loaded module registry)"
+        // P2.3：符号名直呼 —— 种子编译器把 import 内联进同一 `.auc`
+        //（`resolve_aura_imports`），导入符号在本模块函数表中即为目标实现。
+        if (this.funcParamCount(targetSymbol) >= 0 || this.funcOffset(targetSymbol) != 0) {
+            val directArgc: Int = this.funcParamCount(targetSymbol)
+            this.callOrBuiltin(targetSymbol, if (directArgc < 0) 0 else directArgc)
+            return
+        }
+
+        // P2.3：模块注册表查询（已登记模块的导出符号诊断）
+        val regExports: String = this.loadedModuleExports.getOrDefault(parts.get(1), "")
+        if (regExports != "") {
+            val regEntry: String = this.lookupExportIn(regExports, targetSymbol)
+            if (regEntry != "") {
+                this.error = "CallExternal: module=" + parts.get(1)
+                    + " symbol=" + targetSymbol
+                    + " (registered but its code is not loaded into this VM instance)"
+            } else {
+                this.error = "CallExternal: module=" + parts.get(1)
+                    + " symbol=" + targetSymbol + " (registered module lacks this symbol)"
+            }
+        } else {
+            this.error = "CallExternal: module=" + parts.get(1)
+                + " symbol=" + targetSymbol
+                + " (cross-module linking requires loaded module registry)"
+        }
         this.running = false
+    }
+
+    /// 在导出表文本（每行 `name|funcIdx`）中查找符号（P2.3 注册表辅助）。
+    private fun lookupExportIn(exportsText: String, symName: String): String {
+        if (exportsText == "" || symName == "") { return "" }
+        var pos: Int = 0
+        var len: Int = exportsText.length
+        while (pos < len) {
+            val nl: Int = indexOfChar(exportsText, pos, 10)
+            val end: Int = if (nl >= 0) nl else len
+            val line: String = exportsText.substring(pos, end)
+            pos = end + 1
+            val pipe: Int = indexOfChar(line, 0, 124)
+            if (pipe > 0 && line.substring(0, pipe) == symName) {
+                return line
+            }
+        }
+        return ""
+    }
+
+    /// 登记已加载模块的导出表（P2.3 ModuleRegistry；供跨模块诊断/解析）。
+    fun registerLoadedModule(moduleName: String, exportsText: String): Unit {
+        this.loadedModuleExports.put(moduleName, exportsText)
     }
 
     /// 在导入表中按索引查找条目（格式 `name|module|symbol|funcIdx`）。

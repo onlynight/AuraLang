@@ -1901,11 +1901,19 @@ fn native_stdio_buffer_to_string(args: &[Value]) -> Value {
 }
 
 /// FileOps.open(path, flags) → Int (fd or -1)
+///
+/// ⚠ 2026-10-01 修复：Windows CRT 默认 O_TEXT，`_read` 遇到 0x1A（Ctrl-Z）
+/// 即截断 —— 二进制 `.auc` 在 2306 字节处含 0x1A → 整个文件只读到 2306 字节
+/// （实测函数表失步）。此处无条件追加 `_O_BINARY(0x8000)`，调用方无需感知平台。
 fn native_fileops_open(args: &[Value]) -> Value {
     let path = arg_i64(args, 0);
-    let flags = arg_i64(args, 1) as i32;
+    let mut flags = arg_i64(args, 1) as i32;
     if path == 0 {
         return Value::Int(-1);
+    }
+    #[cfg(windows)]
+    {
+        flags |= 0x8000; // _O_BINARY：按字节读，忽略 0x1A
     }
     // Read the path string from memory
     let c_str = unsafe { std::ffi::CStr::from_ptr(path as *const libc::c_char) };
