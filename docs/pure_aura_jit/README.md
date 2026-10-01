@@ -1,3 +1,5 @@
+> ✅ 复核基准（2026-10-01，P0.2 文档治理）：本档为 `docs/vm_pure_aura/00-VM纯Aura化技术方案与达成路径.md`（VM-PA-00 v3.1）认定的权威依据；此后代码变更以 git 历史为准。
+
 ﻿# �?Aura 化技术方案（全域�?
 > **文档定位**：除 `compiler/src/bootstrap/`（最小引导层，保�?Rust）、Cranelift（JIT 机器码后端，保留 Rust）、syscall 运行库（Rust 重写）外，全部组件的 Aura 化执行方�?> **配套目录**：`docs/pure_aura/`（宏观路�?A–E 阶段）、`aura/compiler/`（纯 Aura 编译器实现）、`aura/core/`（纯 Aura 标准库）
 > **代码边界**：除 bootstrap + Cranelift + syscall 运行库（Rust 重写）外，编译器前端、VM 解释器、AOT 发射器�?*JIT �?Aura �?*、标准库、CLI、LSP、调试器、loom 构建系统全部�?Aura 实现

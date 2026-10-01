@@ -50,12 +50,18 @@ class Vm {
     /// 导入表（每行 `name|module|symbol|funcIdx`，来自 .auc 的 imports 区段）。
     private var importsTable: String = ""
 
-    /// 加载期缓存的「指令行 / opcode / 参数表」（三者的下标与 `ip` 对齐）。
+    /// 加载期缓存的「指令行 / opcode 助记符 / 数值编号 / 参数表」
+    ///（四者的下标与 `ip` 对齐）。
     ///
     /// 执行期不再做 `substring` / 参数字符串切分：AOT 运行时没有 GC，
     /// 逐条解析会把临时字符串累积到 GB 级。
+    ///
+    /// P0.4（ADR-002）：`opCodes` 在加载期经 `Opcodes.fromName` 一次性把助记符
+    /// 转为数值编号，分派只做整数比较；`ops` 保留助记符仅供未知指令诊断。
+    /// 注释行 / 空行编号为 `Opcodes.OP_NOP`。
     private var lines: List<String> = arrayListOf<String>()
     private var ops: List<String> = arrayListOf<String>()
+    private var opCodes: List<Int> = arrayListOf<Int>()
     private var argCache: List<List<String>> = arrayListOf<List<String>>()
 
     private var ip: Int = 0
@@ -115,8 +121,21 @@ class Vm {
     private var upvalueTable: HashMap<Int, Any> = HashMap<Int, Any>()
     private var nextUpvalueId: Int = 0
 
-    // 协程状态
-    private var coroutineScheduler: Any = null
+    // ── 对象模型（P0.5，ADR-003）──
+    // 实例字段表：键 "<objPtr>|<fieldName>" -> 值（按实例隔离，替代原全局 "field:" 表）。
+    // 说明：装箱 Any 值无法安全 round-trip 裸内存（write64 截断字符串句柄），
+    // 堆内联字段槽待 P1.1 值模型对齐后落地（ADR-003 偏差记录）。
+    private var objectFields: HashMap<String, Any> = HashMap<String, Any>()
+    // 对象类名表：键 "<objPtr>" -> 类名（方法分派 / 类型标签用）。
+    private var objectClass: HashMap<String, String> = HashMap<String, String>()
+
+    // ── 加速派发钩子（P0.8，接口预留不实现加速逻辑）──
+    // 热函数直呼表：funcName -> 入口行号；callOrBuiltin 用户函数路径优先查询。
+    // JIT/Photon 任务对接点（VM-PA-00 §2.3 契约）：接口签名保持稳定。
+    private var accelEnabled: Boolean = false
+    private var accelTable: HashMap<String, Int> = HashMap<String, Int>()
+
+    // 挂起状态（suspend()/resume() 使用；协程调度器已按 D5 废弃移除）
     private var suspended: Boolean = false
 
     init() {
@@ -127,6 +146,7 @@ class Vm {
         this.importsTable = ""
         this.lines = arrayListOf<String>()
         this.ops = arrayListOf<String>()
+        this.opCodes = arrayListOf<Int>()
         this.argCache = arrayListOf<List<String>>()
         this.ip = 0
         this.running = true
@@ -145,7 +165,10 @@ class Vm {
         this.closureTable = HashMap<Int, String>()
         this.upvalueTable = HashMap<Int, Any>()
         this.nextUpvalueId = 0
-        this.coroutineScheduler = null
+        this.objectFields = HashMap<String, Any>()
+        this.objectClass = HashMap<String, String>()
+        this.accelEnabled = false
+        this.accelTable = HashMap<String, Int>()
         this.suspended = false
     }
 
@@ -175,6 +198,8 @@ class Vm {
         this.suspended = false
         this.aucArgBase = 0
         this.aucMode = false
+        this.objectFields = HashMap<String, Any>()
+        this.objectClass = HashMap<String, String>()
         this.buildLineCache()
     }
 
@@ -210,6 +235,8 @@ class Vm {
         // `.auc` 的形参槽从 1 开始（见 aucArgBase）
         this.aucArgBase = 1
         this.aucMode = true
+        this.objectFields = HashMap<String, Any>()
+        this.objectClass = HashMap<String, String>()
         this.buildLineCache()
         return this.run()
     }
@@ -234,7 +261,7 @@ class Vm {
         this.ip = this.funcOffset("main")
         this.currentFunc = "main"
 
-        while (this.running && this.ip < this.ops.size()) {
+        while (this.running && this.ip < this.opCodes.size()) {
             this.instructionCount = this.instructionCount + 1
             if (this.instructionCount > this.MAX_INSTRUCTIONS) {
                 this.error = "Instruction limit exceeded (" + toStr(this.MAX_INSTRUCTIONS) + ")"
@@ -242,31 +269,31 @@ class Vm {
                 break
             }
 
-            val line: String = this.lines[this.ip]
-            val opcode: String = this.ops[this.ip]
+            val opCode: Int = this.opCodes[this.ip]
             val args: List<String> = this.argCache[this.ip]
             this.ip = this.ip + 1
 
-            // 跳过注释行（# 开头）
-            if (this.startsWith(line, "#")) {
+            // 注释行 / 空行（加载期已编号为 OP_NOP）
+            if (opCode == Opcodes.OP_NOP) {
+                continue
+            }
+            // 兜底：空 opcode 文本的行
+            if (this.ops[this.ip - 1] == "") {
                 continue
             }
 
-            // 空行跳过
-            if (opcode == "") {
-                continue
-            }
-
-            this.dispatch(opcode, args)
+            this.dispatch(opCode, this.ops[this.ip - 1], args)
         }
 
         return this.returnValue
     }
 
-    /// 加载期预处理：把字节码切成行并缓存 `opcode` / 参数表（只分配一次）。
+    /// 加载期预处理：把字节码切成行并缓存 `opcode` 助记符 / **数值编号** / 参数表
+    ///（只分配一次；助记符→编号转换在此一次完成，ADR-002）。
     private fun buildLineCache() {
         this.lines = this.bytecode.split("\n")
         this.ops = arrayListOf<String>()
+        this.opCodes = arrayListOf<Int>()
         this.argCache = arrayListOf<List<String>>()
         var i: Int = 0
         while (i < this.lines.size()) {
@@ -279,7 +306,14 @@ class Vm {
                 }
                 pos = pos + 1
             }
-            this.ops.add(VmOps.vmSubstr(ln, 0, pos))
+            val name: String = VmOps.vmSubstr(ln, 0, pos)
+            this.ops.add(name)
+            // 注释行（# 开头）/ 空行 → OP_NOP；其余经唯一编号源转数值
+            if (name == "" || this.startsWith(ln, "#")) {
+                this.opCodes.add(Opcodes.OP_NOP)
+            } else {
+                this.opCodes.add(Opcodes.fromName(name))
+            }
             this.argCache.add(VmOps.parseArgs(ln, pos))
             i = i + 1
         }
@@ -289,39 +323,42 @@ class Vm {
     //  指令分派
     // ═══════════════════════════════════════════════════════════
 
-    /// 按加载期缓存的 `opcode` / 参数执行一条指令。
-    private fun dispatch(opcode: String, args: List<String>): Unit {
+    /// 按加载期缓存的数值编号执行一条指令。
+    ///
+    /// P0.4（ADR-002）：分派只做**整数**比较（`Opcodes` 常量），无指令名
+    /// 字符串比较；`opName` 仅用于未知指令的诊断信息。
+    private fun dispatch(op: Int, opName: String, args: List<String>): Unit {
         // ── 常量指令 ──
-        if (opcode == "CONST_INT") {
+        if (op == Opcodes.CONST_INT) {
             val idx: Int = VmOps.toI32(toStr(this.getConst(args.get(0))))
             this.stack.push(toAny(idx))
-        } else if (opcode == "CONST_FLOAT") {
+        } else if (op == Opcodes.CONST_FLOAT) {
             val val: Any = this.getConst(args.get(0))
             this.stack.push(VmOps.parseFloat(toStr(val)))
-        } else if (opcode == "CONST_STRING") {
+        } else if (op == Opcodes.CONST_STRING) {
             val val: Any = this.getConst(args.get(0))
             this.stack.push(val)
-        } else if (opcode == "CONST_BOOL") {
+        } else if (op == Opcodes.CONST_BOOL) {
             this.stack.push(args.get(0) == "true")
-        } else if (opcode == "CONST_NULL") {
+        } else if (op == Opcodes.CONST_NULL) {
             this.stack.push(null)
         }
 
         // ── 类型化常量加载（`.auc` 路径：LoadConst 单操作码 + 常量标签）──
-        else if (opcode == "LOAD_CONST_I") {
+        else if (op == Opcodes.LOAD_CONST_I) {
             this.stack.push(toAny(VmOps.toI32(toStr(this.getConst(args.get(0))))))
-        } else if (opcode == "LOAD_CONST_F") {
+        } else if (op == Opcodes.LOAD_CONST_F) {
             this.stack.push(VmOps.parseFloat(toStr(this.getConst(args.get(0)))))
-        } else if (opcode == "LOAD_CONST_S") {
+        } else if (op == Opcodes.LOAD_CONST_S) {
             this.stack.push(this.getConst(args.get(0)))
-        } else if (opcode == "LOAD_CONST_B") {
+        } else if (op == Opcodes.LOAD_CONST_B) {
             this.stack.push(toStr(this.getConst(args.get(0))) == "1")
-        } else if (opcode == "LOAD_CONST_N") {
+        } else if (op == Opcodes.LOAD_CONST_N) {
             this.stack.push(null)
         }
 
         // ── 栈操作 ──
-        else if (opcode == "LOAD_LOCAL") {
+        else if (op == Opcodes.LOAD_LOCAL) {
             val slot: Int = VmOps.toI32(args.get(0))
             val v: Any = this.locals.get(slot)
             // **不要**写成 `push(if (v == null) 0 else v)`：混合类型 if 表达式会被
@@ -333,17 +370,17 @@ class Vm {
             } else {
                 this.stack.push(v)
             }
-        } else if (opcode == "STORE_LOCAL") {
+        } else if (op == Opcodes.STORE_LOCAL) {
             val slot: Int = VmOps.toI32(args.get(0))
             this.locals.put(slot, this.stack.pop())
-        } else if (opcode == "DECL_LOCAL") {
+        } else if (op == Opcodes.DECL_LOCAL) {
             val slot: Int = VmOps.toI32(args.get(0))
             this.locals.put(slot, 0)
-        } else if (opcode == "POP") {
+        } else if (op == Opcodes.POP) {
             this.stack.pop()
-        } else if (opcode == "DUP") {
+        } else if (op == Opcodes.DUP) {
             this.stack.push(this.stack.peek())
-        } else if (opcode == "SWAP") {
+        } else if (op == Opcodes.SWAP) {
             val top: Any = this.stack.pop()
             val second: Any = this.stack.pop()
             this.stack.push(top)
@@ -351,116 +388,116 @@ class Vm {
         }
 
         // ── 算术运算 ──
-        else if (opcode == "ADD") {
+        else if (op == Opcodes.ADD) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.add(a, b))
-        } else if (opcode == "SUB") {
+        } else if (op == Opcodes.SUB) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.sub(a, b))
-        } else if (opcode == "MUL") {
+        } else if (op == Opcodes.MUL) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.mul(a, b))
-        } else if (opcode == "DIV") {
+        } else if (op == Opcodes.DIV) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.div(a, b))
-        } else if (opcode == "MOD") {
+        } else if (op == Opcodes.MOD) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.mod(a, b))
-        } else if (opcode == "NEG") {
+        } else if (op == Opcodes.NEG) {
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.neg(a))
-        } else if (opcode == "POS") {
+        } else if (op == Opcodes.POS) {
             val a: Any = this.stack.pop()
             this.stack.push(a)
         }
 
         // ── 比较运算 ──
-        else if (opcode == "EQ") {
+        else if (op == Opcodes.EQ) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.eq(a, b))
-        } else if (opcode == "NEQ") {
+        } else if (op == Opcodes.NEQ) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.neq(a, b))
-        } else if (opcode == "LT") {
+        } else if (op == Opcodes.LT) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.lt(a, b))
-        } else if (opcode == "GT") {
+        } else if (op == Opcodes.GT) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.gt(a, b))
-        } else if (opcode == "LE") {
+        } else if (op == Opcodes.LE) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.le(a, b))
-        } else if (opcode == "GE") {
+        } else if (op == Opcodes.GE) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.ge(a, b))
         }
 
         // ── 逻辑/位运算 ──
-        else if (opcode == "AND") {
+        else if (op == Opcodes.AND) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.and(a, b))
-        } else if (opcode == "OR") {
+        } else if (op == Opcodes.OR) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.or(a, b))
-        } else if (opcode == "NOT") {
+        } else if (op == Opcodes.NOT) {
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.not(a))
-        } else if (opcode == "BIT_AND") {
+        } else if (op == Opcodes.BIT_AND) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.bitAnd(a, b))
-        } else if (opcode == "BIT_OR") {
+        } else if (op == Opcodes.BIT_OR) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.bitOr(a, b))
-        } else if (opcode == "BIT_XOR") {
+        } else if (op == Opcodes.BIT_XOR) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.bitXor(a, b))
-        } else if (opcode == "SHL") {
+        } else if (op == Opcodes.SHL) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.shl(a, b))
-        } else if (opcode == "SHR") {
+        } else if (op == Opcodes.SHR) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.shr(a, b))
         }
 
         // ── 控制流 ──
-        else if (opcode == "JUMP") {
+        else if (op == Opcodes.JUMP) {
             this.ip = VmOps.toI32(args.get(0))
-        } else if (opcode == "JUMP_IF_FALSE") {
+        } else if (op == Opcodes.JUMP_IF_FALSE) {
             val cond: Any = this.stack.pop()
             if (!VmOps.toBool(cond)) {
                 this.ip = VmOps.toI32(args.get(0))
             }
-        } else if (opcode == "JUMP_IF_TRUE") {
+        } else if (op == Opcodes.JUMP_IF_TRUE) {
             val cond: Any = this.stack.pop()
             if (VmOps.toBool(cond)) {
                 this.ip = VmOps.toI32(args.get(0))
             }
-        } else if (opcode == "HALT") {
+        } else if (op == Opcodes.HALT) {
             this.running = false
-        } else if (opcode == "PHI") {
+        } else if (op == Opcodes.PHI) {
             // SSA phi 节点：在文本模式下为 no-op
         }
 
         // ── 函数调用 ──
-        else if (opcode == "CALL") {
+        else if (op == Opcodes.CALL) {
             val funcName: String = args.get(0)
             // 文本字节码：`CALL name argc`；.auc 二进制：`CALL <函数下标>`（无 argc，
             // 由函数表的参数个数补全）。
@@ -472,10 +509,10 @@ class Vm {
                 if (argc < 0) { argc = 0 }
             }
             this.callOrBuiltin(funcName, argc)
-        } else if (opcode == "CALL_METHOD") {
+        } else if (op == Opcodes.CALL_METHOD) {
             val methodName: String = args.get(0)
-            this.callMethod(methodName)
-        } else if (opcode == "CALL_NATIVE_ARGS") {
+            this.callMethod(methodName, args)
+        } else if (op == Opcodes.CALL_NATIVE_ARGS) {
             // `.auc` 路径：加载器已把原生函数**下标**解析成名字，
             // 直接复用内建分派（println / toStr / …）。
             val fname: String = args.get(0)
@@ -484,54 +521,54 @@ class Vm {
                 argc2 = VmOps.toI32(args.get(1))
             }
             this.callOrBuiltin(fname, argc2)
-        } else if (opcode == "CALL_NATIVE") {
+        } else if (op == Opcodes.CALL_NATIVE) {
             val idx: Int = VmOps.toI32(args.get(0))
             this.callNative(idx)
-        } else if (opcode == "CALL_C") {
+        } else if (op == Opcodes.CALL_C) {
             val idx: Int = VmOps.toI32(args.get(0))
             this.callC(idx)
-        } else if (opcode == "RETURN") {
+        } else if (op == Opcodes.RETURN) {
             this.returnFromFunc()
-        } else if (opcode == "RETURN_UNIT") {
+        } else if (op == Opcodes.RETURN_UNIT) {
             this.returnValue = "Unit"
             this.returnFromFunc()
         }
 
         // ── 对象/类 ──
-        else if (opcode == "NEW_OBJECT") {
+        else if (op == Opcodes.NEW_OBJECT) {
             val className: String = args.get(0)
             this.newObject(className)
-        } else if (opcode == "GET_FIELD") {
+        } else if (op == Opcodes.GET_FIELD) {
             val fieldName: String = args.get(0)
             this.getField(fieldName)
-        } else if (opcode == "SET_FIELD") {
+        } else if (op == Opcodes.SET_FIELD) {
             val fieldName: String = args.get(0)
             this.setField(fieldName)
-        } else if (opcode == "NEW_ARRAY") {
+        } else if (op == Opcodes.NEW_ARRAY) {
             val size: Any = this.stack.pop()
             this.newArray(size)
-        } else if (opcode == "GET_INDEX") {
+        } else if (op == Opcodes.GET_INDEX) {
             this.getIndex()
-        } else if (opcode == "SET_INDEX") {
+        } else if (op == Opcodes.SET_INDEX) {
             this.setIndex()
-        } else if (opcode == "CALL_CTOR") {
+        } else if (op == Opcodes.CALL_CTOR) {
             val ctorName: String = args.get(0)
-            this.callCtor(ctorName)
+            this.callCtor(ctorName, args)
         }
 
         // ── 集合 ──
-        else if (opcode == "NEW_LIST") {
+        else if (op == Opcodes.NEW_LIST) {
             this.stack.push(VmCollections.newList())
-        } else if (opcode == "NEW_MAP") {
+        } else if (op == Opcodes.NEW_MAP) {
             this.stack.push(VmCollections.newMap())
-        } else if (opcode == "LIST_PUSH") {
+        } else if (op == Opcodes.LIST_PUSH) {
             val list: Any = this.stack.pop()
             val elem: Any = this.stack.pop()
             VmCollections.push(list, elem)
-        } else if (opcode == "LIST_POP") {
+        } else if (op == Opcodes.LIST_POP) {
             val list: Any = this.stack.peek()
             this.stack.push(VmCollections.pop(list))
-        } else if (opcode == "LIST_LEN") {
+        } else if (op == Opcodes.LIST_LEN) {
             // `.auc`（Rust MIR）语义是 **pop**（`Instr::ListLen`）；Aura 文本字节码用 peek
             if (this.aucMode) {
                 val list: Any = this.stack.pop()
@@ -540,181 +577,173 @@ class Vm {
                 val list: Any = this.stack.peek()
                 this.stack.push(VmCollections.length(list))
             }
-        } else if (opcode == "MAP_SET") {
+        } else if (op == Opcodes.MAP_SET) {
             val map: Any = this.stack.pop()
             val key: Any = this.stack.pop()
             val val: Any = this.stack.pop()
             VmCollections.mapSet(map, key, val)
-        } else if (opcode == "MAP_GET") {
+        } else if (op == Opcodes.MAP_GET) {
             val map: Any = this.stack.pop()
             val key: Any = this.stack.pop()
             this.stack.push(VmCollections.mapGet(map, key))
-        } else if (opcode == "MAP_LEN") {
+        } else if (op == Opcodes.MAP_LEN) {
             val map: Any = this.stack.peek()
             this.stack.push(VmCollections.mapLen(map))
         }
 
         // ── 闭包 ──
-        else if (opcode == "LOAD_CLOSURE") {
+        else if (op == Opcodes.LOAD_CLOSURE) {
             this.loadClosure(args.get(0))
-        } else if (opcode == "MAKE_CLOSURE") {
+        } else if (op == Opcodes.MAKE_CLOSURE) {
             this.makeClosure(args.get(0))
-        } else if (opcode == "CALL_CLOSURE") {
+        } else if (op == Opcodes.CALL_CLOSURE) {
             this.callClosure()
         }
 
         // ── 类型检查 ──
-        else if (opcode == "INSTANCE_OF") {
+        else if (op == Opcodes.INSTANCE_OF) {
             val typeName: String = args.get(0)
             this.instanceOf(typeName)
-        } else if (opcode == "CHECK_CAST") {
+        } else if (op == Opcodes.CHECK_CAST) {
             val typeName: String = args.get(0)
             this.checkCast(typeName)
-        } else if (opcode == "CAST") {
+        } else if (op == Opcodes.CAST) {
             val typeName: String = args.get(0)
             this.cast(typeName)
-        } else if (opcode == "CHECK_TYPE") {
+        } else if (op == Opcodes.CHECK_TYPE) {
             val typeName: String = args.get(0)
             this.checkType(typeName)
         }
 
         // ── ARC 生命周期 ──
-        else if (opcode == "INC_REF") {
+        else if (op == Opcodes.INC_REF) {
             this.incRef()
-        } else if (opcode == "DEC_REF") {
+        } else if (op == Opcodes.DEC_REF) {
             this.decRef()
-        } else if (opcode == "RETAIN") {
+        } else if (op == Opcodes.RETAIN) {
             this.retain()
-        } else if (opcode == "RELEASE") {
+        } else if (op == Opcodes.RELEASE) {
             this.release()
-        } else if (opcode == "DROP_REF") {
+        } else if (op == Opcodes.DROP_REF) {
             this.dropRef()
-        } else if (opcode == "WEAK_REF") {
+        } else if (op == Opcodes.WEAK_REF) {
             this.weakRef()
-        } else if (opcode == "WEAK_GET") {
+        } else if (op == Opcodes.WEAK_GET) {
             this.weakGet()
-        } else if (opcode == "BOX_ALLOC") {
+        } else if (op == Opcodes.BOX_ALLOC) {
             this.boxAlloc()
         }
 
         // ── defer ──
-        else if (opcode == "DEFER_BEGIN") {
+        else if (op == Opcodes.DEFER_BEGIN) {
             // defer 区域开始（由 VM 管理清理栈）
-        } else if (opcode == "DEFER_END") {
+        } else if (op == Opcodes.DEFER_END) {
             // defer 区域结束
         }
 
-        // ── 协程 ──
-        else if (opcode == "YIELD") {
-            this.yield()
-        } else if (opcode == "NEW_COROUTINE") {
-            val funcIdx: Int = VmOps.toI32(args.get(0))
-            this.newCoroutine(funcIdx)
-        } else if (opcode == "RESUME_COROUTINE") {
-            this.resumeCoroutine()
-        }
+        // ── 协程（D5：已废弃，指令不进入 ADR-001 指令集，走到 else 报未知指令）──
 
         // ── FFI ──
-        else if (opcode == "CSTRING") {
+        else if (op == Opcodes.CSTRING) {
             this.cstring()
-        } else if (opcode == "READ_CSTR") {
+        } else if (op == Opcodes.READ_CSTR) {
             this.readCstr()
-        } else if (opcode == "PTR_IS_NULL") {
+        } else if (op == Opcodes.PTR_IS_NULL) {
             this.ptrIsNull()
-        } else if (opcode == "PTR_TO_INT") {
+        } else if (op == Opcodes.PTR_TO_INT) {
             this.ptrToInt()
-        } else if (opcode == "INT_TO_PTR") {
+        } else if (op == Opcodes.INT_TO_PTR) {
             this.intToPtr()
         }
 
         // ── 异常处理 ──
-        else if (opcode == "PUSH_HANDLER") {
+        else if (op == Opcodes.PUSH_HANDLER) {
             this.pushHandler(args)
-        } else if (opcode == "POP_HANDLER") {
+        } else if (op == Opcodes.POP_HANDLER) {
             this.popHandler()
-        } else if (opcode == "THROW") {
+        } else if (op == Opcodes.THROW) {
             this.throwException()
         }
 
         // ── 并发 ──
-        else if (opcode == "THREAD_SPAWN") {
+        else if (op == Opcodes.THREAD_SPAWN) {
             this.threadSpawn()
-        } else if (opcode == "THREAD_JOIN") {
+        } else if (op == Opcodes.THREAD_JOIN) {
             this.threadJoin()
-        } else if (opcode == "THREAD_SLEEP") {
+        } else if (op == Opcodes.THREAD_SLEEP) {
             this.threadSleep()
-        } else if (opcode == "THREAD_ID") {
+        } else if (op == Opcodes.THREAD_ID) {
             this.threadId()
-        } else if (opcode == "THREAD_PARALLELISM") {
+        } else if (op == Opcodes.THREAD_PARALLELISM) {
             this.threadParallelism()
-        } else if (opcode == "MUTEX_NEW") {
+        } else if (op == Opcodes.MUTEX_NEW) {
             this.mutexNew()
-        } else if (opcode == "MUTEX_LOCK") {
+        } else if (op == Opcodes.MUTEX_LOCK) {
             this.mutexLock()
-        } else if (opcode == "MUTEX_UNLOCK") {
+        } else if (op == Opcodes.MUTEX_UNLOCK) {
             this.mutexUnlock()
-        } else if (opcode == "MUTEX_TRY_LOCK") {
+        } else if (op == Opcodes.MUTEX_TRY_LOCK) {
             this.mutexTryLock()
-        } else if (opcode == "CHANNEL_NEW") {
+        } else if (op == Opcodes.CHANNEL_NEW) {
             this.channelNew()
-        } else if (opcode == "CHANNEL_SEND") {
+        } else if (op == Opcodes.CHANNEL_SEND) {
             this.channelSend()
-        } else if (opcode == "CHANNEL_RECV") {
+        } else if (op == Opcodes.CHANNEL_RECV) {
             this.channelRecv()
-        } else if (opcode == "ATOMIC_NEW") {
+        } else if (op == Opcodes.ATOMIC_NEW) {
             this.atomicNew()
-        } else if (opcode == "ATOMIC_LOAD") {
+        } else if (op == Opcodes.ATOMIC_LOAD) {
             this.atomicLoad()
-        } else if (opcode == "ATOMIC_STORE") {
+        } else if (op == Opcodes.ATOMIC_STORE) {
             this.atomicStore()
-        } else if (opcode == "ATOMIC_ADD") {
+        } else if (op == Opcodes.ATOMIC_ADD) {
             this.atomicAdd()
-        } else if (opcode == "ATOMIC_CAS") {
+        } else if (op == Opcodes.ATOMIC_CAS) {
             this.atomicCas()
-        } else if (opcode == "RWLOCK_NEW") {
+        } else if (op == Opcodes.RWLOCK_NEW) {
             this.rwLockNew()
-        } else if (opcode == "RWLOCK_READ_LOCK") {
+        } else if (op == Opcodes.RWLOCK_READ_LOCK) {
             this.rwLockReadLock()
-        } else if (opcode == "RWLOCK_WRITE_LOCK") {
+        } else if (op == Opcodes.RWLOCK_WRITE_LOCK) {
             this.rwLockWriteLock()
-        } else if (opcode == "RWLOCK_READ_UNLOCK") {
+        } else if (op == Opcodes.RWLOCK_READ_UNLOCK) {
             this.rwLockReadUnlock()
-        } else if (opcode == "RWLOCK_WRITE_UNLOCK") {
+        } else if (op == Opcodes.RWLOCK_WRITE_UNLOCK) {
             this.rwLockWriteUnlock()
-        } else if (opcode == "CONDVAR_NEW") {
+        } else if (op == Opcodes.CONDVAR_NEW) {
             this.condvarNew()
-        } else if (opcode == "CONDVAR_WAIT") {
+        } else if (op == Opcodes.CONDVAR_WAIT) {
             this.condvarWait()
-        } else if (opcode == "CONDVAR_SIGNAL") {
+        } else if (op == Opcodes.CONDVAR_SIGNAL) {
             this.condvarSignal()
-        } else if (opcode == "CONDVAR_BROADCAST") {
+        } else if (op == Opcodes.CONDVAR_BROADCAST) {
             this.condvarBroadcast()
         }
 
         // ── 枚举 ──
-        else if (opcode == "ENUM_CONSTRUCT") {
+        else if (op == Opcodes.ENUM_CONSTRUCT) {
             this.enumConstruct(args.get(0))
-        } else if (opcode == "ENUM_TAG") {
+        } else if (op == Opcodes.ENUM_TAG) {
             this.enumTag()
-        } else if (opcode == "MAKE_FN_REF") {
+        } else if (op == Opcodes.MAKE_FN_REF) {
             this.makeFnRef(args.get(0))
         }
 
         // ── 跨模块 ──
-        else if (opcode == "CALL_EXPORT") {
+        else if (op == Opcodes.CALL_EXPORT) {
             this.callExport(args.get(0))
-        } else if (opcode == "CALL_EXTERNAL") {
+        } else if (op == Opcodes.CALL_EXTERNAL) {
             this.callExternal(args.get(0), args.get(1))
         }
 
         // ── AOT ──
-        else if (opcode == "CALL_AOT") {
+        else if (op == Opcodes.CALL_AOT) {
             this.callAot(args.get(0))
         }
 
-        // ── 未知指令 ──
+        // ── 未知指令（含已废弃的协程指令，D5/ADR-001）──
         else {
-            this.error = "Unknown opcode: " + opcode
+            this.error = "Unknown opcode: " + opName
             this.running = false
         }
     }
@@ -1105,7 +1134,16 @@ class Vm {
         }
 
         // 用户函数：压栈返回地址，跳转到函数入口
-        val target: Int = this.funcOffset(funcName)
+        var target: Int = this.funcOffset(funcName)
+        // P0.8 加速派发钩子（可插拔，默认关闭）：直呼表命中时以表内入口
+        // 覆盖函数表查找结果。本阶段不做任何加速，仅为 JIT/Photon 预留
+        // 稳定对接点（VM-PA-00 §2.3 契约；接口见 enableAccelDispatch 等）。
+        if (this.accelEnabled) {
+            val accel: Int = this.accelTable.getOrDefault(funcName, -1)
+            if (accel >= 0) {
+                target = accel
+            }
+        }
         if (target == 0 && this.funcParamCount(funcName) < 0) {
             this.error = "Unknown function: " + funcName
             this.running = false
@@ -1193,13 +1231,21 @@ class Vm {
     // ═══════════════════════════════════════════════════════════
 
     /// 分配对象（在堆上分配内存，返回 Long 指针）。
+    ///
+    /// P0.5（ADR-003）：对象头 16 字节——`offset 0` 类标识（预留 vtable/类表
+    /// 扩展位，0 = 通用对象）、`offset 8` 引用计数 = 1（与 ARC 指令布局一致）。
+    /// 类名登记进 `objectClass`，供 `CALL_METHOD` 虚方法解析与类型查询使用；
+    /// 字段值存 `objectFields`（按实例隔离），不写裸内存（装箱 Any 无法安全
+    /// round-trip，见 ADR-003 偏差记录）。
     private fun newObject(className: String): Unit {
-        // 最小对象头：类型标签 (i64) + 引用计数 (i32) = 12 字节
         val objSize: Long = 16
         val ptr: Long = Memory.alloc(objSize)
-        Memory.write64(ptr, 0)          // 类型标签（0 = 通用对象）
+        Memory.write64(ptr, 0)          // 类型标签（0 = 通用对象；类表接入 P1.2 后写类 id）
         Memory.write32(ptr + 8, 1)      // 引用计数 = 1
         this.stack.push(ptr)
+        // 类名键取栈值的 toStrAny 形态——与 get/set/方法解析同一转换路径；
+        // 不得对 Long 局部变量做 toStr（装箱路径不一致会导致键不匹配）。
+        this.objectClass.put(VmOps.toStrAny(this.stack.peek()), className)
     }
 
     /// 读取对象字段（含字符串/集合的**内建成员**）。
@@ -1236,18 +1282,43 @@ class Vm {
             this.stack.push(VmCollections.vmListAt(obj, idx))
             return
         }
-        // 简化：对象字段按名称哈希存储，此处使用全局表
-        val fieldKey: String = "field:" + fieldName
-        val val = this.globals.get(fieldKey)
+        // P0.5（ADR-003）：字段按**实例**存储（键 "<objPtr>|<name>"），
+        // 不再写入全局表——两个实例的同名字段互不可见。
+        // 键统一取自栈值（Any）的 toStrAny 形态（转换路径与 newObject 一致）。
+        // 注意：堆指针的装箱类型名随宿主不同可能是 "Int" 或 "Long"（实测
+        // seed 宿主为 "Int"），故此处接受全部整型，非整型值非对象。
+        if (!VmOps.isNumeric(obj)) {
+            this.stack.push(0)
+            return
+        }
+        val objKey: String = VmOps.toStrAny(obj)
+        if (VmOps.toI64(objKey) == 0L) {
+            // 空指针 / 非对象值：保持旧的容错语义（读缺失字段得 0）
+            this.stack.push(0)
+            return
+        }
+        val fieldKey: String = objKey + "|" + fieldName
+        val val = this.objectFields.get(fieldKey)
         this.stack.push(if (val == null) 0 else val)
     }
 
     /// 设置对象字段。
+    ///
+    /// P0.5（ADR-003）：字段按**实例**存储（键 "<objPtr>|<name>"）。
+    /// 栈序：value 在顶、objPtr 在其下。
     private fun setField(fieldName: String): Unit {
         val val: Any = this.stack.pop()
-        val objPtr: Long = this.stack.pop()
-        val fieldKey: String = "field:" + fieldName
-        this.globals.put(fieldKey, val)
+        val obj: Any = this.stack.pop()
+        // 指针装箱类型名随宿主可能是 "Int"/"Long"（见 getField 注释），接受整型
+        if (!VmOps.isNumeric(obj)) {
+            // 无接收者可写（遗留容错）：丢弃，行为与旧桩一致
+            return
+        }
+        val objKey: String = VmOps.toStrAny(obj)
+        if (VmOps.toI64(objKey) == 0L) {
+            return
+        }
+        this.objectFields.put(objKey + "|" + fieldName, val)
     }
 
     /// 分配数组（在堆上）。
@@ -1304,16 +1375,74 @@ class Vm {
         VmCollections.vmListSet(objAny, idx, v)
     }
 
-    /// 虚方法调用（简化：全局函数查找）。
-    private fun callMethod(methodName: String): Unit {
-        // 获取方法名和调用者
-        val argc: Int = 0
-        this.callOrBuiltin(methodName, argc)
+    /// 读取栈上指定深度处的接收者类名（非对象指针或越界返回 ""）。
+    ///
+    /// depth = 接收者之下压着的实参个数（0 = 接收者在栈顶）。
+    private fun receiverClassAt(depth: Int): String {
+        if (depth < 0) { return "" }
+        val idx: Int = this.stack.size() - 1 - depth
+        if (idx < 0) { return "" }
+        val v: Any = this.stack.vmSlotAt(idx)
+        if (v == null) { return "" }
+        // 仅整型堆指针可能是 VM 对象（装箱类型名随宿主为 "Int"/"Long"，
+        // 见 getField 注释）；字符串/布尔等直接排除
+        if (!VmOps.isNumeric(v)) { return "" }
+        return this.objectClass.getOrDefault(VmOps.toStrAny(v), "")
     }
 
-    /// 构造器调用。
-    private fun callCtor(ctorName: String): Unit {
-        // 构造器：初始化对象字段
+    /// 虚方法调用（P0.5，ADR-003）。
+    ///
+    /// 方法函数以 `"类名.方法名"` 注册、**首参为接收者 self**。
+    /// `CALL_METHOD name [argc]`：argc 可选（除 self 外的实参个数；
+    /// 省略时按无参方法处理，接收者 = 栈顶）。解析失败退让旧路径
+    /// `callOrBuiltin(name, 0)`，兼容遗留字节码。
+    private fun callMethod(methodName: String, args: List<String>): Unit {
+        var argc: Int = -1
+        if (args.size() >= 2) {
+            argc = VmOps.toI32(args.get(1))
+        }
+        val receiverDepth: Int = if (argc >= 0) argc else 0
+        val cls: String = this.receiverClassAt(receiverDepth)
+        if (cls != "") {
+            val resolved: String = cls + "." + methodName
+            var callArgc: Int = 1
+            if (argc >= 0) {
+                callArgc = argc + 1
+            } else {
+                val pc: Int = this.funcParamCount(resolved)
+                if (pc >= 0) { callArgc = pc }
+            }
+            if (this.funcParamCount(resolved) >= 0 || this.funcOffset(resolved) != 0) {
+                this.callOrBuiltin(resolved, callArgc)
+                return
+            }
+        }
+        // 退让：遗留行为（忽略接收者，按全局函数名调用）
+        this.callOrBuiltin(methodName, 0)
+    }
+
+    /// 构造器调用（P0.5，ADR-003）。
+    ///
+    /// `CALL_CTOR name [argc]`：对象已由 `NEW_OBJECT` 分配（接收者在栈上、
+    /// 实参之下），构造器函数以 `"类名.ctor"`（或 `"类名." + name`）注册，
+    /// self 为首参。解析失败退让旧路径。
+    private fun callCtor(ctorName: String, args: List<String>): Unit {
+        var argc: Int = 0
+        if (args.size() >= 2) {
+            argc = VmOps.toI32(args.get(1))
+        }
+        val cls: String = this.receiverClassAt(argc)
+        if (cls != "") {
+            var resolved: String = cls + "." + ctorName
+            if (this.funcParamCount(resolved) < 0 && this.funcOffset(resolved) == 0 && ctorName == cls) {
+                resolved = cls + ".new"
+            }
+            if (this.funcParamCount(resolved) >= 0 || this.funcOffset(resolved) != 0) {
+                this.callOrBuiltin(resolved, argc + 1)
+                return
+            }
+        }
+        // 退让：遗留行为
         this.callOrBuiltin(ctorName, 0)
     }
 
@@ -1515,34 +1644,12 @@ class Vm {
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  协程
+    //  协程（D5：已废弃，2026-10-01）
+    //
+    //  原 Yield/NewCoroutine/ResumeCoroutine 桩实现已随 P0.4 分派器重构
+    //  移除（ADR-001：协程指令不进入指令集；并发模型仅保留 Actor，P3.3）。
+    //  suspend()/resume() 仅保留为挂起/恢复执行的公共接口。
     // ═══════════════════════════════════════════════════════════
-
-    private fun yield(): Unit {
-        // 协程让出：挂起 VM
-        val retVal: Any = if (this.stack.size() > 0) this.stack.pop() else "Unit"
-        this.returnValue = retVal
-        this.suspended = true
-        this.running = false
-    }
-
-    private fun newCoroutine(funcIdx: Int): Unit {
-        // 创建协程状态（简化：使用 HashMap）
-        val state: HashMap<String, Any> = HashMap<String, Any>()
-        state.put("funcIdx", funcIdx)
-        state.put("suspended", true)
-        state.put("returnValue", null)
-        this.stack.push(state)
-    }
-
-    private fun resumeCoroutine(): Unit {
-        val arg: Any = this.stack.pop()
-        val state: Any = this.stack.pop()
-        // 简化：协程恢复在当前 VM 内继续执行
-        this.stack.push(arg)
-        this.stack.push(state)
-        this.suspended = false
-    }
 
     // ═══════════════════════════════════════════════════════════
     //  FFI
@@ -2217,9 +2324,33 @@ class Vm {
         return this.upvalueTable.getSize()
     }
 
+    // ═══════════════════════════════════════════════════════════
+    //  加速派发钩子（P0.8，仅接口；VM-PA-00 §2.3 契约）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 启用/禁用加速派发钩子（默认关闭，行为与未接入时完全一致）。
+    fun enableAccelDispatch(enabled: Boolean): Unit {
+        this.accelEnabled = enabled
+    }
+
+    /// 注册热函数直呼入口（funcName -> 入口行号）。
+    fun setAccelEntry(funcName: String, entryIp: Int): Unit {
+        this.accelTable.put(funcName, entryIp)
+    }
+
+    /// 清空直呼表。
+    fun clearAccelEntries(): Unit {
+        this.accelTable = HashMap<String, Int>()
+    }
+
+    /// 查询钩子是否启用。
+    fun isAccelDispatchEnabled(): Boolean {
+        return this.accelEnabled
+    }
+
     /// VM 版本。
     fun version(): String {
-        return "1.0.0-phase0-complete-vm"
+        return "1.1.0-p0-numeric-dispatch"
     }
 
     /// 检查 VM 是否就绪。
@@ -2227,9 +2358,10 @@ class Vm {
         return true
     }
 
-    /// 协程让出。
+    /// 挂起执行（P0：仅置挂起标志；原协程语义已按 D5 废弃）。
     fun suspend(): Unit {
-        this.yield()
+        this.suspended = true
+        this.running = false
     }
 
     /// 恢复执行。

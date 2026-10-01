@@ -1,0 +1,247 @@
+// ═════════════════════════════════════════════════════════════
+// P0 验收测试：VM 对象模型 + 数值分派 + 加速钩子
+//
+// 对应 VM-PA-00 v3.1 P0 验收标准：
+//   * 多实例字段隔离（缺陷 1 回归）：d1.name == "Rex"，d2.name == "Fido"
+//   * 数值分派（ADR-002）：控制流/算术/调用全链路
+//   * 虚方法解析（ADR-003）：CALL_METHOD → "类名.方法名"，self 首参
+//   * 加速派发钩子（P0.8）：接口可用、默认关闭、命中/未命中均正确
+//
+// 运行：aura run tests/vm_object_model_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
+
+// ── 字节码 1：两个 Dog 实例，分别赋值后读取 d1.name ──
+// 旧实现（全局字段表）下该程序返回 "Fido"——本测试即为缺陷 1 的回归锚。
+fun bcTwoDogsReadFirst(): String {
+    return "NEW_OBJECT Dog\n" +      // 0: d1
+        "STORE_LOCAL 0\n" +          // 1
+        "NEW_OBJECT Dog\n" +         // 2: d2
+        "STORE_LOCAL 1\n" +          // 3
+        "LOAD_LOCAL 0\n" +           // 4: obj
+        "CONST_STRING 0\n" +         // 5: "Rex"（value 在顶）
+        "SET_FIELD name\n" +         // 6
+        "LOAD_LOCAL 1\n" +           // 7: obj
+        "CONST_STRING 1\n" +         // 8: "Fido"
+        "SET_FIELD name\n" +         // 9
+        "LOAD_LOCAL 0\n" +           // 10
+        "GET_FIELD name\n" +         // 11
+        "RETURN\n"                   // 12
+}
+
+// ── 字节码 2：同上，但读取 d2.name ──
+fun bcTwoDogsReadSecond(): String {
+    return "NEW_OBJECT Dog\n" +
+        "STORE_LOCAL 0\n" +
+        "NEW_OBJECT Dog\n" +
+        "STORE_LOCAL 1\n" +
+        "LOAD_LOCAL 0\n" +
+        "CONST_STRING 0\n" +
+        "SET_FIELD name\n" +
+        "LOAD_LOCAL 1\n" +
+        "CONST_STRING 1\n" +
+        "SET_FIELD name\n" +
+        "LOAD_LOCAL 1\n" +           // 读 d2
+        "GET_FIELD name\n" +
+        "RETURN\n"
+}
+
+// ── 字节码 3：读未设置的字段 → 默认 0 ──
+fun bcUnsetField(): String {
+    return "NEW_OBJECT Dog\n" +
+        "STORE_LOCAL 0\n" +
+        "LOAD_LOCAL 0\n" +
+        "GET_FIELD age\n" +
+        "RETURN\n"
+}
+
+// ── 字节码 4：虚方法解析（Dog.speak，self 首参）──
+// main 0..7；Dog.speak 8..10（funcTable 行号含注释行，此处无注释行）
+fun bcMethodCall(): String {
+    return "NEW_OBJECT Dog\n" +      // 0
+        "STORE_LOCAL 0\n" +          // 1
+        "LOAD_LOCAL 0\n" +           // 2: obj
+        "CONST_STRING 0\n" +         // 3: "Rex"
+        "SET_FIELD name\n" +         // 4
+        "LOAD_LOCAL 0\n" +           // 5: receiver
+        "CALL_METHOD speak\n" +      // 6 → Dog.speak(self)
+        "RETURN\n" +                 // 7
+        "LOAD_LOCAL 0\n" +           // 8: Dog.speak 入口（self）
+        "GET_FIELD name\n" +         // 9
+        "RETURN\n"                   // 10
+}
+
+// ── 字节码 5：循环累加（数值分派 + 控制流冒烟）──
+// sum = 5+4+3+2+1 = 15
+fun bcSumLoop(): String {
+    return "DECL_LOCAL 0\n" +        // 0: sum = 0
+        "CONST_INT 0\n" +            // 1: 5
+        "STORE_LOCAL 1\n" +          // 2: i = 5
+        "LOAD_LOCAL 1\n" +           // 3: 循环头
+        "JUMP_IF_FALSE 14\n" +       // 4: i == 0 → 退出到 14
+        "LOAD_LOCAL 0\n" +           // 5
+        "LOAD_LOCAL 1\n" +           // 6
+        "ADD\n" +                    // 7
+        "STORE_LOCAL 0\n" +          // 8
+        "LOAD_LOCAL 1\n" +           // 9
+        "CONST_INT 1\n" +            // 10: 1
+        "SUB\n" +                    // 11
+        "STORE_LOCAL 1\n" +          // 12
+        "JUMP 3\n" +                 // 13
+        "LOAD_LOCAL 0\n" +           // 14: 退出路径：压 sum
+        "RETURN\n"                   // 15: 返回 sum
+}
+
+// ── 字节码 6：函数调用 + 加速钩子目标（double(21) = 42）──
+fun bcCallDouble(): String {
+    return "CONST_INT 0\n" +         // 0: 21
+        "CALL double 1\n" +          // 1
+        "RETURN\n" +                 // 2
+        "LOAD_LOCAL 0\n" +           // 3: double 入口
+        "LOAD_LOCAL 0\n" +           // 4
+        "ADD\n" +                    // 5
+        "RETURN\n"                   // 6
+}
+
+fun testFieldIsolation(): Int {
+    val t = TestRunner()
+    t.begin("ObjectModel.fieldIsolation")
+
+    // d1.name 必须是 "Rex"（缺陷 1 回归锚：旧全局表实现得 "Fido"）
+    val vm1 = VmRunner()
+    vm1.loadBytecode(bcTwoDogsReadFirst(), "Rex\nFido\n", "")
+    vm1.run()
+    t.assertEq(toStr(vm1.getReturnValue()), "Rex", "d1.name == Rex")
+    t.assertEq(vm1.getError(), "", "no error (d1)")
+
+    // d2.name 必须是 "Fido"
+    val vm2 = VmRunner()
+    vm2.loadBytecode(bcTwoDogsReadSecond(), "Rex\nFido\n", "")
+    vm2.run()
+    t.assertEq(toStr(vm2.getReturnValue()), "Fido", "d2.name == Fido")
+    t.assertEq(vm2.getError(), "", "no error (d2)")
+
+    return t.report()
+}
+
+fun testUnsetFieldDefault(): Int {
+    val t = TestRunner()
+    t.begin("ObjectModel.unsetField")
+
+    val vm = VmRunner()
+    vm.loadBytecode(bcUnsetField(), "", "")
+    vm.run()
+    t.assertEq(toStr(vm.getReturnValue()), "0", "unset field reads 0")
+
+    return t.report()
+}
+
+fun testMethodDispatch(): Int {
+    val t = TestRunner()
+    t.begin("ObjectModel.methodDispatch")
+
+    val vm = VmRunner()
+    vm.loadBytecode(bcMethodCall(), "Rex\n", "main|0|0\nDog.speak|8|1\n")
+    vm.run()
+    t.assertEq(vm.getError(), "", "no error (method)")
+    t.assertEq(toStr(vm.getReturnValue()), "Rex", "Dog.speak(self) returns self.name")
+
+    return t.report()
+}
+
+fun testNumericDispatchControlFlow(): Int {
+    val t = TestRunner()
+    t.begin("NumericDispatch.controlFlow")
+
+    val vm = VmRunner()
+    vm.loadBytecode(bcSumLoop(), "5\n1\n", "")
+    vm.run()
+    t.assertEq(vm.getError(), "", "no error (loop)")
+    t.assertEq(toStr(vm.getReturnValue()), "15", "sum 5..1 == 15")
+
+    return t.report()
+}
+
+fun testAccelHook(): Int {
+    val t = TestRunner()
+    t.begin("AccelHook.dispatch")
+
+    // 默认关闭：行为不变
+    val vm1 = VmRunner()
+    vm1.loadBytecode(bcCallDouble(), "21\n", "main|0|0\ndouble|3|1\n")
+    vm1.run()
+    t.assertEq(toStr(vm1.getReturnValue()), "42", "baseline call")
+    t.assertFalse(vm1.isAccelDispatchEnabled(), "accel off by default")
+
+    // 启用 + 命中：结果一致
+    val vm2 = VmRunner()
+    vm2.loadBytecode(bcCallDouble(), "21\n", "main|0|0\ndouble|3|1\n")
+    vm2.enableAccelDispatch(true)
+    vm2.setAccelEntry("double", 3)
+    vm2.run()
+    t.assertTrue(vm2.isAccelDispatchEnabled(), "accel enabled")
+    t.assertEq(toStr(vm2.getReturnValue()), "42", "accel hit result")
+
+    // 启用 + 未命中（表内无该函数）：回退函数表查找，结果一致
+    val vm3 = VmRunner()
+    vm3.loadBytecode(bcCallDouble(), "21\n", "main|0|0\ndouble|3|1\n")
+    vm3.enableAccelDispatch(true)
+    vm3.setAccelEntry("other", 3)
+    vm3.run()
+    t.assertEq(toStr(vm3.getReturnValue()), "42", "accel miss falls back")
+
+    return t.report()
+}
+
+fun testCommentAndUnknownOpcode(): Int {
+    val t = TestRunner()
+    t.begin("Dispatch.commentAndUnknown")
+
+    // 注释行 / 空行：加载期编号为 OP_NOP，执行跳过
+    val vm1 = VmRunner()
+    vm1.loadBytecode("# func main:Unit\n\nCONST_INT 0\nRETURN\n", "7\n", "")
+    vm1.run()
+    t.assertEq(toStr(vm1.getReturnValue()), "7", "comment/blank lines skipped")
+
+    // 未知指令：报错并保留原始助记符
+    val vm2 = VmRunner()
+    vm2.loadBytecode("BOGUS_OP 1\nRETURN\n", "", "")
+    vm2.run()
+    t.assertTrue(vm2.getError().contains("Unknown opcode: BOGUS_OP"), "unknown opcode error")
+
+    // 已废弃的协程指令（D5）：按未知指令退让
+    val vm3 = VmRunner()
+    vm3.loadBytecode("YIELD\nRETURN\n", "", "")
+    vm3.run()
+    t.assertTrue(vm3.getError().contains("Unknown opcode: YIELD"), "deprecated coroutine op rejected")
+
+    return t.report()
+}
+
+fun main() {
+    println("=== P0 VM Object Model / Numeric Dispatch Tests ===")
+    println()
+
+    val f1 = testFieldIsolation()
+    val f2 = testUnsetFieldDefault()
+    val f3 = testMethodDispatch()
+    val f4 = testNumericDispatchControlFlow()
+    val f5 = testAccelHook()
+    val f6 = testCommentAndUnknownOpcode()
+
+    val totalFailures: Int = f1 + f2 + f3 + f4 + f5 + f6
+
+    println()
+    println("=== Summary ===")
+    println("Total failures: " + toStr(totalFailures))
+
+    if (totalFailures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(totalFailures) + ")")
+    }
+}

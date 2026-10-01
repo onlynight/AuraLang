@@ -1,0 +1,76 @@
+// ═════════════════════════════════════════════════════════════
+// 示例：用 VmRunner（Aura 自举 VM）执行文本字节码
+//
+// 对应 VM-PA-00 v3.1 P0 验收标准：
+//   「examples/ 下新增至少 1 个实际调用 VmRunner 的示例」
+//   「Dog 示例必须输出 Rex 而非 Fido（多实例字段隔离）」
+//
+// 运行：aura run examples/compiler/vm_runner_demo.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
+
+/// 两个 Dog 实例分别赋值 name，再依次读取——字段按实例隔离（ADR-003）。
+///
+/// 栈序约定：SET_FIELD 弹出 value（顶）与 objPtr（其下），
+/// 故先压对象、再压值。
+fun dogProgram(readSlot: Int): String {
+    var code: String = ""
+    code = code + "NEW_OBJECT Dog\n"      // 0: d1
+    code = code + "STORE_LOCAL 0\n"       // 1
+    code = code + "NEW_OBJECT Dog\n"      // 2: d2
+    code = code + "STORE_LOCAL 1\n"       // 3
+    code = code + "LOAD_LOCAL 0\n"        // 4
+    code = code + "CONST_STRING 0\n"      // 5: "Rex"
+    code = code + "SET_FIELD name\n"      // 6
+    code = code + "LOAD_LOCAL 1\n"        // 7
+    code = code + "CONST_STRING 1\n"      // 8: "Fido"
+    code = code + "SET_FIELD name\n"      // 9
+    code = code + "LOAD_LOCAL " + toStr(readSlot) + "\n"  // 10
+    code = code + "GET_FIELD name\n"      // 11
+    code = code + "RETURN\n"              // 12
+    return code
+}
+
+fun main() {
+    println("=== Aura VM (VmRunner) demo: per-instance object fields ===")
+
+    // d1.name 必须是 "Rex"（旧的全局字段表实现会错误地输出 "Fido"）
+    val vm1 = VmRunner()
+    vm1.loadBytecode(dogProgram(0), "Rex\nFido\n", "")
+    vm1.run()
+    val d1Name: String = toStr(vm1.getReturnValue())
+    println("d1.name = " + d1Name)
+
+    // d2.name 必须是 "Fido"
+    val vm2 = VmRunner()
+    vm2.loadBytecode(dogProgram(1), "Rex\nFido\n", "")
+    vm2.run()
+    val d2Name: String = toStr(vm2.getReturnValue())
+    println("d2.name = " + d2Name)
+
+    // 方法分派（ADR-003）：Dog.speak(self) → self.name
+    val vm3 = VmRunner()
+    val methodCode: String = "NEW_OBJECT Dog\n" +      // 0
+        "STORE_LOCAL 0\n" +                            // 1
+        "LOAD_LOCAL 0\n" +                             // 2
+        "CONST_STRING 0\n" +                           // 3
+        "SET_FIELD name\n" +                           // 4
+        "LOAD_LOCAL 0\n" +                             // 5: receiver
+        "CALL_METHOD speak\n" +                        // 6
+        "RETURN\n" +                                   // 7
+        "LOAD_LOCAL 0\n" +                             // 8: Dog.speak 入口（self）
+        "GET_FIELD name\n" +                           // 9
+        "RETURN\n"                                     // 10
+    vm3.loadBytecode(methodCode, "Rex\n", "main|0|0\nDog.speak|8|1\n")
+    vm3.run()
+    val spoken: String = toStr(vm3.getReturnValue())
+    println("d1.speak() = " + spoken)
+
+    if (d1Name == "Rex" and d2Name == "Fido" and spoken == "Rex") {
+        println("DEMO PASS")
+    } else {
+        println("DEMO FAIL")
+    }
+}

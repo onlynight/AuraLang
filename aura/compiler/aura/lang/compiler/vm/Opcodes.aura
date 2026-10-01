@@ -1,31 +1,69 @@
 // aura:///aura/compiler/aura/lang/compiler/vm/Opcodes.aura
 package aura.lang.compiler.vm
-// VM 指令集定义（Phase 4: 完整 VM Aura 编写）
-/// 虚拟机指令集常量定义。
+// ─────────────────────────────────────────────────────────────
+// VM 指令编号源 — 唯一权威定义（ADR-001，P0.4 接线）
+//
+// 本对象是 Aura VM 全部指令的**唯一编号来源**：
+//   * 分派器（Vm.aura dispatch）只对这里的数值常量比较，
+//     不出现指令名字符串比较（ADR-002 数值分派架构）；
+//   * 文本字节码 / .auc 翻译出的助记符在**加载期**经 fromName()
+//     一次性转为本编号；
+//   * 与 Rust `OpCode::byte()` 编号无关（.auc 由 AucLoader 翻译）。
+//
+// 编号按功能分组，每组预留 10 个号段：
+//   0-9 常量 / 10-19 栈 / 20-29 算术 / 30-39 比较 / 40-49 逻辑位运算
+//   50-59 控制流 / 60-69 调用与跨模块 / 70-79 对象 / 80-89 集合
+//   90-99 闭包 / 100-109 类型 / 110-119 ARC / 120-129 defer与异常
+//   130-139 FFI / 140-149 线程 / 150-159 互斥锁 / 160-169 通道
+//   170-179 原子 / 180-189 读写锁 / 190-199 条件变量 / 200+ 枚举等
+//
+// 协程指令（Yield/NewCoroutine/ResumeCoroutine）按决策 D5 废弃，
+// 不定义编号（ADR-001）；旧 .auc 含协程指令按未知指令退让。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.collection.HashMap
+
+/// 虚拟机指令集编号（唯一权威源）。
 ///
-/// @since 0.5
+/// @since 0.6
 internal object Opcodes {
 
-    // ── 常量指令 (0x00 - 0x0F) ──
+    // ── 哨兵编号（不对应任何指令）──
+    /// 注释行 / 空行：执行循环直接跳过。
+    val OP_NOP: Int = -2
+    /// 未认知的助记符：执行到时报 Unknown opcode。
+    val OP_UNKNOWN: Int = -1
+
+    // ── 常量 (0-9) ──
     const val CONST_INT: Int = 0
     const val CONST_FLOAT: Int = 1
     const val CONST_STRING: Int = 2
-    const val CONST_NULL: Int = 3
+    const val CONST_BOOL: Int = 3
+    const val CONST_NULL: Int = 4
+    const val LOAD_CONST_I: Int = 5
+    const val LOAD_CONST_F: Int = 6
+    const val LOAD_CONST_S: Int = 7
+    const val LOAD_CONST_B: Int = 8
+    const val LOAD_CONST_N: Int = 9
 
-    // ── 栈操作 (0x10 - 0x1F) ──
+    // ── 栈操作 (10-19) ──
     const val LOAD_LOCAL: Int = 10
     const val STORE_LOCAL: Int = 11
-    const val POP: Int = 12
-    const val DUP: Int = 13
+    const val DECL_LOCAL: Int = 12
+    const val POP: Int = 13
+    const val DUP: Int = 14
+    const val SWAP: Int = 15
 
-    // ── 算术运算 (0x20 - 0x2F) ──
+    // ── 算术 (20-29) ──
     const val ADD: Int = 20
     const val SUB: Int = 21
     const val MUL: Int = 22
     const val DIV: Int = 23
     const val MOD: Int = 24
+    const val NEG: Int = 25
+    const val POS: Int = 26
 
-    // ── 比较运算 (0x30 - 0x3F) ──
+    // ── 比较 (30-39) ──
     const val EQ: Int = 30
     const val NEQ: Int = 31
     const val LT: Int = 32
@@ -33,88 +71,427 @@ internal object Opcodes {
     const val LE: Int = 34
     const val GE: Int = 35
 
-    // ── 控制流 (0x40 - 0x4F) ──
-    const val JUMP: Int = 40
-    const val JUMP_IF_FALSE: Int = 41
-    const val JUMP_IF_TRUE: Int = 42
+    // ── 逻辑/位运算 (40-49) ──
+    const val AND: Int = 40
+    const val OR: Int = 41
+    const val NOT: Int = 42
+    const val BIT_AND: Int = 43
+    const val BIT_OR: Int = 44
+    const val BIT_XOR: Int = 45
+    const val SHL: Int = 46
+    const val SHR: Int = 47
 
-    // ── 函数调用 (0x50 - 0x5F) ──
-    const val CALL: Int = 50
-    const val CALL_METHOD: Int = 51
-    const val RETURN: Int = 52
+    // ── 控制流 (50-59) ──
+    const val JUMP: Int = 50
+    const val JUMP_IF_FALSE: Int = 51
+    const val JUMP_IF_TRUE: Int = 52
+    const val HALT: Int = 53
+    const val PHI: Int = 54
 
-    // ── 对象操作 (0x60 - 0x6F) ──
-    const val NEW_OBJECT: Int = 60
-    const val GET_FIELD: Int = 61
-    const val SET_FIELD: Int = 62
+    // ── 调用与跨模块 (60-69) ──
+    const val CALL: Int = 60
+    const val CALL_METHOD: Int = 61
+    const val CALL_NATIVE_ARGS: Int = 62
+    const val CALL_NATIVE: Int = 63
+    const val CALL_C: Int = 64
+    const val RETURN: Int = 65
+    const val RETURN_UNIT: Int = 66
+    const val CALL_EXPORT: Int = 67
+    const val CALL_EXTERNAL: Int = 68
+    const val CALL_AOT: Int = 69
 
-    // ── FFI 调用 (0x70 - 0x7F) ──
-    const val CALL_C: Int = 70
-    const val CALL_RUST: Int = 71
-    const val CALL_AURA: Int = 72
+    // ── 对象 (70-79) ──
+    const val NEW_OBJECT: Int = 70
+    const val GET_FIELD: Int = 71
+    const val SET_FIELD: Int = 72
+    const val NEW_ARRAY: Int = 73
+    const val GET_INDEX: Int = 74
+    const val SET_INDEX: Int = 75
+    const val CALL_CTOR: Int = 76
 
-    // ── GC 指令 (0x80 - 0x8F) ──
-    const val GC_MARK: Int = 80
-    const val GC_SWEEP: Int = 81
+    // ── 集合 (80-89) ──
+    const val NEW_LIST: Int = 80
+    const val NEW_MAP: Int = 81
+    const val LIST_PUSH: Int = 82
+    const val LIST_POP: Int = 83
+    const val LIST_LEN: Int = 84
+    const val MAP_SET: Int = 85
+    const val MAP_GET: Int = 86
+    const val MAP_LEN: Int = 87
 
-    // ── 辅助函数 ──
+    // ── 闭包 (90-99) ──
+    const val LOAD_CLOSURE: Int = 90
+    const val MAKE_CLOSURE: Int = 91
+    const val CALL_CLOSURE: Int = 92
 
-    /// 获取指令助记符（调试用）。
+    // ── 类型检查 (100-109) ──
+    const val INSTANCE_OF: Int = 100
+    const val CHECK_CAST: Int = 101
+    const val CAST: Int = 102
+    const val CHECK_TYPE: Int = 103
+
+    // ── ARC 生命周期 (110-119) ──
+    const val INC_REF: Int = 110
+    const val DEC_REF: Int = 111
+    const val RETAIN: Int = 112
+    const val RELEASE: Int = 113
+    const val DROP_REF: Int = 114
+    const val WEAK_REF: Int = 115
+    const val WEAK_GET: Int = 116
+    const val BOX_ALLOC: Int = 117
+
+    // ── defer 与异常 (120-129) ──
+    const val DEFER_BEGIN: Int = 120
+    const val DEFER_END: Int = 121
+    const val PUSH_HANDLER: Int = 122
+    const val POP_HANDLER: Int = 123
+    const val THROW: Int = 124
+
+    // ── FFI (130-139) ──
+    const val CSTRING: Int = 130
+    const val READ_CSTR: Int = 131
+    const val PTR_IS_NULL: Int = 132
+    const val PTR_TO_INT: Int = 133
+    const val INT_TO_PTR: Int = 134
+
+    // ── 线程 (140-149) ──
+    const val THREAD_SPAWN: Int = 140
+    const val THREAD_JOIN: Int = 141
+    const val THREAD_SLEEP: Int = 142
+    const val THREAD_ID: Int = 143
+    const val THREAD_PARALLELISM: Int = 144
+
+    // ── 互斥锁 (150-159) ──
+    const val MUTEX_NEW: Int = 150
+    const val MUTEX_LOCK: Int = 151
+    const val MUTEX_UNLOCK: Int = 152
+    const val MUTEX_TRY_LOCK: Int = 153
+
+    // ── 通道 (160-169) ──
+    const val CHANNEL_NEW: Int = 160
+    const val CHANNEL_SEND: Int = 161
+    const val CHANNEL_RECV: Int = 162
+
+    // ── 原子 (170-179) ──
+    const val ATOMIC_NEW: Int = 170
+    const val ATOMIC_LOAD: Int = 171
+    const val ATOMIC_STORE: Int = 172
+    const val ATOMIC_ADD: Int = 173
+    const val ATOMIC_CAS: Int = 174
+
+    // ── 读写锁 (180-189) ──
+    const val RWLOCK_NEW: Int = 180
+    const val RWLOCK_READ_LOCK: Int = 181
+    const val RWLOCK_WRITE_LOCK: Int = 182
+    const val RWLOCK_READ_UNLOCK: Int = 183
+    const val RWLOCK_WRITE_UNLOCK: Int = 184
+
+    // ── 条件变量 (190-199) ──
+    const val CONDVAR_NEW: Int = 190
+    const val CONDVAR_WAIT: Int = 191
+    const val CONDVAR_SIGNAL: Int = 192
+    const val CONDVAR_BROADCAST: Int = 193
+
+    // ── 枚举/函数引用 (200-209) ──
+    const val ENUM_CONSTRUCT: Int = 200
+    const val ENUM_TAG: Int = 201
+    const val MAKE_FN_REF: Int = 202
+
+    // ── 助记符 → 编号（加载期转换表，惰性构建一次）──
+
+    private var nameToCode: HashMap<String, Int> = HashMap<String, Int>()
+    private var nameMapReady: Boolean = false
+
+    /// 助记符转编号（未认知返回 OP_UNKNOWN；大小写敏感）。
+    ///
+    /// 加载期每行调用一次（`Vm.buildLineCache`）；映射表首个调用时构建。
+    fun fromName(name: String): Int {
+        if (!this.nameMapReady) {
+            this.buildNameMap()
+        }
+        return this.nameToCode.getOrDefault(name, OP_UNKNOWN)
+    }
+
+    private fun buildNameMap() {
+        // 常量
+        this.nameToCode.put("CONST_INT", CONST_INT)
+        this.nameToCode.put("CONST_FLOAT", CONST_FLOAT)
+        this.nameToCode.put("CONST_STRING", CONST_STRING)
+        this.nameToCode.put("CONST_BOOL", CONST_BOOL)
+        this.nameToCode.put("CONST_NULL", CONST_NULL)
+        this.nameToCode.put("LOAD_CONST_I", LOAD_CONST_I)
+        this.nameToCode.put("LOAD_CONST_F", LOAD_CONST_F)
+        this.nameToCode.put("LOAD_CONST_S", LOAD_CONST_S)
+        this.nameToCode.put("LOAD_CONST_B", LOAD_CONST_B)
+        this.nameToCode.put("LOAD_CONST_N", LOAD_CONST_N)
+        // 栈
+        this.nameToCode.put("LOAD_LOCAL", LOAD_LOCAL)
+        this.nameToCode.put("STORE_LOCAL", STORE_LOCAL)
+        this.nameToCode.put("DECL_LOCAL", DECL_LOCAL)
+        this.nameToCode.put("POP", POP)
+        this.nameToCode.put("DUP", DUP)
+        this.nameToCode.put("SWAP", SWAP)
+        // 算术
+        this.nameToCode.put("ADD", ADD)
+        this.nameToCode.put("SUB", SUB)
+        this.nameToCode.put("MUL", MUL)
+        this.nameToCode.put("DIV", DIV)
+        this.nameToCode.put("MOD", MOD)
+        this.nameToCode.put("NEG", NEG)
+        this.nameToCode.put("POS", POS)
+        // 比较
+        this.nameToCode.put("EQ", EQ)
+        this.nameToCode.put("NEQ", NEQ)
+        this.nameToCode.put("LT", LT)
+        this.nameToCode.put("GT", GT)
+        this.nameToCode.put("LE", LE)
+        this.nameToCode.put("GE", GE)
+        // 逻辑/位
+        this.nameToCode.put("AND", AND)
+        this.nameToCode.put("OR", OR)
+        this.nameToCode.put("NOT", NOT)
+        this.nameToCode.put("BIT_AND", BIT_AND)
+        this.nameToCode.put("BIT_OR", BIT_OR)
+        this.nameToCode.put("BIT_XOR", BIT_XOR)
+        this.nameToCode.put("SHL", SHL)
+        this.nameToCode.put("SHR", SHR)
+        // 控制流
+        this.nameToCode.put("JUMP", JUMP)
+        this.nameToCode.put("JUMP_IF_FALSE", JUMP_IF_FALSE)
+        this.nameToCode.put("JUMP_IF_TRUE", JUMP_IF_TRUE)
+        this.nameToCode.put("HALT", HALT)
+        this.nameToCode.put("PHI", PHI)
+        // 调用与跨模块
+        this.nameToCode.put("CALL", CALL)
+        this.nameToCode.put("CALL_METHOD", CALL_METHOD)
+        this.nameToCode.put("CALL_NATIVE_ARGS", CALL_NATIVE_ARGS)
+        this.nameToCode.put("CALL_NATIVE", CALL_NATIVE)
+        this.nameToCode.put("CALL_C", CALL_C)
+        this.nameToCode.put("RETURN", RETURN)
+        this.nameToCode.put("RETURN_UNIT", RETURN_UNIT)
+        this.nameToCode.put("CALL_EXPORT", CALL_EXPORT)
+        this.nameToCode.put("CALL_EXTERNAL", CALL_EXTERNAL)
+        this.nameToCode.put("CALL_AOT", CALL_AOT)
+        // 对象
+        this.nameToCode.put("NEW_OBJECT", NEW_OBJECT)
+        this.nameToCode.put("GET_FIELD", GET_FIELD)
+        this.nameToCode.put("SET_FIELD", SET_FIELD)
+        this.nameToCode.put("NEW_ARRAY", NEW_ARRAY)
+        this.nameToCode.put("GET_INDEX", GET_INDEX)
+        this.nameToCode.put("SET_INDEX", SET_INDEX)
+        this.nameToCode.put("CALL_CTOR", CALL_CTOR)
+        // 集合
+        this.nameToCode.put("NEW_LIST", NEW_LIST)
+        this.nameToCode.put("NEW_MAP", NEW_MAP)
+        this.nameToCode.put("LIST_PUSH", LIST_PUSH)
+        this.nameToCode.put("LIST_POP", LIST_POP)
+        this.nameToCode.put("LIST_LEN", LIST_LEN)
+        this.nameToCode.put("MAP_SET", MAP_SET)
+        this.nameToCode.put("MAP_GET", MAP_GET)
+        this.nameToCode.put("MAP_LEN", MAP_LEN)
+        // 闭包
+        this.nameToCode.put("LOAD_CLOSURE", LOAD_CLOSURE)
+        this.nameToCode.put("MAKE_CLOSURE", MAKE_CLOSURE)
+        this.nameToCode.put("CALL_CLOSURE", CALL_CLOSURE)
+        // 类型
+        this.nameToCode.put("INSTANCE_OF", INSTANCE_OF)
+        this.nameToCode.put("CHECK_CAST", CHECK_CAST)
+        this.nameToCode.put("CAST", CAST)
+        this.nameToCode.put("CHECK_TYPE", CHECK_TYPE)
+        // ARC
+        this.nameToCode.put("INC_REF", INC_REF)
+        this.nameToCode.put("DEC_REF", DEC_REF)
+        this.nameToCode.put("RETAIN", RETAIN)
+        this.nameToCode.put("RELEASE", RELEASE)
+        this.nameToCode.put("DROP_REF", DROP_REF)
+        this.nameToCode.put("WEAK_REF", WEAK_REF)
+        this.nameToCode.put("WEAK_GET", WEAK_GET)
+        this.nameToCode.put("BOX_ALLOC", BOX_ALLOC)
+        // defer 与异常
+        this.nameToCode.put("DEFER_BEGIN", DEFER_BEGIN)
+        this.nameToCode.put("DEFER_END", DEFER_END)
+        this.nameToCode.put("PUSH_HANDLER", PUSH_HANDLER)
+        this.nameToCode.put("POP_HANDLER", POP_HANDLER)
+        this.nameToCode.put("THROW", THROW)
+        // FFI
+        this.nameToCode.put("CSTRING", CSTRING)
+        this.nameToCode.put("READ_CSTR", READ_CSTR)
+        this.nameToCode.put("PTR_IS_NULL", PTR_IS_NULL)
+        this.nameToCode.put("PTR_TO_INT", PTR_TO_INT)
+        this.nameToCode.put("INT_TO_PTR", INT_TO_PTR)
+        // 线程
+        this.nameToCode.put("THREAD_SPAWN", THREAD_SPAWN)
+        this.nameToCode.put("THREAD_JOIN", THREAD_JOIN)
+        this.nameToCode.put("THREAD_SLEEP", THREAD_SLEEP)
+        this.nameToCode.put("THREAD_ID", THREAD_ID)
+        this.nameToCode.put("THREAD_PARALLELISM", THREAD_PARALLELISM)
+        // 互斥锁
+        this.nameToCode.put("MUTEX_NEW", MUTEX_NEW)
+        this.nameToCode.put("MUTEX_LOCK", MUTEX_LOCK)
+        this.nameToCode.put("MUTEX_UNLOCK", MUTEX_UNLOCK)
+        this.nameToCode.put("MUTEX_TRY_LOCK", MUTEX_TRY_LOCK)
+        // 通道
+        this.nameToCode.put("CHANNEL_NEW", CHANNEL_NEW)
+        this.nameToCode.put("CHANNEL_SEND", CHANNEL_SEND)
+        this.nameToCode.put("CHANNEL_RECV", CHANNEL_RECV)
+        // 原子
+        this.nameToCode.put("ATOMIC_NEW", ATOMIC_NEW)
+        this.nameToCode.put("ATOMIC_LOAD", ATOMIC_LOAD)
+        this.nameToCode.put("ATOMIC_STORE", ATOMIC_STORE)
+        this.nameToCode.put("ATOMIC_ADD", ATOMIC_ADD)
+        this.nameToCode.put("ATOMIC_CAS", ATOMIC_CAS)
+        // 读写锁
+        this.nameToCode.put("RWLOCK_NEW", RWLOCK_NEW)
+        this.nameToCode.put("RWLOCK_READ_LOCK", RWLOCK_READ_LOCK)
+        this.nameToCode.put("RWLOCK_WRITE_LOCK", RWLOCK_WRITE_LOCK)
+        this.nameToCode.put("RWLOCK_READ_UNLOCK", RWLOCK_READ_UNLOCK)
+        this.nameToCode.put("RWLOCK_WRITE_UNLOCK", RWLOCK_WRITE_UNLOCK)
+        // 条件变量
+        this.nameToCode.put("CONDVAR_NEW", CONDVAR_NEW)
+        this.nameToCode.put("CONDVAR_WAIT", CONDVAR_WAIT)
+        this.nameToCode.put("CONDVAR_SIGNAL", CONDVAR_SIGNAL)
+        this.nameToCode.put("CONDVAR_BROADCAST", CONDVAR_BROADCAST)
+        // 枚举/函数引用
+        this.nameToCode.put("ENUM_CONSTRUCT", ENUM_CONSTRUCT)
+        this.nameToCode.put("ENUM_TAG", ENUM_TAG)
+        this.nameToCode.put("MAKE_FN_REF", MAKE_FN_REF)
+        this.nameMapReady = true
+    }
+
+    // ── 调试辅助 ──
+
+    /// 获取指令助记符（调试/诊断用）。
     fun opcodeName(opcode: Int): String {
         return when (opcode) {
-            CONST_INT       -> "CONST_INT"
-            CONST_FLOAT     -> "CONST_FLOAT"
-            CONST_STRING    -> "CONST_STRING"
-            CONST_NULL      -> "CONST_NULL"
-            LOAD_LOCAL      -> "LOAD_LOCAL"
-            STORE_LOCAL     -> "STORE_LOCAL"
-            POP             -> "POP"
-            DUP             -> "DUP"
-            ADD             -> "ADD"
-            SUB             -> "SUB"
-            MUL             -> "MUL"
-            DIV             -> "DIV"
-            MOD             -> "MOD"
-            EQ              -> "EQ"
-            NEQ             -> "NEQ"
-            LT              -> "LT"
-            GT              -> "GT"
-            LE              -> "LE"
-            GE              -> "GE"
-            JUMP            -> "JUMP"
-            JUMP_IF_FALSE   -> "JUMP_IF_FALSE"
-            JUMP_IF_TRUE    -> "JUMP_IF_TRUE"
-            CALL            -> "CALL"
-            CALL_METHOD     -> "CALL_METHOD"
-            RETURN          -> "RETURN"
-            NEW_OBJECT      -> "NEW_OBJECT"
-            GET_FIELD       -> "GET_FIELD"
-            SET_FIELD       -> "SET_FIELD"
-            CALL_C          -> "CALL_C"
-            CALL_RUST       -> "CALL_RUST"
-            CALL_AURA       -> "CALL_AURA"
-            GC_MARK         -> "GC_MARK"
-            GC_SWEEP        -> "GC_SWEEP"
-            else            -> "UNKNOWN"
+            CONST_INT            -> "CONST_INT"
+            CONST_FLOAT          -> "CONST_FLOAT"
+            CONST_STRING         -> "CONST_STRING"
+            CONST_BOOL           -> "CONST_BOOL"
+            CONST_NULL           -> "CONST_NULL"
+            LOAD_CONST_I         -> "LOAD_CONST_I"
+            LOAD_CONST_F         -> "LOAD_CONST_F"
+            LOAD_CONST_S         -> "LOAD_CONST_S"
+            LOAD_CONST_B         -> "LOAD_CONST_B"
+            LOAD_CONST_N         -> "LOAD_CONST_N"
+            LOAD_LOCAL           -> "LOAD_LOCAL"
+            STORE_LOCAL          -> "STORE_LOCAL"
+            DECL_LOCAL           -> "DECL_LOCAL"
+            POP                  -> "POP"
+            DUP                  -> "DUP"
+            SWAP                 -> "SWAP"
+            ADD                  -> "ADD"
+            SUB                  -> "SUB"
+            MUL                  -> "MUL"
+            DIV                  -> "DIV"
+            MOD                  -> "MOD"
+            NEG                  -> "NEG"
+            POS                  -> "POS"
+            EQ                   -> "EQ"
+            NEQ                  -> "NEQ"
+            LT                   -> "LT"
+            GT                   -> "GT"
+            LE                   -> "LE"
+            GE                   -> "GE"
+            AND                  -> "AND"
+            OR                   -> "OR"
+            NOT                  -> "NOT"
+            BIT_AND              -> "BIT_AND"
+            BIT_OR               -> "BIT_OR"
+            BIT_XOR              -> "BIT_XOR"
+            SHL                  -> "SHL"
+            SHR                  -> "SHR"
+            JUMP                 -> "JUMP"
+            JUMP_IF_FALSE        -> "JUMP_IF_FALSE"
+            JUMP_IF_TRUE         -> "JUMP_IF_TRUE"
+            HALT                 -> "HALT"
+            PHI                  -> "PHI"
+            CALL                 -> "CALL"
+            CALL_METHOD          -> "CALL_METHOD"
+            CALL_NATIVE_ARGS     -> "CALL_NATIVE_ARGS"
+            CALL_NATIVE          -> "CALL_NATIVE"
+            CALL_C               -> "CALL_C"
+            RETURN               -> "RETURN"
+            RETURN_UNIT          -> "RETURN_UNIT"
+            CALL_EXPORT          -> "CALL_EXPORT"
+            CALL_EXTERNAL        -> "CALL_EXTERNAL"
+            CALL_AOT             -> "CALL_AOT"
+            NEW_OBJECT           -> "NEW_OBJECT"
+            GET_FIELD            -> "GET_FIELD"
+            SET_FIELD            -> "SET_FIELD"
+            NEW_ARRAY            -> "NEW_ARRAY"
+            GET_INDEX            -> "GET_INDEX"
+            SET_INDEX            -> "SET_INDEX"
+            CALL_CTOR            -> "CALL_CTOR"
+            NEW_LIST             -> "NEW_LIST"
+            NEW_MAP              -> "NEW_MAP"
+            LIST_PUSH            -> "LIST_PUSH"
+            LIST_POP             -> "LIST_POP"
+            LIST_LEN             -> "LIST_LEN"
+            MAP_SET              -> "MAP_SET"
+            MAP_GET              -> "MAP_GET"
+            MAP_LEN              -> "MAP_LEN"
+            LOAD_CLOSURE         -> "LOAD_CLOSURE"
+            MAKE_CLOSURE         -> "MAKE_CLOSURE"
+            CALL_CLOSURE         -> "CALL_CLOSURE"
+            INSTANCE_OF          -> "INSTANCE_OF"
+            CHECK_CAST           -> "CHECK_CAST"
+            CAST                 -> "CAST"
+            CHECK_TYPE           -> "CHECK_TYPE"
+            INC_REF              -> "INC_REF"
+            DEC_REF              -> "DEC_REF"
+            RETAIN               -> "RETAIN"
+            RELEASE              -> "RELEASE"
+            DROP_REF             -> "DROP_REF"
+            WEAK_REF             -> "WEAK_REF"
+            WEAK_GET             -> "WEAK_GET"
+            BOX_ALLOC            -> "BOX_ALLOC"
+            DEFER_BEGIN          -> "DEFER_BEGIN"
+            DEFER_END            -> "DEFER_END"
+            PUSH_HANDLER         -> "PUSH_HANDLER"
+            POP_HANDLER          -> "POP_HANDLER"
+            THROW                -> "THROW"
+            CSTRING              -> "CSTRING"
+            READ_CSTR            -> "READ_CSTR"
+            PTR_IS_NULL          -> "PTR_IS_NULL"
+            PTR_TO_INT           -> "PTR_TO_INT"
+            INT_TO_PTR           -> "INT_TO_PTR"
+            THREAD_SPAWN         -> "THREAD_SPAWN"
+            THREAD_JOIN          -> "THREAD_JOIN"
+            THREAD_SLEEP         -> "THREAD_SLEEP"
+            THREAD_ID            -> "THREAD_ID"
+            THREAD_PARALLELISM   -> "THREAD_PARALLELISM"
+            MUTEX_NEW            -> "MUTEX_NEW"
+            MUTEX_LOCK           -> "MUTEX_LOCK"
+            MUTEX_UNLOCK         -> "MUTEX_UNLOCK"
+            MUTEX_TRY_LOCK       -> "MUTEX_TRY_LOCK"
+            CHANNEL_NEW          -> "CHANNEL_NEW"
+            CHANNEL_SEND         -> "CHANNEL_SEND"
+            CHANNEL_RECV         -> "CHANNEL_RECV"
+            ATOMIC_NEW           -> "ATOMIC_NEW"
+            ATOMIC_LOAD          -> "ATOMIC_LOAD"
+            ATOMIC_STORE         -> "ATOMIC_STORE"
+            ATOMIC_ADD           -> "ATOMIC_ADD"
+            ATOMIC_CAS           -> "ATOMIC_CAS"
+            RWLOCK_NEW           -> "RWLOCK_NEW"
+            RWLOCK_READ_LOCK     -> "RWLOCK_READ_LOCK"
+            RWLOCK_WRITE_LOCK    -> "RWLOCK_WRITE_LOCK"
+            RWLOCK_READ_UNLOCK   -> "RWLOCK_READ_UNLOCK"
+            RWLOCK_WRITE_UNLOCK  -> "RWLOCK_WRITE_UNLOCK"
+            CONDVAR_NEW          -> "CONDVAR_NEW"
+            CONDVAR_WAIT         -> "CONDVAR_WAIT"
+            CONDVAR_SIGNAL       -> "CONDVAR_SIGNAL"
+            CONDVAR_BROADCAST    -> "CONDVAR_BROADCAST"
+            ENUM_CONSTRUCT       -> "ENUM_CONSTRUCT"
+            ENUM_TAG             -> "ENUM_TAG"
+            MAKE_FN_REF          -> "MAKE_FN_REF"
+            OP_NOP               -> "#NOP"
+            OP_UNKNOWN           -> "#UNKNOWN"
+            else                 -> "UNKNOWN"
         }
     }
 
-    /// 检查指令是否为常量指令。
+    /// 检查指令是否为常量装载指令。
     fun isConst(opcode: Int): Boolean {
-        return opcode >= CONST_INT and opcode <= CONST_NULL
-    }
-
-    /// 获取所有指令名称列表（用于调试和文档）。
-    fun allOpcodes(): List<String> {
-        val result: List<String> = Collections.emptyList()
-        var i: Int = 0
-        while (i <= GC_SWEEP) {
-            val name = opcodeName(i)
-            if (name != "UNKNOWN") {
-                result.add(name)
-            }
-            i = i + 1
-        }
-        return result
+        return opcode >= CONST_INT and opcode <= LOAD_CONST_N
     }
 }

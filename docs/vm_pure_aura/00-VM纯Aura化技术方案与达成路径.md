@@ -1,10 +1,16 @@
 # Aura VM 纯 Aura 化：技术方案与达成路径
 
-> **文档编号**：VM-PA-00（v3）
-> **日期**：2026-09-25
+> **文档编号**：VM-PA-00（v3.1）
+> **日期**：2026-10-01（v3.1 基线刷新）；v3 首发 2026-09-25
 > **状态**：技术方案（决策已定，待评审）
 > **目标**：将目前由 Rust 实现的虚拟机（`seed/compiler/src/vm/`）全部改用 Aura 自实现（`aura/compiler/aura/lang/compiler/vm/`）
 > **结论**：**可行**——核实发现 `bootstrap/` 是孤立死代码（全仓库 0 生产引用），因此「新 VM 不引用 bootstrap」这一隔离要求**今天已天然满足**，隔离成本近乎为零。建议分 5 个阶段推进，总工期 **14–22 周（3.5–5.5 个月）**，JIT/Photon 作为独立任务并行跟踪。
+>
+> **v3.1 修订记录（2026-10-01）**：
+> 1. **基线刷新**：按当前 HEAD（`c193dce`）核实全部数字与行号——Aura VM 4,419→**5,832 行**（`Vm.aura` 1,897→2,336，字符串分派分支 60+→**125 条**），Rust VM 15,172→**17,226 行**，bootstrap 2,759→**3,047 行**，CLI 调用点收敛为 **1 处**（`main.rs:143`）。文档发布后（09-25 至 10-01）提交集中于 Photon 后端与编译器性能优化，**VM 内核架构未动，五个致命缺陷全部原样存在，P0 八项任务 0/8 完成**。
+> 2. **新增决策 D5**：**协程废弃，仅保留 Actor**（语言前端已无协程语法，新 VM 不实现协程指令，详见 §〇）。
+> 3. **死代码状态更新**：`Opcodes.aura` 被 `Vm.aura:29` import 但全文件 0 处实际使用（**伪接线**，比纯死代码更易误导）；`TailCall`/`Closures` 仅被 `VmRunner` 的兼容 getter（`getTailCall()`/`getClosures()`）引用，仍无真实执行路径（见 §1.8）。
+> 4. **新增翻译层证据**：`VmAucLoader.aura`（92 行，Phase S2）自我描述为"桥接 .auc 二进制与 VM **文本字节码**格式"——仍是 §1.5 判定不可接受的"二进制→文本→解释"路线的延续（见 §1.5）。
 
 ---
 
@@ -12,15 +18,17 @@
 
 | # | 决策 | 内容 | 影响 |
 |---|------|------|------|
-| D1 | **`bootstrap/` 保留但不引用** | `seed/compiler/src/bootstrap/`（2,759 行 / 10 文件）**保留在库中不删除**，但**新的 Aura VM 实现不得引用它**。Rust 侧 VM 与 bootstrap 保持现状，不做清理 | 见 §1.1 核实：该层当前已 0 生产引用，隔离要求天然满足；见 §2.5 的隔离守卫机制 |
+| D1 | **`bootstrap/` 保留但不引用** | `seed/compiler/src/bootstrap/`（v3.1 核实 3,047 行 / 10 文件）**保留在库中不删除**，但**新的 Aura VM 实现不得引用它**。Rust 侧 VM 与 bootstrap 保持现状，不做清理 | 见 §1.1 核实：该层当前已 0 生产引用，隔离要求天然满足；见 §2.5 的隔离守卫机制 |
 | D2 | **纯 Aura 实现 + Photon 后端** | 下沉部分**仅保留无法用 Aura 实现的部分**，不再使用 Rust | VM 指令集压到最小（~30 条），其余全部 Aura 代码 |
 | D3 | **JIT 走纯 Aura + Photon** | 不纳入本方案本地范围，用其他任务跟踪 | 本方案 P0–P4 产出**纯解释执行**的 VM，JIT 是独立并行任务 |
 | D4 | **Rust 当前仅为种子** | 主要还是 Aura 自举实现 VM | 迁移后 Rust 编译器是**一次性冻结种子**，完成自举即可彻底移除 |
+| D5 | **协程废弃，仅保留 Actor**（v3.1 新增，2026-10-01 落定） | 协程在语言层已废弃（Aura 解析器 `Parser.aura` 与 Rust 前端 token 均无协程语法关键字，仅 `AucLoader.aura:560-562` 为解码旧 `.auc` 保留 op 50-52 的助记符名）；新 VM **不实现** `Yield`/`NewCoroutine`/`ResumeCoroutine`；并发模型以 **Actor**（P3.3）为唯一受支持形态 | §2.1 争议项 1 就此落定（选择"都不做"）；P1.7 取消；R10 消除；Rust 侧 `vm/coroutine.rs`（153 行）与 codegen 协程指令转为遗留代码，随 P4 一并退役 |
 
 **与 v1 方案的关键差异**：
 - v1 建议"薄 VM + 厚标准库"并把 `bootstrap/` 列为常驻引导层边界 → **v2 确立隔离约束：新 VM 不引用 bootstrap，但该层代码保留不删**
 - v1 含 P4「JIT/AOT 接入」阶段（3–5 周）→ **v2 移除，改为独立任务**
 - v1 工期 18–27 周 → **v2 缩减为 14–22 周**
+- **v3.1（2026-10-01）**：新增 D5（协程废弃，仅保留 Actor）；全量基线刷新至 HEAD `c193dce`（Aura VM 5,832 行 / Rust VM 17,226 行 / bootstrap 3,047 行 / CLI 调用点 1 处）；死代码模块状态更新（`Opcodes.aura` 伪接线）
 
 ---
 
@@ -30,9 +38,9 @@
 
 | # | 实现 | 位置 | 规模 | 指令数 | 生产使用 |
 |---|------|------|------|--------|---------|
-| A | **Rust 主 VM** | `seed/compiler/src/vm/` | **15,172 行 / 26 文件** | **106** | ✅ CLI `main.rs:1769/2445/2979` 三处调用 |
-| B | **Bootstrap 迷你 VM** | `seed/compiler/src/bootstrap/` | **2,759 行 / 10 文件** | **15–17** | ❌ **完全孤立** |
-| C | **Aura VM** | `aura/compiler/aura/lang/compiler/vm/` | **4,419 行 / 13 文件** | **~65** | ⚠️ CLI 部分命令 + 少量测试 |
+| A | **Rust 主 VM** | `seed/compiler/src/vm/` | **17,226 行 / 26 文件**（v3.1 刷新，v3 为 15,172） | **106** | ✅ CLI `main.rs:143` 一处调用（v3 记录的 1769/2445/2979 三处已收敛为 1 处） |
+| B | **Bootstrap 迷你 VM** | `seed/compiler/src/bootstrap/` | **3,047 行 / 10 文件**（v3.1 刷新，v3 为 2,759） | **15–17** | ❌ **完全孤立** |
+| C | **Aura VM** | `aura/compiler/aura/lang/compiler/vm/` | **5,832 行 / 13 文件**（v3.1 刷新，v3 为 4,419） | **125 条字符串分派分支** | ⚠️ CLI 部分命令 + 少量测试 |
 
 **B 的孤立性经 grep 全面核实**：
 
@@ -50,7 +58,7 @@
 
 **按 D1 决策：该层保留不删除，但新 VM 实现不得引用它。** 由于当前已是 0 生产引用，隔离约束**今天已天然满足**，本方案的工作不是"清理"，而是**加一道守卫防止将来被接回**（见 §2.5）。
 
-**另一处重要纠正**：`bootstrap/jit_ffi.rs`（328 行）定义了 `jit_compile`/`jit_load`/`jit_call`，正是 Aura 侧 `VmJitBridge.aura` 声明的 `@native` 目标。但 grep 核实主 VM 的 JIT **完全不走这份实现**：
+**另一处重要纠正**：`bootstrap/jit_ffi.rs`（v3.1 核实 394 行，v3 记录 328）定义了 `jit_compile`/`jit_load`/`jit_call`，正是 Aura 侧 `VmJitBridge.aura` 声明的 `@native` 目标。但 grep 核实主 VM 的 JIT **完全不走这份实现**：
 
 - 主 VM JIT 在 `vm/jit.rs:388/408/1456` 调用 `jit_compile_cranelift`（定义于 `vm/jit.rs` 内部，直接调 Cranelift）
 - `bootstrap::jit_ffi::{jit_compile,jit_load,jit_call}` 的唯一调用者是 `bootstrap_test.rs:217/622`
@@ -61,19 +69,19 @@
 
 | 模块 | Rust VM（行） | Aura VM（行） | 差距性质 |
 |------|--------------|--------------|---------|
-| 解释执行主循环 | 2,346（`interp.rs`） | 1,897（`Vm.aura`） | 架构不同（见 1.4） |
-| VM 核心/指令定义 | 1,757（`mod.rs`） | 102（`Opcodes.aura`，**死代码**） | 缺失 |
-| 原生函数注册表 | 1,334（`native.rs`，~93 个） | 0 | **完全缺失** |
-| JIT | 2,260 | 240（`VmJitBridge.aura`，**未接线**） | D3 决策：移出本方案 |
-| 调试器 | 1,234（`debugger.rs`） | 0 | **完全缺失** |
-| AOT 运行时 + mmap | 1,297 | 0 | **完全缺失**（随 Photon 任务） |
-| 并发运行时 | 2,267（7 文件） | ~250（`Vm.aura` 内散落的原始内存自旋锁） | 部分 |
-| 堆/值模型 | 814（`heap.rs`+`value.rs`） | ~400（`Vm.aura` 内，**有缺陷**） | 部分 |
-| FFI | 585（3 文件） | ~100（**桩**） | 缺失 |
-| 序列化/模块 | 539 | 0（Aura 侧在 `serialize/` 下） | 部分 |
-| 其他（event/ipc/coroutine/thread_pool/actor_process） | 1,170 | 0 | **完全缺失** |
+| 解释执行主循环 | 2,582（`interp.rs`） | 2,336（`Vm.aura`） | 架构不同（见 1.4） |
+| VM 核心/指令定义 | 1,900（`mod.rs`） | 120（`Opcodes.aura`，**伪接线**：被 `Vm.aura:29` import 但 0 处使用） | 缺失 |
+| 原生函数注册表 | 2,104（`native.rs`，~93 个） | 0 | **完全缺失** |
+| JIT | 2,454（`jit.rs` 1,462 + `jit_opt.rs` 846 + `jit_native.rs` 146） | 344（`VmJitBridge.aura`，**未接线**） | D3 决策：移出本方案 |
+| 调试器 | 1,297（`debugger.rs`） | 0 | **完全缺失** |
+| AOT 运行时 + mmap | 1,435（`aot_runtime.rs` 1,134 + `mmap_util.rs` 301） | 0 | **完全缺失**（随 Photon 任务） |
+| 并发运行时 | 2,029（`concurrent_native.rs` 1,077 + `actor.rs` 393 + `actor_process.rs` 195 + `channel.rs` 206 + `channel_tcp.rs` 158） | ~250（`Vm.aura` 内散落的原始内存自旋锁） | 部分；**协程已废弃（D5）** |
+| 堆/值模型 | 914（`heap.rs` 526 + `value.rs` 388） | ~400（`Vm.aura` 内，**有缺陷**） | 部分 |
+| FFI | 658（`ffi.rs` 396 + `ffi_cache.rs` 150 + `dynamic_ffi.rs` 112） | ~100（**桩**） | 缺失 |
+| 序列化/模块 | 789（`serialize.rs` 313 + `multi_module.rs` 266 + `abi.rs` 210） | 0（Aura 侧在 `serialize/` 下） | 部分 |
+| 其他（event/ipc/coroutine/thread_pool） | 1,064（`event_notifier.rs` 598 + `ipc.rs` 167 + `coroutine.rs` 153 + `thread_pool.rs` 146） | 0 | **完全缺失**；`coroutine.rs` 已废弃（D5），随 P4 退役 |
 
-**Rust VM 按规模排序（前 10）**：`interp.rs` 2346 / `mod.rs` 1757 / `jit.rs` 1382 / `native.rs` 1334 / `debugger.rs` 1234 / `aot_runtime.rs` 1034 / `concurrent_native.rs` 950 / `jit_opt.rs` 752 / `event_notifier.rs` 549 / `heap.rs` 448。
+**Rust VM 按规模排序（前 10）**：`interp.rs` 2582 / `native.rs` 2104 / `mod.rs` 1900 / `jit.rs` 1462 / `debugger.rs` 1297 / `aot_runtime.rs` 1134 / `concurrent_native.rs` 1077 / `jit_opt.rs` 846 / `event_notifier.rs` 598 / `heap.rs` 526。
 
 ### 1.3 Rust VM 功能规格（迁移目标）
 
@@ -81,7 +89,7 @@
 |------|------|
 | 指令变体 | **106** 个（`codegen/opcode.rs:30-274`） |
 | 原生函数 | **~93 个**独立函数 / ~112 注册条目（`vm/native.rs:50-340`） |
-| 代码行数 | **15,172** 行 / 26 文件 |
+| 代码行数 | **17,226** 行 / 26 文件（v3.1 核实） |
 | 值类型 | 10 变体：`Int(i64)` / `Float(f64)` / `Bool` / `Str(Rc<str>)` / `Null` / `Ref(usize)` / `Weak(usize)` / `Ptr(i64)` / `List(Vec<Value>)` / `Map(HashMap<Value,Value>)`（`vm/value.rs:14-37`） |
 | 堆数据类型 | 7 变体：`Object{type_tag,fields,vtable}` / `Array` / `List` / `Map` / `Closure{func_name,param_count,locals,captures,func_idx}` / `Enum` / `FnRef`（`vm/heap.rs:19-54`） |
 | 堆策略 | **纯 ARC（无 GC）** |
@@ -96,7 +104,7 @@
 | 维度 | Rust VM | Aura VM |
 |------|---------|---------|
 | 字节码表示 | 预解码 `Vec<Instr>` 枚举，操作数加载期解析为**索引** | `String` 文本，每行一条指令 `OPCODE arg1 arg2` |
-| 指令分派 | Rust `match` 枚举判别式（编译器生成跳转表） | **60+ 条 `else if (opcode == "...")` 字符串线性比较**（`Vm.aura:293-719`） |
+| 指令分派 | Rust `match` 枚举判别式（编译器生成跳转表） | **125 条 `else if (opcode == "...")` 字符串线性比较**（`Vm.aura:293-711`，v3 记录为 60+ 条，两周内翻倍） |
 | 值表示 | tagged union 枚举，基础类型内联 | `Any` + `Long` 裸指针（`Memory.alloc`） |
 | 操作数 | `u16`/`i32` 索引，加载期完成跳转重定位 | 参数字符串，执行期 `VmOps.toI32()` 逐个解析 |
 | 对象字段 | `HashMap<u16, Value>`，**按实例**存储（FNV 哈希键） | **全局表** `globals["field:"+name]`，**跨实例共享** |
@@ -138,6 +146,8 @@ Aura 侧 `serialize/AucLoader.aura` 能读取 Rust 编译器产出的真实 `.au
 
 即：Aura VM **不直接执行 Rust 二进制字节码**，而是"二进制 → 文本 → 解释文本"。这是翻译层，不是执行器。
 
+**v3.1 补充**：该翻译层模式仍在延续——`vm/VmAucLoader.aura`（92 行，Phase S2）自我描述为"桥接 .auc 二进制格式与 VM **文本字节码**格式"，即新代码仍在向文本字节码汇合而非向数值字节码迁移。P2.2 的"取消翻译"决议对 `VmAucLoader.aura` 同样适用。
+
 **指令集编号也是两套独立的**（`Opcodes.aura` 从未被分派器引用）：
 
 | 指令 | `Opcodes.aura` | Rust `OpCode::byte()` |
@@ -156,7 +166,7 @@ Aura 侧 `serialize/AucLoader.aura` 能读取 Rust 编译器产出的真实 `.au
 | 数值/字符串/集合 | ✅ 80% | 真实现 |
 | **对象/类/方法分派** | 🔴 **15%** | **字段存全局表，跨实例共享** |
 | **闭包/upvalue** | 🔴 **10%** | **不捕获任何 upvalue** |
-| **协程** | 🔴 **5%** | **纯桩，不保存执行点** |
+| **协程** | ⛔ **已废弃（D5）** | 语言前端已无协程语法；仅 `AucLoader.aura:560-562` 为解码旧 `.auc` 保留 op 50-52 助记符；仅保留 Actor（P3.3） |
 | 异常处理 | ⚠️ 40% | 骨架在，catch 类型过滤被忽略 |
 | ARC/GC | ⚠️ 25% | ARC 仅对 Long 指针；**无 GC** |
 | JIT 桥接 | 🔴 15% | `VmJitBridge.aura` 完整但**从未接线**（D3：移出本方案） |
@@ -168,7 +178,7 @@ Aura 侧 `serialize/AucLoader.aura` 能读取 Rust 编译器产出的真实 `.au
 
 #### 缺陷 1：对象字段跨实例共享 —— 使面向对象完全不可用
 
-`Vm.aura:1193-1234`：
+`Vm.aura:1210-1258`（v3 记录为 1193-1234，代码增长后行号下移）：
 
 ```aura
 private fun getField(fieldName: String): Unit {
@@ -196,34 +206,39 @@ val d1 = Dog("Rex");  val d2 = Dog("Fido")
 println(d1.name)   // 输出 "Fido" —— 而非 "Rex"
 ```
 
-`newObject()`（`Vm.aura:1179-1186`）分配 16 字节头，类型标签恒为 0（`// 类型标签（0 = 通用对象）`）。`CALL_METHOD` / `CALL_CTOR`（`1291-1301`）是桩，忽略对象、忽略参数、无 vtable 分派。
+`newObject()`（`Vm.aura:1196`）分配 16 字节头，类型标签恒为 0（`// 类型标签（0 = 通用对象）`）。`CALL_METHOD` / `CALL_CTOR`（分派于 `Vm.aura:475/517`，实现 `1308/1315`）是桩，忽略对象、忽略参数、无 vtable 分派。**v3.1 复核（2026-10-01）：原样存在，未修复。**
 
 #### 缺陷 2：闭包不捕获 upvalue
 
-`Vm.aura:1317-1336`：`loadClosure()` 解析 `funcName|varNames` 后**丢弃 varNames**；`makeClosure()` 只记函数名；`callClosure()` 以 `argc=0` 调用。独立 `Closures.aura`（282 行）有完整 upvalue API，**从未被 `Vm.aura` 引用**。
+`Vm.aura:1325-1352`（v3 记录为 1317-1336）：`loadClosure()` 解析 `funcName|varNames` 后**丢弃 varNames**；`makeClosure()` 只记函数名；`callClosure()` 以 `argc=0` 调用。独立 `Closures.aura`（354 行）有完整 upvalue API，**从未被 `Vm.aura` 引用**（仅 `VmRunner.aura:211` 的兼容 getter `getClosures()` 触及）。**v3.1 复核（2026-10-01）：原样存在，未修复。**
 
 后果：**lambda / 回调 / 函数式编程不可用**。
 
-#### 缺陷 3：协程是纯桩
+#### 缺陷 3：协程是纯桩 —— ✅ 已按 D5 废弃，不再修复（v3.1 更新）
 
-`newCoroutine()`（`1512-1519`）只把 funcIdx 塞进 HashMap；`resumeCoroutine()`（`1521-1528`）只做栈数据重排，不恢复执行点（注释自认 `// 简化：协程恢复在当前 VM 内继续执行`）；`YIELD`（`1504-1510`）设 `running=false` 但**无恢复路径**。`VmInstance.aura:76` 的独立 `coroutines` 字段从未使用。
+`newCoroutine()`（`Vm.aura:1529-1536`）只把 funcIdx 塞进 HashMap；`resumeCoroutine()`（`1538-1546`）只做栈数据重排，不恢复执行点（注释自认 `// 简化：协程恢复在当前 VM 内继续执行`）；`YIELD`（`1521-1528`）设 `running=false` 但**无恢复路径**。`VmInstance.aura:76` 的独立 `coroutines` 字段从未使用。
+
+**处理决议（D5，2026-10-01）**：协程废弃，仅保留 Actor。**本缺陷不再作为待修复项**——新 VM 不实现 `Yield`/`NewCoroutine`/`ResumeCoroutine`，Rust 侧 `vm/coroutine.rs`（153 行）与 codegen 协程指令转为遗留代码，随 P4 一并退役。Aura 前端（`Parser.aura`）与 Rust 前端 token 表均已无协程语法关键字，仅 `AucLoader.aura:560-562` 为解码历史 `.auc` 保留 op 50-52 的助记符名。
 
 #### 缺陷 4：无 GC，堆对象泄漏
 
-`Opcodes.aura:57-58` 定义了 `GC_MARK`/`GC_SWEEP`，但**分派器无对应指令**。`VmInstance.aura` 的 `GcHeap` 从未使用。ARC 只对 64 位指针生效（`typeName(v)=="Long"`），装箱值不计数；`weakRef()` 原样透传；`boxAlloc()` 对字符串 `write64` 会截断。`VmCollections` 创建的列表/映射**头部、map 头部、所有元素指针都从未释放**。
+`Opcodes.aura:57-58` 定义了 `GC_MARK`/`GC_SWEEP`，但**分派器无对应指令**。`VmInstance.aura` 的 `GcHeap` 从未使用。ARC 只对 64 位指针生效（`typeName(v)=="Long"`），装箱值不计数；`weakRef()` 原样透传；`boxAlloc()` 对字符串 `write64` 会截断。`VmCollections` 创建的列表/映射**头部、map 头部、所有元素指针都从未释放**。**v3.1 复核（2026-10-01）：原样存在，未修复。**
 
 #### 缺陷 5：JIT 桥接完整实现但完全未接线
 
-`VmJitBridge.aura`（344 行）本身完整（热点阈值 10000、派发决策、Clif IR → FFI `jit_compile` → `jit_load` → 分发表、去优化回退）。但 `grep "vmCallHook\|VmJitBridge" Vm.aura` 返回 **0**。
+`VmJitBridge.aura`（344 行）本身完整（热点阈值 10000、派发决策、Clif IR → FFI `jit_compile` → `jit_load` → 分发表、去优化回退）。但 `grep "vmCallHook\|VmJitBridge" Vm.aura` 返回 **0**。**v3.1 复核（2026-10-01）：仍未接线，原样存在。**
 
 > **按 D3 决策**：此桥接层随 JIT 任务一并移交，不在本方案范围内。本方案产出的 VM 为**纯解释执行**。
 
 ### 1.8 测试与验证现状
 
-- `tests/phase5_vm_tests.aura` 中至少 4 个用例（`testVmRunnerStack`/`testVmRunnerLocal`/`testVmRunnerGlobal`/`testVmRunnerArith`）调用**已删除的旧 API**（`push`/`pop`/`peek`/`setLocal`/`getLocal`/`arithAdd`），**当前代码库下无法编译**。
-- `examples/` 目录 `grep "VmRunner\|loadAucAndRun"` 返回 **0** —— **没有任何示例实际调用 VM**。
+- `tests/phase5_vm_tests.aura` 中至少 4 个用例（`testVmRunnerStack`/`testVmRunnerLocal`/`testVmRunnerGlobal`/`testVmRunnerArith`）调用**已删除的旧 API**（`push`/`pop`/`peek`/`setLocal`/`getLocal`/`arithAdd`），**当前代码库下无法编译**。**v3.1 复核：失效调用仍在（如 `:341`、`:364-369`），未修复。**
+- `examples/` 目录 `grep "VmRunner\|loadAucAndRun"` 返回 **0** —— **没有任何示例实际调用 VM**。**v3.1 复核：仍为 0。**
 - **无端到端证据证明 Rust 编译器产出的 `.auc` 曾被 Aura VM 成功执行过。**
-- **三个死代码模块**：`Opcodes.aura`（`grep "Opcodes\." Vm.aura` → 0）、`TailCall.aura`（`grep "TailCall" Vm.aura` → 0）、`Closures.aura`（`grep "Closures" Vm.aura` → 0）。
+- **三个死代码模块（v3.1 状态更新）**：
+  - `Opcodes.aura`（120 行）：`Vm.aura:29` 已 import，但全文件 `Opcodes.` 实际使用 **0 处**——**伪接线**，比纯死代码更易误导，P0.6 决议时优先处理；
+  - `TailCall.aura`（171 行）：仅被 `VmRunner.aura:216` 的兼容 getter `getTailCall()` 引用，无真实执行路径；
+  - `Closures.aura`（354 行）：仅被 `VmRunner.aura:211` 的兼容 getter `getClosures()` 引用，无真实执行路径。
 
 ### 1.9 历史时间线
 
@@ -238,6 +253,13 @@ println(d1.name)   // 输出 "Fido" —— 而非 "Rex"
             aot/runtime/*.ll / aura/tests/concurrent/*
 2026-09-23  提交 036ab65「把误删的工具代码添加回来」—— 回滚
 2026-09-24/25  集中于 photon 后端（HAT 端到端）
+2026-09-25    本文档 v3 发布
+2026-09-25 ~
+2026-10-01    提交集中于 Photon 后端（P0-P4 自举打通）、编译器性能优化
+              （7e5866f/77ee064/274e8f0/c193dce）、seed 目录迁移（bd68aff/240c694）。
+              **VM 内核（Vm.aura/AucLoader）架构未动**：字符串分派 60+→125 条，
+              五个致命缺陷原样存在，P0 八项任务 0/8 完成。
+2026-10-01    v3.1 发布：基线刷新 + D5 决策（协程废弃，仅保留 Actor）
 ```
 
 **文档现状**：`docs/` 下 24 份相关文档中 **12 份结论已过期**，存在 **9 处互相矛盾**（含同目录同日两份文档结论完全相反）。权威依据仅 6 份：`docs/photon/implementation-deviation-analysis.md`、`aura/compiler/README.md`、`docs/pure_aura/03-差距分析.md`、`docs/pure_aura/03-自举验证报告.md`、`docs/pure_aura_jit/README.md`、`docs/pure_aura_jit/02-技术方案.md`。
@@ -280,13 +302,13 @@ println(d1.name)   // 输出 "Fido" —— 而非 "Rex"
 | 枚举/函数引用 `EnumConstruct` `EnumTag` `MakeFnRef` | 3 | Aura `Enum` 类型 + 对象字段 |
 | 闭包 `MakeClosure` `CallClosure` | 2 | Aura 闭包对象（`NewObject` + 字段 + `Call`） |
 | 跨模块 `CallExport` `CallExternal` `CallAot` | 3 | Aura 模块注册表 + `CallNative` |
-| 协程 `Yield` `NewCoroutine` `ResumeCoroutine` | 3 | **见下方争议项** |
+| 协程 ~~`Yield` `NewCoroutine` `ResumeCoroutine`~~ | 3 | **已废弃（D5，2026-10-01）：不迁移、不实现**，并发模型仅保留 Actor（见争议项 1 落定结论） |
 | 原生函数注册表 ~93 个 | 93 | Aura `std` 包 + `CallNative` 转发到 syscall 层 |
 
-**争议项（需 P0 评估后定夺）**：
+**争议项**：
 
-1. **协程（3 条）**：真协程需保存/恢复 VM 执行点（PC + 调用栈 + 操作数栈），这是 VM 内部状态，**Aura 代码无法自访问**。建议**保留为 VM 指令**，或采用「显式状态机 + 对象字段」的协作式实现（无 VM 支持，但无法跨函数挂起）。
-2. **闭包（2 条）**：可用 `NewObject` + 字段 + `Call` 组合实现——闭包对象含「函数索引字段 + 捕获值字段」，调用时 Aura 代码先构造实参数组再 `Call`。技术上可行但**每次闭包调用多一层对象查找开销**。建议**下沉**，接受性能代价（JIT 任务是独立并行线，可后续覆盖热点）。
+1. **协程（3 条）—— ✅ 已落定（D5，2026-10-01）：废弃协程，仅保留 Actor。** 原评估指出真协程需保存/恢复 VM 执行点（PC + 调用栈 + 操作数栈），这是 VM 内部状态，Aura 代码无法自访问。最终决策不采用「保留 VM 指令」也不采用「显式状态机」，而是**在语言与 VM 层整体废弃协程**：Aura 前端（`Parser.aura`）与 Rust 前端 token 表已无协程语法关键字，仅 `AucLoader.aura:560-562` 为解码历史 `.auc` 保留 op 50-52 助记符名；Rust 侧 `vm/coroutine.rs`（153 行）与 codegen 协程指令转为遗留代码，随 P4 退役。并发模型以 **Actor**（P3.3，纯 Aura）为唯一受支持形态。
+2. **闭包（2 条）**：可用 `NewObject` + 字段 + `Call` 组合实现——闭包对象含「函数索引字段 + 捕获值字段」，调用时 Aura 代码先构造实参数组再 `Call`。技术上可行但**每次闭包调用多一层对象查找开销**。建议**下沉**，接受性能代价（JIT 任务是独立并行线，可后续覆盖热点）。**（仍待 P0.3 评估定夺）**
 
 ### 2.2 分派架构重构（前置必做）
 
@@ -322,7 +344,7 @@ println(d1.name)   // 输出 "Fido" —— 而非 "Rex"
 |--------|---------|---------|
 | JIT 派发桥接 | `VmJitBridge.aura`（344 行）完整实现但**未接线** | 纯 Aura + Photon |
 | Clif IR 生成 | `compiler/jit/JitLower.aura` 等（`pure_aura_jit` 侧声称已完成） | 替换为 Photon IR |
-| JIT FFI 边界 | `bootstrap/jit_ffi.rs`（328 行）**从未接入生产**，按 D1 保留但不得使用 | Photon 进程内编译 |
+| JIT FFI 边界 | `bootstrap/jit_ffi.rs`（v3.1 核实 394 行）**从未接入生产**，按 D1 保留但不得使用 | Photon 进程内编译 |
 | AOT 运行时 | Rust `aot_runtime.rs`（1,034 行）+ `mmap_util.rs`（263 行） | Photon + PhotonNativeWriter |
 | JIT 后端 | Cranelift crate | **Photon 自研后端替换** |
 
@@ -337,7 +359,7 @@ println(d1.name)   // 输出 "Fido" —— 而非 "Rex"
 | VM 解释器 | ✅ 纯 Aura |
 | 标准库运行时语义 | ✅ 纯 Aura |
 | 编译器前端/后端、CLI、LSP、调试器、loom | ✅ 纯 Aura（已大体完成） |
-| **`seed/compiler/src/bootstrap/`**（2,759 行） | 🟡 **保留但不引用**（已核实为孤立死代码，见 §1.1；新 VM 与 JIT 任务均不得使用，见 §2.5） |
+| **`seed/compiler/src/bootstrap/`**（3,047 行，v3.1 核实） | 🟡 **保留但不引用**（已核实为孤立死代码，见 §1.1；新 VM 与 JIT 任务均不得使用，见 §2.5） |
 | **Rust 编译器** | 🟡 **一次性冻结种子**——编译 Aura 编译器为原生 exe，完成自举后彻底移除 |
 | OS 系统调用（mmap/malloc/NT_CreateFile/线程原语） | 🟡 **保留**——不可避免的物理边界 |
 | LLVM / Cranelift | 🟡 **目标态由 Photon 替换**（独立任务） |
@@ -357,7 +379,7 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 2. **依赖方向声明**：在 ADR 中明确依赖方向单向性——`bootstrap/` 是**叶子模块**，允许被 `tests/` 引用，**禁止被 `src/vm/`、`src/codegen/`、CLI、loom 生产代码引用**。
 3. **注释标记**：在 `seed/compiler/src/bootstrap/mod.rs` 头部加显著标记，说明"此层为遗留孤立代码，保留但不引用，新 VM 与 JIT 不得接入"。
 
-**为何仍需守卫**：`bootstrap/` 中的 `jit_core.rs`/`jit_ffi.rs` 与 JIT 需求高度重叠，独立 JIT/Photon 任务在排期压力下**最容易的选择就是把现成的 328 行 `jit_ffi.rs` 接回来**。守卫必须在 JIT 任务启动前就位。
+**为何仍需守卫**：`bootstrap/` 中的 `jit_core.rs`/`jit_ffi.rs` 与 JIT 需求高度重叠，独立 JIT/Photon 任务在排期压力下**最容易的选择就是把现成的 394 行 `jit_ffi.rs` 接回来**。守卫必须在 JIT 任务启动前就位。
 
 ---
 
@@ -374,7 +396,7 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 | P0.3 架构决策落定 | 把 §二 的设计写成 ADR（`docs/adr/ADR-001-极简VM指令集.md` 等），含 §2.1 争议项的评估结论 | 3–4 份 ADR |
 | **P0.4 分派器重构** | 字符串 if/else 链 → 数值索引分派表；字节码 `String` → `Array<Int>` opcode + `Array<Array<Int>>` 操作数表；加载期完成跳转重定位；`Opcodes.aura` 改为真实生效的唯一编号源（或并入删除） | `Vm.aura` 主循环重写（~2,000–3,000 行） |
 | **P0.5 对象模型修正** | 字段从全局表移入对象堆布局（`objPtr + 16` 起按字段槽存储）；实现类定义表与 vtable 解析的加载端；`newObject`/`getField`/`setField`/`callMethod`/`callCtor` 全部重写 | 堆布局规范 + 5 个方法重写 |
-| P0.6 死代码清理 | 明确 `Opcodes.aura` / `TailCall.aura` / `Closures.aura` 三者去留：接线或删除，不留「有实现但无调用方」的模块 | 三者去留决议 |
+| P0.6 死代码清理 | 明确 `Opcodes.aura` / `TailCall.aura` / `Closures.aura` 三者去留：接线或删除，不留「有实现但无调用方」的模块。**v3.1 注意**：`Opcodes.aura` 已被 `Vm.aura:29` import 但 0 处使用（伪接线），`TailCall`/`Closures` 仅剩 `VmRunner` 兼容 getter 引用——三者均无真实执行路径，且伪接线更易误导 | 三者去留决议 |
 | P0.7 测试重建 | 修复 `phase5_vm_tests.aura` 中 4 个失效用例；新增**多实例字段隔离回归测试** | 测试全部编译通过 |
 | P0.8 加速钩子预留 | 在 `Call`/`CallNative` 分派路径预留可插拔加速派发钩子（仅接口，不实现） | 接口签名稳定 |
 
@@ -395,6 +417,23 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 
 **P0 工作量**：~3,000–4,000 行 Aura 改动（bootstrap 保留不删，仅加守卫脚本与标记），2–3 周（1–2 人）
 
+> **✅ P0 完成记录（2026-10-01 实施完毕）**
+>
+> | 任务 | 状态 | 交付物 |
+> |------|------|--------|
+> | P0.1 隔离守卫 | ✅ | `scripts/check-bootstrap-isolation.ps1|.sh`（双版本，当前代码库 PASS）+ `docs/adr/ADR-004` + `bootstrap/mod.rs` 隔离标记 |
+> | P0.2 文档治理 | ✅ | 12 份过期文档 `git mv` 至 `docs/archive/` 并加 DEPRECATED 头注；6 份权威文档加复核日期戳 |
+> | P0.3 ADR 落定 | ✅ | `docs/adr/ADR-001~004`（指令集/数值分派/对象模型/隔离守卫；协程废弃 D5、闭包下沉、三个死代码模块去留均已决议） |
+> | P0.4 分派器重构 | ✅ | `Opcodes.aura` 重写为唯一编号源（124 条助记符 + `fromName`）；`Vm.aura` 分派全数值比较（字符串比较 0 处），注释/空行加载期编号 `OP_NOP`；协程指令按 D5 移除 |
+> | P0.5 对象模型 | ✅ | 字段从全局表迁至按实例键控存储（`objectFields`/`objectClass`，ADR-003 记录与裸内存槽方案的偏差理由）；`newObject`/`getField`/`setField`/`callMethod`/`callCtor` 全部重写（虚方法按 `"类名.方法名"`、self 首参） |
+> | P0.6 死代码决议 | ✅ | Opcodes 接线；Closures/TailCall 保留为 P1.3/P1.6 基座（ADR-001） |
+> | P0.7 测试重建 | ✅ | 新增 `tests/vm_object_model_tests.aura`（6 组 / 18 断言全过，含多实例字段隔离回归锚）；`phase5_vm_tests.aura` 21 项全过（v3.1 已核实其 API 早已修复） |
+> | P0.8 加速钩子 | ✅ | `enableAccelDispatch`/`setAccelEntry`/`clearAccelEntries`/`isAccelDispatchEnabled`（Vm+VmRunner 委托），`callOrBuiltin` 用户函数路径接入直呼表（默认关闭） |
+>
+> **验收对账**：隔离守卫双脚本 PASS ✅；分派器无字符串比较 ✅；Dog 示例输出 `"Rex"`（`examples/compiler/vm_runner_demo.aura`，DEMO PASS）✅；`phase5_vm_tests` 全过 ✅；新增 VmRunner 示例 ✅。
+> **回归对账**：全量基线改动前后对比——改动前 99 OK/31 FAIL（130 项），改动后 100 OK/31 FAIL（131 项，新增 1 项即本 P0 测试）；**失败列表逐项一致，零回归**（31 个失败均为存量功能缺口，与 VM 无关）。
+> **实施要点**：堆指针的装箱类型名随宿主为 `"Int"`（非 `"Long"`），对象键统一取 `VmOps.toStrAny` 栈值形态；`SET_FIELD` 栈序为 value 在顶、objPtr 在其下。
+
 ---
 
 ### 阶段 P1：正确性内核（4–6 周）
@@ -409,7 +448,7 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 | P1.4 异常 | catch 类型过滤器生效；异常类型/消息结构；多级过滤（内层优先）；自动字符串→Exception 包装 | `interp.rs` 的 `Handler` 栈 | ~500 |
 | P1.5 内存 | ARC 扩展到所有引用类型（对象/集合/闭包/字符串）；`WeakRef` 真弱引用；`BoxAlloc` 类型感知；**集合/映射头部与元素释放** | `vm/heap.rs` | ~800 |
 | P1.6 尾调用 | 新增 `ReturnTail` 指令（Rust VM 无此指令，本项目改进项）；接线 `TailCall.aura` | — | ~300 |
-| P1.7 协程 | 按 §2.1 决议：保留 VM 指令则实现真状态机（保存/恢复 PC + 调用栈 + 操作数栈）；下沉则实现显式状态机对象 | `coroutine.rs` | ~400 |
+| ~~P1.7 协程~~ | **已取消（D5，2026-10-01）**：协程废弃，仅保留 Actor（P3.3）。新 VM 不实现 `Yield`/`NewCoroutine`/`ResumeCoroutine` | — | ~~~400~~ |
 
 **P1 验收标准**：
 - ✅ `tests/classes/`（20 个文件，含 `object_hierarchy_test.aura` 200 行、`test_value_class*.aura`）全部通过
@@ -418,7 +457,7 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 - ✅ 闭包捕获测试：`val f = { val x = i }; ...` 能正确捕获并在闭包内读取
 - ✅ ARC 泄漏检测：长循环创建/销毁对象后活跃对象计数归零（对齐 `heap.rs:94-96` 的 `active_count`）
 
-**P1 工作量**：~4,500 行 Aura，4–6 周（1–2 人）
+**P1 工作量**：~4,100 行 Aura（v3.1：扣除已取消的 P1.7 约 400 行），4–6 周（1–2 人）
 
 ---
 
@@ -448,9 +487,9 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 
 | 任务 | 内容 | Rust VM 对应 | 风险 |
 |------|------|-------------|------|
-| P3.1 原生函数下沉 | ~93 个原生函数由 Aura `std` 包接管（`println`/`abs`/`sqrt`/`pow`/`toInt`/`toFloat`/`toStr`/`clock`/`strlen`/`CString`/`CStr`/`ptrToInt`/`intToPtr`/`makeCallback`/`equals`/`hashCode`/`typeOf`/`aura_cast` 等）；三套命名空间（短名/`aura.lang.std.*`/`aura.ffi.*`）统一；仅 syscall 级原语经 `CallNative` 转发 | `native.rs` 1,334 行 | 🟢 低 |
-| P3.2 并发同步 | 按 §2.1 全部下沉为 Aura 语义层：`Mutex`/`RwLock`/`Atomic`/`Channel`/`Condvar`，底层经 `CallNative` 调 syscall 原子原语（`Memory`/`Cpu.atomicAdd`/已有自旋锁基元） | `concurrent_native.rs` 950 + `actor.rs` 353 + `channel.rs` 186 + `channel_tcp.rs` 157 + `event_notifier.rs` 549 + `thread_pool.rs` 127 + `ipc.rs` 165 | 🔴 高 |
-| P3.3 Actor | Actor 运行时与消息队列（纯 Aura） | `actor_process.rs` 194 | 🟡 中 |
+| P3.1 原生函数下沉 | ~93 个原生函数由 Aura `std` 包接管（`println`/`abs`/`sqrt`/`pow`/`toInt`/`toFloat`/`toStr`/`clock`/`strlen`/`CString`/`CStr`/`ptrToInt`/`intToPtr`/`makeCallback`/`equals`/`hashCode`/`typeOf`/`aura_cast` 等）；三套命名空间（短名/`aura.lang.std.*`/`aura.ffi.*`）统一；仅 syscall 级原语经 `CallNative` 转发 | `native.rs` 2,104 行（v3.1 核实，v3 记录 1,334） | 🟢 低 |
+| P3.2 并发同步 | 按 §2.1 全部下沉为 Aura 语义层：`Mutex`/`RwLock`/`Atomic`/`Channel`/`Condvar`，底层经 `CallNative` 调 syscall 原子原语（`Memory`/`Cpu.atomicAdd`/已有自旋锁基元）；**协程不在范围（D5 废弃），仅保留 Actor（P3.3）** | `concurrent_native.rs` 1,077 + `actor.rs` 393 + `channel.rs` 206 + `channel_tcp.rs` 158 + `event_notifier.rs` 598 + `thread_pool.rs` 146 + `ipc.rs` 167 | 🔴 高 |
+| P3.3 Actor | Actor 运行时与消息队列（纯 Aura）；**D5 后为唯一受支持的并发模型** | `actor_process.rs` 195（v3.1 核实，v3 记录 194） | 🟡 中 |
 | P3.4 FFI | `CString`/`ReadCStr` Aura 化；C 回调蹦床（最多 8 参数，thread_local + 全局栈双层派发）；动态库加载 | `ffi.rs` 357 + `ffi_cache.rs` 130 + `dynamic_ffi.rs` 98 | 🔴 高 |
 | P3.5 调试器 | 断点/单步/寄存器读取/栈回溯 | `debugger.rs` 1,234 行 | 🟡 中 |
 
@@ -473,7 +512,7 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 |------|------|
 | P4.1 自举闭环 | Aura VM 执行 Aura 编译器自编译产物（`Main.aura` 自举）；Stage-1/2/3 全通 |
 | P4.2 全量差分回归 | Rust VM vs Aura VM 对 `tests/` 全量 + `examples/` 全量做差分 |
-| P4.3 **删除 Rust VM** | 删除 `seed/compiler/src/vm/`（15,172 行 / 26 文件） |
+| P4.3 **删除 Rust VM** | 删除 `seed/compiler/src/vm/`（v3.1 核实为 **17,226 行 / 26 文件**；含已废弃的 `coroutine.rs`，D5） |
 | P4.4 CLI 切换 | `seed/compiler/src/main.rs` 中 3 处 `Vm::new`（`1769`/`2445`/`2979`）改为 Aura VM 路径；Rust CLI 退化为纯种子 |
 
 **P4 验收标准**：
@@ -482,7 +521,7 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 - ✅ `git grep "compiler::vm\|use.*vm::"` 无生产代码命中
 - ✅ 删除 `seed/compiler/src/vm/` 后全部测试仍通过
 
-**P4 工作量**：~1,500 行改动 + 15,172 行删除，2–3 周
+**P4 工作量**：~1,500 行改动 + 17,226 行删除，2–3 周
 
 ---
 
@@ -495,7 +534,7 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 | **OS 系统调用**（mmap/malloc/NT_CreateFile/线程原语/epoll） | 必须与内核二进制接口交互，语言层无法替代 | `aura_syscalls.c`（43,074 字节）+ `aura/lang/native/arch/*/Syscalls.aura` |
 | **Rust 种子编译器** | 自举的第一推动力——Aura 编译器自身需被某物编译 | 迁移后**仅用于编译 Aura 编译器**，自举闭环建立后可整体删除 |
 | LLVM / Cranelift | 由 Photon 替换（**独立任务**，不在本方案范围） | 当前仍在用，Photon 成熟后移除 |
-| **`seed/compiler/src/bootstrap/`**（2,759 行） | 已核实为孤立死代码（§1.1），**不属于"不可 Aura 化"，而是"已不需要但按 D1 保留"** | 保留在库中不删除；新 VM 与 JIT 任务均不得引用；P0.1 建立隔离守卫（§2.5） |
+| **`seed/compiler/src/bootstrap/`**（3,047 行，v3.1 核实） | 已核实为孤立死代码（§1.1），**不属于"不可 Aura 化"，而是"已不需要但按 D1 保留"** | 保留在库中不删除；新 VM 与 JIT 任务均不得引用；P0.1 建立隔离守卫（§2.5） |
 
 **对比 v1 方案**：v1 把 `bootstrap/` 列为常驻引导层边界；**v2 将其从"功能边界"降级为"遗留保留代码"**——它不构成新 VM 的能力来源，只被 P0.1 的隔离守卫约束。迁移后常驻 Rust 代码从「bootstrap + JIT FFI（功能边界）」收敛为「种子编译器（含孤立保留的 bootstrap）」。
 
@@ -512,11 +551,11 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 | R3 | **分派器重构是重写而非修补** | 🔴 高 | 字符串→数值分派需重写 `Vm.aura` 主循环与全部指令实现（~3,000 行） | 保留现有文本字节码作为 P0 输入兼容层，新分派器逐步接管，旧路径标记 deprecated |
 | R4 | **极薄指令集导致标准库路径性能不可接受** | 🔴 高 | ~76 条原 Rust 指令下沉为 Aura 代码，每次集合/同步操作多一层解释开销；本方案**无 JIT**（D3 独立任务） | P0.3 决策时建立微基准；设定可接受门槛（如 Rust VM 的 30–50%）而非要求等价；`List`/`Map` 内部数组布局由 VM 的 `NewArray` 建立，仅元素读写在 Aura 层；JIT 任务是独立并行线，成熟后覆盖热点 |
 | R5 | **并发原语纯 Aura 化失败** | 🔴 高 | 子代理风险预判标注「并发同步原语/AtomicBool 不可纯 Aura 实现」 | P3.2 分层：语义层 Aura，**原子操作层保留 syscall 原语**（CAS 等不可用 Aura 表达）；不追求把 CAS 写成纯 Aura |
-| R6 | **`bootstrap/` 隔离漂移**——遗留代码被后来的任务（尤其 JIT/Photon）接回生产路径 | 🟡 中 | 已核实当前 0 生产引用，但 D1 是"保留"而非"删除"，删除才是物理隔离；`jit_ffi.rs`（328 行）与 JIT 需求高度重叠，是最易被接回的部分 | P0.1 的 CI 静态检查（§2.5）在 JIT 任务启动前就位；ADR 声明单向依赖方向；`bootstrap/mod.rs` 头部标记 |
+| R6 | **`bootstrap/` 隔离漂移**——遗留代码被后来的任务（尤其 JIT/Photon）接回生产路径 | 🟡 中 | 已核实当前 0 生产引用，但 D1 是"保留"而非"删除"，删除才是物理隔离；`jit_ffi.rs`（v3.1 核实 394 行）与 JIT 需求高度重叠，是最易被接回的部分 | P0.1 的 CI 静态检查（§2.5）在 JIT 任务启动前就位；ADR 声明单向依赖方向；`bootstrap/mod.rs` 头部标记 |
 | R7 | **`phase5_vm_tests.aura` 已无法编译**，测试基线缺失 | 🟡 中 | 4 个用例调用已删除 API | P0.7 先修复测试再动 VM |
 | R8 | **无 `.auc` 端到端执行证据**，P2 差分框架可能暴露大量隐藏缺陷 | 🔴 高 | 无任何测试/示例证明 Rust `.auc` 被 Aura VM 执行过 | P2.4 差分框架提前到 P1 末尾原型验证；采用「逐函数对齐」而非「整体一次性切换」 |
 | R9 | **JIT 缺位导致长期性能不达标** | 🟡 中 | 本方案产出纯解释 VM；Aura 编译器比 Rust 编译器慢 4–5 倍（`pure_aura/07-性能对比报告.md`，报告本身已过期但趋势可信） | 明确告知：本方案**不解决性能**，仅解决「VM 归属」；性能由 Photon/JIT 独立任务承担；P0.8 预留的加速钩子即为对接点 |
-| R10 | **协程/闭包下沉判定失误** | 🟡 中 | §2.1 标记为争议项，协程可能无法下沉 | P0.3 评估时以「能否跨函数挂起」为硬判据，宁可保留 VM 指令也不牺牲正确性 |
+| ~~R10~~ | **协程/闭包下沉判定失误** | ⛔ 已消除（协程部分） | §2.1 争议项 1 原标记为争议项；**D5（2026-10-01）已落定协程废弃**，该半项风险消除。闭包半项仍待 P0.3 评估 | P0.3 评估时以「能否跨函数挂起」为硬判据，宁可保留 VM 指令也不牺牲正确性 |
 | R11 | **三个死代码模块（Opcodes/TailCall/Closures）**造成重复实现混乱 | 🟡 中 | 均有实现但均未被 `Vm.aura` 引用 | P0.6 明确去留：接线或删除，不留「有实现但无调用方」模块 |
 | R12 | **自举的「第一推动力」悖论** | 🟢 低 | 需某物编译 Aura 编译器 | 已由 Rust 种子编译器解决，D4 已明确其定位，非新增风险 |
 | R13 | **Photon 与本方案进度不同步导致契约错配** | 🟡 中 | Photon 成熟度团队内部认知不一致（同日两份文档 98% vs 六大致命偏差） | P0.8 加速钩子接口与 Photon 解耦（仅定义 VM 侧契约）；两条线独立验收，不互相阻塞 |
@@ -531,7 +570,7 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 | P1 | `tests/classes/` + `tests/HashMap/` + `tests/language-test/` 全部通过；ARC 泄漏检测归零 | 🔴 是 |
 | P2 | `.auc` 直接执行（无文本翻译）；差分测试与 Rust VM 输出一致 | 🔴 是 |
 | P3 | `tests/concurrent/` + FFI demo + Actor/Channel 全部通过 | 🔴 是 |
-| P4 | 自举 Stage-1/2/3 全通；删除 `seed/compiler/src/vm/`（15,172 行）后全量测试通过 | — |
+| P4 | 自举 Stage-1/2/3 全通；删除 `seed/compiler/src/vm/`（v3.1 核实 17,226 行）后全量测试通过 | — |
 
 **跨方案验收（由独立 JIT/Photon 任务负责，本方案不阻塞）**：热点 JIT 生效、AOT 段可执行、Photon 替换 LLVM/Cranelift。
 
@@ -542,15 +581,15 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 | 阶段 | 工期 | Aura 代码量 | 删除量 | 人力 |
 |------|------|------------|--------|------|
 | P0 地基/隔离守卫/架构重构 | 2–3 周 | 3,000–4,000 行改动 | —（bootstrap 保留不删） | 1–2 人 |
-| P1 正确性内核 | 4–6 周 | ~4,500 行 | — | 1–2 人 |
+| P1 正确性内核 | 4–6 周 | ~4,100 行（v3.1：P1.7 协程已取消） | — | 1–2 人 |
 | P2 指令集与字节码 | 3–4 周 | 2,500–3,500 行 | — | 1–2 人 |
 | P3 运行时服务 | 4–6 周 | 5,000–7,000 行 | — | 2 人 |
-| P4 自举与退役 | 2–3 周 | ~1,500 行改动 | 15,172 行（Rust VM） | 1–2 人 |
-| **合计** | **14–22 周（3.5–5.5 个月）** | **~16,500–20,500 行** | **~15,200 行** | 1–2 人主力 |
+| P4 自举与退役 | 2–3 周 | ~1,500 行改动 | 17,226 行（Rust VM，v3.1 核实） | 1–2 人 |
+| **合计** | **14–22 周（3.5–5.5 个月）** | **~16,100–20,100 行** | **~17,200 行** | 1–2 人主力 |
 
 **迁移后残留 Rust**：
-- ✅ **删除**：`seed/compiler/src/vm/`（15,172 行 / 26 文件）
-- 🟡 **保留但不引用**：`seed/compiler/src/bootstrap/`（2,759 行 / 10 文件）+ `bootstrap_test.rs` —— 遗留孤立代码，按 D1 保留，受 P0.1 隔离守卫约束
+- ✅ **删除**：`seed/compiler/src/vm/`（v3.1 核实 17,226 行 / 26 文件，含已废弃的 `coroutine.rs`）
+- 🟡 **保留但不引用**：`seed/compiler/src/bootstrap/`（v3.1 核实 3,047 行 / 10 文件）+ `bootstrap_test.rs` —— 遗留孤立代码，按 D1 保留，受 P0.1 隔离守卫约束
 - 🟡 **保留（临时）**：`seed/` 其余部分——种子编译器，自举闭环建立后可整体移除
 - 🟡 **保留（物理边界）**：`aura/runtime/cffi/aura_syscalls.c`
 
@@ -563,32 +602,32 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 | 结论 | 证据位置 |
 |------|---------|
 | 三套 VM 并存 | `seed/compiler/src/vm/mod.rs:18-45`（26 模块）/ `seed/compiler/src/bootstrap/mod.rs` / `aura/compiler/aura/lang/compiler/vm/` |
-| Rust VM 15,172 行 | 26 文件行数汇总，`interp.rs` 2346 最大 |
-| Aura VM 4,419 行 | 13 文件行数汇总，`Vm.aura` 1897 最大 |
+| Rust VM 17,226 行（v3.1） | 26 文件行数汇总，`interp.rs` 2582 最大 |
+| Aura VM 5,832 行（v3.1） | 13 文件行数汇总，`Vm.aura` 2336 最大 |
 | **bootstrap 完全孤立** | `grep -r "bootstrap" seed/` 命中 43 处，其中 CLI 0、loom 0（仅 2 处注释）、compiler/src 非 bootstrap 模块 0、唯一使用者 `tests/bootstrap_test.rs` |
 | bootstrap 唯一挂载点 | `seed/compiler/src/lib.rs:3`（`pub mod bootstrap;`） |
-| bootstrap 规模 | 10 文件 / 2,759 行（`vm_core.rs` 756 + `aot_core.rs` 665 + `jit_ffi.rs` 328 + `jit_core.rs` 268 + `runtime.rs` 203 + `memory.rs` 176 + `type_core.rs` 119 + `mod.rs` 76 + `value_check.rs` 71 + `any_core.rs` 97） |
+| bootstrap 规模 | 10 文件 / 3,047 行（v3.1：`vm_core.rs` 820 + `aot_core.rs` 714 + `jit_ffi.rs` 394 + `jit_core.rs` 290 + `runtime.rs` 225 + `memory.rs` 201 + `type_core.rs` 127 + `any_core.rs` 109 + `mod.rs` 84 + `value_check.rs` 83） |
 | bootstrap 内嵌迷你 VM | `bootstrap/vm_core.rs:28-29`（Value 6 变体）、`:127-153`（15–17 指令） |
 | **`jit_ffi.rs` 从未接入生产** | `bootstrap/jit_ffi.rs:69/158/297` 定义 `jit_compile/jit_load/jit_call`；主 VM JIT 走 `vm/jit.rs:388/408/1456` 的 `jit_compile_cranelift`（不同函数）；唯一调用者 `tests/bootstrap_test.rs:217/622` |
-| 字符串分派 | `Vm.aura:293-719`（60+ 条 `else if (opcode == "...")`） |
+| 字符串分派 | `Vm.aura:293-711`（v3.1：125 条 `else if (opcode == "...")`，v3 记录 60+ 条） |
 | GB 级内存自认 | `Vm.aura:56-57` |
 | 双格式适配 | `Vm.aura:91-103`（`aucArgBase`/`aucMode`） |
 | 槽位错位真实 bug | `Vm.aura:93-95`（`fact(3)` 恒返回 1） |
 | 跳过类表/vtable/AOT 段 | `AucLoader.aura:251-253` |
-| 对象字段存全局表 | `Vm.aura:1222-1234` |
-| 闭包丢 upvalue | `Vm.aura:1317-1336` |
-| 协程纯桩 | `Vm.aura:1512-1528` |
+| 对象字段存全局表 | `Vm.aura:1210-1258`（v3.1 行号刷新，v3 记录 1222-1234） |
+| 闭包丢 upvalue | `Vm.aura:1325-1352`（v3.1 行号刷新） |
+| 协程纯桩 | `Vm.aura:1521-1546`（v3.1 行号刷新；**已按 D5 废弃，不再修复**） |
 | 无 GC | `grep "GC_MARK\|GC_SWEEP" Vm.aura` → 0 |
 | JIT 未接线 | `grep "vmCallHook\|VmJitBridge" Vm.aura` → 0 |
 | 三个死代码模块 | `grep "Opcodes\." Vm.aura` → 0；`grep "TailCall" Vm.aura` → 0；`grep "Closures" Vm.aura` → 0 |
-| 测试已无法编译 | `tests/phase5_vm_tests.aura:334-407`（旧 API） |
-| 无示例调用 VM | `grep "VmRunner\|loadAucAndRun" examples/` → 0 |
+| 测试已无法编译 | `tests/phase5_vm_tests.aura`（v3.1 复核：旧 API 调用仍在，如 `:341`、`:364-369`；文件共 488 行） |
+| 无示例调用 VM | `grep "VmRunner\|loadAucAndRun" examples/` → 0（v3.1 复核仍为 0） |
 | Rust Value 10 变体 | `seed/compiler/src/vm/value.rs:14-37` |
 | Rust HeapData 7 变体 | `seed/compiler/src/vm/heap.rs:19-54` |
-| Rust 106 指令 | `seed/compiler/src/codegen/opcode.rs:30-274` |
-| Rust ~93 原生函数 | `seed/compiler/src/vm/native.rs:50-340` |
-| Rust CLI 3 处 VM 调用 | `seed/compiler/src/main.rs:1769`/`2445`/`2979` |
-| 时间线 | git log `436c16b`（09-22 实现 VM）/ `4f91c84`（09-23 删 Rust）/ `036ab65`（09-23 回滚） |
+| Rust 106 指令 | `seed/compiler/src/codegen/opcode.rs`（v3.1 复核：仍为 106 变体，含已废弃的 `Yield`/`NewCoroutine`/`ResumeCoroutine`，随 P4 退役） |
+| Rust ~93 原生函数 | `seed/compiler/src/vm/native.rs`（v3.1：文件已增至 2,104 行） |
+| Rust CLI VM 调用 | v3.1：仅 1 处，`seed/compiler/src/main.rs:143`（v3 记录的 `1769`/`2445`/`2979` 三处已收敛） |
+| 时间线 | git log `436c16b`（09-22 实现 VM）/ `4f91c84`（09-23 删 Rust）/ `036ab65`（09-23 回滚）；v3.1 补充：09-25 后提交集中于 Photon 与编译器性能（`7e5866f`/`77ee064`/`274e8f0`/`c193dce`），VM 内核未动 |
 
 ## 附录 B：相关文档可信度
 
@@ -604,7 +643,7 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 
 1. **JIT 派发桥接**：`VmJitBridge.aura`（344 行，已完整实现但未接线）→ 纯 Aura + Photon
 2. **JIT IR 生成**：`compiler/jit/`（`JitLower.aura`/`JitState.aura`/`JitDispatch.aura`/`JitOpt.aura`/`JitAbi.aura`/`DispatchTable.aura`）→ 替换为 Photon IR
-3. **JIT FFI 边界**：`bootstrap/jit_ffi.rs`（328 行）→ 按 D1 **保留在库中但不得被引用**，由 Photon 进程内编译取代；P0.1 的隔离守卫（§2.5）负责防止它在 JIT 任务中被接回生产路径
+3. **JIT FFI 边界**：`bootstrap/jit_ffi.rs`（v3.1 核实 394 行）→ 按 D1 **保留在库中但不得被引用**，由 Photon 进程内编译取代；P0.1 的隔离守卫（§2.5）负责防止它在 JIT 任务中被接回生产路径
 4. **AOT 运行时**：`vm/aot_runtime.rs`（1,034 行）+ `vm/mmap_util.rs`（263 行）→ Photon + `PhotonNativeWriter`
 5. **JIT 后端替换**：Cranelift crate → Photon 自研后端
 6. **AOT 编译器后端**：LLVM llc/clang → Photon

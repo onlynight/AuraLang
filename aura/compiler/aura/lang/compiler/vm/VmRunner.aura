@@ -322,4 +322,28 @@ class VmRunner {
     fun arithDiv(a: String, b: String): String {
         return this.vm.arithDiv(a, b)
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  加速派发钩子（P0.8 委托）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 启用/禁用加速派发钩子（默认关闭）。
+    fun enableAccelDispatch(enabled: Boolean): Unit {
+        this.vm.enableAccelDispatch(enabled)
+    }
+
+    /// 注册热函数直呼入口（funcName -> 入口行号）。
+    fun setAccelEntry(funcName: String, entryIp: Int): Unit {
+        this.vm.setAccelEntry(funcName, entryIp)
+    }
+
+    /// 清空直呼表。
+    fun clearAccelEntries(): Unit {
+        this.vm.clearAccelEntries()
+    }
+
+    /// 查询钩子是否启用。
+    fun isAccelDispatchEnabled(): Boolean {
+        return this.vm.isAccelDispatchEnabled()
+    }
 }
