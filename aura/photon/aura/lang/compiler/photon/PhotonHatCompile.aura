@@ -194,6 +194,7 @@ fun main() {
     println("===RESULT===" + (if (result.success) "success" else "fail"))
     if (!result.success) {
         println("===ERR===" + result.errorMessage)
+        Process.exit(1)
     }
 
     Process.exit(0)

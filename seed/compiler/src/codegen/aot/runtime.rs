@@ -122,6 +122,10 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
     // ⚠️ 这些是裸名调用，非 sanitized 名。正确做法是修复改派而非加声明。
     RuntimeFn { name: "read", ret: "i64", params: &[("fd", "i64"), ("buf", "i64"), ("count", "i64")] },
     RuntimeFn { name: "write", ret: "i64", params: &[("fd", "i64"), ("buf", "i64"), ("count", "i64")] },
+    // Windows UCRT system() — 供 Process.run 降级调用
+    RuntimeFn { name: "system", ret: "i32", params: &[("cmd", "i8*")] },
+    // Windows CreateProcessA 版 system — 避免 cmd.exe 解析差异
+    RuntimeFn { name: "aura_system", ret: "i32", params: &[("cmd", "i8*")] },
     RuntimeFn { name: "open", ret: "i64", params: &[("path", "i64"), ("flags", "i64")] },
     RuntimeFn { name: "close", ret: "i64", params: &[("fd", "i64")] },
     RuntimeFn { name: "access", ret: "i64", params: &[("path", "i64"), ("mode", "i64")] },

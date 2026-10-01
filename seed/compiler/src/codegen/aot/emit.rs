@@ -4159,6 +4159,33 @@ fn emit_call(
         return Ok(("%void".to_string(), "void".to_string()));
     }
 
+    // `Process.run(cmd)` / `ProcessNative.run(cmd)` → UCRT `system`（Windows）。
+    //
+    // Aura 侧的 `run` 用 `fork`/`execve` 组合（POSIX），Windows 下 `fork` 不存在。
+    // AOT 发射器必须内置映射到 `system()`，否则 `spawn` 的返回值 0 被误判为子进程
+    // 并 `exit(1)`，整个编译器进程静默退出。
+    //
+    // HIR 将 `Process.run(cmd)` 降级为 `Call("Process.run", [Var("Process"), Var("cmd")])`，
+    // args[0] 是接收者（幽灵首参），args[1] 是真正的命令字符串。
+    // Aura 字符串在 AOT 中是 `{ i8*, i64 }` 结构体，通过 `extractvalue` 提取数据指针。
+    if callee == "Process.run" || callee == "ProcessNative.run" {
+        if args.len() >= 2 {
+            let (cmd_val, cmd_ty) = emit_expr_val(ctx, blocks, &args[1])?;
+            let cur = blocks.last_mut();
+            // cmd_val 是 `{ i8*, i64 }` 结构体，提取第一个元素（数据指针）
+            let mut data_ptr = ctx.fresh_var();
+            if cmd_ty.starts_with('{') {
+                cur.body.push(format!("{} = extractvalue {} {}, 0", data_ptr, cmd_ty, cmd_val));
+            } else {
+                // 已经是 i8*，直接使用
+                data_ptr = cmd_val.clone();
+            }
+            let ret = ctx.fresh_var();
+            cur.body.push(format!("{} = call i32 @aura_system(i8* {})", ret, data_ptr));
+            return Ok((ret, "i32".to_string()));
+        }
+    }
+
     // P9: 检查是否为结构体构造函数。
     // declared_structs 存的是 `%struct.X` 格式，而 callee 是裸名 `X`，
     // 因此需要同时检查裸名和 `%struct.{callee}` 两种形式。
@@ -4953,14 +4980,30 @@ fn emit_call(
         return Ok((tmp, "i8*".to_string()));
     }
     if callee == "__list_push" && args_ir.len() == 2 {
-        let (l, _) = &args_ir[0];
+        // 接收者若是**类实例指针**（`%struct.ArrayList*` / `%struct.HashMap*`），
+        // 不能直接当 `AuraDynList*` 传给 `listAppend`：那会把整个对象指针当列表读，
+        // 读到的是对象的第一个字段。`%struct.ArrayList`（16 B）下越界 segfault，
+        // `%struct.HashMap`（40 B）下错位读写。取第 0 号字段（`items`/`buckets`）再传，
+        // 与 `ArrayList_add` 函数体的写法保持一致。
+        let (l_raw, l_ty) = &args_ir[0];
+        let l_field = if l_ty.starts_with("%struct.") {
+            let gep = ctx.fresh_var();
+            blocks.last_mut().body.push(format!(
+                "{} = getelementptr {}, {}* {}, i32 0, i32 0",
+                gep, l_ty.trim_end_matches("*"), l_ty.trim_end_matches("*"), l_raw
+            ));
+            let ld = ctx.fresh_var();
+            blocks.last_mut().body.push(format!("{} = load i8*, i8** {}", ld, gep));
+            ld
+        } else {
+            l_raw.clone()
+        };
         let (e, e_ty) = &args_ir[1];
         let e_ptr = coerce_val_to_i8ptr(ctx, blocks, e, e_ty);
         let tmp = ctx.fresh_var();
-        let cur = blocks.last_mut();
-        cur.body.push(format!(
+        blocks.last_mut().body.push(format!(
             "{} = call i8* @aura_lang_std_Collections_listAppend(i8* {}, i8* {})",
-            tmp, l, e_ptr
+            tmp, l_field, e_ptr
         ));
         return Ok((tmp, "i8*".to_string()));
     }
@@ -4968,14 +5011,27 @@ fn emit_call(
     // 对 `var x = arrayListOf<T>()` 等局部泛型变量返回 None）。此处按方法调用原样处理：
     // callee 裸名 "add"，首参是列表接收者。
     if callee == "add" && args_ir.len() == 2 && !callee_owned.contains('.') && !callee_owned.contains("__") {
-        let (l, _) = &args_ir[0];
+        // 兜底：接收者若是类实例指针，取第 0 号字段（`items`/`buckets`）再传，
+        // 与 `__list_push` 分支一致（见上方注释）。
+        let (l_raw, l_ty) = &args_ir[0];
+        let l_field = if l_ty.starts_with("%struct.") {
+            let gep = ctx.fresh_var();
+            blocks.last_mut().body.push(format!(
+                "{} = getelementptr {}, {}* {}, i32 0, i32 0",
+                gep, l_ty.trim_end_matches("*"), l_ty.trim_end_matches("*"), l_raw
+            ));
+            let ld = ctx.fresh_var();
+            blocks.last_mut().body.push(format!("{} = load i8*, i8** {}", ld, gep));
+            ld
+        } else {
+            l_raw.clone()
+        };
         let (e, e_ty) = &args_ir[1];
         let e_ptr = coerce_val_to_i8ptr(ctx, blocks, e, e_ty);
         let tmp = ctx.fresh_var();
-        let cur = blocks.last_mut();
-        cur.body.push(format!(
+        blocks.last_mut().body.push(format!(
             "{} = call i8* @aura_lang_std_Collections_listAppend(i8* {}, i8* {})",
-            tmp, l, e_ptr
+            tmp, l_field, e_ptr
         ));
         return Ok((tmp, "i8*".to_string()));
     }
@@ -5190,7 +5246,11 @@ fn emit_call(
         }
 
         // Map.getOrDefault(map, key, default) → i8*
-        if bare == "getOrDefault" && args_ir.len() == 3 {
+        // 当 callee 是 `HashMap.getOrDefault` 时跳过：有真实 Aura 类方法实现
+        // （`HashMap_getOrDefault`），不能走 C 运行时 `getOrDefault`。
+        if bare == "getOrDefault" && args_ir.len() == 3
+            && !(callee.starts_with("HashMap.") && bare == "getOrDefault")
+        {
             let (m, _) = &args_ir[0];
             let (k, k_ty) = &args_ir[1];
             let (d, d_ty) = &args_ir[2];
@@ -5228,7 +5288,14 @@ fn emit_call(
                 | "EnvOps"
                 | "MathOps"
         );
-        if !platform_qual && (bare == "put" || bare == "set") && args_ir.len() == 3 {
+        // Map.put/map_set：仅对**裸名**（如接口 `Map`/`MutableMap` 上的 `.put()`）或
+        // 非平台接口限定名生效。当 callee 是 `HashMap.put` / `HashMap.set` 时，
+        // 存在真实的 Aura 类方法实现（`HashMap_put`），应走正常调用路径，
+        // 不能走 C 运行时 `mapSet`（其接收 `AuraDynMap*`，与 `%struct.HashMap`
+        // 布局不兼容）。同理 `getOrDefault` 也有 `HashMap_getOrDefault` 实现。
+        let is_aura_map_method = callee.starts_with("HashMap.")
+            && (bare == "put" || bare == "set" || bare == "getOrDefault");
+        if !platform_qual && !is_aura_map_method && (bare == "put" || bare == "set") && args_ir.len() == 3 {
             let (m, _) = &args_ir[0];
             let (k, k_ty) = &args_ir[1];
             let (v, v_ty) = &args_ir[2];
@@ -7162,6 +7229,7 @@ fn is_builtin(name: &str) -> bool {
             | "pow"
             | "toInt"
             | "toFloat"
+            | "toLong"
             | "toStr"
             | "toString"
             | "clock"

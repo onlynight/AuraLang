@@ -521,12 +521,14 @@ class PhotonPipeline {
         val linkRc: Int = linker.runLinker(linkCmd)
         if (linkRc == 0) {
             this.vprintln("    ✓ 链接成功: " + result.executablePath)
+            result.success = true
         } else {
             println("    ⚠ 链接失败 (rc=" + this.toStr(linkRc) + ")")
+            result.success = false
+            result.errorMessage = "链接失败 (rc=" + this.toStr(linkRc) + ")"
         }
 
         result.functionCount = lir.functionCount
-        result.success = true
 
         this.vprintln("")
         this.vprintln("══════════════════════════════════════════════")
@@ -805,12 +807,14 @@ class PhotonPipeline {
         val linkRc: Int = linker.runLinker(linkCmd)
         if (linkRc == 0) {
             this.vprintln("    ✓ 链接成功: " + result.executablePath)
+            result.success = true
         } else {
             println("    ⚠ 链接失败 (rc=" + this.toStr(linkRc) + ")")
+            result.success = false
+            result.errorMessage = "链接失败 (rc=" + this.toStr(linkRc) + ")"
         }
 
         result.functionCount = lir.functionCount
-        result.success = true
 
         this.vprintln("")
         this.vprintln("══════════════════════════════════════════════")

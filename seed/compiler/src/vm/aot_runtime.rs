@@ -487,7 +487,7 @@ impl AotRuntime {
         };
         let ctx_ptr: *const () = &ctx as *const AotCallContext as *const ();
         let args_ptr = if args.is_empty() { std::ptr::null() } else { args.as_ptr() };
-        entry(args_ptr, &mut ret, args.len(), ctx_ptr);
+        unsafe { entry(args_ptr, &mut ret, args.len(), ctx_ptr) };
         // Phase 2.6: 检查异常码（AOT 函数通过 ctx.exception 返回异常状态）
         if ctx.exception != 0 {
             return Err(format!(

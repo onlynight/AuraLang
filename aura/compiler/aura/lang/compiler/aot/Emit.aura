@@ -6381,6 +6381,12 @@ class LlvmEmitter {
             }
             return this.coerceValue(fv, fTy, "i32")
         }
+        if (fname == "toLong" && n == 1) {
+            val fId: Int = hirKidsAt(kids, 0)
+            val fTy: String = this.inferType(hir, fId)
+            val fv: String = this.emitExpr(hir, fId)
+            return this.coerceValue(fv, fTy, "i64")
+        }
         if (fname == "toFloat" && n == 1) {
             val fId: Int = hirKidsAt(kids, 0)
             val fTy: String = this.inferType(hir, fId)
@@ -8176,6 +8182,9 @@ class LlvmEmitter {
             }
             if (fname == "toInt" && hirKidsCount(kids) == 1) {
                 return "i32"
+            }
+            if (fname == "toLong" && hirKidsCount(kids) == 1) {
+                return "i64"
             }
             // `Memory.*` 访存内置：返回宽度由方法名决定，必须与 `emitCall`
             // 的 `Memory.*` 分支（inttoptr + load/store）一致。

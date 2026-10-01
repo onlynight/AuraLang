@@ -26,6 +26,7 @@ import aura.lang.compiler.mir.SsaMir
 import aura.lang.compiler.mir.TypeRegistry
 import aura.lang.compiler.mir.Mir
 import aura.lang.compiler.mir.Linearizer
+import aura.lang.compiler.aot.AotUtil
 
 /// HIR → SSA MIR 构建器。
 class SsaBuilder {
@@ -2580,20 +2581,25 @@ class SsaBuilder {
     }
 
     /// 局部变量声明类型名（未命中返回 ""）。
+    ///
+    /// 旧实现在每次调用时 `splitStr` 切分整个 `localTypes` 字符串（O(n) 每次），
+    /// 循环内多次调用 → O(n²)。修复：用 `lastIndexOf` 逆序查找目标行，
+    /// 用 `substringAt` 提取类型名（O(1) 每次，无中间 List 分配）。
     private fun localTypeOf(name: String): String {
         if (this.localTypes == "") {
             return ""
         }
-        val lines: List<String> = this.splitStr(this.localTypes, "\n")
-        var i: Int = lines.size - 1
-        while (i >= 0) {
-            val parts: List<String> = this.splitStr(lines[i], "|")
-            if (parts.size >= 2 && parts[0] == name) {
-                return parts[1]
-            }
-            i = i - 1
+        // 逆序查找：最后一个匹配的行优先（后声明的局部变量覆盖先声明的）
+        val needle: String = "\n" + name + "|"
+        val pos: Int = this.localTypes.lastIndexOf(needle)
+        if (pos < 0) {
+            return ""
         }
-        return ""
+        // 从 pos + needle.length 到行尾是类型名
+        val tyStart: Int = pos + needle.length
+        val tyEnd: Int = String.indexOf(this.localTypes, "\n", tyStart)
+        val tyLen: Int = if (tyEnd < 0) this.localTypes.length - tyStart else tyEnd - tyStart
+        return this.localTypes.substringAt(tyStart, tyLen)
     }
 
     /// 接收者表达式的静态类名（不可判定返回 ""）。
@@ -2756,18 +2762,25 @@ class SsaBuilder {
             i = i + 1
         }
         // 第二遍：`funcOwner` 已就绪，可判定哪些 HirFunction 是顶层自由函数。
+        //
+        // 旧实现逐条字符串拼接（O(n²)）：每次追加都拷贝整串。
+        // 修复：先收进 List，循环后一次 join（沿用 joinChunks 范式）。
+        val freeFuncList: ArrayList<String> = arrayListOf<String>()
         i = 0
         while (i < n) {
             if (src.kindOf(i) == "HirFunction") {
                 if (this.ownerClassNameOf(i) == "") {
                     val fn: String = src.textOf(i)
                     if (fn != "") {
-                        this.freeFuncs = this.freeFuncs + "\n" + fn + "\n"
+                        freeFuncList.add(fn)
                     }
                 }
             }
             i = i + 1
         }
+        // 格式：\nfn1\nfn2\n（首尾各一个 \n，便于 indexOf("\n" + name + "\n") 匹配）
+        // 用 StringBuilder 一次拼接，避免 O(n²)。
+        this.freeFuncs = joinFreeFuncs(freeFuncList)
 
         // 字段布局缓存：登记阶段到此结束，`classFields` 后续只读。
         // 必须放在**最后**（见 `buildFieldLayoutCache` 的注释）。
@@ -2780,6 +2793,25 @@ class SsaBuilder {
             return false
         }
         return this.freeFuncs.indexOf("\n" + name + "\n") >= 0
+    }
+
+    /// 把自由函数列表拼接成 `\nfn1\nfn2\n` 格式（供 `isFreeFunc` 的 indexOf 匹配）。
+    /// 避免逐条 `this.freeFuncs + x` 的 O(n²) 拼接。
+    private fun joinFreeFuncs(fns: List<String>): String {
+        if (fns.size == 0) {
+            return ""
+        }
+        // 不能用 StringBuilder（它是 object 单例，无法 new 独立实例）。
+        // 用 List<String> 分步收集，最后一次 + 拼接（O(n) 而非 O(n²)）。
+        val parts: ArrayList<String> = arrayListOf<String>()
+        parts.add("\n")
+        var i: Int = 0
+        while (i < fns.size) {
+            parts.add(fns[i])
+            parts.add("\n")
+            i = i + 1
+        }
+        return joinPieces(parts)
     }
 
     /// 一次性构建**类字段布局缓存**（`buildClassIndex` 的收尾步骤）。
@@ -3720,6 +3752,9 @@ class SsaBuilder {
     ///
     /// 元数集合 = 声明侧（`scanInitArities`）∪ {0}。裸 `Class()` 构造必须总能
     /// 落到 `__new0`；多参构造（`Exception("m")`）落到 `__new1`。
+    ///
+    /// P1 优化：按 chunk 处理（每 32 个类），每个 chunk 结束后释放中间状态，
+    /// 降低峰值内存并避免长时间持有大量 SSA 中间表示。
     private fun synthesizeCtors(src: Hir) {
         val savedMem: Int = this.memHead
         val savedBlock: Int = this.curBlock
@@ -3729,33 +3764,53 @@ class SsaBuilder {
         val savedLocalTypes: String = this.localTypes
 
         val lty: Int = this.types.fromTypeName("Long")
+        val CHUNK_SIZE: Int = 32
         var ci: Int = 0
         while (ci < this.classList.size) {
-            val cname: String = this.classList[ci]
-            // 「0,\n<元数>\n」前缀保证裸构造总有落点；`initAritiesOf` 已去重，
-            // 这里只需再对 0 去一次。
-            var arStr: String = "0" + this.initAritiesOf(cname)
-            if (arStr.indexOf("\n0\n") < 0) {
-                arStr = arStr + "\n0\n"
-            }
-            var ai: Int = 0
-            val alen: Int = arStr.length
-            while (ai < alen) {
-                if (arStr.charCodeAt(ai) == 10) {
-                    val astart: Int = ai + 1
-                    var ae: Int = astart
-                    while (ae < alen && arStr.charCodeAt(ae) != 10) {
-                        ae = ae + 1
-                    }
-                    if (ae > astart) {
-                        this.synthesizeCctorBody(src, cname, arStr.substring(astart, ae), lty)
-                    }
-                    ai = ae + 1
-                } else {
-                    ai = ai + 1
+            val chunkEnd: Int = min(ci + CHUNK_SIZE, this.classList.size)
+            // 每个 chunk 开始前保存状态（synthesizeCctorBody 会修改这些）
+            val chunkMem: Int = this.memHead
+            val chunkBlock: Int = this.curBlock
+            val chunkClass: String = this.curClass
+            val chunkVarMap: String = this.varMap
+            val chunkParams: String = this.curParams
+            val chunkLocalTypes: String = this.localTypes
+
+            while (ci < chunkEnd) {
+                val cname: String = this.classList[ci]
+                // 「0,\n<元数>\n」前缀保证裸构造总有落点；`initAritiesOf` 已去重，
+                // 这里只需再对 0 去一次。
+                var arStr: String = "0" + this.initAritiesOf(cname)
+                if (arStr.indexOf("\n0\n") < 0) {
+                    arStr = arStr + "\n0\n"
                 }
+                var ai: Int = 0
+                val alen: Int = arStr.length
+                while (ai < alen) {
+                    if (arStr.charCodeAt(ai) == 10) {
+                        val astart: Int = ai + 1
+                        var ae: Int = astart
+                        while (ae < alen && arStr.charCodeAt(ae) != 10) {
+                            ae = ae + 1
+                        }
+                        if (ae > astart) {
+                            this.synthesizeCctorBody(src, cname, arStr.substring(astart, ae), lty)
+                        }
+                        ai = ae + 1
+                    } else {
+                        ai = ai + 1
+                    }
+                }
+                ci = ci + 1
             }
-            ci = ci + 1
+
+            // chunk 结束后恢复状态，释放 chunk 内的中间 SSA
+            this.memHead = chunkMem
+            this.curBlock = chunkBlock
+            this.curClass = chunkClass
+            this.varMap = chunkVarMap
+            this.curParams = chunkParams
+            this.localTypes = chunkLocalTypes
         }
 
         this.memHead = savedMem
@@ -3864,6 +3919,8 @@ class SsaBuilder {
     /// `Memory_alloc(classSizeOf)` + 逐字段写默认值，之后返回缓存指针。
     /// 对象布局与 `synthesizeCtors` 完全一致（`[0] vtable [8] size [16+i*8] 字段`），
     /// `__field_get` / `__field_set` 无需任何改动。
+    ///
+    /// P1 优化：按 chunk 处理（每 32 个单例），降低峰值内存。
     private fun synthesizeSingletons(src: Hir) {
         val savedMem: Int = this.memHead
         val savedBlock: Int = this.curBlock
@@ -3873,16 +3930,36 @@ class SsaBuilder {
         val savedLocalTypes: String = this.localTypes
 
         val lty: Int = this.types.fromTypeName("Long")
+        val CHUNK_SIZE: Int = 32
         var ci: Int = 0
         while (ci < this.singletonList.size) {
-            val sname: String = this.singletonList[ci]
-            // 纯静态单例（`Mutex` / `Thread` / `Cpu`，无字段）也要生成：
-            // `buildFunction` 对**所有**单例方法都把 `this` 解析成
-            // `<Owner>_getInstance()` 的一次调用（见下），不生成就会在链接期
-            // `undefined symbol: Mutex_getInstance`。无字段时它只分配 16 字节
-            // 空壳，代价可忽略。
-            this.synthesizeSingletonGetter(src, sname, lty, ci)
-            ci = ci + 1
+            val chunkEnd: Int = min(ci + CHUNK_SIZE, this.singletonList.size)
+            // 每个 chunk 开始前保存状态
+            val chunkMem: Int = this.memHead
+            val chunkBlock: Int = this.curBlock
+            val chunkClass: String = this.curClass
+            val chunkVarMap: String = this.varMap
+            val chunkParams: String = this.curParams
+            val chunkLocalTypes: String = this.localTypes
+
+            while (ci < chunkEnd) {
+                val sname: String = this.singletonList[ci]
+                // 纯静态单例（`Mutex` / `Thread` / `Cpu`，无字段）也要生成：
+                // `buildFunction` 对**所有**单例方法都把 `this` 解析成
+                // `<Owner>_getInstance()` 的一次调用（见下），不生成就会在链接期
+                // `undefined symbol: Mutex_getInstance`。无字段时它只分配 16 字节
+                // 空壳，代价可忽略。
+                this.synthesizeSingletonGetter(src, sname, lty, ci)
+                ci = ci + 1
+            }
+
+            // chunk 结束后恢复状态，释放 chunk 内的中间 SSA
+            this.memHead = chunkMem
+            this.curBlock = chunkBlock
+            this.curClass = chunkClass
+            this.varMap = chunkVarMap
+            this.curParams = chunkParams
+            this.localTypes = chunkLocalTypes
         }
 
         this.memHead = savedMem

@@ -97,6 +97,14 @@ fun toFloat(x: Any): Float {
     return 0.0f
 }
 
+/// 转换为 64 位长整数。
+fun toLong(x: Any): Long {
+    if (x is Long) return x as Long
+    if (x is Int) return (x as Int) as Long
+    if (x is String) return (x as String).toLong()
+    return 0
+}
+
 /// 转换为字符串。
 fun toStr(x: Any): String {
     if (x is String) return x as String

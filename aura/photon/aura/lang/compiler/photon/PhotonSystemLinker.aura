@@ -154,8 +154,13 @@ class PhotonSystemLinker {
 
     /// 执行链接器命令，返回退出码。
     fun runLinker(command: String): Int {
-        println("    [linker] cmd=" + command)
-        val rc: Int = Process.run(command)
+        // 去除尾部空格，避免 cmd.exe /c 解析异常
+        var cmd: String = command
+        while (cmd.endsWith(" ")) {
+            cmd = cmd.substring(0, cmd.length - 1)
+        }
+        println("    [linker] cmd=" + cmd)
+        val rc: Int = Process.run(cmd)
         println("    [linker] rc=" + rc)
         return rc
     }
@@ -211,12 +216,19 @@ class PhotonSystemLinker {
     ///   /OPT:REF        — 优化引用
     ///   /OPT:ICF        — 折叠内部函数
     fun buildLldLinkCommand(objectFiles: String, outputName: String): String {
-        var cmd: String = this.getLldPath() + " "
+        var cmd: String = quoteArg(this.getLldPath()) + " "
 
-        // 输入文件
-        cmd = cmd + objectFiles + " "
+        // 输入文件（空格分隔，逐个加引号）
+        val objList: List<String> = splitSpaces(objectFiles)
+        var j: Int = 0
+        while (j < objList.size) {
+            if (objList[j] != "") {
+                cmd = cmd + quoteArg(objList[j]) + " "
+            }
+            j = j + 1
+        }
 
-        // 输出文件
+        // 输出文件（路径转为反斜杠）
         var outName: String = outputName
         if (this.outputType == "exe" && !outName.endsWith(".exe")) {
             outName = outName + ".exe"
@@ -239,7 +251,7 @@ class PhotonSystemLinker {
             var i: Int = 0
             while (i < libList.size) {
                 if (libList[i] != "") {
-                    cmd = cmd + PhotonSystemLinkerUtils.libLinkFlag("windows", libList[i]) + " "
+                    cmd = cmd + quoteArg(PhotonSystemLinkerUtils.libLinkFlag("windows", libList[i])) + " "
                 }
                 i = i + 1
             }
@@ -612,6 +624,57 @@ object PhotonSystemLinkerUtils {
         if (type == "so") { return "so" }
         if (type == "obj") { return "a" }
         return ""
+    }
+
+    /// 按空格切分字符串（用于对象文件列表等）。
+    fun splitSpaces(text: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") {
+            return out
+        }
+        val len: Int = text.length
+        var start: Int = 0
+        var i: Int = 0
+        while (i < len) {
+            if (text.charAt(i).toString() == " ") {
+                if (i > start) {
+                    out.add(text.substring(start, i))
+                }
+                start = i + 1
+            }
+            i = i + 1
+        }
+        if (start < len) {
+            out.add(text.substring(start, len))
+        }
+        return out
+    }
+
+    /// 为 Windows 路径添加引号。
+    /// 仅对看起来像文件路径的字符串做转换（含空格或盘符路径），
+    /// 链接器标志（如 /OUT:, /NODEFAULTLIB）保持原样。
+    /// 注意：Windows 原生支持正斜杠路径，且 cmd.exe 会把引号内的反斜杠当转义符，
+    /// 因此保留正斜杠（或使用 winPath 但此处不转换）以避免解析问题。
+    fun quoteArg(arg: String): String {
+        // 检查是否包含空格
+        var hasSpace: Boolean = false
+        var i: Int = 0
+        while (i < arg.length) {
+            if (arg.charAt(i).toString() == " ") {
+                hasSpace = true
+                break
+            }
+            i = i + 1
+        }
+        if (hasSpace) {
+            // 含空格：直接加引号，保留原路径格式（Windows 接受正斜杠）
+            return "\"" + arg + "\""
+        }
+        // 不含空格：检查是否是盘符路径（如 C:/... 或 C:\...）
+        if (arg.length >= 2 && arg.charAt(1).toString() == ":") {
+            return "\"" + arg + "\""
+        }
+        return arg
     }
 
     /// 确保输出文件名包含正确的扩展名。

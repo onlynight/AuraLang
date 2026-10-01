@@ -28,6 +28,7 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "pow",
     "toInt",
     "toFloat",
+    "toLong",
     "toStr",
     "toString",
     "clock",

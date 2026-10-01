@@ -2523,26 +2523,100 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         functions.push(desugar_class_method(m, &o.name, true));
                     }
                 }
-                // 字段 → 零参读取函数（单例实例字段访问）
+                // 字段 → 读取函数（单例实例字段访问）
+                //
+                // 旧实现把字段函数编译为「零参 + 返回默认常量」——单例字段的
+                // **当前值**永远读不到，每次 `Singleton.field` 都得到初始值。
+                // 修复：带 `self` 参数，返回 `self.field`。调用点（desugar_expr
+                // 的 MemberAccess 分支）会传 `Singleton` 裸名，AOT 发射器
+                // （emit_call 的 singleton_self_class 逻辑）把 `null` 替换为
+                // `@Singleton_instance`。
+                //
+                // `const` 字段无需 self：编译期内联为字面量（见 OBJECT_CONSTS）。
                 for f in &o.fields {
-                    let init = f
-                        .default_value
-                        .as_ref()
-                        .map(|e| desugar_expr(e))
-                        .unwrap_or(HirExpr::Lit(Literal::Null));
-                    functions.push(HirFunction {
-                        name: format!("{}.{}", o.name, f.name),
-                        params: vec![],
-                        ret: HirType::from_ast_opt(&f.type_hint),
-                        body: HirBlock {
-                            stmts: vec![HirStmt::Return(Some(init))],
-                        },
-                        is_native: false,
-                        type_params: vec![],
-                        ffi_abi: FfiAbi::None,
-                        ffi_lib: None,
-                        native_attr: None,
-                    });
+                    if f.is_const {
+                        // const 字段：保持零参 + 返回常量（编译期内联）
+                        let init = f
+                            .default_value
+                            .as_ref()
+                            .map(|e| desugar_expr(e))
+                            .unwrap_or(HirExpr::Lit(Literal::Null));
+                        functions.push(HirFunction {
+                            name: format!("{}.{}", o.name, f.name),
+                            params: vec![],
+                            ret: HirType::from_ast_opt(&f.type_hint),
+                            body: HirBlock {
+                                stmts: vec![HirStmt::Return(Some(init))],
+                            },
+                            is_native: false,
+                            type_params: vec![],
+                            ffi_abi: FfiAbi::None,
+                            ffi_lib: None,
+                            native_attr: None,
+                        });
+                    } else {
+                        // var 字段：带 self 参数，返回 self.field
+                        functions.push(HirFunction {
+                            name: format!("{}.{}", o.name, f.name),
+                            params: vec![HirParam {
+                                name: "self".into(),
+                                ty: Some(HirType::Named(o.name.clone())),
+                                default_value: None,
+                                is_vararg: false,
+                            }],
+                            ret: HirType::from_ast_opt(&f.type_hint),
+                            body: HirBlock {
+                                stmts: vec![HirStmt::Return(Some(HirExpr::Member {
+                                    object: Box::new(HirExpr::Var("self".into())),
+                                    name: f.name.clone(),
+                                }))],
+                            },
+                            is_native: false,
+                            type_params: vec![],
+                            ffi_abi: FfiAbi::None,
+                            ffi_lib: None,
+                            native_attr: None,
+                        });
+                    }
+                    // var 字段写入：`Singleton.field = v` 在 HIR 降级为
+                    // `Singleton.field.set(self, v)`（setter 调用）。
+                    if !f.is_const {
+                        functions.push(HirFunction {
+                            name: format!("{}.{}.set", o.name, f.name),
+                            params: vec![
+                                HirParam {
+                                    name: "self".into(),
+                                    ty: Some(HirType::Named(o.name.clone())),
+                                    default_value: None,
+                                    is_vararg: false,
+                                },
+                                HirParam {
+                                    name: "value".into(),
+                                    ty: HirType::from_ast_opt(&f.type_hint),
+                                    default_value: None,
+                                    is_vararg: false,
+                                },
+                            ],
+                            ret: Some(HirType::Named("Unit".into())),
+                            body: HirBlock {
+                                stmts: vec![
+                                    HirStmt::Assign {
+                                        target: HirExpr::Member {
+                                            object: Box::new(HirExpr::Var("self".into())),
+                                            name: f.name.clone(),
+                                        },
+                                        value: HirExpr::Var("value".into()),
+                                    },
+                                    HirStmt::Return(None),
+                                ],
+                            },
+                            is_native: false,
+                            type_params: vec![],
+                            ffi_abi: FfiAbi::None,
+                            ffi_lib: None,
+                            native_attr: None,
+                        });
+                    }
                 }
                 // 单例字段初始化函数：`<Object>.__singletonInit(self)`
                 //
@@ -2822,6 +2896,15 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         is_vararg: false,
                     }],
                     Some(HirType::Named("Float".into())),
+                ),
+                "toLong" => (
+                    vec![HirParam {
+                        name: "x".into(),
+                        ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
+                    }],
+                    Some(HirType::Named("Long".into())),
                 ),
                 "toStr" | "toString" => (
                     vec![HirParam {
@@ -4188,6 +4271,23 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
                         ],
                     });
                 }
+                // 单例字段写入：Singleton.field = v → Singleton.field.set(Singleton, v)
+                if let Expr::Ident(obj_name, _) = object.as_ref() {
+                    if is_type_name(obj_name) {
+                        let table = CLASS_TABLE.with(|t| t.borrow().clone());
+                        if let Some(entry) = table.get(obj_name) {
+                            if entry.is_singleton && entry.fields.contains(&name.to_string()) {
+                                return HirStmt::Expr(HirExpr::Call {
+                                    callee: format!("{}.{}.set", obj_name, name),
+                                    args: vec![
+                                        HirExpr::Var(obj_name.clone()),
+                                        desugar_expr(value),
+                                    ],
+                                });
+                            }
+                        }
+                    }
+                }
             }
             HirStmt::Assign {
                 target: desugar_expr(target),
@@ -5546,11 +5646,12 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     // open/abstract 方法（可被子类重写）→ CallVirtual 动态分派
                     if let Some((class, entry)) = resolve_method_owner(object, name, Some(args.len())) {
                         let mut all_args = vec![];
-                        // object 方法由 HIR 统一带 self 形参（见 `desugar_class_method(_, _, true)`），
-                        // 调用点必须**占位**：单例没有实例可传，用 null 占位（object 无实例状态，
-                        // 方法体不读 self）；class 方法传真正的接收者。
-                        // 若不传，实参会整体前移一格（`TargetUtils.archName(this.arch)` 的 arch
-                        // 落到 self 槽位），生成「实参数与定义不符」的调用。
+                        // object 单例方法：传 Literal::Null 占位，AOT 发射器
+                        // （emit_call 的 singleton_self_class 逻辑）替换为
+                        // @<Name>_instance。旧实现注释写「单例无实例状态」，
+                        // 但单例字段已可读写（坑1修复），null 会导致空指针崩溃。
+                        // HIR 侧传 null 占位、发射器侧替换，比传类名变量更稳：
+                        // 后者在 `HirExpr::New` 等路径上会被误判为构造函数调用。
                         if entry.is_singleton {
                             all_args.push(HirExpr::Lit(Literal::Null));
                         } else {
@@ -5915,13 +6016,15 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                             args: vec![],
                         };
                     }
-                    // object 单例字段读取：Counter.count → Counter.count()（零参函数，VM 拦截）
+                    // object 单例字段读取：Counter.count → Counter.count(self)
+                    // 字段函数带 self 参数（返回 self.field），调用点传裸名
+                    // 作为 self 占位，AOT 发射器解析为 @<Name>_instance。
                     let table = CLASS_TABLE.with(|t| t.borrow().clone());
                     if let Some(entry) = table.get(obj_name) {
                         if entry.is_singleton && entry.fields.contains(&name.to_string()) {
                             return HirExpr::Call {
                                 callee: format!("{}.{}", obj_name, name),
-                                args: vec![],
+                                args: vec![HirExpr::Var(obj_name.clone())],
                             };
                         }
                     }
@@ -7490,6 +7593,7 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.lang.std.Builtin.toString", vec![("value", "Value")]),
         ("aura.lang.std.Builtin.toInt", vec![("value", "Value")]),
         ("aura.lang.std.Builtin.toFloat", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.toLong", vec![("value", "Value")]),
         ("aura.lang.std.Builtin.toBool", vec![("value", "Value")]),
         ("aura.lang.std.Builtin.sizeOf", vec![("value", "Value")]),
         ("aura.lang.std.Builtin.hash", vec![("value", "Value")]),
