@@ -459,6 +459,26 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 
 **P1 工作量**：~4,100 行 Aura（v3.1：扣除已取消的 P1.7 约 400 行），4–6 周（1–2 人）
 
+> **✅ P1 完成记录（2026-10-01 实施完毕，承接当日完成的 P0）**
+>
+> | 任务 | 状态 | 交付物 |
+> |------|------|--------|
+> | P1.1 值模型 | ✅ | `boxAlloc` 类型感知（24B 头 tag@0/rc@8/value@16；非数值句柄入 `boxValues` 侧表，不再截断字符串）；`DEC_REF` 对未注册值透传（修复误判路径）；Float/Bool/Null/String 装箱约定测试覆盖 |
+> | P1.2 类/继承 | ✅ | 新增 `DEF_CLASS cls parent` 指令 + `registerClass` API（类继承注册表）；`CALL_METHOD` 沿父类链解析（子类覆写优先，链深上限 64）；`INSTANCE_OF`/`CHECK_CAST` 对对象值按 is-a 链判定 |
+> | P1.3 闭包/upvalue | ✅ | `MAKE_CLOSURE name nCaptures`（弹栈捕获）+ `CALL_CLOSURE [argc]` + `LOAD_UPVALUE`/`STORE_UPVALUE`（原位改写，闭包间共享可变状态）；调用帧经 callStack 第 4 字段保存/恢复 `currentClosure`；无闭包上下文明确报错 |
+> | P1.4 异常 | ✅ | handler 记录扩展为 `target\|ip\|slot\|catchType\|frame`；catch 类型过滤（对象沿类链、字符串自动包装为 Exception、内层优先多级过滤）；帧截断回退到 handler 帧（含 locals/闭包上下文恢复）；slot 落槽 |
+> | P1.5 内存 | ✅ | `heapKinds` 堆分配注册表（object/box/list/map/array/mutex/atomic/channel/rwlock/condvar）作为「是否堆对象」唯一真值源；`freeRegistered` 按 kind 释放容器头部+items/keys/vals 内层数组并摘除登记/字段/侧表；真弱引用（`weakGet` 以注册表判活，不再读已释放内存）；`getActiveHeapObjects()` 泄漏计数——长循环创建/销毁后归零 |
+> | P1.6 尾调用 | ✅ | 新增 `CALL_TAIL name argc`（帧复用：不压 callStack/savedLocals，RETURN 直达原调用者）；10 万层尾递归调用深度恒为 1 |
+> | ~~P1.7 协程~~ | ⛔ | D5 取消 |
+>
+> **测试**：`tests/vm_p1_kernel_tests.aura` 17 组 / 40 断言全过（值模型 3 + 继承 3 + 闭包 3 + 异常 3 + ARC 3 + 尾调用 2 组）；`phase5_vm_tests`（21 项）、`vm_object_model_tests`（P0）、`vm_runner_demo` 全部回归通过。
+> **回归对账**：全量基线 101 OK / 31 FAIL（132 项），失败列表与 P0 前（99 OK / 31 FAIL / 130 项）逐项一致，新增 2 个通过即 P0/P1 新测试——**零回归**。
+> **设计要点（后续阶段注意）**：
+> 1. 指针与整数装箱类型名相同（均 `"Int"`，实测），**无法靠类型区分**——ARC 释放以 `heapKinds` 注册为准，未注册值一律透传；
+> 2. 容器（list/map/array）头部布局与 `aura.lang.collection.Collections` 二进制兼容、**无引用计数字段**，采用「丢弃即释放」语义；别名容器的重复 DEC_REF 会双重释放——已知限制，P2 引入 `.auc` 类表后统一为真 ARC；
+> 3. `TAIL` 系指令不改变 `currentClosure`（尾调用体内的 upvalue 访问继承调用者上下文）——P1 限制，文档化。
+> **验收对账说明**：`tests/classes/`、`tests/HashMap/`、`tests/language-test/` 等宿主侧测试由 Rust 种子编译器执行（不经 Aura VM），当前基线已全绿（见 §六）；P1 的 Aura VM 侧等价能力以上述 `vm_p1_kernel_tests` 为准，P2 差分框架建立后将做逐字节对齐。
+
 ---
 
 ### 阶段 P2：指令集对齐与字节码完整化（3–4 周）

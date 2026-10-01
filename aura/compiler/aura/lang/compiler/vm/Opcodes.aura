@@ -123,6 +123,8 @@ internal object Opcodes {
     const val LOAD_CLOSURE: Int = 90
     const val MAKE_CLOSURE: Int = 91
     const val CALL_CLOSURE: Int = 92
+    const val LOAD_UPVALUE: Int = 93
+    const val STORE_UPVALUE: Int = 94
 
     // ── 类型检查 (100-109) ──
     const val INSTANCE_OF: Int = 100
@@ -196,6 +198,12 @@ internal object Opcodes {
     const val ENUM_CONSTRUCT: Int = 200
     const val ENUM_TAG: Int = 201
     const val MAKE_FN_REF: Int = 202
+
+    // ── P1 扩展 (210-219，ADR-001 附录：P1 新增指令) ──
+    /// 声明类继承关系：`DEF_CLASS cls parent`（parent 为 "-" 或空表示无父类）。
+    const val DEF_CLASS: Int = 210
+    /// 尾调用（帧复用）：`CALL_TAIL name argc`，语义同 CALL 但不压新调用帧。
+    const val CALL_TAIL: Int = 211
 
     // ── 助记符 → 编号（加载期转换表，惰性构建一次）──
 
@@ -293,6 +301,8 @@ internal object Opcodes {
         this.nameToCode.put("LOAD_CLOSURE", LOAD_CLOSURE)
         this.nameToCode.put("MAKE_CLOSURE", MAKE_CLOSURE)
         this.nameToCode.put("CALL_CLOSURE", CALL_CLOSURE)
+        this.nameToCode.put("LOAD_UPVALUE", LOAD_UPVALUE)
+        this.nameToCode.put("STORE_UPVALUE", STORE_UPVALUE)
         // 类型
         this.nameToCode.put("INSTANCE_OF", INSTANCE_OF)
         this.nameToCode.put("CHECK_CAST", CHECK_CAST)
@@ -355,6 +365,9 @@ internal object Opcodes {
         this.nameToCode.put("ENUM_CONSTRUCT", ENUM_CONSTRUCT)
         this.nameToCode.put("ENUM_TAG", ENUM_TAG)
         this.nameToCode.put("MAKE_FN_REF", MAKE_FN_REF)
+        // P1 扩展
+        this.nameToCode.put("DEF_CLASS", DEF_CLASS)
+        this.nameToCode.put("CALL_TAIL", CALL_TAIL)
         this.nameMapReady = true
     }
 
@@ -433,6 +446,8 @@ internal object Opcodes {
             LOAD_CLOSURE         -> "LOAD_CLOSURE"
             MAKE_CLOSURE         -> "MAKE_CLOSURE"
             CALL_CLOSURE         -> "CALL_CLOSURE"
+            LOAD_UPVALUE         -> "LOAD_UPVALUE"
+            STORE_UPVALUE        -> "STORE_UPVALUE"
             INSTANCE_OF          -> "INSTANCE_OF"
             CHECK_CAST           -> "CHECK_CAST"
             CAST                 -> "CAST"
@@ -484,6 +499,8 @@ internal object Opcodes {
             ENUM_CONSTRUCT       -> "ENUM_CONSTRUCT"
             ENUM_TAG             -> "ENUM_TAG"
             MAKE_FN_REF          -> "MAKE_FN_REF"
+            DEF_CLASS            -> "DEF_CLASS"
+            CALL_TAIL            -> "CALL_TAIL"
             OP_NOP               -> "#NOP"
             OP_UNKNOWN           -> "#UNKNOWN"
             else                 -> "UNKNOWN"

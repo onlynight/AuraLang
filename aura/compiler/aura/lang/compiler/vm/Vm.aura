@@ -114,20 +114,37 @@ class Vm {
     // 异常处理器栈
     private var handlerStack: VmStrStack = VmStrStack()
 
-    // 闭包表：closureId -> "funcName|upvalueIds"
+    // 闭包表：closureId -> funcName
     private var closureTable: HashMap<Int, String> = HashMap<Int, String>()
 
-    // 上值表：upvalueId -> value
-    private var upvalueTable: HashMap<Int, Any> = HashMap<Int, Any>()
-    private var nextUpvalueId: Int = 0
+    // 闭包捕获表（P1.3）：closureId -> 捕获值列表（按压入顺序，下标即 upvalue 序号）。
+    // STORE_UPVALUE 可原位改写捕获值（闭包对象共享可变状态）。
+    private var closureCaptures: HashMap<Int, List<Any>> = HashMap<Int, List<Any>>()
+    private var nextClosureId: Int = 0
+    // 捕获值总数（getUpvalueCount 用；避免宿主对泛型 List 迭代/求和的推导问题）
+    private var upvalueTotal: Int = 0
+    // 当前帧所属闭包（LOAD/STORE_UPVALUE 的寻址上下文；-1 = 无闭包上下文）。
+    // 调用帧以 callStack 第 4 字段保存/恢复（见 callOrBuiltin / returnFromFunc）。
+    private var currentClosure: Int = -1
 
-    // ── 对象模型（P0.5，ADR-003）──
-    // 实例字段表：键 "<objPtr>|<fieldName>" -> 值（按实例隔离，替代原全局 "field:" 表）。
-    // 说明：装箱 Any 值无法安全 round-trip 裸内存（write64 截断字符串句柄），
-    // 堆内联字段槽待 P1.1 值模型对齐后落地（ADR-003 偏差记录）。
-    private var objectFields: HashMap<String, Any> = HashMap<String, Any>()
-    // 对象类名表：键 "<objPtr>" -> 类名（方法分派 / 类型标签用）。
+    // ── 对象模型（P0.5 / P1.2 / P1.5，ADR-003）──
+    // 实例字段表：键 "<objPtr>" -> (字段名 -> 值)。按实例隔离；嵌套结构使
+    // 对象释放时可 O(1) 摘除其全部字段（P1.5）。
+    private var objectFields: HashMap<String, HashMap<String, Any>> = HashMap<String, HashMap<String, Any>>()
+    // 对象类名表：键 "<objPtr>" -> 类名（方法分派 / 类型过滤用）。
     private var objectClass: HashMap<String, String> = HashMap<String, String>()
+    // 类继承注册表（P1.2）：类名 -> 父类名（"" 或 "-" = 无父类）。
+    // DEF_CLASS 指令 / registerClass API 写入；方法解析与 instanceOf 沿父类链行走。
+    private var classParents: HashMap<String, String> = HashMap<String, String>()
+
+    // ── 堆分配注册表（P1.5）：ptrKey -> kind ──
+    // kind ∈ object|box|list|map|array|mutex|atomic|channel|rwlock|condvar。
+    // 这是「该值是否为 VM 堆对象」的唯一真值来源：DEC_REF 只对注册过的指针
+    // 生效（指针与整数的装箱类型名无法区分，未注册值一律透传，避免误释放）。
+    private var heapKinds: HashMap<String, String> = HashMap<String, String>()
+    // 装箱值侧表（P1.1 boxAlloc 类型感知）：非数值装箱值无法写裸内存，
+    // 以 "<objPtr>" 键存放于托管侧表（box 释放时同步摘除）。
+    private var boxValues: HashMap<String, Any> = HashMap<String, Any>()
 
     // ── 加速派发钩子（P0.8，接口预留不实现加速逻辑）──
     // 热函数直呼表：funcName -> 入口行号；callOrBuiltin 用户函数路径优先查询。
@@ -163,10 +180,15 @@ class Vm {
         this.instructionCount = 0
         this.handlerStack = VmStrStack()
         this.closureTable = HashMap<Int, String>()
-        this.upvalueTable = HashMap<Int, Any>()
-        this.nextUpvalueId = 0
-        this.objectFields = HashMap<String, Any>()
+        this.closureCaptures = HashMap<Int, List<Any>>()
+        this.nextClosureId = 0
+        this.upvalueTotal = 0
+        this.currentClosure = -1
+        this.objectFields = HashMap<String, HashMap<String, Any>>()
         this.objectClass = HashMap<String, String>()
+        this.classParents = HashMap<String, String>()
+        this.heapKinds = HashMap<String, String>()
+        this.boxValues = HashMap<String, Any>()
         this.accelEnabled = false
         this.accelTable = HashMap<String, Int>()
         this.suspended = false
@@ -198,8 +220,13 @@ class Vm {
         this.suspended = false
         this.aucArgBase = 0
         this.aucMode = false
-        this.objectFields = HashMap<String, Any>()
+        this.objectFields = HashMap<String, HashMap<String, Any>>()
         this.objectClass = HashMap<String, String>()
+        this.classParents = HashMap<String, String>()
+        this.heapKinds = HashMap<String, String>()
+        this.boxValues = HashMap<String, Any>()
+        this.closureCaptures = HashMap<Int, List<Any>>()
+        this.currentClosure = -1
         this.buildLineCache()
     }
 
@@ -235,8 +262,13 @@ class Vm {
         // `.auc` 的形参槽从 1 开始（见 aucArgBase）
         this.aucArgBase = 1
         this.aucMode = true
-        this.objectFields = HashMap<String, Any>()
+        this.objectFields = HashMap<String, HashMap<String, Any>>()
         this.objectClass = HashMap<String, String>()
+        this.classParents = HashMap<String, String>()
+        this.heapKinds = HashMap<String, String>()
+        this.boxValues = HashMap<String, Any>()
+        this.closureCaptures = HashMap<Int, List<Any>>()
+        this.currentClosure = -1
         this.buildLineCache()
         return this.run()
     }
@@ -532,6 +564,17 @@ class Vm {
         } else if (op == Opcodes.RETURN_UNIT) {
             this.returnValue = "Unit"
             this.returnFromFunc()
+        } else if (op == Opcodes.CALL_TAIL) {
+            // P1.6：尾调用（帧复用）。文本：`CALL_TAIL name argc`；argc 省略时按函数表推导。
+            val tFunc: String = args.get(0)
+            var tArgc: Int = 0
+            if (args.size() >= 2) {
+                tArgc = VmOps.toI32(args.get(1))
+            } else {
+                tArgc = this.funcParamCount(tFunc)
+                if (tArgc < 0) { tArgc = 0 }
+            }
+            this.callTail(tFunc, tArgc)
         }
 
         // ── 对象/类 ──
@@ -554,13 +597,20 @@ class Vm {
         } else if (op == Opcodes.CALL_CTOR) {
             val ctorName: String = args.get(0)
             this.callCtor(ctorName, args)
+        } else if (op == Opcodes.DEF_CLASS) {
+            // P1.2：声明类继承（parent "-" 或空 = 无父类）
+            var parent: String = ""
+            if (args.size() >= 2) { parent = args.get(1) }
+            this.defClass(args.get(0), parent)
         }
 
         // ── 集合 ──
         else if (op == Opcodes.NEW_LIST) {
             this.stack.push(VmCollections.newList())
+            this.registerHeapTop("list")
         } else if (op == Opcodes.NEW_MAP) {
             this.stack.push(VmCollections.newMap())
+            this.registerHeapTop("map")
         } else if (op == Opcodes.LIST_PUSH) {
             val list: Any = this.stack.pop()
             val elem: Any = this.stack.pop()
@@ -595,9 +645,13 @@ class Vm {
         else if (op == Opcodes.LOAD_CLOSURE) {
             this.loadClosure(args.get(0))
         } else if (op == Opcodes.MAKE_CLOSURE) {
-            this.makeClosure(args.get(0))
+            this.makeClosure(args.get(0), args)
         } else if (op == Opcodes.CALL_CLOSURE) {
-            this.callClosure()
+            this.callClosure(args)
+        } else if (op == Opcodes.LOAD_UPVALUE) {
+            this.loadUpvalue(VmOps.toI32(args.get(0)))
+        } else if (op == Opcodes.STORE_UPVALUE) {
+            this.storeUpvalue(VmOps.toI32(args.get(0)))
         }
 
         // ── 类型检查 ──
@@ -1150,8 +1204,8 @@ class Vm {
             return
         }
 
-        // 保存返回地址和当前帧
-        this.callStack.push(toStr(this.ip) + "|" + toStr(this.currentFrame) + "|" + this.currentFunc)
+        // 保存返回地址和当前帧（第 4 字段为调用者的闭包上下文，P1.3）
+        this.callStack.push(toStr(this.ip) + "|" + toStr(this.currentFrame) + "|" + this.currentFunc + "|" + toStr(this.currentClosure))
         this.savedLocals.push(this.locals)
         this.locals = HashMap<Int, Any>()
 
@@ -1184,15 +1238,45 @@ class Vm {
 
         val last: String = this.callStack.peek()
         val returnIp: Int = VmOps.toI32(VmOps.fieldAt(last, 0, "|"))
+        val savedClosure: Int = VmOps.toI32(VmOps.fieldAt(last, 3, "|"))
         this.callStack.pop()
 
-        // 恢复局部变量
+        // 恢复局部变量与闭包上下文
         this.locals = this.popSavedLocals()
+        this.currentClosure = savedClosure
         this.currentFrame = this.currentFrame - 1
 
         // 把返回值压回调用者的栈
         this.stack.push(retVal)
         this.ip = returnIp
+    }
+
+    /// 尾调用（P1.6）：复用当前调用帧，不压 callStack / savedLocals。
+    ///
+    /// 语义：弹出实参绑定到新帧 → ip 跳转目标入口。当前帧的 callStack 条目
+    /// （返回地址、保存的局部变量）原样保留，因此被调函数 RETURN 时直接
+    /// 返回到**原调用者**——深层递归的调用深度恒为 O(1)。
+    /// 实参绑定与 `callOrBuiltin` 的用户函数路径一致（含 aucArgBase 基址）。
+    private fun callTail(funcName: String, argc: Int): Unit {
+        var target: Int = this.funcOffset(funcName)
+        if (this.accelEnabled) {
+            val accel: Int = this.accelTable.getOrDefault(funcName, -1)
+            if (accel >= 0) { target = accel }
+        }
+        if (target == 0 && this.funcParamCount(funcName) < 0) {
+            this.error = "Unknown function: " + funcName
+            this.running = false
+            return
+        }
+        this.locals = HashMap<Int, Any>()
+        val pc: Int = this.funcParamCount(funcName)
+        var k: Int = pc - 1
+        while (k >= 0 && k < argc) {
+            this.locals.put(k + this.aucArgBase, this.stack.pop())
+            k = k - 1
+        }
+        this.currentFunc = funcName
+        this.ip = target
     }
 
     /// 弹出最后一个保存的局部变量块。
@@ -1245,7 +1329,11 @@ class Vm {
         this.stack.push(ptr)
         // 类名键取栈值的 toStrAny 形态——与 get/set/方法解析同一转换路径；
         // 不得对 Long 局部变量做 toStr（装箱路径不一致会导致键不匹配）。
-        this.objectClass.put(VmOps.toStrAny(this.stack.peek()), className)
+        val objKey: String = VmOps.toStrAny(this.stack.peek())
+        this.objectClass.put(objKey, className)
+        this.objectFields.put(objKey, HashMap<String, Any>())
+        // P1.5：登记堆分配（DEC_REF 释放与活跃计数的数据源）
+        this.heapKinds.put(objKey, "object")
     }
 
     /// 读取对象字段（含字符串/集合的**内建成员**）。
@@ -1297,8 +1385,8 @@ class Vm {
             this.stack.push(0)
             return
         }
-        val fieldKey: String = objKey + "|" + fieldName
-        val val = this.objectFields.get(fieldKey)
+        val fields: HashMap<String, Any> = this.objectFields.getOrDefault(objKey, HashMap<String, Any>())
+        val val = fields.get(fieldName)
         this.stack.push(if (val == null) 0 else val)
     }
 
@@ -1318,7 +1406,12 @@ class Vm {
         if (VmOps.toI64(objKey) == 0L) {
             return
         }
-        this.objectFields.put(objKey + "|" + fieldName, val)
+        var fields: HashMap<String, Any> = this.objectFields.getOrDefault(objKey, HashMap<String, Any>())
+        if (fields.getSize() == 0 && !this.objectFields.containsKey(objKey)) {
+            fields = HashMap<String, Any>()
+            this.objectFields.put(objKey, fields)
+        }
+        fields.put(fieldName, val)
     }
 
     /// 分配数组（在堆上）。
@@ -1375,7 +1468,51 @@ class Vm {
         VmCollections.vmListSet(objAny, idx, v)
     }
 
-    /// 读取栈上指定深度处的接收者类名（非对象指针或越界返回 ""）。
+    /// 声明类继承关系（P1.2，ADR-003 扩展）。
+    ///
+    /// `DEF_CLASS cls parent` 指令与 `registerClass` API 共用；
+    /// parent 为 "" 或 "-" 表示无父类。
+    private fun defClass(cls: String, parent: String): Unit {
+        var p: String = parent
+        if (p == "-") { p = "" }
+        this.classParents.put(cls, p)
+    }
+
+    /// 沿父类链解析方法（P1.2）：返回 "类名.方法名"，链上无命中返回 ""。
+    private fun resolveMethodInChain(cls: String, methodName: String): String {
+        var cur: String = cls
+        var depth: Int = 0
+        while (cur != "" && depth < 64) {
+            val candidate: String = cur + "." + methodName
+            if (this.funcParamCount(candidate) >= 0 || this.funcOffset(candidate) != 0) {
+                return candidate
+            }
+            cur = this.classParents.getOrDefault(cur, "")
+            depth = depth + 1
+        }
+        return ""
+    }
+
+    /// 类名 cls 是否为 target 自身或其祖先链上的类型（P1.2，instanceOf/checkCast 用）。
+    private fun classIsA(cls: String, target: String): Boolean {
+        if (cls == "") { return false }
+        var cur: String = cls
+        var depth: Int = 0
+        while (cur != "" && depth < 64) {
+            if (cur == target) { return true }
+            cur = this.classParents.getOrDefault(cur, "")
+            depth = depth + 1
+        }
+        return false
+    }
+
+    /// 对象值是否为注册的堆对象（P1.2/P1.5 共用），是则返回其类名。
+    private fun heapObjectClass(v: Any): String {
+        if (v == null) { return "" }
+        val key: String = VmOps.toStrAny(v)
+        if (this.heapKinds.getOrDefault(key, "") != "object") { return "" }
+        return this.objectClass.getOrDefault(key, "")
+    }
     ///
     /// depth = 接收者之下压着的实参个数（0 = 接收者在栈顶）。
     private fun receiverClassAt(depth: Int): String {
@@ -1404,15 +1541,16 @@ class Vm {
         val receiverDepth: Int = if (argc >= 0) argc else 0
         val cls: String = this.receiverClassAt(receiverDepth)
         if (cls != "") {
-            val resolved: String = cls + "." + methodName
-            var callArgc: Int = 1
-            if (argc >= 0) {
-                callArgc = argc + 1
-            } else {
-                val pc: Int = this.funcParamCount(resolved)
-                if (pc >= 0) { callArgc = pc }
-            }
-            if (this.funcParamCount(resolved) >= 0 || this.funcOffset(resolved) != 0) {
+            // P1.2：沿父类链解析方法（子类覆写优先，未覆写则命中父类实现）
+            val resolved: String = this.resolveMethodInChain(cls, methodName)
+            if (resolved != "") {
+                var callArgc: Int = 1
+                if (argc >= 0) {
+                    callArgc = argc + 1
+                } else {
+                    val pc: Int = this.funcParamCount(resolved)
+                    if (pc >= 0) { callArgc = pc }
+                }
                 this.callOrBuiltin(resolved, callArgc)
                 return
             }
@@ -1450,49 +1588,159 @@ class Vm {
     //  闭包
     // ═══════════════════════════════════════════════════════════
 
-    /// 加载闭包。
+    /// 加载闭包（遗留文本格式：`LOAD_CLOSURE "funcName|varNames"`）。
+    ///
+    /// varNames 在文本模式下无 name→slot 映射可解析，按 0 捕获处理；
+    /// 捕获语义由 `MAKE_CLOSURE name nCaptures`（弹栈捕获）承担。
     private fun loadClosure(closureData: String): Unit {
-        // closureData 格式：funcName|varNames
         val parts: List<String> = VmOps.split(closureData, "|")
         if (parts.size >= 1) {
-            this.makeClosure(parts.get(0))
+            this.makeClosure(parts.get(0), parts)
         }
     }
 
-    /// 创建闭包。
-    private fun makeClosure(funcName: String): Unit {
-        // 创建闭包描述对象
-        val closureId: Int = this.nextUpvalueId
-        this.nextUpvalueId = this.nextUpvalueId + 1
+    /// 创建闭包（P1.3）。
+    ///
+    /// `MAKE_CLOSURE funcName [nCaptures]`：带 nCaptures 时从栈顶弹出
+    /// nCaptures 个值作为捕获（按压入顺序存为 upvalue 0..n-1）；
+    /// 无第二个操作数时为 0 捕获（遗留 .auc 路径兼容）。
+    /// 压入 closureId（Int），`CALL_CLOSURE` 按其调用。
+    private fun makeClosure(funcName: String, args: List<String>): Unit {
+        var n: Int = 0
+        if (args.size() >= 2) {
+            n = VmOps.toI32(args.get(1))
+        }
+        val caps: List<Any> = arrayListOf<Any>()
+        if (n > 0) {
+            // 栈顶在下，弹出顺序与压入相反：先收进临时表再反转
+            val tmp: List<Any> = arrayListOf<Any>()
+            var i: Int = 0
+            while (i < n) {
+                tmp.add(this.stack.pop())
+                i = i + 1
+            }
+            var j: Int = n - 1
+            while (j >= 0) {
+                caps.add(tmp.get(j))
+                j = j - 1
+            }
+        }
+        val closureId: Int = this.nextClosureId
+        this.nextClosureId = this.nextClosureId + 1
         this.closureTable.put(closureId, funcName)
+        this.closureCaptures.put(closureId, caps)
+        this.upvalueTotal = this.upvalueTotal + n
         this.stack.push(closureId)
     }
 
-    /// 调用闭包。
-    private fun callClosure(): Unit {
-        val closureId: Any = this.stack.pop()
-        val cid: Int = VmOps.toI32(toStr(closureId))
+    /// 调用闭包（P1.3）。
+    ///
+    /// `CALL_CLOSURE [argc]`：栈序 closureId 在下、argc 个实参在其上
+    /// （与 CALL 一致）。argc 省略时按目标函数参数个数推导（兼容旧路径
+    /// 的无参调用）。调用期间 currentClosure 指向该闭包，函数体内的
+    /// LOAD_UPVALUE/STORE_UPVALUE 按此寻址。
+    private fun callClosure(args: List<String>): Unit {
+        var argc: Int = 0
+        if (args.size() >= 1) {
+            argc = VmOps.toI32(args.get(0))
+        }
+        if (this.stack.size() < argc + 1) {
+            this.error = "CALL_CLOSURE: stack underflow"
+            this.running = false
+            return
+        }
+        // 先摘出实参再取 closureId，然后按原顺序压回实参
+        val argVals: List<Any> = arrayListOf<Any>()
+        var i: Int = 0
+        while (i < argc) {
+            argVals.add(this.stack.pop())
+            i = i + 1
+        }
+        val closureIdAny: Any = this.stack.pop()
+        val cid: Int = VmOps.toI32(toStr(closureIdAny))
         val funcName: String = this.closureTable.getOrDefault(cid, "")
         if (funcName == "") {
             this.error = "Invalid closure id: " + toStr(cid)
             this.running = false
             return
         }
-        this.callOrBuiltin(funcName, 0)
+        if (argc > 0) {
+            var j: Int = argc - 1
+            while (j >= 0) {
+                this.stack.push(argVals.get(j))
+                j = j - 1
+            }
+        }
+        this.currentClosure = cid
+        this.callOrBuiltin(funcName, argc)
+    }
+
+    /// 读取当前闭包的第 idx 个 upvalue（P1.3）。
+    private fun loadUpvalue(idx: Int): Unit {
+        if (this.currentClosure < 0) {
+            this.error = "LOAD_UPVALUE: no closure context"
+            this.running = false
+            return
+        }
+        val caps: List<Any> = this.closureCaptures.getOrDefault(this.currentClosure, arrayListOf<Any>())
+        if (idx < 0 || idx >= caps.size()) {
+            this.error = "LOAD_UPVALUE: index " + toStr(idx) + " out of range"
+            this.running = false
+            return
+        }
+        this.stack.push(caps.get(idx))
+    }
+
+    /// 原位改写当前闭包的第 idx 个 upvalue（P1.3，闭包间共享可变状态）。
+    private fun storeUpvalue(idx: Int): Unit {
+        if (this.currentClosure < 0) {
+            this.error = "STORE_UPVALUE: no closure context"
+            this.running = false
+            return
+        }
+        val caps: List<Any> = this.closureCaptures.getOrDefault(this.currentClosure, arrayListOf<Any>())
+        if (idx < 0 || idx >= caps.size()) {
+            this.error = "STORE_UPVALUE: index " + toStr(idx) + " out of range"
+            this.running = false
+            return
+        }
+        val v: Any = this.stack.pop()
+        caps.set(idx, v)
     }
 
     // ═══════════════════════════════════════════════════════════
     //  类型检查
     // ═══════════════════════════════════════════════════════════
 
+    // ═══════════════════════════════════════════════════════════
+    //  类型检查（P1.2：对象值沿类继承链判定）
+    // ═══════════════════════════════════════════════════════════
+
     private fun instanceOf(typeName: String): Unit {
         val v: Any = this.stack.pop()
+        // 对象值：沿类继承链匹配（is-a 语义）
+        val objCls: String = this.heapObjectClass(v)
+        if (objCls != "") {
+            this.stack.push(this.classIsA(objCls, typeName))
+            return
+        }
         this.stack.push(VmOps.typeName(v) == typeName)
     }
 
     private fun checkCast(typeName: String): Unit {
         val v: Any = this.stack.pop()
-        if (VmOps.typeName(v) == typeName || v == null) {
+        if (v == null) {
+            this.stack.push(v)
+            return
+        }
+        val objCls: String = this.heapObjectClass(v)
+        var ok: Boolean = false
+        if (objCls != "") {
+            ok = this.classIsA(objCls, typeName)
+        } else {
+            ok = VmOps.typeName(v) == typeName
+        }
+        if (ok) {
             this.stack.push(v)
         } else {
             this.error = "CheckCast failed: " + VmOps.typeName(v) + " is not " + typeName
@@ -1526,45 +1774,113 @@ class Vm {
     //   offset 8..11  : 引用计数 (u32)
     //   offset 12..15 : 保留
 
+    // ═══════════════════════════════════════════════════════════
+    //  堆分配注册表（P1.5）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 登记一个堆分配（栈顶值即句柄；键取 toStrAny 形态）。
+    private fun registerHeapTop(kind: String): Unit {
+        this.heapKinds.put(VmOps.toStrAny(this.stack.peek()), kind)
+    }
+
+    /// 释放注册过的堆块（按 kind 释放其内层数组并摘除登记/侧表）。
+    ///
+    /// 容器（list/map/array）布局与 `aura.lang.collection.Collections` 兼容、
+    /// 头部无引用计数字段，采用「丢弃即释放」语义；别名容器重复 DEC_REF
+    /// 会双重释放 —— 已知限制，等价 Rust VM 的即时回收行为（heap.rs）。
+    private fun freeRegistered(ptrKey: String, kind: String): Unit {
+        val ptr: Long = VmOps.toI64(ptrKey)
+        if (ptr == 0L) { return }
+        if (kind == "list") {
+            val items: Long = Memory.read64(ptr + 16)
+            if (items != 0L) { Memory.free(items) }
+            Memory.free(ptr)
+        } else if (kind == "map") {
+            val keys: Long = Memory.read64(ptr + 16)
+            val vals: Long = Memory.read64(ptr + 24)
+            if (keys != 0L) { Memory.free(keys) }
+            if (vals != 0L) { Memory.free(vals) }
+            Memory.free(ptr)
+        } else if (kind == "array") {
+            val items: Long = Memory.read64(ptr + 16)
+            if (items != 0L) { Memory.free(items) }
+            Memory.free(ptr)
+        } else {
+            // object / box / mutex / atomic / channel / rwlock / condvar：单块内存
+            Memory.free(ptr)
+        }
+        this.heapKinds.remove(ptrKey)
+        if (kind == "object") {
+            this.objectFields.remove(ptrKey)
+            this.objectClass.remove(ptrKey)
+        } else if (kind == "box") {
+            this.boxValues.remove(ptrKey)
+        }
+    }
+
+    /// 活跃堆对象计数（P1.5 泄漏检测：长循环创建/销毁后应归零）。
+    fun getActiveHeapObjects(): Int {
+        return this.heapKinds.getSize()
+    }
+
+    /// 当前调用深度（主帧为 1）。
+    fun getCallDepth(): Int {
+        return this.callStack.size() + 1
+    }
+
     /// 递增引用计数。
+    ///
+    /// 仅对带引用计数头的堆块生效（object/box，rc 位于 offset 8）；
+    /// 其余注册类型（容器/资源）无 rc 字段，为 no-op。
     private fun incRef(): Unit {
         val v: Any = this.stack.pop()
-        if (v == null || VmOps.typeName(v) != "Long") {
+        if (v == null || !VmOps.isNumeric(v)) {
             this.stack.push(v)
             return
         }
-        val ptr: Long = VmOps.toI64(toStr(v))
-        if (ptr <= 0) {
-            this.stack.push(v)
-            return
-        }
-        val rc: Int = Memory.read32(ptr + 8)
-        if (rc > 0) {
-            Memory.write32(ptr + 8, rc + 1)
+        val key: String = VmOps.toStrAny(v)
+        val kind: String = this.heapKinds.getOrDefault(key, "")
+        if (kind == "object" || kind == "box") {
+            val ptr: Long = VmOps.toI64(key)
+            if (ptr > 0) {
+                val rc: Int = Memory.read32(ptr + 8)
+                if (rc > 0) {
+                    Memory.write32(ptr + 8, rc + 1)
+                }
+            }
         }
         this.stack.push(v)
     }
 
-    /// 递减引用计数，归零时释放堆内存。
+    /// 递减引用计数，归零时按类型释放堆内存（P1.5）。
     private fun decRef(): Unit {
         val v: Any = this.stack.pop()
-        if (v == null || VmOps.typeName(v) != "Long") {
-            this.stack.push(v)
-            return
-        }
-        val ptr: Long = VmOps.toI64(toStr(v))
-        if (ptr <= 0) {
-            this.stack.push(v)
-            return
-        }
-        val rc: Int = Memory.read32(ptr + 8)
-        val newRc: Int = rc - 1
-        if (newRc <= 0) {
-            Memory.free(ptr)
+        if (v == null || !VmOps.isNumeric(v)) {
             this.stack.push(null)
-        } else {
-            Memory.write32(ptr + 8, newRc)
+            return
+        }
+        val key: String = VmOps.toStrAny(v)
+        val kind: String = this.heapKinds.getOrDefault(key, "")
+        if (kind == "") {
+            // 未注册值（整数/字符串/裸指针外值）：透传
             this.stack.push(v)
+            return
+        }
+        if (kind == "object" || kind == "box") {
+            val ptr: Long = VmOps.toI64(key)
+            val rc: Int = Memory.read32(ptr + 8)
+            val newRc: Int = rc - 1
+            if (newRc <= 0) {
+                this.freeRegistered(key, kind)
+                this.stack.push(null)
+            } else {
+                Memory.write32(ptr + 8, newRc)
+                this.stack.push(v)
+            }
+        } else {
+            // 容器/资源：丢弃即释放
+            this.freeRegistered(key, kind)
+            this.stack.push(null)
         }
     }
 
@@ -1578,24 +1894,30 @@ class Vm {
         this.decRef()
     }
 
-    /// 丢弃引用：弹出并回收。
+    /// 丢弃引用：弹出并按注册类型回收（P1.5）。
     private fun dropRef(): Unit {
         val v: Any = this.stack.pop()
-        if (v == null || VmOps.typeName(v) != "Long") {
+        if (v == null || !VmOps.isNumeric(v)) {
             return
         }
-        val ptr: Long = VmOps.toI64(toStr(v))
-        if (ptr <= 0) {
+        val key: String = VmOps.toStrAny(v)
+        val kind: String = this.heapKinds.getOrDefault(key, "")
+        if (kind == "") {
             return
         }
-        val rc: Int = Memory.read32(ptr + 8)
-        if (rc > 0) {
-            val newRc: Int = rc - 1
-            if (newRc <= 0) {
-                Memory.free(ptr)
-            } else {
-                Memory.write32(ptr + 8, newRc)
+        if (kind == "object" || kind == "box") {
+            val ptr: Long = VmOps.toI64(key)
+            val rc: Int = Memory.read32(ptr + 8)
+            if (rc > 0) {
+                val newRc: Int = rc - 1
+                if (newRc <= 0) {
+                    this.freeRegistered(key, kind)
+                } else {
+                    Memory.write32(ptr + 8, newRc)
+                }
             }
+        } else {
+            this.freeRegistered(key, kind)
         }
     }
 
@@ -1605,42 +1927,49 @@ class Vm {
         this.stack.push(v)
     }
 
-    /// 弱引用升级：若对象仍存活（refcount > 0），升级（+1）并返回原值；
-    /// 否则返回 null（对象已被回收）。
+    /// 弱引用升级（P1.5 真弱引用）：仅当对象仍在堆注册表中存活时升级成功
+    /// （object/box 引用计数 +1 并返回原值）；已释放的块已被摘除登记，
+    /// 一律返回 null——不再有「读已释放内存的 rc」的未定义行为。
     private fun weakGet(): Unit {
         val v: Any = this.stack.pop()
-        if (v == null || VmOps.typeName(v) != "Long") {
+        if (v == null || !VmOps.isNumeric(v)) {
             this.stack.push(v)
             return
         }
-        val ptr: Long = VmOps.toI64(toStr(v))
-        if (ptr <= 0) {
-            this.stack.push(null)
-            return
+        val key: String = VmOps.toStrAny(v)
+        val kind: String = this.heapKinds.getOrDefault(key, "")
+        if (kind == "object" || kind == "box") {
+            val ptr: Long = VmOps.toI64(key)
+            val rc: Int = Memory.read32(ptr + 8)
+            if (rc > 0) {
+                Memory.write32(ptr + 8, rc + 1)
+                this.stack.push(v)
+                return
+            }
         }
-        val rc: Int = Memory.read32(ptr + 8)
-        if (rc > 0) {
-            Memory.write32(ptr + 8, rc + 1)
-            this.stack.push(v)
-        } else {
-            this.stack.push(null)
-        }
+        this.stack.push(null)
     }
 
+    /// 装箱分配（P1.1 类型感知；24 字节头：tag@0 / rc@8 / value@16）。
+    ///
+    /// 数值装箱值直接写 value 槽；非数值（字符串等句柄值）写裸内存会截断，
+    /// 存入 `boxValues` 侧表（键 = objPtr 的 toStrAny 形态）。
     private fun boxAlloc(): Unit {
         val v: Any = this.stack.pop()
-        // 分配 16 字节，写入值
-        val ptr: Long = Memory.alloc(16)
+        val ptr: Long = Memory.alloc(24)
         Memory.write32(ptr + 8, 1)  // 初始引用计数 = 1
-        // 根据值类型写入
         if (v == null) {
-            Memory.write64(ptr, 0)
+            Memory.write64(ptr, 0)          // tag 0 = Null
+            Memory.write64(ptr + 16, 0)
         } else if (VmOps.typeName(v) == "Int" || VmOps.typeName(v) == "Long") {
-            Memory.write64(ptr, VmOps.toI64(toStr(v)))
+            Memory.write64(ptr, 1)          // tag 1 = 整数
+            Memory.write64(ptr + 16, VmOps.toI64(VmOps.toStrAny(v)))
         } else {
-            Memory.write64(ptr, VmOps.toI64(toStr(v)))
+            Memory.write64(ptr, 3)          // tag 3 = 托管侧表值（字符串/对象句柄等）
+            this.boxValues.put(VmOps.toStrAny(ptr), v)
         }
         this.stack.push(ptr)
+        this.heapKinds.put(VmOps.toStrAny(this.stack.peek()), "box")
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -1709,12 +2038,22 @@ class Vm {
     //  异常处理
     // ═══════════════════════════════════════════════════════════
 
+    // ═══════════════════════════════════════════════════════════
+    //  异常处理（P1.4：类型过滤 / 多级过滤 / 帧截断 / 字符串自动包装）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 压入异常处理器。
+    ///
+    /// `PUSH_HANDLER target slot catchType`；记录条目
+    /// `target|ip|slot|catchType|frame`（slot = catch 后异常值的落槽，-1 = 不落槽）。
     private fun pushHandler(args: List<String>): Unit {
-        // handlerTarget|slot|catchType
         val target: String = args.get(0)
-        val slot: String = args.get(1)
-        val catchType: String = args.get(2)
-        this.handlerStack.push(target + "|" + toStr(this.ip) + "|" + slot + "|" + catchType)
+        var slot: String = "-1"
+        if (args.size() >= 2) { slot = args.get(1) }
+        var catchType: String = ""
+        if (args.size() >= 3) { catchType = args.get(2) }
+        this.handlerStack.push(target + "|" + toStr(this.ip) + "|" + slot + "|" + catchType
+            + "|" + toStr(this.currentFrame))
     }
 
     private fun popHandler(): Unit {
@@ -1723,24 +2062,65 @@ class Vm {
         }
     }
 
+    /// 异常值是否命中 catch 类型过滤器（P1.4）。
+    ///
+    /// 匹配规则：
+    ///   * catchType 为 "" / "Any"：匹配一切；
+    ///   * 异常值为注册对象：沿其类继承链匹配（子类实例可被父类 catch）；
+    ///   * 异常值为字符串：视为自动包装的 Exception（匹配 "Exception"/"String"）；
+    ///   * 其他内置类型：按 `typeName` 精确匹配。
+    private fun exceptionMatches(ex: Any, catchType: String): Boolean {
+        if (catchType == "" || catchType == "Any") { return true }
+        if (ex == null) { return catchType == "Null" }
+        val objCls: String = this.heapObjectClass(ex)
+        if (objCls != "") {
+            return this.classIsA(objCls, catchType)
+        }
+        val tn: String = VmOps.typeName(ex)
+        if (tn == "String") {
+            // 字符串消息自动包装为 Exception（Rust VM interp.rs 的 auto-wrap 语义）
+            return catchType == "Exception" || catchType == "String"
+        }
+        return tn == catchType
+    }
+
     private fun throwException(): Unit {
         val ex: Any = if (this.stack.size() > 0) this.stack.pop() else "Exception"
 
-        // 弹出最近的异常处理器
-        if (this.handlerStack.size() > 0) {
+        // 自内向外逐层过滤（P1.4 多级过滤：内层不匹配则继续外层）
+        while (this.handlerStack.size() > 0) {
             val handler: String = this.handlerStack.peek()
             this.handlerStack.pop()
             val parts: List<String> = VmOps.split(handler, "|")
-            if (parts.size >= 3) {
-                val target: Int = VmOps.toI32(parts.get(0))
-                this.stack.push(ex)
-                this.ip = target
-                return
+            if (parts.size < 5) {
+                continue
             }
+            val target: Int = VmOps.toI32(parts.get(0))
+            val slot: Int = VmOps.toI32(parts.get(2))
+            val catchType: String = parts.get(3)
+            val frame: Int = VmOps.toI32(parts.get(4))
+            if (!this.exceptionMatches(ex, catchType)) {
+                continue
+            }
+            // 帧截断：丢弃 handler 之上（含当前）的调用帧，恢复到 handler 帧
+            while (this.currentFrame > frame && this.callStack.size() > 0) {
+                val entry: String = this.callStack.peek()
+                this.currentClosure = VmOps.toI32(VmOps.fieldAt(entry, 3, "|"))
+                this.callStack.pop()
+                this.locals = this.popSavedLocals()
+                this.currentFrame = this.currentFrame - 1
+            }
+            // 异常值落槽（若 handler 指定）并压栈
+            if (slot >= 0) {
+                this.locals.put(slot, ex)
+            }
+            this.stack.push(ex)
+            this.ip = target
+            return
         }
 
         // 没有处理器，终止 VM
-        this.error = "Uncaught exception: " + toStr(ex)
+        this.error = "Uncaught exception: " + VmOps.toStrAny(ex)
         this.running = false
     }
 
@@ -2319,9 +2699,14 @@ class Vm {
         return this.closureTable.getSize()
     }
 
-    /// 获取上值总数。
+    /// 获取捕获值（upvalue）总数（P1.3）。
     fun getUpvalueCount(): Int {
-        return this.upvalueTable.getSize()
+        return this.upvalueTotal
+    }
+
+    /// 注册类继承关系（P1.2；与 DEF_CLASS 指令等效，parent 空/"-" = 无父类）。
+    fun registerClass(cls: String, parent: String): Unit {
+        this.defClass(cls, parent)
     }
 
     // ═══════════════════════════════════════════════════════════

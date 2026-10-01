@@ -346,4 +346,23 @@ class VmRunner {
     fun isAccelDispatchEnabled(): Boolean {
         return this.vm.isAccelDispatchEnabled()
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  P1 委托
+    // ═══════════════════════════════════════════════════════════
+
+    /// 注册类继承关系（P1.2；与 DEF_CLASS 指令等效）。
+    fun registerClass(cls: String, parent: String): Unit {
+        this.vm.registerClass(cls, parent)
+    }
+
+    /// 活跃堆对象计数（P1.5 泄漏检测）。
+    fun getActiveHeapObjects(): Int {
+        return this.vm.getActiveHeapObjects()
+    }
+
+    /// 当前调用深度（主帧为 1；尾调用不增长，P1.6）。
+    fun getCallDepth(): Int {
+        return this.vm.getCallDepth()
+    }
 }
