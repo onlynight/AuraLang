@@ -56,6 +56,21 @@ pub enum MirInstr {
     ListPush { obj: Reg, src: Reg },
     /// 列表长度：`dst = obj.size`（同时兼容堆列表与内联列表）
     ListLen { dst: Reg, obj: Reg },
+    /// 列表判空（P3.5）：`dst = obj.isEmpty()`。
+    ///
+    /// 与 `ListLen` 分开是**语义**需要：`ArrayList` 之类的纯 Aura 集合类
+    /// 运行期是对象句柄，`Collections.isEmpty` 那类只认内联 `Value::List` 的
+    /// native 会误判为「空」，必须有一条能解引用类实例字段的独立指令。
+    ListIsEmpty { dst: Reg, obj: Reg },
+    /// 列表包含判定（P3.5）：`dst = obj.contains(item)` → Bool
+    ListContains { dst: Reg, obj: Reg, item: Reg },
+    /// 列表下标查找（P3.5）：`dst = obj.indexOf(item)` → Int（未找到 -1）
+    ListIndexOf { dst: Reg, obj: Reg, item: Reg },
+    /// 列表按下标删除（P3.5）：`dst = obj.removeAt(index)` → 被删元素。
+    ///
+    /// 堆句柄感知：接收者若是 `ArrayList<T>` 类实例，会自动解包到其字段 0
+    /// 的真实列表。替代 `ArrayList.remove`（其 `_size` 运行期恒为 0）。
+    ListRemoveAt { dst: Reg, obj: Reg, idx: Reg },
     /// 保留引用计数 +1（P7.2 ARC 自动插入）
     Retain { src: Reg },
     /// 释放引用计数 -1（P7.2 ARC 自动插入）
@@ -64,6 +79,10 @@ pub enum MirInstr {
     WeakRef { dst: Reg, src: Reg },
     /// 从弱引用升级（P7.3）：`dst = upgrade(src)`
     WeakGet { dst: Reg, src: Reg },
+    /// 读取模块级全局槽位（P3.2）：`dst = globals[slot]`
+    LoadGlobal { dst: Reg, slot: usize },
+    /// 写入模块级全局槽位（P3.2）：`globals[slot] = src`
+    StoreGlobal { slot: usize, src: Reg },
     /// 显式堆分配（P7.5）：`dst = box(src)`
     Box { dst: Reg, src: Reg },
     /// 创建 C 回调蹦床（P8.7）：`dst = makeCallback(func_name)`
@@ -182,6 +201,8 @@ pub struct LowerCtx {
     pub enum_names: HashSet<String>,
     /// Phase 2: 闭包计数器
     pub next_closure_id: usize,
+    /// P3.2: 模块级全局量名 → 全局槽位下标（顶层 `val`/`var`）。
+    pub globals: HashMap<String, usize>,
 }
 
 impl LowerCtx {
@@ -194,6 +215,7 @@ impl LowerCtx {
             user_functions: HashSet::new(),
             enum_names: HashSet::new(),
             next_closure_id: 0,
+            globals: HashMap::new(),
         };
         // Phase 4: 注册内置原生函数短名（实例方法调用 `text.split("\n")` 解析为 "split"）
         // 这些短名在 NativeRegistry 中已注册，但不在 HIR 程序的 natives 中，
@@ -750,6 +772,18 @@ impl MirBuilder {
             | HirStmt::Var {
                 name, init, ..
             } => {
+                // P3.2：顶层 `val`/`var` → 模块级全局槽位（共享存储），
+                // 不声明帧局部槽位；否则本函数内的读写会落在私有副本上。
+                if let Some(&gslot) = ctx.globals.get(name) {
+                    if let Some(e) = init {
+                        let v = self.lower_expr(e, ctx);
+                        self.emit(MirInstr::StoreGlobal {
+                            slot: gslot,
+                            src: v,
+                        });
+                    }
+                    return;
+                }
                 let reg = self.alloc_reg();
                 if let Some(e) = init {
                     let v = self.lower_expr(e, ctx);
@@ -767,7 +801,13 @@ impl MirBuilder {
                 let v = self.lower_expr(value, ctx);
                 match target {
                     HirExpr::Var(n) => {
-                        if let Some(slot) = self.lookup(n) {
+                        // P3.2：顶层全局量的赋值写共享槽位（先于局部量判定）。
+                        if let Some(&gslot) = ctx.globals.get(n) {
+                            self.emit(MirInstr::StoreGlobal {
+                                slot: gslot,
+                                src: v,
+                            });
+                        } else if let Some(slot) = self.lookup(n) {
                             self.emit(MirInstr::StoreLocal {
                                 slot,
                                 src: v,
@@ -1044,6 +1084,19 @@ impl MirBuilder {
                 dst
             }
             HirExpr::Var(n) => {
+                // P3.2：模块级全局量优先（顶层 `val`/`var`）。
+                //
+                // 必须先于局部量查找：顶层声明已被 `synthesize_main_if_missing`
+                // 搬进 main 体，若此处按局部量读取，则会读到 main 自己的槽位，
+                // 其他函数（尤其 `Thread.spawn` 的新 VM）读到的是各自帧内的垃圾。
+                if let Some(&gslot) = ctx.globals.get(n) {
+                    let dst = self.alloc_reg();
+                    self.emit(MirInstr::LoadGlobal {
+                        dst,
+                        slot: gslot,
+                    });
+                    return dst;
+                }
                 let slot = self.lookup(n).unwrap_or(0);
                 let dst = self.alloc_reg();
                 self.emit(MirInstr::LoadLocal { dst, slot });
@@ -1127,7 +1180,70 @@ impl MirBuilder {
                     self.emit(MirInstr::ListLen { dst, obj });
                     return dst;
                 }
-                let argv: Vec<Reg> = args.iter().map(|a| self.lower_expr(a, ctx)).collect();
+                // P3.5: 堆句柄感知的列表判定/查找（`ArrayList` 类实例接收者下
+                // `Collections.isEmpty` 等 native 只认内联 `Value::List`，恒返回
+                // 错误值 → 改走这三条独立指令）。
+                if callee == "__list_is_empty" && args.len() == 1 {
+                    let obj = self.lower_expr(&args[0], ctx);
+                    let dst = self.alloc_reg();
+                    self.emit(MirInstr::ListIsEmpty { dst, obj });
+                    return dst;
+                }
+                if callee == "__list_contains" && args.len() == 2 {
+                    let obj = self.lower_expr(&args[0], ctx);
+                    let item = self.lower_expr(&args[1], ctx);
+                    let dst = self.alloc_reg();
+                    self.emit(MirInstr::ListContains { dst, obj, item });
+                    return dst;
+                }
+                if callee == "__list_remove_at" && args.len() == 2 {
+                    let obj = self.lower_expr(&args[0], ctx);
+                    let idx = self.lower_expr(&args[1], ctx);
+                    let dst = self.alloc_reg();
+                    self.emit(MirInstr::ListRemoveAt { dst, obj, idx });
+                    return dst;
+                }
+                if callee == "__list_index_of" && args.len() == 2 {
+                    let obj = self.lower_expr(&args[0], ctx);
+                    let item = self.lower_expr(&args[1], ctx);
+                    let dst = self.alloc_reg();
+                    self.emit(MirInstr::ListIndexOf { dst, obj, item });
+                    return dst;
+                }
+                // ── Thread.spawn / Future.spawn：函数引用 → 函数索引整数 ──
+                //
+                // 与 AOT 后端（`codegen/aot/emit.rs` 的 `is_spawn` 特判）保持一致：
+                // `spawn(fn, arg)` 的首参期望**函数表下标（整数）**，但 HIR 把裸函数名
+                // 表示为 `HirExpr::Var(fn_name)` —— 若按普通变量读取，`lower_expr`
+                // 会因查不到局部槽而 `unwrap_or(0)` 恒取槽 0，于是
+                // `Thread.spawn(multiIncrementer, cnt)` 实际执行的是函数 #0。
+                // 这是 `tests/concurrent/*`（thread_basics `r=198`、atomic_ops
+                // `final=3`、mutex_shared `count=0`、integration `done=0`）的根因。
+                // 此处若首参是已知用户函数名，改为发射 `MakeFnRef`（VM 侧压入
+                // 函数索引 `Int`）。
+                let is_spawn = callee == "Thread.spawn"
+                    || callee.ends_with(".Thread.spawn")
+                    || callee == "Future.spawn"
+                    || callee.ends_with(".Future.spawn");
+                let argv: Vec<Reg> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        if i == 0 && is_spawn {
+                            if let HirExpr::Var(fn_name) = a {
+                                if ctx.user_functions.contains(fn_name.as_str()) {
+                                    let d = self.alloc_reg();
+                                    self.emit(MirInstr::MakeFnRef {
+                                        dst: d,
+                                        func: fn_name.clone(),
+                                    });
+                                    return d;
+                                }
+                            }
+                        }
+                        self.lower_expr(a, ctx)
+                    })
+                    .collect();
                 let dst = self.alloc_reg();
                 // Phase 1: 优先检查用户自定义函数 — 有同名用户函数则走 Call，否则走 CallNative
                 if ctx.user_functions.contains(callee.as_str()) {
@@ -1452,6 +1568,10 @@ pub fn lower_program(hir: &HirProgram) -> (Vec<MirFunction>, LowerCtx) {
     // Phase 3: 注册枚举名
     for e in &hir.enums {
         ctx.enum_names.insert(e.name.clone());
+    }
+    // P3.2: 注册顶层 `val`/`var` 为模块级全局槽位（下标 = HIR 收集顺序）。
+    for (i, g) in hir.globals.iter().enumerate() {
+        ctx.globals.entry(g.clone()).or_insert(i);
     }
     // Phase 1: **先**一次性登记所有用户自定义函数名，**再**逐个下沉。
     //

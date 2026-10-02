@@ -272,6 +272,31 @@ pub enum OpCode {
     CondvarSignal,
     /// 唤醒所有（栈顶为句柄）
     CondvarBroadcast,
+
+    // ── 堆句柄感知的列表判定/查找（P3.5）──
+    /// 列表是否为空（栈：List 引用/类实例句柄）→ Bool。
+    ///
+    /// 独立于 `ListLen` 的原因是**接收者形态**：`ArrayList` 之类完全纯 Aura
+    /// 实现的集合类，运行期是**对象句柄**而非列表槽，`Collections.isEmpty`
+    /// 这类只认内联 `Value::List` 的 native 对其恒返回 `true`。
+    ListIsEmpty,
+    /// 列表是否包含某元素（栈：元素、List 引用）→ Bool
+    ListContains,
+    /// 列表查找元素下标（栈：元素、List 引用）→ Int（未找到 -1）
+    ListIndexOf,
+    ListRemoveAt,
+
+    // ── 模块级全局变量（P3.2）──
+    /// 读取模块级全局变量（操作数：全局槽位下标），压栈。
+    ///
+    /// 与 `LoadVar`/`StoreVar`（**帧局部**槽位）相对：`LoadGlobal`/`StoreGlobal`
+    /// 读写的是**跨函数、跨线程共享**的模块级存储。顶层 `val`/`var`（脚本模式）
+    /// 由 `synthesize_main_if_missing` 前置进 `main` 执行初始化，但其读写点
+    /// 必须落在共享存储上，否则其他函数（尤其是 `Thread.spawn` 拉起的新 VM）
+    /// 读到的是各自帧内的垃圾值。
+    LoadGlobal(u16),
+    /// 写入模块级全局变量（操作数：全局槽位下标），弹栈。
+    StoreGlobal(u16),
 }
 
 impl OpCode {
@@ -391,6 +416,14 @@ impl OpCode {
             OpCode::CondvarWait => 107,
             OpCode::CondvarSignal => 108,
             OpCode::CondvarBroadcast => 109,
+            OpCode::ListIsEmpty => 112,
+            OpCode::ListContains => 113,
+            OpCode::ListIndexOf => 114,
+            OpCode::ListRemoveAt => 115,
+
+            // ── 模块级全局变量（P3.2）──
+            OpCode::LoadGlobal(_) => 110,
+            OpCode::StoreGlobal(_) => 111,
         }
     }
 
@@ -398,6 +431,7 @@ impl OpCode {
     pub fn operand_size(byte: u8) -> usize {
         match byte {
             0 | 1 | 2 | 30 | 32 | 33 | 72 | 74 | 76 | 77 => 2, // u16 操作数
+            110 | 111 => 2, // LoadGlobal / StoreGlobal：u16 全局槽位下标
             23 | 24 | 25 => 4,                                 // i32 偏移
             82 => 8, // PushHandler: i32 处理器块偏移 + u16 异常值槽位 + u16 catch_type
             // ⚠ 必须与 `write` 实际写出的操作数字节数一致：解码器用本表
@@ -529,6 +563,14 @@ impl OpCode {
             107 => OpCode::CondvarWait,
             108 => OpCode::CondvarSignal,
             109 => OpCode::CondvarBroadcast,
+            112 => OpCode::ListIsEmpty,
+            113 => OpCode::ListContains,
+            114 => OpCode::ListIndexOf,
+            115 => OpCode::ListRemoveAt,
+
+            // ── 模块级全局变量（P3.2）──
+            110 => OpCode::LoadGlobal(0),
+            111 => OpCode::StoreGlobal(0),
             _ => return None,
         })
     }
@@ -557,6 +599,8 @@ impl OpCode {
             | OpCode::MakeFnRef(i)
             | OpCode::CallExport(i)
             | OpCode::CallAot(i)
+            | OpCode::LoadGlobal(i)
+            | OpCode::StoreGlobal(i)
             | OpCode::ThreadSpawn(i) => buf.extend_from_slice(&i.to_le_bytes()),
             OpCode::CallNativeArgs(idx, argc) => {
                 buf.extend_from_slice(&idx.to_le_bytes());
@@ -637,6 +681,10 @@ impl fmt::Display for OpCode {
             OpCode::ListPush => write!(f, "LIST_PUSH"),
             OpCode::ListPop => write!(f, "LIST_POP"),
             OpCode::ListLen => write!(f, "LIST_LEN"),
+            OpCode::ListIsEmpty => write!(f, "LIST_IS_EMPTY"),
+            OpCode::ListContains => write!(f, "LIST_CONTAINS"),
+            OpCode::ListIndexOf => write!(f, "LIST_INDEX_OF"),
+            OpCode::ListRemoveAt => write!(f, "LIST_REMOVE_AT"),
             OpCode::MapSet => write!(f, "MAP_SET"),
             OpCode::MapGet => write!(f, "MAP_GET"),
             OpCode::MapLen => write!(f, "MAP_LEN"),
@@ -701,6 +749,10 @@ impl fmt::Display for OpCode {
             OpCode::CondvarWait => write!(f, "CONDVAR_WAIT"),
             OpCode::CondvarSignal => write!(f, "CONDVAR_SIGNAL"),
             OpCode::CondvarBroadcast => write!(f, "CONDVAR_BROADCAST"),
+
+            // ── 模块级全局变量（P3.2）──
+            OpCode::LoadGlobal(i) => write!(f, "LOAD_GLOBAL {}", i),
+            OpCode::StoreGlobal(i) => write!(f, "STORE_GLOBAL {}", i),
         }
     }
 }

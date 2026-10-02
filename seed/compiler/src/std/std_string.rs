@@ -29,6 +29,8 @@ pub fn register(reg: &mut NativeRegistry) {
         ("trimStart", nat_trim_start),
         ("trimEnd", nat_trim_end),
         ("substring", nat_substring),
+        ("substringFrom", nat_substring_from),
+        ("substringAt", nat_substring_at),
         ("substringBefore", nat_substring_before),
         ("substringAfter", nat_substring_after),
         ("toLowerCase", nat_to_lower),
@@ -73,6 +75,11 @@ pub fn register(reg: &mut NativeRegistry) {
     reg.register("substring", nat_substring);
     reg.register("substringBefore", nat_substring_before);
     reg.register("substringAfter", nat_substring_after);
+    // 2026-10-02 补齐：substringFrom（1 参 substring）/ substringAt(from, len)。
+    // 包模式下 `s.substringAt(a, b)` 经扁平命名空间发射裸名（ProcessNative.aura），
+    // 不注册则未链接、静默返回空串。
+    reg.register("substringFrom", nat_substring_from);
+    reg.register("substringAt", nat_substring_at);
     reg.register("indexOf", nat_index_of);
     reg.register("lastIndexOf", nat_last_index_of);
     reg.register("replace", nat_replace);
@@ -84,6 +91,14 @@ pub fn register(reg: &mut NativeRegistry) {
     reg.register("fromCharCode", nat_from_char_code);
     reg.register("charCodeAt", nat_char_at_code);
     reg.register("charAt", nat_char_at);
+    // `length` 也要注册裸名：包模式（仓库内有 aura.toml）下 std `String` 以
+    // Aura 类加载，`s.length()` 经扁平命名空间降级成**裸名** `length` 发射，
+    // 而这里此前刻意不注册（怕与容器同名方法冲突）⇒ VM 链接失败，
+    // `[vm] Unlinked external function 'length', call ignored` ⇒ 恒返回 0
+    // （实测 tests/photon/P2/04_string_ops.aura：VM 基线 `len = 0`，应为 11）。
+    // 「未链接」意味着此前也没有任何容器实现可命中 —— 注册是纯改善；
+    // 容器长度在本方言里走 `count` / `size` / `getSize`，不走 `length`。
+    reg.register("length", nat_length);
 }
 
 fn s0(args: &[Value]) -> String {
@@ -195,6 +210,38 @@ fn nat_substring(args: &[Value]) -> Value {
         return Value::str_("");
     }
     Value::str_(chars[start..end].iter().collect::<String>())
+}
+
+/// 1 参 `substring(start)` —— 取 [start, 末尾)。与 AOT 侧
+/// `aura_lang_std_String_substringFrom` 同语义（2026-10-02 补齐：
+/// 此前 VM/AOT 两侧都没有该形态的实现，调用点静默得到错误结果）。
+fn nat_substring_from(args: &[Value]) -> Value {
+    let text = s0(args);
+    let start = args
+        .get(1)
+        .map(|v| v.as_int().max(0) as usize)
+        .unwrap_or(0);
+    let chars: Vec<char> = text.chars().collect();
+    if start > chars.len() {
+        return Value::str_("");
+    }
+    Value::str_(chars[start..].iter().collect::<String>())
+}
+
+/// `substringAt(from, len)` —— 取 [from, from+len)。与 Aura 侧
+/// `String.substringAt` 同语义（此前映射缺失，AOT 发射裸名未定义符号）。
+fn nat_substring_at(args: &[Value]) -> Value {
+    let text = s0(args);
+    let from = args
+        .get(1)
+        .map(|v| v.as_int().max(0) as usize)
+        .unwrap_or(0);
+    let len = args.get(2).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+    let chars: Vec<char> = text.chars().collect();
+    if from > chars.len() || from + len > chars.len() {
+        return Value::str_("");
+    }
+    Value::str_(chars[from..from + len].iter().collect::<String>())
 }
 
 fn nat_substring_before(args: &[Value]) -> Value {

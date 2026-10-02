@@ -2559,8 +2559,12 @@ class Vm {
     }
 
     private fun makeFnRef(funcName: String): Unit {
-        // 创建函数引用
-        this.stack.push(funcName)
+        // 创建函数引用：压入**函数表下标（Int）**，与 Rust VM 一致。
+        //
+        // `MAKE_FN_REF` 的唯一消费者是 `Thread.spawn(fn, arg)` / `Future.spawn`，
+        // 原生 `ThreadOps.create(fnId, arg)` 以整数取函数下标（见 `threadSpawn`）。
+        // 原实现压入**函数名字符串**，`toI32` 解析失败得 0 → 新线程恒执行函数 #0。
+        this.stack.push(VmOps.toI32(funcName))
     }
 
     // ═══════════════════════════════════════════════════════════

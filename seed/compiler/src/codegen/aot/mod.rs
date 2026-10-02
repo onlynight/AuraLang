@@ -311,6 +311,27 @@ pub fn aot_compile(
         return Err(CodegenError::Aot(format!("parse: {}", e.message)));
     }
 
+    // 语义门禁（仅可靠检查）：实参数/重载违规必须硬失败。
+    //
+    // AOT 路径此前**完全不跑 sema**，实参数不匹配静默通过：缺失实参在 LLVM IR
+    // 里落成未初始化的 `%var`（垃圾值），或调用点发射成不存在的符号。
+    // 实测 `joinPieces(parts)` 漏传 `sep` ⇒ freeFuncs 整串损坏（2026-10-02）；
+    // `String.indexOf(s, sub, start)` 三参形态（不存在的 API）发射
+    // `@String_indexOf` → `llc: use of undefined value`。
+    // 只对「no overload of …」这类来自真实符号签名的可靠诊断硬失败；
+    // 其余语义诊断因 P3 泛型等已知误报不在此阻断。
+    {
+        let (_ast, sema) = crate::sema::checker::analyze_source(source);
+        if crate::sema::checker::has_overload_violation(&sema.errors) {
+            let msgs = crate::sema::checker::overload_violation_messages(&sema.errors);
+            return Err(CodegenError::Aot(format!(
+                "semantic error: call arity violation ({}):\n  {}",
+                msgs.len(),
+                msgs.join("\n  ")
+            )));
+        }
+    }
+
     let codegen = AotCodeGenerator::new(options);
     let output = codegen
         .compile_program(&program, output_path.parent().unwrap_or(Path::new(".")), {
@@ -334,27 +355,173 @@ pub fn aot_compile(
         })
         .map_err(|e| CodegenError::Aot(e.to_string()))?;
 
-    // 如果用户指定了非默认输出文件名，复制或重命名
-    if output.exe_path.as_ref().map(|p| p != output_path).unwrap_or(false)
-        || output.object_path.as_ref().map(|p| p != output_path).unwrap_or(false)
-        || output.blob_path.as_ref().map(|p| p != output_path).unwrap_or(false)
-        || output.shared_library_path.as_ref().map(|p| p != output_path).unwrap_or(false)
-        || output.rust_host_path.as_ref().map(|p| p != output_path).unwrap_or(false)
-    {
-        if let Some(ref src) = output.exe_path {
-            std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;
-        } else if let Some(ref src) = output.object_path {
-            std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;
-        } else if let Some(ref src) = output.blob_path {
-            std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;
-        } else if let Some(ref src) = output.shared_library_path {
-            std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;
-        } else if let Some(ref src) = output.rust_host_path {
+    // 如果用户指定了非默认输出文件名，复制到目标路径。
+    //
+    // 判断必须基于**实际将被复制的那一个产物**，而不是「任意产物路径与目标
+    // 不同」。旧实现把 exe/obj/blob/... 全部串进 `||` 守卫：只要该次构建还
+    // 产出了 `.obj`（几乎总是），即使 exe 路径已经等于目标，也会进入分支并
+    // 无条件自拷贝 `exe_path → output_path`。当 `--output <dir>/<dir>.exe`
+    // （产物名与输出目录同名）时二者是同一文件，Windows 上 `fs::copy` 会以
+    // ERROR_SHARING_VIOLATION(32) 失败，构建「成功产出 exe 却报错」。
+    //
+    // ⚠️ `object_path` 必须排在**所有最终产物之后**。`.obj` 是中间件，几乎每次
+    // 构建都存在；旧顺序把 `.obj` 放在 `shared_library_path` 之前，导致
+    // `--shared --output x.dll` 复制的是 COFF 目标文件而非链接好的 DLL
+    // （实测 `utils.dll` 只有 5375B 且以 `64 86`(COFF) 开头 → `ctypes` 报
+    // WinError 193「不是有效的 Win32 应用程序」），P3.4 FFI demo 因此恒失败。
+    let artifact_src = output
+        .exe_path
+        .as_ref()
+        .or(output.shared_library_path.as_ref())
+        .or(output.blob_path.as_ref())
+        .or(output.rust_host_path.as_ref())
+        .or(output.object_path.as_ref());
+    if let Some(src) = artifact_src {
+        if !same_file(src, output_path) {
             std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;
         }
     }
 
     Ok(output)
+}
+
+/// P3.4: 由 Aura 源码生成 C 头文件（`aura export-header`）。
+///
+/// 输出内容与 `--cabi --shared` 产物的导出契约一致：
+/// - 每个**用户函数**（非 native 声明、非合成入口）声明一条 `aura_c_<name>` 原型；
+/// - 类型按既定 ABI 映射：`Int`→`int32_t`、`Long`→`int64_t`、`Float`/`Double`→`double`、
+///   `Boolean`→`bool`、`Char`→`char`、`String`/`CString`/指针/`Any`→`const char*` / `void*`。
+///
+/// 生成过程复用与 AOT 相同的 HIR 降级链路（desugar + mono + inline + fold），
+/// 因此头文件中的函数集合与 `--cabi` 实际导出的包装函数一一对应。
+pub fn export_c_header(source: &str, entry: &str) -> Result<String, CodegenError> {
+    use crate::codegen::{
+        desugar_program, fold_hir, inline_hir, mono_hir, synthesize_main_if_missing,
+    };
+    use crate::codegen::hir::{HirFunction, HirType};
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer.tokenize();
+    if let Some(e) = lexer.errors().first() {
+        return Err(CodegenError::Aot(format!("lex: {}", e.message)));
+    }
+    let mut parser = Parser::new(tokens);
+    let program = parser.parse_program();
+    if let Some(e) = parser.errors().first() {
+        return Err(CodegenError::Aot(format!("parse: {}", e.message)));
+    }
+
+    let mut hir = desugar_program(&program);
+    synthesize_main_if_missing(&mut hir);
+    mono_hir(&mut hir);
+    inline_hir(&mut hir);
+    fold_hir(&mut hir);
+
+    // HirType → C 类型名
+    fn c_type(ty: Option<&HirType>) -> String {
+        match ty {
+            None => "void".to_string(),
+            Some(HirType::Pointer(inner)) => format!("{}*", c_type(Some(inner))),
+            Some(HirType::Nullable(inner)) => format!("{}*", c_type(Some(inner))),
+            Some(HirType::Array { inner, .. }) => format!("{}*", c_type(Some(inner))),
+            Some(HirType::Named(n)) => match n.as_str() {
+                "Int" | "Int32" => "int32_t".to_string(),
+                "Long" | "Int64" | "Size" | "u64" | "i64" => "int64_t".to_string(),
+                "Float" | "Double" | "f64" => "double".to_string(),
+                "Boolean" | "Bool" => "bool".to_string(),
+                "Char" | "Byte" | "u8" => "char".to_string(),
+                "CString" | "CStr" => "const char*".to_string(),
+                "Unit" | "Nothing" | "Void" => "void".to_string(),
+                // String / List / Map / Any / 用户类型 一律退化为不透明指针
+                _ => "void*".to_string(),
+            },
+            Some(HirType::Function { .. }) => "void*".to_string(),
+            Some(HirType::Unknown) => "void*".to_string(),
+        }
+    }
+
+    fn is_user_fn(f: &HirFunction) -> bool {
+        // 排除 native/FFI 声明、合成入口、以及类方法（含 `.` 或 `$` 的名字）
+        if f.is_native {
+            return false;
+        }
+        let n = f.name.as_str();
+        if n == "main" || n.starts_with("$") {
+            return false;
+        }
+        if n.contains('.') || n.contains('$') {
+            return false;
+        }
+        true
+    }
+
+    let mut decls = String::new();
+    let mut count = 0usize;
+    for f in hir.functions.iter().filter(|f| is_user_fn(f)) {
+        let ret = c_type(f.ret.as_ref());
+        let params: Vec<String> = f
+            .params
+            .iter()
+            .map(|p| format!("{} {}", c_type(p.ty.as_ref()), p.name))
+            .collect();
+        let param_str = if params.is_empty() { "void".to_string() } else { params.join(", ") };
+        decls.push_str(&format!(
+            "/* {} */\n{} aura_c_{}({});\n\n",
+            f.name, ret, f.name, param_str
+        ));
+        count += 1;
+    }
+
+    let stem = entry
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("aura_ffi")
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or("aura_ffi");
+    let guard = format!("{}_H", stem.replace(['.', '-'], "_").to_uppercase());
+
+    let header = format!(
+        "/*\n\
+         * {stem}.h — C 头文件（由 `aura export-header` 生成）\n\
+         *\n\
+         * 对应 Aura AOT + --cabi --shared 产物的 C ABI 接口。\n\
+         * 导出符号前缀为 aura_c_，调用约定为 C ABI (ccc)。\n\
+         *\n\
+         * 源文件：{entry}\n\
+         * 构建：aura build {entry} --aot --shared --cabi --output <lib>.dll\n\
+         */\n\n\
+         #ifndef {guard}\n\
+         #define {guard}\n\n\
+         #include <stdint.h>\n\
+         #include <stdbool.h>\n\n\
+         #ifdef __cplusplus\n\
+         extern \"C\" {{\n\
+         #endif\n\n\
+         {decls}\
+         #ifdef __cplusplus\n\
+         }}\n\
+         #endif\n\n\
+         #endif /* {guard} */\n",
+        stem = stem,
+        entry = entry,
+        guard = guard,
+        decls = decls,
+    );
+
+    let _ = count;
+    Ok(header)
+}
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
 }
 
 /// Phase C: 注入并发原生函数声明到 HIR 程序

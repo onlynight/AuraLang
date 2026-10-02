@@ -59,10 +59,10 @@ pub fn std_signature_table() -> &'static HashMap<(String, String), Signature> {
         m.insert(
             ("String".into(), "substring".into()),
             Signature {
+                // 最小形态 [text, start]：1 参 substring(start) 与 2 参
+                // substring(start, end) 都是合法重载（实参超出不在此检查）。
                 ret: "i8*",
-                params: &[
-                    "i8*", "i64", "i64",
-                ],
+                params: &["i8*", "i64"],
             },
         );
         m.insert(

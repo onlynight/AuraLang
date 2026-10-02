@@ -234,6 +234,12 @@ class LlvmEmitter {
     /// 全局闭包惰性初始化 IR 片段（模块末尾统一输出）。
     var globalParts: EmitBuffer = EmitBuffer()
 
+    /// 顶层 `val`/`var` 普通变量名表（每行 `name|`）。
+    ///
+    /// 与 `fGlobalClosures`（闭包变量）平行的普通全局表：顶层非闭包变量
+    /// 发射为 `@<name> = global i64 <init>`，供函数体内的裸名读写。
+    var fGlobalNames: EmitBuffer = EmitBuffer()
+
     /// 当前 lambda 捕获的外层变量表（每行 `name|llvmTy`）。
     ///
     /// 闭包环境布局：`[0] = 函数指针`，`[1..]` = 按捕获顺序存放的值副本。
@@ -386,9 +392,25 @@ class LlvmEmitter {
         this.lambdaParts = EmitBuffer()
         this.fClosureSigs.sbReset()
         this.fGlobalClosures.sbReset()
+        this.fGlobalNames.sbReset()
         this.globalParts.sbReset()
         this.fCapturedVars.sbReset()
         this.svCapturedVars = ""
+    }
+
+    /// 登记顶层普通全局变量（`@<name> = global i64 <init>`）。
+    ///
+    /// 与 `emitGlobalClosure` 平行：闭包变量走 `i8*` + 惰性初始化函数，
+    /// 普通标量 / 句柄变量直接以 `i64` 承载，初始值取字面量常量，
+    /// 非字面量初始化式（如 `Mutex.new()`）以 `0` 落地——初始化语句
+    /// 本身由 `main` 内的显式赋值完成（`SHARED_COUNT_LOCK = Mutex.new()`）。
+    fun declareGlobal(name: String): Unit {
+        val sym: String = sanitizeLlvm(name)
+        if (name == "" || this.fGlobalNames.sbContains("\n" + sym + "|")) {
+            return
+        }
+        this.fGlobalNames.sbAdd("\n" + sym + "|")
+        this.globalParts.sbAdd("@" + sym + " = global i64 0\n")
     }
 
     /// 生成新 SSA 临时变量名。
@@ -718,6 +740,25 @@ class LlvmEmitter {
             val gIr: String = this.globalParts.sbBuild()
             if (gIr != "") {
                 out.sbAdd(gIr)
+            }
+            out.sbAdd("\n")
+        }
+        // 顶层普通变量（`val`/`var` 非闭包）：`@name = global i64 0`。
+        // 同样必须在 funcParts 之前，函数体 load/store 需要符号可见。
+        if (this.fGlobalNames.sbSize() > 0) {
+            out.sbAdd("; ---- Top-level Globals ----\n")
+            val gnLines: List<String> = this.fGlobalNames.sbBuild().split("\n")
+            var gni: Int = 0
+            while (gni < gnLines.size) {
+                val gln: String = gnLines[gni]
+                gni = gni + 1
+                if (gln == "") {
+                    continue
+                }
+                val gname: String = sanitizeLlvm(aotFieldAt(gln, 0, "|"))
+                if (gname != "") {
+                    out.sbAdd("@" + gname + " = global i64 0\n")
+                }
             }
             out.sbAdd("\n")
         }
@@ -4508,6 +4549,19 @@ class LlvmEmitter {
             this.emitThisFieldStore(hir, name, valueId)
             return
         }
+        // 顶层 `val`/`var`（非闭包）：写入模块级全局符号（i64 承载）。
+        // 若仍走 `declareVar` 会退化成函数内 alloca，每个线程各自一份副本，
+        // 「共享状态」在并发测试里彻底失效。
+        if (this.lookupVarTy(name) == "" && this.globalClosureSigOf(name) == "") {
+            this.declareGlobal(name)
+            val gv: String = this.emitExpr(hir, valueId)
+            val gc: String = this.coerceValue(gv, this.inferType(hir, valueId), "i64")
+            this.fBody.sbAdd("  store i64 ")
+            this.fBody.sbAdd(gc)
+            this.fBody.sbAdd(", i64* @" + sanitizeLlvm(name) + "\n")
+            this.fTerminated = false
+            return
+        }
         val valueTy: String = this.inferType(hir, valueId)
         val value: String = this.emitExpr(hir, valueId)
         var ty: String = this.lookupVarTy(name)
@@ -5085,7 +5139,21 @@ class LlvmEmitter {
             if (this.curClassFieldIndex(name) >= 0) {
                 return this.emitThisFieldLoad(name)
             }
-            return "0"
+            // 顶层 `val`/`var` 声明：发射全局符号（i64 承载任意小值 / 句柄），
+            // 与 VM 侧「top-level 作用域变量」的语义一致。缺失这一分支时，
+            // `lookupVarTy` 查不到类型会静默降级成字面量 `0`，于是
+            // `SHARED_COUNT = SHARED_COUNT + 1` 退化为 `0 + 1`，并发计数永远
+            // 停留在初值——`tests/concurrent/mutex_shared.aura` 的
+            // 「Mutex 保护并发递增 count=0」就是这条路径。
+            // 首次读到未登记的裸名时**按需登记**全局符号：顶层 val 声明本身
+            // 不参与任何函数体发射，若只在 `emitDecl` 里登记，`var` 这类
+            // 只被读写的顶层量永远不会进表。
+            this.declareGlobal(name)
+            val gt: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(gt)
+            this.fBody.sbAdd(" = load i64, i64* @" + sanitizeLlvm(name) + "\n")
+            return gt
         }
         val addr: String = this.lookupVarAddr(name)
         val t: String = this.freshVar()

@@ -27,10 +27,12 @@ pub fn mono_hir(hir: &mut HirProgram) {
         .map(|(i, f)| (f.name.clone(), i))
         .collect();
 
-    if generic.is_empty() {
-        return;
+    if !generic.is_empty() {
+        run_monomorphization(hir, &generic);
     }
+}
 
+fn run_monomorphization(hir: &mut HirProgram, generic: &HashMap<String, usize>) {
     // 统计每个泛型函数被调用的 arity 组合
     let mut arities: HashMap<String, HashSet<usize>> = HashMap::new();
     for f in &hir.functions {
@@ -78,6 +80,11 @@ pub fn mono_hir(hir: &mut HirProgram) {
             continue;
         }
         rewrite_calls(&mut f.body, &spec_map, &generic);
+    }
+    // 顶层语句同样可能被特化调用点命中，需一并改写。
+    if let Some(tl) = &mut hir.top_level_statements {
+        let tl_mut: &mut HirBlock = tl;
+        rewrite_calls(tl_mut, &spec_map, &generic);
     }
 }
 

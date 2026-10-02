@@ -6,7 +6,16 @@ param(
 $ErrorActionPreference = 'Continue'
 $RootDir = 'D:\Code\AuraLang'
 Set-Location $RootDir
-$exe = "rust\target\release\aura.exe"
+# Resolve the current seed compiler. `rust\target\release\aura.exe` is a stale path
+# left over from before the seed/ migration.
+$exe = $null
+foreach ($c in @('seed\target\release\aura.exe', 'seed\target\debug\aura.exe', 'build\bin\aura.exe', 'aura\seed\aura.exe')) {
+    if (Test-Path $c) { $exe = (Resolve-Path $c).Path; break }
+}
+if (-not $exe) {
+    Write-Host "[$Label] ERROR: no seed compiler found" -ForegroundColor Red
+    exit 1
+}
 
 $tests = Get-ChildItem tests -Recurse -Filter "*.aura" |
     Where-Object { $_.Name -notmatch 'Debug|Test_' } |

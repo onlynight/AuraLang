@@ -1,0 +1,288 @@
+// tests/pure_aura/p3_debugger_tests.aura
+// ─────────────────────────────────────────────────────────────
+// P3.5 — 调试器验收测试（断点 / 单步 / 寄存器读取 / 栈回溯）
+//
+// 直接驱动 Aura 调试器包（`aura/toolchain/debugger/`）的
+// `DebugVm` / `BreakpointManager` / `SourceMap`，不依赖外部工具链路径。
+//
+// 运行：aura run tests/pure_aura/p3_debugger_tests.aura
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.debugger.DebugVm
+import aura.lang.debugger.BreakpointManager
+import aura.lang.debugger.Breakpoint
+import aura.lang.debugger.SourceMap
+import aura.lang.collection.ArrayList
+
+// 计数通过的断言
+var PASSED: Int = 0
+var FAILED: Int = 0
+
+fun ok(cond: Boolean, label: String): Unit {
+    if (cond) {
+        PASSED = PASSED + 1
+        println("  ok   " + label)
+    } else {
+        FAILED = FAILED + 1
+        println("  FAIL " + label)
+    }
+}
+
+// 一段最小字节码 + 函数表（文本格式，与 DebugVm 的解析约定一致）。
+//
+//   main:      CONST_INT 0 / STORE_LOCAL 0     <- 常量池[0]="0"，写入局部槽 0
+//              CONST_INT 1 / STORE_LOCAL 1     <- 常量池[1]="5"，写入局部槽 1
+//              LOAD_LOCAL 0 / LOAD_LOCAL 1     <- 压入 0、5
+//              ADD                             <- 操作数栈顶 = 5
+//              RETURN                          <- 返回值 = 5
+//
+// ⚠ 必须用 `STORE_LOCAL`（弹出栈顶存入槽位）而非 `DECL_LOCAL`：
+//   `DECL_LOCAL n` 只做 `setLocal(n, "0")`，**不消费操作数栈**，因此
+//   `CONST_INT 0 / DECL_LOCAL 0` 会留下一个栈元素，且槽位恒为 "0" —— 于是
+//   `ADD` 得 0+0=0 而非 5（实测）。见 `DebugVm.dispatch`。
+//
+// ⚠ 必须用**函数**返回这些字符串，不能声明为模块级 `val`：
+//   当前 VM 的模块级全局槽是 `Vec<i64>`（与 AOT 的 `global i64` 一致，
+//   见 `vm/mod.rs` 的 `globals` 字段说明），**非整数全局量会退化为 0** ——
+//   实测模块级 `val X: String = "hello"` 读出 `"0"`。函数返回值走普通寄存器，
+//   不受该限制。
+fun bcSource(): String {
+    return "CONST_INT 0\nSTORE_LOCAL 0\nCONST_INT 1\nSTORE_LOCAL 1\nLOAD_LOCAL 0\nLOAD_LOCAL 1\nADD\nRETURN\n"
+}
+
+// 函数表行格式：name|offset|paramCount
+fun funcTable(): String {
+    return "main|0|0\n"
+}
+
+// 常量池：行号 = 常量下标。`CONST_INT 0` 取第 0 行、`CONST_INT 1` 取第 1 行。
+// 必须非空 —— 空池会让 `getConst("0")` 返回 ""，于是 `peek()` 恒为 ""。
+fun constPool(): String {
+    return "0\n5\n42\n"
+}
+
+// ── 1. 断点管理 ──
+
+fun testBreakpoints(): Unit {
+    println("[1] 断点管理")
+    val mgr = BreakpointManager()
+
+    val id1 = mgr.add("main.aura", 10)
+    ok(id1 == 1, "首个断点 id = 1")
+    val id2 = mgr.add("main.aura", 20)
+    ok(id2 == 2, "第二个断点 id = 2")
+    ok(mgr.list().size == 2, "断点数为 2")
+    ok(mgr.enabledCount() == 2, "启用断点数 = 2")
+
+    val bp = mgr.getBp(1)
+    ok(bp != null, "getBp(1) 非空")
+    if (bp != null) {
+        ok(bp.get("line") == "10", "断点 1 的行号 = 10")
+        ok(bp.get("file") == "main.aura", "断点 1 的文件名正确")
+        ok(bp.get("enabled") == "true", "断点 1 默认启用")
+    }
+
+    // 禁用切换
+    ok(mgr.toggle(2), "toggle(2) 成功")
+    ok(mgr.enabledCount() == 1, "禁用后启用断点数 = 1")
+    ok(!mgr.toggle(999), "toggle 不存在的 id 返回 false")
+
+    // 条件设置
+    ok(mgr.setCondition(1, "x > 3"), "setCondition(1) 成功")
+
+    // 命中计数：funcOffset 默认 -1，故 checkBreakpoint(ip) 用 -1 才能命中
+    val hit = mgr.checkBreakpoint(-1)
+    ok(hit == 1, "checkBreakpoint(-1) 命中 id 1")
+    ok(mgr.checkBreakpoint(4242) == 0, "无匹配 ip 返回 0")
+
+    ok(mgr.remove(1), "remove(1) 成功")
+    ok(mgr.list().size == 1, "移除后断点数为 1")
+    ok(!mgr.remove(999), "remove 不存在的 id 返回 false")
+
+    mgr.clearAll()
+    ok(mgr.list().size == 0, "clearAll 后断点数为 0")
+    ok(mgr.add("a.aura", 1) == 1, "clearAll 重置 id 计数器")
+}
+
+// ── 2. 单步执行 ──
+
+fun testStepping(): Unit {
+    println("[2] 单步执行")
+    val vm = DebugVm()
+    vm.loadBytecode(bcSource(), constPool(), funcTable())
+    vm.startExecution()
+
+    ok(vm.ip == 0, "初始 ip = 0")
+    ok(vm.isRunning(), "初始处于运行态")
+    ok(vm.bytecodeLineCount() == 8, "字节码行数 = 8")
+
+    // step_in：执行一条指令后暂停
+    vm.stepMode = "in"
+    val r1 = vm.step()
+    ok(r1 == "step", "单步返回 'step'")
+    ok(vm.getInstructionCount() == 1, "指令计数 = 1")
+    ok(vm.ip == 1, "单步后 ip = 1")
+
+    // 继续单步直到 RETURN
+    var r: String = ""
+    var guard: Int = 0
+    while (guard < 32 && r != "completion") {
+        vm.stepMode = "in"
+        r = vm.step()
+        guard = guard + 1
+    }
+    ok(r == "completion", "连续单步可到 RETURN（completion）")
+    ok(!vm.isRunning(), "RETURN 后停止运行")
+    ok(vm.getReturnValue() == "5", "返回值为 ADD 的结果 5")
+    ok(vm.getError() == "", "无执行错误")
+}
+
+// ── 3. 寄存器读取（操作数栈 / 局部槽 / 全局） ──
+
+fun testRegisters(): Unit {
+    println("[3] 寄存器读取")
+    val vm = DebugVm()
+    vm.loadBytecode(bcSource(), constPool(), funcTable())
+    vm.startExecution()
+
+    ok(vm.getStackDepth() == 0, "初始操作数栈为空")
+    ok(vm.getLocals() != null, "局部槽表可读")
+    ok(vm.getGlobals() != null, "全局表可读")
+
+    // 执行 CONST_INT 0 -> 栈顶 = 0
+    vm.stepMode = "in"
+    vm.step()
+    ok(vm.getStackDepth() == 1, "push 后栈深度 = 1")
+    ok(vm.peek() == "0", "栈顶 = 0")
+
+    // STORE_LOCAL 0：弹出栈顶并写入槽 0
+    vm.stepMode = "in"
+    vm.step()
+    ok(vm.getStackDepth() == 0, "STORE_LOCAL 消费栈顶")
+    ok(vm.getLocal(0) == "0", "局部槽 0 = 0")
+
+    // CONST_INT 1 -> 常量池[1] = "5"
+    vm.stepMode = "in"
+    vm.step()
+    // STORE_LOCAL 1
+    vm.stepMode = "in"
+    vm.step()
+    ok(vm.getLocal(1) == "5", "局部槽 1 = 5")
+
+    // LOAD_LOCAL 0 -> 压入 0
+    vm.stepMode = "in"
+    vm.step()
+    ok(vm.getStackDepth() == 1, "LOAD_LOCAL 0 后栈深度 = 1")
+    // LOAD_LOCAL 1 -> 压入 5
+    vm.stepMode = "in"
+    vm.step()
+    ok(vm.getStackDepth() == 2, "两次 LOAD_LOCAL 后栈深度 = 2")
+    ok(vm.peek() == "5", "栈顶 = 5")
+
+    // 写回局部槽与全局表
+    vm.setLocal(0, "42")
+    ok(vm.getLocal(0) == "42", "setLocal/getLocal 往返")
+    vm.setGlobal("counter", "7")
+    ok(vm.getGlobal("counter") == "7", "setGlobal/getGlobal 往返")
+    ok(vm.getLocal(99) == "0", "未初始化的槽返回 \"0\"")
+    ok(vm.getGlobal("missing") == "", "未初始化的全局返回空串")
+}
+
+// ── 4. 栈回溯 ──
+
+fun testBacktrace(): Unit {
+    println("[4] 栈回溯")
+    val vm = DebugVm()
+    vm.loadBytecode(bcSource(), constPool(), funcTable())
+    vm.startExecution()
+
+    ok(vm.getCurrentFunc() == "main", "当前函数 = main")
+    ok(vm.getCurrentIp() == 0, "当前 ip = 0")
+    ok(vm.getCallStack() != null, "调用栈可读")
+    ok(vm.getCallDepth() == 0, "main 层调用深度 = 0")
+    ok(vm.getCurrentLine() == "CONST_INT 0", "当前字节码行可读")
+
+    // 手工压栈 / 出栈
+    vm.push("callee")
+    ok(vm.getStackDepth() == 1, "push 后栈深度 = 1")
+    ok(vm.getStack().size == 1, "getStack() 反映栈深度")
+    val top = vm.pop()
+    ok(top == "callee", "pop 返回压入值")
+
+    // 越界 pop 报错并停机
+    vm.pop()
+    ok(vm.getError() == "Stack underflow", "栈下溢置位错误")
+    ok(!vm.isRunning(), "错误后停止运行")
+
+    // CALL 压入调用帧：调用未知函数应报错
+    val vm2 = DebugVm()
+    vm2.loadBytecode(bcSource(), constPool(), funcTable())
+    vm2.startExecution()
+    vm2.callOrBuiltin("no_such_fn", 0)
+    ok(vm2.getError() != "", "未知函数调用置位错误")
+    ok(!vm2.isRunning(), "未知函数调用后停机")
+
+    // CALL 已知函数压入调用栈
+    val vm3 = DebugVm()
+    vm3.loadBytecode(bcSource(), "1|null|null\n", "main|0|0\ncallee|2|1\n")
+    vm3.startExecution()
+    vm3.callOrBuiltin("callee", 1)
+    ok(vm3.getCallDepth() == 1, "CALL 后调用深度 = 1")
+    ok(vm3.getCurrentFunc() == "callee", "进入 callee")
+    ok(vm3.getCurrentIp() == 2, "跳转到 callee 偏移 2")
+    ok(vm3.getCallStack().size == 1, "调用栈含 1 帧")
+
+    vm3.returnFromFunc()
+    ok(vm3.getCallDepth() == 0, "RETURN 后调用深度 = 0")
+    ok(vm3.getCurrentFunc() == "callee", "RETURN 后 currentFunc 名保持不变（回调方 ip 恢复）")
+    ok(vm3.getReturnValue() != "", "RETURN 记录返回值")
+}
+
+// ── 5. SourceMap（行号 ↔ 函数偏移） ──
+
+fun testSourceMap(): Unit {
+    println("[5] SourceMap")
+    val sm = SourceMap()
+    ok(sm != null, "SourceMap 可构造")
+
+    val off = SourceMapUtils.findFuncOffset("main", funcTable())
+    ok(off == 0, "main 的偏移 = 0")
+    val missing = SourceMapUtils.findFuncOffset("nope", funcTable())
+    ok(missing == -1, "未知函数返回 -1")
+
+    ok(sm.funcNames.size == 0, "未 build 时函数表为空")
+    ok(sm.resolveBreakpoint(1) == -1, "未 build 时 resolveBreakpoint 返回 -1")
+    ok(sm.funcNameAtLine(1) == "", "未 build 时 funcNameAtLine 返回空串")
+    ok(sm.listFunctions() == "(no functions found)", "未 build 时 listFunctions 提示无函数")
+
+    // 工具函数
+    val lines = SourceMapUtils.splitLines("a|1\nb|2\n")
+    ok(lines.size == 2, "splitLines 得到 2 行")
+    ok(lines[0] == "a|1", "首行内容正确")
+    val fields = SourceMapUtils.splitPipe("a|1|2")
+    ok(fields.size == 3, "splitPipe 得到 3 段")
+    ok(SourceMapUtils.vrToInt("-37") == -37, "vrToInt 解析负数")
+    ok(SourceMapUtils.vrToInt("") == -1, "vrToInt 空串返回 -1")
+    ok(SourceMapUtils.safeSubstring("hello", 1, 3) == "el", "safeSubstring 越界安全")
+    ok(SourceMapUtils.safeSubstring("hi", 5, 9) == "", "safeSubstring 起止越界返回空串")
+    // `fieldAt(text, rowIdx, rowSep, colSep, colIdx)` 先按 rowSep 取行、再按 colSep 取列。
+    // 单行文本用 "\n" 作 rowSep 才是"取第 0 行第 colIdx 列"。
+    ok(SourceMapUtils.fieldAt("a|b|c", 0, "\n", "|", 2) == "c", "fieldAt 取第 0 行第 2 列")
+    ok(SourceMapUtils.fieldAt("a|b|c\nd|e|f", 1, "\n", "|", 1) == "e", "fieldAt 取第 1 行第 1 列")
+}
+
+fun main() {
+    println("=== P3.5 调试器验收 ===")
+    testBreakpoints()
+    testStepping()
+    testRegisters()
+    testBacktrace()
+    testSourceMap()
+    println("------------------------------")
+    println("通过 " + toStr(PASSED) + " / 失败 " + toStr(FAILED))
+    if (FAILED > 0) {
+        println("=== P3.5 FAILED ===")
+    } else {
+        println("=== P3.5 PASSED ===")
+    }
+}

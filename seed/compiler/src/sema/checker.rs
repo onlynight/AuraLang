@@ -14,46 +14,9 @@ use crate::sema::symbol::{ParamSym, Symbol, SymbolKind, SymbolTable, ast_type_to
 use crate::sema::ty::Ty;
 use std::collections::{HashMap, HashSet};
 
-/// 已知的 std 类名清单（用于 `import aura.lang.std.*` 通配时注册别名）
-const KNOWN_STD_CLASSES: &[&str] = &[
-    "Ascii",
-    "Assert",
-    "Builtin",
-    "Collections",
-    "Console",
-    "Encoding",
-    "Env",
-    "File",
-    "FileSystem",
-    "IO",
-    "Iter",
-    "Json",
-    "Math",
-    "Network",
-    "Path",
-    "Process",
-    "ProcessHandle",
-    "Random",
-    "String",
-    "StringBuilder",
-    "Test",
-    "Time",
-];
-
-/// 已知的并发包类名清单（用于 `import aura.lang.concurrent.*` 通配时注册别名）
-const KNOWN_CONCURRENT_CLASSES: &[&str] = &[
-    "Coroutine",
-    "Actor",
-    "Channel",
-    "Thread",
-    "Atomic",
-    "Mutex",
-    "RwLock",
-    "Condvar",
-    "Barrier",
-    "Future",
-    "Semaphore",
-];
+// 已知的 std / concurrent 包「类」名清单统一由 `std::decl` 提供（单一来源）：
+// sema 与 codegen 两侧都依赖它展开包级通配符导入，此前两份拷贝容易漂移。
+use crate::std::decl::{KNOWN_CONCURRENT_CLASSES, KNOWN_STD_CLASSES};
 
 /// 语义分析结果
 pub struct SemanticResult {
@@ -111,6 +74,12 @@ pub struct Checker {
     /// 类型所属包：类型名 -> 包名
     type_package: HashMap<String, String>,
 
+    /// 已导入的模块路径集合（`import aura.string.*` / `import aura.lang.std.Math` 等）。
+    ///
+    /// 供 `check_ident` 判定某个标识符是否是**模块命名空间**（而非变量/类型/函数）：
+    /// `aura.string.length(x)` 的最内层 `aura`、`Math.sin(x)` 的 `Math` 都在此列。
+    imported_modules: HashSet<String>,
+
     // ── P3.10 增强：suspend 函数追踪（Phase 1 await 语义修正） ──
     /// 当前是否处于 suspend/async 函数体内
     is_in_suspend_fn: bool,
@@ -164,6 +133,26 @@ impl Checker {
                 t,
                 Ty::from_ast(&Type::Named {
                     name: t.to_string(),
+                    span: Span::single(0, 1, 1),
+                }),
+            );
+        }
+
+        // 预置 std 模块「类」为类型（`Atomic` / `Mutex` / `Math` / `String` ...）
+        //
+        // `Atomic.new(...)` 这类 std 模块方法调用在 `check_call` 里按
+        // `Type.name` 解析（`Atomic` + `new` → `Atomic.new`）。若 `Atomic` 不在
+        // 类型表里，`check_member` 判定其不是已知类型，直接报
+        // `unresolved member 'new' on type 'Atomic'`，callee 退化成裸名 `new` →
+        // `[bytecode] error: 未解析的函数调用 'new'` + 运行期 `#65535`。
+        // 显式导入能工作是因为导入路径顺带登记了类型；通配符导入
+        // （`import aura.lang.concurrent.*`）不走那条路径，故在此**无条件预置**
+        // 全部 std 模块名为类型，让成员调用解析不依赖导入形态。
+        for class in KNOWN_CONCURRENT_CLASSES.iter().chain(KNOWN_STD_CLASSES.iter()) {
+            symbols.register_type(
+                *class,
+                Ty::from_ast(&Type::Named {
+                    name: (*class).to_string(),
                     span: Span::single(0, 1, 1),
                 }),
             );
@@ -1098,6 +1087,7 @@ impl Checker {
             current_package: None,
             type_visibility: HashMap::new(),
             type_package: HashMap::new(),
+            imported_modules: HashSet::new(),
             is_in_suspend_fn: false,
             suspend_functions: HashSet::new(),
             info: SemaInfo::default(),
@@ -2119,6 +2109,31 @@ impl Checker {
     fn expand_import(&mut self, imp: &ImportDecl) {
         let module_path = imp.path.clone();
 
+        // 记录已导入的模块路径（供 `check_ident` 识别模块命名空间标识符）。
+        // `aura.string.*` → 记 `aura.string`，同时记首段 `aura`；
+        // `aura.lang.std.Math.*` → 记全路径与 `Math`。
+        if module_path.starts_with("aura.") {
+            let mut parts: Vec<&str> = module_path.split('.').collect();
+            if parts.last() == Some(&"*") || parts.last() == Some(&"*") {
+                parts.pop();
+            }
+            let joined = parts.join(".");
+            if !joined.is_empty() {
+                self.imported_modules.insert(joined.clone());
+            }
+            // 首段（`aura`）与第 3 段类名（`Math` / `String`）也作为可识别的模块名
+            if let Some(root) = parts.first() {
+                self.imported_modules.insert((*root).to_string());
+            }
+            // 旧命名：`aura.string` → 末段 `string` 亦作为别名（与 expand_import 一致）
+            if !module_path.starts_with("aura.lang.") && parts.len() == 2 {
+                self.imported_modules.insert(parts[1].to_string());
+            }
+            if module_path.starts_with("aura.lang.") && parts.len() >= 3 {
+                self.imported_modules.insert(parts[2].to_string());
+            }
+        }
+
         // ── 安全加固：禁止用户 import aura.lang.native ──
         if module_path.starts_with("aura.lang.native") {
             self.report(
@@ -2193,17 +2208,48 @@ impl Checker {
                 if imp.wildcard {
                     if is_new_scheme && class_name.is_none() {
                         // import aura.lang.std.* / aura.lang.concurrent.*
-                        // → 只引入类名作模块别名（不做短名导入）
+                        // → 引入类名作模块别名 + **每个类的成员函数**（不做短名导入）
+                        //
+                        // ⚠ 只插模块别名不够（2026-10-01 修复）：`Atomic.new(...)` 在
+                        // `check_call` 里按 `Type.name` 查 `symbols.lookup_function`，
+                        // 而通配符分支此前只调 `insert_module_alias`（写作用域符号表），
+                        // 从不登记 `Atomic.new` 这类成员函数 ⇒ 查询落空 ⇒ callee 退化
+                        // 成裸名 `new` ⇒ `[bytecode] error: 未解析的函数调用 'new'` +
+                        // 运行期 `call to undefined function #65535`。这是全部 8 个
+                        // `import aura.lang.concurrent.*` 并发用例的根因。
+                        // 显式导入 `import aura.lang.concurrent.Atomic` 能工作，因为它走
+                        // 精确别名路径（插全名 + 模块别名），故此处对齐其登记口径。
                         let classes: &[&str] = if pkg_prefix == "aura.lang.concurrent" {
                             KNOWN_CONCURRENT_CLASSES
                         } else {
                             KNOWN_STD_CLASSES
                         };
                         for class in classes {
+                            let class_path = format!("{}.{}", pkg_prefix, class);
                             let _ = self.symbols.insert_module_alias(
                                 class.to_string(),
-                                format!("{}.{}", pkg_prefix, class),
+                                class_path.clone(),
                             );
+                            // 登记该类的成员函数（全名 + 类点分名），供 `check_call`
+                            // 按 `Atomic.new` 解析；已有同名函数时不覆盖，避免二义性。
+                            for short_name in crate::std::decl::module_functions(&class_path) {
+                                if self.symbols.lookup_function(&short_name).is_some() {
+                                    continue;
+                                }
+                                for fname in [
+                                    short_name.clone(),
+                                    format!("{}.{}", class, short_name),
+                                    format!("{}.{}", class_path, short_name),
+                                ] {
+                                    let _ = self.symbols.insert_function(
+                                        fname,
+                                        any_params(),
+                                        Ty::Any,
+                                        Visibility::Public,
+                                        imp.span,
+                                    );
+                                }
+                            }
                         }
                     } else {
                         // import aura.lang.std.Math.* 或 import aura.math.*
@@ -2324,6 +2370,32 @@ impl Checker {
                         );
                     }
                     self.symbols.insert_module(module_path.clone());
+
+                    // ── 旧命名通配：`import aura.string.*` 后 `aura.string.length(s)` ──
+                    //
+                    // `aura.string.length(name)` 在**同一成员访问链**里出现两个点，
+                    // sema 会把最外层 `aura` 当标识符查符号表；未登记 `aura` 模块时
+                    // `check_ident("aura")` 报 `unresolved reference 'aura'` →
+                    // 整条链退化为 `Ty::Error` / `Ty::Any`。
+                    //
+                    // 后果不只是警告：`tests/language-test/14-string-interp.aura` §14.2
+                    // 的 `${aura.string.length(name)}` 因类型退化为 `Any` 而被 HIR
+                    // 包上 `Any.toString`，在旧编译器里表现为运行期
+                    // `method call on non-object value`。
+                    //
+                    // 这里对齐新命名空间的做法（`insert_module_alias("Math", path)`），
+                    // 把包的**根标识符**与**末段别名**都登记成 Module 符号，使
+                    // `aura.string.<fn>` / `string.<fn>` 两种写法都能解析。
+                    if imp.wildcard || module_path.split('.').count() == 2 {
+                        let parts: Vec<&str> = module_path.split('.').collect();
+                        let root = parts[0].to_string();
+                        let leaf = parts[1].to_string();
+                        for alias in [root, leaf] {
+                            if !alias.is_empty() {
+                                self.symbols.insert_module_alias(alias, module_path.clone());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3145,8 +3217,40 @@ impl Checker {
             }
             return Ty::Named(name.to_string());
         }
+        // 模块命名空间标识符（`aura.string.length(x)` 里的 `aura`；`Math.sin(x)` 里的 `Math`）
+        //
+        // `import aura.string.*` 只把 `aura.string.<fn>` 全名登记进符号表，
+        // 但源码里的成员访问链是 `((aura).string).length`：最内层 `check_ident("aura")`
+        // 查不到 => 报 `unresolved reference 'aura'` => 整条链退化成 `Ty::Error`。
+        //
+        // 这里按「已登记的模块别名 / 模块路径前缀」兜底，返回 `Ty::Module`，
+        // 使 `check_member` 能继续沿链解析并给出正确的返回类型。
+        if let Some(rest) = self.lookup_module_path(name) {
+            return Ty::Module(rest);
+        }
         self.report(span, format!("unresolved reference '{}'", name));
         Ty::Error
+    }
+
+    /// 查询 `name` 是否是**已导入的模块命名空间**，返回其规范化路径。
+    ///
+    /// - 模块别名（`Math` / `string` / `cc`）→ 原名或 `<alias>.<name>` 形态
+    /// - 模块路径首段（`aura`）→ 返回 `aura`（调用方拼后续段）
+    fn lookup_module_path(&self, name: &str) -> Option<String> {
+        // 1) 直接是模块符号（`insert_module` / `insert_module_alias` 登记的名字）
+        if let Some(sym) = self.symbols.lookup(name) {
+            if matches!(sym.kind, SymbolKind::Module) {
+                return Some(name.to_string());
+            }
+        }
+        // 2) 模块路径首段：`imported_modules` 里有 `aura` / `aura.string` 等
+        let prefix = format!("{}.", name);
+        for m in self.imported_modules.iter() {
+            if m == name || m.starts_with(&prefix) {
+                return Some(name.to_string());
+            }
+        }
+        None
     }
 
     /// 运算符重载解析：操作数类（含继承链）声明了对应 operator fun → 返回其返回类型
@@ -3600,19 +3704,23 @@ impl Checker {
             if let Some(sig) =
                 crate::sema::std_sigs::std_signature_table().get(&(type_name, name.clone()))
             {
-                // 检查实参数量
-                if args.len() > sig.params.len() && sig.params.len() > 0 {
-                    // 允许可变参数（如 listOf 接受任意多个参数）
-                    if args.len() < sig.params.len() {
-                        self.report(
-                            span,
-                            format!(
-                                "expected {} arguments, got {}",
-                                sig.params.len(),
-                                args.len()
-                            ),
-                        );
-                    }
+                // 检查实参数量（签名表是手写的 LLVM 级签名，可靠；实参不足必须报）。
+                // 旧实现的条件 `args.len() > params.len() && params.len() > 0` 内层
+                // 又要求 `args.len() < params.len()` —— 两者互斥，检查恒不触发。
+                //
+                // ⚠️ 签名表条目**含接收者**（`String.charCodeAt → [text, index]`），
+                // 调用点实参不含接收者 ⇒ 比较时给实参 +1。
+                // 实参**超出**不报：部分内建按可变实参约定分发（listOf 等）。
+                if args.len() + 1 < sig.params.len() {
+                    self.report(
+                        span,
+                        format!(
+                            "no overload of '{}' accepts {} argument(s) (signature: {} params)",
+                            name,
+                            args.len(),
+                            sig.params.len() - 1
+                        ),
+                    );
                 }
                 // 检查实参类型
                 for a in args {
@@ -3671,6 +3779,27 @@ impl Checker {
             // **返回类型**补上，两侧即可对齐。
             if let Some(t) = self.infer_bare_method_return(name, args) {
                 return t;
+            }
+            // 裸名调用**同包兄弟模块**的顶层函数（P3.5 调试器用例）。
+            //
+            // `import` 内联把多个模块拼成**一个** `Program`，而语义阶段的符号表
+            // 并不按 `package` 分子表；Aura 也没有 `pkg.fn()` 这种限定名。
+            // 因此「先出现」的模块里对「后出现」模块顶层函数的**裸引用**查不到符号，
+            // 旧实现会报 `unresolved reference` → `Ty::Error`。
+            //
+            // 但 HIR 侧本就有「按名唯一定位函数」的兜底（`未解析的函数调用` 是
+            // HIR 的最后一道防线），AOT/字节码都能把裸名解析到唯一符号。
+            // 这与上面 `infer_bare_method_return` 的注释所述问题**同源**：
+            // 语义阶段只需把类型补成 `Any` 让调用点保持动态派发，
+            // HIR 侧即可对齐；否则返回值退化为 `Ty::Error` 会污染整条链。
+            //
+            // 仅在名字确实未定义时兜底（已被前面 `lookup_function` / 类型 /
+            // prelude / collection 工厂 / object 方法覆盖的分支不会走到这里）。
+            if !name.is_empty() && name.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_') {
+                for a in args {
+                    self.check_expr(a);
+                }
+                return Ty::Any;
             }
         }
         // 否则作为表达式检查（可能是 lambda 调用等）
@@ -3825,14 +3954,27 @@ impl Checker {
             .collect();
 
         if viable.is_empty() {
-            self.report(
-                span,
-                format!(
-                    "no overload of '{}' accepts {} argument(s)",
-                    name,
-                    args.len()
-                ),
-            );
+            // 只对**用户定义**的候选硬报实参数违规。
+            //
+            // std/内建符号的符号表参数不含调用约定里的隐式项（部分内建的 mem 尾参、
+            // 接收者重排），checker 的实参数与它们的真实形参表天然对不齐，报出来
+            // 全是误报（实测驱动构建 694 条里 `charCodeAt`/`add` 占绝大多数）。
+            // 用户自由函数无隐式约定，实参数 1:1 对应形参——这类违规是可靠的
+            // （实测 `joinTwo("X")` 漏传参在生成物里落成未初始化内存）。
+            let has_user_def = overloads.iter().any(|s| {
+                !s.is_builtin && matches!(s.kind, SymbolKind::Function { .. })
+            });
+            if has_user_def {
+                self.report(
+                    span,
+                    format!(
+                        "no overload of '{}' accepts {} argument(s)",
+                        name,
+                        args.len()
+                    ),
+                );
+                return Ty::Error;
+            }
             return Ty::Error;
         }
 
@@ -4220,6 +4362,17 @@ impl Checker {
                 );
                 Ty::Error
             }
+            // 模块命名空间上的函数调用：`aura.string.length(s)` / `Math.sin(x)`。
+            //
+            // 与 `check_member` 走同一解析器，保证「成员访问」与「方法调用」两条
+            // 路径给出相同的类型，避免 `${aura.string.length(name)}` 在插值里被判成
+            // 非字符串而包上 `Any.toString`。
+            (Ty::Module(module), m) => {
+                for a in args {
+                    self.check_expr(a);
+                }
+                self.resolve_module_member(module, m).unwrap_or(Ty::Any)
+            }
             _ => {
                 self.report(
                     span,
@@ -4293,6 +4446,66 @@ impl Checker {
         }
     }
 
+    /// 解析 `module.member` 的类型（成员访问链上的模块段）。
+    ///
+    /// 覆盖三种调用写法：
+    /// - 旧命名：`aura.string.length(s)` → `aura.lang.std.String.length` → `String.length`
+    /// - 新命名：`aura.lang.std.String.length(s)` → 直接查全名
+    /// - 类别名：`Math.sin(x)` / `String.length(s)` → 补类前缀后查
+    ///
+    /// 返回 `None` 表示该 member 不是已知函数（调用方继续按子模块处理）。
+    fn resolve_module_member(&mut self, module: &str, name: &str) -> Option<Ty> {
+        // ── 1) 组装候选全名 ──
+        let mut candidates: Vec<String> = Vec::new();
+        // 直接拼接（`aura.lang.std.String` + `length`）
+        candidates.push(format!("{}.{}", module, name));
+        // 旧命名 → 新命名（`aura.string` → `aura.lang.std.String`）
+        if let Some(class) = crate::codegen::hir::std_module_to_class_name_pub(module) {
+            candidates.push(format!("{}.{}", class, name));
+        }
+        // 类别名：`Math` → `aura.lang.std.Math`
+        candidates.push(format!("aura.lang.std.{}.{}", module, name));
+        candidates.push(format!("aura.lang.concurrent.{}.{}", module, name));
+
+        // ── 2) 先查符号表 ──
+        for cand in &candidates {
+            if let Some(fns) = self.symbols.lookup_function(cand) {
+                if let Some(sym) = fns.first() {
+                    if let SymbolKind::Function {
+                        return_type,
+                        ..
+                    } = &sym.kind
+                    {
+                        return Some(return_type.clone());
+                    }
+                }
+            }
+        }
+
+        // ── 3) 查 std_sigs 签名表（LLVM 级精确返回类型）──
+        // 表键是 `(类短名, 方法名)`：`String.length` / `Math.sin`。
+        let sig_table = crate::sema::std_sigs::std_signature_table();
+        for class_suffix in [
+            std_class_suffix(module),
+            module.to_string(),
+        ]
+        .iter()
+        {
+            if let Some(sig) = sig_table.get(&(class_suffix.clone(), name.to_string())) {
+                if let Some(ty) = crate::sema::std_sigs::llvm_type_to_ty(sig.ret) {
+                    return Some(ty);
+                }
+            }
+        }
+
+        // ── 4) 内建模块函数返回类型（短名表）──
+        if let Some(ty) = builtin_module_fn_ty(module, name) {
+            return Some(ty);
+        }
+
+        None
+    }
+
     fn check_member(&mut self, object: &Expr, name: &str, span: Span) -> Ty {
         let obj_ty = self.check_expr(object);
         if obj_ty.is_nullable() {
@@ -4311,6 +4524,33 @@ impl Checker {
         }
         let base = obj_ty.non_null();
         let type_name = base.name().to_string();
+        // 模块命名空间成员：`aura.string.length(x)` / `Math.sin(x)`。
+        //
+        // 把「模块路径 + 成员名」拼成完整函数名（含旧命名 → 新命名映射，
+        // 与 HIR 的 `resolve_function_path` / `std_module_to_class_name` 口径一致），
+        // 再按登记的函数返回类型求解。
+        if let Ty::Module(module) = base {
+            let module = module.clone();
+            if let Some(ty) = self.resolve_module_member(&module, name) {
+                return ty;
+            }
+            // 模块下的子模块（`aura.lang` / `aura.string`）继续作为模块向下传
+            let child = format!("{}.{}", module, name);
+            if self.imported_modules.iter().any(|m| m == &child || m.starts_with(&format!("{}.", child)))
+            {
+                return Ty::Module(child);
+            }
+            // 两段式模块名（`aura.string` 是根 `aura` 的子模块）
+            if module == "aura" {
+                let child = format!("aura.{}", name);
+                if self.imported_modules.iter().any(|m| m == &child || m.starts_with(&format!("{}.", child)))
+                {
+                    return Ty::Module(child);
+                }
+            }
+            // 模块成员类型未知：返回 Any（不报错，避免误伤未知 std 函数）
+            return Ty::Any;
+        }
         // 访问控制检查：private/protected/internal 成员不可在定义类型/包之外被访问
         if let Some(vis) = self.member_visibility.get(&format!("{}.{}", type_name, name)) {
             self.check_access(*vis, &type_name, name, span);
@@ -5068,6 +5308,42 @@ pub fn analyze_source(source: &str) -> (Program, SemanticResult) {
     (program, result2)
 }
 
+/// 重载/实参数违规诊断的**可靠**消息前缀。
+///
+/// 「no overload of 'f' accepts N argument(s)」只在符号表里存在 `f` 的真实
+/// 签名、且所有候选的实参数区间都不容纳当前调用时产生——没有误报路径。
+/// 编译管线（VM 字节码与 AOT）对这类诊断**硬失败**：否则缺失的实参在
+/// 生成物里落成未初始化内存（实测 `joinPieces(parts)` 漏传 `sep` ⇒
+/// `freeFuncs` 整串损坏 ⇒ 用户自由函数 `add(3,4)` 被改写成 `ArrayList_add`）。
+/// 其余语义诊断（类型失配、未解析引用等）因 P3 的已知误报（泛型实例化等）
+/// 保持警告不阻断——见 `codegen::compile_source` 的历史注记。
+pub const OVERLOAD_VIOLATION_PREFIX: &str = "no overload of";
+
+/// 诊断列表中是否存在可靠的实参数/重载违规。
+pub fn has_overload_violation(errors: &[crate::errors::CompileError]) -> bool {
+    errors.iter().any(|e| {
+        e.severity == crate::errors::ErrorSeverity::Error
+            && e.message.starts_with(OVERLOAD_VIOLATION_PREFIX)
+    })
+}
+
+/// 汇总全部实参数/重载违规消息（供管线拼装报错文本）。
+pub fn overload_violation_messages(errors: &[crate::errors::CompileError]) -> Vec<String> {
+    errors
+        .iter()
+        .filter(|e| {
+            e.severity == crate::errors::ErrorSeverity::Error
+                && e.message.starts_with(OVERLOAD_VIOLATION_PREFIX)
+        })
+        .map(|e| {
+            format!(
+                "{} (line {}, col {})",
+                e.message, e.span.start_line, e.span.start_col
+            )
+        })
+        .collect()
+}
+
 /// 集合工厂函数的返回类型（`arrayListOf<Int>()` → `List<Any>`）。
 ///
 /// 这些工厂几乎都是原生函数，符号表里没有可推断的返回类型，此前一律退化为
@@ -5082,6 +5358,86 @@ fn collection_factory_ty(name: &str) -> Option<Ty> {
         | "linkedSetOf" => Some(Ty::List(Box::new(Ty::Any))),
         "mapOf" | "mutableMapOf" | "hashMapOf" | "emptyMap" | "linkedHashMapOf" => {
             Some(Ty::Map(Box::new(Ty::Any), Box::new(Ty::Any)))
+        }
+        _ => None,
+    }
+}
+
+/// 从模块路径提取 `std_sigs` 表使用的**类短名**。
+///
+/// `std_sigs::std_signature_table()` 的键是 `(类短名, 方法名)`：
+/// `("String", "length")` / `("Math", "sin")` / `("IO", "println")`。
+/// 本函数把任意写法归一到那个短名：
+/// - `aura.lang.std.String` → `String`
+/// - `aura.string`          → `String`（经 `std_module_to_class_name` 映射）
+/// - `Math`                 → `Math`
+fn std_class_suffix(module: &str) -> String {
+    if let Some(class) = crate::codegen::hir::std_module_to_class_name_pub(module) {
+        if let Some(last) = class.rsplit('.').next() {
+            return last.to_string();
+        }
+    }
+    // 新命名：直接取 `aura.lang.<pkg>.<Class>` 的末段
+    if let Some(rest) = module.strip_prefix("aura.lang.std.") {
+        return rest.split('.').next().unwrap_or(rest).to_string();
+    }
+    if let Some(rest) = module.strip_prefix("aura.lang.concurrent.") {
+        return rest.split('.').next().unwrap_or(rest).to_string();
+    }
+    // 旧命名 2 段（`aura.string`）已由上面的映射覆盖；其余取末段
+    module.rsplit('.').next().unwrap_or(module).to_string()
+}
+
+/// 内置模块函数的返回类型（`std_sigs` 覆盖不到时的补充表）。
+///
+/// 只登记**类型明确**的常用函数；未登记一律返回 `None`（调用方回退 `Ty::Any`），
+/// 以免用错误的类型污染推断。
+fn builtin_module_fn_ty(module: &str, name: &str) -> Option<Ty> {
+    // 字符串族：`length` / `indexOf` / `countChar` … 一律 `Int`；
+    // 其余（substring / trim / replace …）返回 `String`。
+    let is_string_mod = matches!(
+        std_class_suffix(module).as_str(),
+        "String" | "StringBuilder"
+    );
+    if is_string_mod {
+        return match name {
+            "length" | "indexOf" | "lastIndexOf" | "countChar" | "charCodeAt" | "hashCode" => {
+                Some(Ty::Int)
+            }
+            "isEmpty" | "isBlank" | "startsWith" | "endsWith" | "contains" | "containsAny"
+            | "containsAll" | "matches" => Some(Ty::Boolean),
+            "charAt" | "substring" | "substringBefore" | "substringAfter" | "substringFrom"
+            | "substringAt" | "trim" | "trimStart" | "trimEnd" | "toLowerCase"
+            | "toUpperCase" | "replace" | "replaceAll" | "repeat" | "padStart" | "padEnd"
+            | "join" | "joinLines" | "format" | "escape" | "unescape" | "first" | "last"
+            | "fromCharCode" | "finish" => Some(Ty::String),
+            "split" | "splitLines" => Some(Ty::List(Box::new(Ty::String))),
+            _ => None,
+        };
+    }
+    // 数学族：绝大多数返回 `Float`（`abs` 同时有 Int 重载，这里取 `Float`）
+    if std_class_suffix(module) == "Math" {
+        return match name {
+            "abs" | "min" | "max" | "sign" | "clamp" => None, // 依赖实参类型，交给 std_sigs
+            "PI" | "E" => Some(Ty::Float),
+            "INT_MAX" | "INT_MIN" => Some(Ty::Int),
+            _ => Some(Ty::Float),
+        };
+    }
+    // Collections / Iter：集合工厂与变换
+    match (std_class_suffix(module).as_str(), name) {
+        ("Collections", "listOf" | "mutableListOf" | "arrayListOf" | "emptyList") => {
+            Some(Ty::List(Box::new(Ty::Any)))
+        }
+        ("Collections", "listSize") => Some(Ty::Int),
+        ("Iter", "sum" | "count" | "min" | "max" | "product") => Some(Ty::Any),
+        ("Iter", "toList" | "distinct" | "range" | "rangeTo" | "rangeUntil" | "repeatN") => {
+            Some(Ty::List(Box::new(Ty::Any)))
+        }
+        ("Test", "assertEq" | "assertTrue" | "assertFalse" | "assertNotNull" | "assertNull"
+        | "assertContains" | "assertNotContains" | "assertGt" | "assertGte" | "assertLt"
+        | "assertLte" | "assertApprox" | "assertArrayEq" | "assertMapEq" | "pass" | "fail") => {
+            Some(Ty::Unit)
         }
         _ => None,
     }

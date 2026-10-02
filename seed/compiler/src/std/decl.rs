@@ -237,6 +237,58 @@ pub fn module_functions(module_path: &str) -> Vec<String> {
         .collect()
 }
 
+/// `aura.lang.std` 包下已知的模块「类」名。
+///
+/// 供包级通配符导入（`import aura.lang.std.*`）展开：遍历本清单，把每个模块的
+/// `module_functions` 登记进符号表。清单与 `build_all_names` 里登记的
+/// `aura.lang.std.<Class>.*` 函数一一对应。
+pub const KNOWN_STD_CLASSES: &[&str] = &[
+    "Ascii",
+    "Assert",
+    "Builtin",
+    "Collections",
+    "Console",
+    "Encoding",
+    "Env",
+    "File",
+    "FileSystem",
+    "IO",
+    "Iter",
+    "Json",
+    "Math",
+    "Network",
+    "Path",
+    "Process",
+    "ProcessHandle",
+    "Random",
+    "String",
+    "StringBuilder",
+    "Test",
+    "Time",
+];
+
+/// `aura.lang.concurrent` 包下已知的模块「类」名（含 D5 已废弃的协程，
+/// 保留以便旧源码仍可解析）。
+pub const KNOWN_CONCURRENT_CLASSES: &[&str] = &[
+    "Coroutine",
+    "Actor",
+    "Channel",
+    "Thread",
+    "Atomic",
+    "Mutex",
+    "RwLock",
+    "Condvar",
+    "Barrier",
+    "Future",
+    "Semaphore",
+    // `Promise` 与 `Future` 共享内存布局，是 `aura/core/aura/lang/concurrent/Promise.aura`
+    // 中的纯 Aura object。漏登记它时，`import aura.lang.concurrent.*` 的展开
+    // 不会注册 `Promise.create/reject/isRejected/tryAwait` → 调用退化成裸名
+    // → `[bytecode] error: 未解析的函数调用 'create'` + 运行期 `#65535`
+    // （`tests/concurrent/promise_test.aura` 的根因）。
+    "Promise",
+];
+
 /// 获取指定模块的所有函数全名（含模块前缀）
 ///
 /// 例如：`module_functions_full("aura.lang.std.Math")` → `["aura.lang.std.Math.sin", "aura.lang.std.Math.cos", ...]`
@@ -339,6 +391,20 @@ fn build_all_names() -> HashSet<&'static str> {
         "aura.lang.std.aura_cast",
         "aura.lang.std.aura_cast_safety",
     ] {
+        s.insert(n);
+    }
+
+    // ── 类名前缀的 `Any` 核心虚方法（Layer 0，bootstrap/any_core.rs）──
+    //
+    // `Any.toString` / `Any.equals` / `Any.hashCode` 是「带类名前缀的基础协议」。
+    // 静态类型已知为 `Any` 时（如 `${aura.string.length(s)}` 的返回类型），
+    // `codegen::hir::wrap_tostring` 会**刻意**发出 `Any.toString(<expr>)`：
+    //   - 裸 `toString` 会被判成 `CallVirtual`，而 `Any` 不是对象 →
+    //     运行期 `method call on non-object value`；
+    //   - 类名前缀形态会走 `resolve_method_owner` 的静态派发路径，
+    //     落到 Rust native（VM）/ `aura_any_to_string`（AOT）上。
+    // 此处登记使 `is_builtin` 命中，避免被误判成用户函数或未解析符号。
+    for n in ["Any.toString", "Any.equals", "Any.hashCode"] {
         s.insert(n);
     }
 
@@ -479,6 +545,19 @@ fn build_all_names() -> HashSet<&'static str> {
         "aura.lang.concurrent.Semaphore.release",
         "aura.lang.concurrent.Semaphore.count",
         "aura.lang.concurrent.Semaphore.destroy",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.concurrent.Promise.* — 可外部写入的异步结果（纯 Aura）──
+    for n in [
+        "aura.lang.concurrent.Promise.create",
+        "aura.lang.concurrent.Promise.resolve",
+        "aura.lang.concurrent.Promise.reject",
+        "aura.lang.concurrent.Promise.await",
+        "aura.lang.concurrent.Promise.isDone",
+        "aura.lang.concurrent.Promise.isRejected",
+        "aura.lang.concurrent.Promise.tryAwait",
     ] {
         s.insert(n);
     }

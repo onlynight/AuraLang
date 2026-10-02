@@ -598,6 +598,19 @@ class SsaBuilder {
             }
         }
 
+        // 局部量类型兜底：声明标注在 HIR 层丢失（`Hir.aura` 把类型一律写空串）
+        // 且初始化**不是调用**（`var s3: String = s1 + " " + s2` 这类表达式形态，
+        // 上面的推断分支只认 HirCall）时，用 SSA 值的**实际类型**登记。
+        // 缺这一步：`s3.length()` 的接收者定型失败 → `length` 落到「唯一属主」
+        // `StringBuilder` → 把字符串指针当 StringBuilder 读字段 ⇒ 0xC0000005
+        //（实测 tests/photon/P2/04_string_ops.aura）。
+        if (this.localTypeOf(varName) == "" && initVal >= 0) {
+            val initTyName: String = this.types.typeNameOf(this.program.valueOf(initVal).type)
+            if (initTyName != "") {
+                this.localTypeAdd(varName, initTyName)
+            }
+        }
+
         // 存储到变量映射
         this.varMapAdd(varName, initVal)
     }
@@ -2586,20 +2599,49 @@ class SsaBuilder {
     /// 循环内多次调用 → O(n²)。修复：用 `lastIndexOf` 逆序查找目标行，
     /// 用 `substringAt` 提取类型名（O(1) 每次，无中间 List 分配）。
     private fun localTypeOf(name: String): String {
-        if (this.localTypes == "") {
+        if (this.localTypes == "" || name == "") {
             return ""
         }
-        // 逆序查找：最后一个匹配的行优先（后声明的局部变量覆盖先声明的）
+        // ⚠️ 手写逆序扫描，不用 `lastIndexOf` / 静态三参 `String.indexOf` /
+        // `substringAt`：三者经 AOT 编译后失效（实测 2026-10-02，AOT 驱动下
+        // 本函数恒返回 "" ⇒ 局部量定型全废 ⇒ `s3.length()` 落到
+        // `StringBuilder_length` 把字符串指针当对象读 ⇒ 0xC0000005；
+        // 种子 VM 下三者正常，故 VM 侧套件无症状）。只依赖
+        // `charCodeAt` / `substring` —— 与 `LirUtils.strToInt` 等手写原语同一动机。
+        // 逆序：后声明的局部变量覆盖先声明者。
         val needle: String = "\n" + name + "|"
-        val pos: Int = this.localTypes.lastIndexOf(needle)
-        if (pos < 0) {
-            return ""
+        val nl: Int = needle.length
+        val hayLen: Int = this.localTypes.length
+        var pos: Int = hayLen - nl
+        while (pos >= 0) {
+            var matched: Boolean = true
+            var ci: Int = 0
+            while (ci < nl) {
+                val hc: Int = this.localTypes.charCodeAt(pos + ci) as Int
+                val nc: Int = needle.charCodeAt(ci) as Int
+                if (hc != nc) {
+                    matched = false
+                }
+                ci = ci + 1
+            }
+            if (matched) {
+                val tyStart: Int = pos + nl
+                var tyEnd: Int = tyStart
+                // ⚠️ 不用 `tyEnd < hayLen && charCodeAt(..)` —— AOT 不保证 &&
+                // 短路（见 aot/Emit.aura 的 charCodeAt 陷阱），越界路径必须
+                // 结构上不可达：先判界，再入内读字符。
+                while (tyEnd < hayLen) {
+                    val ec: Int = this.localTypes.charCodeAt(tyEnd) as Int
+                    if (ec == 10) {
+                        break
+                    }
+                    tyEnd = tyEnd + 1
+                }
+                return this.localTypes.substring(tyStart, tyEnd)
+            }
+            pos = pos - 1
         }
-        // 从 pos + needle.length 到行尾是类型名
-        val tyStart: Int = pos + needle.length
-        val tyEnd: Int = String.indexOf(this.localTypes, "\n", tyStart)
-        val tyLen: Int = if (tyEnd < 0) this.localTypes.length - tyStart else tyEnd - tyStart
-        return this.localTypes.substringAt(tyStart, tyLen)
+        return ""
     }
 
     /// 接收者表达式的静态类名（不可判定返回 ""）。
@@ -2765,22 +2807,28 @@ class SsaBuilder {
         //
         // 旧实现逐条字符串拼接（O(n²)）：每次追加都拷贝整串。
         // 修复：先收进 List，循环后一次 join（沿用 joinChunks 范式）。
-        val freeFuncList: ArrayList<String> = arrayListOf<String>()
+        // ⚠️ 2026-10-02：**字符串直接累加**，不经 `List<String>` 中转。
+        // 实测（AOT 自举驱动、05_functions.aura）：owner 判定全部正确
+        // （add/multiply/main 的 owner 均为空、逐条打印可证），但
+        // `ArrayList<String>.add(fn)` 之后列表 size 仍为 0 —— AOT 运行时的
+        // 真实负载下它会**静默丢元素**（同 `scanInitArities` 注释记录的
+        // 「`ArrayList<Any>` 泛型装箱路径不可靠」，也同本日
+        // InstructionSelection 前驱表嵌套列表损坏）。此表一函数只建一次、
+        // 规模 ~千条 × ~20 字符，O(n²) 拼接总复制量 ~几十 MB，可接受。
+        // 格式：`\nfn1\nfn2\n`（首尾各一个 \n，便于 indexOf("\n" + name + "\n")）。
+        this.freeFuncs = "\n"
         i = 0
         while (i < n) {
             if (src.kindOf(i) == "HirFunction") {
                 if (this.ownerClassNameOf(i) == "") {
                     val fn: String = src.textOf(i)
                     if (fn != "") {
-                        freeFuncList.add(fn)
+                        this.freeFuncs = this.freeFuncs + fn + "\n"
                     }
                 }
             }
             i = i + 1
         }
-        // 格式：\nfn1\nfn2\n（首尾各一个 \n，便于 indexOf("\n" + name + "\n") 匹配）
-        // 用 StringBuilder 一次拼接，避免 O(n²)。
-        this.freeFuncs = joinFreeFuncs(freeFuncList)
 
         // 字段布局缓存：登记阶段到此结束，`classFields` 后续只读。
         // 必须放在**最后**（见 `buildFieldLayoutCache` 的注释）。
@@ -2811,7 +2859,12 @@ class SsaBuilder {
             parts.add("\n")
             i = i + 1
         }
-        return joinPieces(parts)
+        // ⚠️ 必须显式传 `sep=""`：joinPieces 的签名是 `(parts, sep)` 双参。
+        // 漏写实参时种子编译器**不报错**，缺失参数落成未初始化内存（垃圾字节）
+        // ⇒ freeFuncs 整串损坏 ⇒ isFreeFunc 永远 false ⇒ 用户自由函数
+        // `add(3,4)` 落进「唯一属主」回退被改写成 `ArrayList_add`
+        // （实测 tests/photon/P1/05_functions.aura 一进 main 即 0xC0000005）。
+        return joinPieces(parts, "")
     }
 
     /// 一次性构建**类字段布局缓存**（`buildClassIndex` 的收尾步骤）。

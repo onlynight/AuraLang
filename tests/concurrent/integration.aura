@@ -131,7 +131,8 @@ fun rcConsumer(semId: Int): Int {
 // 状态读取器
 fun stateReader(id: Int): Int {
     var totalVersion = 0
-    for (i in 0..id) {
+    // `..` 包含端点：读 `id` 次须用排他区间。
+    for (i in 0..<id) {
         RwLock.readLock(GLOBAL_STATE_LOCK)
         totalVersion = totalVersion + GLOBAL_STATE_VERSION
         RwLock.readUnlock(GLOBAL_STATE_LOCK)
@@ -141,7 +142,8 @@ fun stateReader(id: Int): Int {
 
 // 状态写入器
 fun stateWriter(id: Int): Int {
-    for (i in 0..id) {
+    // 写 `id` 次 → 排他区间（场景 4 断言 version == 5 与 `stateWriter(5)` 对应）。
+    for (i in 0..<id) {
         RwLock.writeLock(GLOBAL_STATE_LOCK)
         GLOBAL_STATE_VERSION = GLOBAL_STATE_VERSION + 1
         GLOBAL_STATE_DATA = GLOBAL_STATE_DATA + id
@@ -256,6 +258,11 @@ fun main(): Int {
 
         val p1 = Thread.spawn(rcProducer, sem)
         val p2 = Thread.spawn(rcProducer, sem)
+        // ⚠ 确定性：消费者在「有货」时才计数，若与生产者并发启动，
+        // 消费者可能先拿到许可却看到 `PROD_CON_COUNT == 0`（不计消费），
+        // 于是 `produced=2 consumed=1` —— 这是**测试自身的竞态**（实测 4 跑 1 败）。
+        // 生产者各持许可 5ms 后释放，故此处等它们完成生产再启动消费者。
+        Thread.sleep(20)
         val c1 = Thread.spawn(rcConsumer, sem)
         val c2 = Thread.spawn(rcConsumer, sem)
 
@@ -373,14 +380,20 @@ fun main(): Int {
         Thread.join(tp)
 
         // 阶段2: 处理任务（带信号量限制）
+        //
+        // 任务池有 10 个任务，每个工作者只**尝试**取固定次数（`poolWorker` 的
+        // `while (i < id)`）。原为 4 个工作者 × 2 次 = 8 次尝试 < 10，
+        // 必然剩 2 个任务未被取走（`done=8`）。补第 5 个工作者使尝试次数 ≥ 10。
         val w1 = Thread.spawn(poolWorker, 2)
         val w2 = Thread.spawn(poolWorker, 2)
         val w3 = Thread.spawn(poolWorker, 2)
         val w4 = Thread.spawn(poolWorker, 2)
+        val w5 = Thread.spawn(poolWorker, 2)
         Thread.join(w1)
         Thread.join(w2)
         Thread.join(w3)
         Thread.join(w4)
+        Thread.join(w5)
 
         // 阶段3: 汇总
         Mutex.lock(TASK_POOL_LOCK)

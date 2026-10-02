@@ -400,7 +400,7 @@ object AucLoaderUtils {
             startLines.add(lineNo2)
             reader.pos = codeStarts.get(fi3)
             val decoded: Int = decodeNumeric(reader, codeLens.get(fi3), nativeNames,
-                nativeParams, constTags, funcNames, funcParams, slotMethodNames,
+                nativeParams, constTags, funcNames, funcParams, mod.slotMethodNames,
                 mod.classNames, lineNo2, mod)
             lineNo2 = lineNo2 + decoded
             fi3 = fi3 + 1

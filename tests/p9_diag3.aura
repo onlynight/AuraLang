@@ -1,0 +1,74 @@
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import aura.lang.std.String
+import aura.lang.std.Collections
+import aura.lang.std.Math
+import aura.lang.std.Iter
+import aura.lang.std.fs.FileUtils
+import aura.lang.std.Process
+import "../aura/compiler/aura/lang/compiler/lexer/Span.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Token.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Lexer.aura"
+import "../aura/compiler/aura/lang/compiler/ast/Ast.aura"
+import "../aura/compiler/aura/lang/compiler/errors/CompileError.aura"
+import "../aura/compiler/aura/lang/compiler/parser/Parser.aura"
+import "../aura/compiler/aura/lang/compiler/sema/Type.aura"
+import "../aura/compiler/aura/lang/compiler/sema/TypeInfo.aura"
+import "../aura/compiler/aura/lang/compiler/sema/SymbolTable.aura"
+import "../aura/compiler/aura/lang/compiler/sema/TypeChecker.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Hir.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Desugar.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Mono.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Inline.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Fold.aura"
+import "../aura/compiler/aura/lang/compiler/mir/Mir.aura"
+import "../aura/compiler/aura/lang/compiler/mir/MirLower.aura"
+import "../aura/compiler/aura/lang/compiler/mir/MirOpt.aura"
+import "../aura/compiler/aura/lang/compiler/codegen/Codegen.aura"
+import "../aura/compiler/aura/lang/compiler/vm/Opcodes.aura"
+import "../aura/compiler/aura/lang/compiler/vm/Frames.aura"
+import "../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
+import "../aura/compiler/aura/lang/compiler/aot/TypeMapper.aura"
+import "../aura/compiler/aura/lang/compiler/aot/AotUtil.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Runtime.aura"
+import "../aura/compiler/aura/lang/compiler/aot/StdSigs.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Ffi.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Target.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Optimize.aura"
+import "../aura/compiler/aura/lang/compiler/aot/EmitBuffer.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Emit.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Linker.aura"
+import "../aura/compiler/aura/lang/compiler/aot/CBackend.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Dwarf.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Aot.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitUtil.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitAbi.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitState.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitOpt.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitLower.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitDispatch.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitRuntime.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitCore.aura"
+
+fun main() {
+    val src = "fun main(): Int {\n    return 2 + 3 * 4\n}\n"
+    println("src.len=" + toStr(src.length()))
+    val lx0 = Lexer(src)
+    lx0.scanAll()
+    println("lexer.tokens=" + toStr(lx0.tokenCount()) + " lexer.n=" + toStr(lx0.n))
+    val p = Parser(src)
+    p.parseProgram()
+    println("ast.count=" + toStr(p.ast.count))
+    val hl = HirLowerer()
+    hl.lower(p.ast)
+    println("hir.count=" + toStr(hl.hir.count))
+    val ml = MirLowerer()
+    ml.lower(hl.hir)
+    println("mir.count=" + toStr(ml.mir.count))
+    val cg = Codegen()
+    val bc = cg.emit(ml.mir)
+    println("bc=" + toStr(bc.length))
+    val vm = VmRunner()
+    vm.loadBytecode(bc, cg.constPoolStr(), cg.funcTableStr())
+    val out = vm.run()
+    println("out=[" + toStr(out) + "]")
+}

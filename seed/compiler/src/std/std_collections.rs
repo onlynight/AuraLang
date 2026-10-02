@@ -332,6 +332,13 @@ fn nat_collection_index_of(args: &[Value]) -> Value {
 fn nat_is_empty(args: &[Value]) -> Value {
     match &args[0] {
         Value::List(items) => Value::Bool(items.is_empty()),
+        // `Value::Ref`（堆列表 / `ArrayList` 类实例）：native 拿不到堆句柄，
+        // 无法在此判定。编译器侧对**类接收者**已改派到 `__list_is_empty`
+        // （见 `codegen::hir` 的 `isEmpty` 拦截 + `Instr::ListIsEmpty`），
+        // 走到这里说明是**动态接收者**（静态类型未知），保持保守的「非空」语义，
+        // 避免把「有元素」误判为空（`true` 会让 `while (!isEmpty())` 之类的
+        // 循环瞬间退出，比多循环一次危险得多）。
+        Value::Ref(_) => Value::Bool(false),
         _ => Value::Bool(true),
     }
 }

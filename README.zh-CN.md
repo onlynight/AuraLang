@@ -641,6 +641,19 @@ scripts\photon\photon-hat-suite.ps1 -Phase P1,P2,P3
 > `while (i >= 0 && s.charCodeAt(i) != 10)` 的循环在 `i` 走到 -1 时会越界读取 ——
 > `&&` 短路救不了你，因为边界检查写在 `charCodeAt` 的 Aura 源码里，被 AOT 内联时丢弃了。
 > 要把循环结构写成「只可能传入合法下标」。
+>
+> **陷阱 2（2026-10-02）**：**别指望实参数写错能编译过**。`build --aot` 已上语义门禁，
+> 对「no overload of … accepts …」（符号表真实签名可判定的实参数/重载违规）**硬失败**——
+> 缺失实参此前会静默落成未初始化内存（实测 `joinPieces(parts)` 漏传 `sep` ⇒
+> `freeFuncs` 整串损坏 ⇒ 用户函数调用被改写成 `ArrayList_add`）。
+>
+> **陷阱 3（2026-10-02）**：**AOT 重负载下避免 `List<List<T>>` 与高频
+> `List<String>` 累加**。嵌套列表的内层临时对象与 `ArrayList<String>` 累加器
+> 在大函数（数百行、多局部量）的编译产物里实测损坏/静默丢元素
+> （`slot.size` 读回指针值、随后段错误；小型探针 `build/lstest*.aura` 无法复现，
+> 疑似特定寄存器分配形态触发）。可靠替代：**扁平数组（CSR：计数 → 前缀和 → 填充）**
+> 与**字符串直接累加**（InstructionSelection 的 `analyzePhiPreds` / SsaBuilder 的
+> `freeFuncs` 已按此重写）。
 
 ---
 

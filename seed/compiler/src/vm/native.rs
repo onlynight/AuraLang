@@ -98,6 +98,19 @@ impl NativeRegistry {
         r.register("typeOf", native_type_of);
         r.register("aura_cast", native_cast);
         r.register("aura_cast_safety", native_cast_safety);
+        // P3.1: `Any` 的**类名前缀**基础协议（Layer 0，bootstrap/any_core.rs）。
+        //
+        // 静态类型退化为 `Any` 时（插值 `${expr}`、`"a" + int` 隐式转换），
+        // `codegen::hir::wrap_tostring` 会刻意发出 `Any.toString(<expr>)` 而不是
+        // 裸名 `toString` —— 裸名会被后续降级成 `CallVirtual`，而 `Any` 值没有
+        // vtable → VM 报 `method call on non-object value`。
+        //
+        // 登记为原生函数（与裸名 `toString` 同一实现），使 MIR/字节码把调用点
+        // 发射成 `CALL_NATIVE` 而非误判成用户函数 → `未解析的函数调用 'Any.toString'`
+        // + 运行期 `call to undefined function #65535`。
+        r.register("Any.toString", native_to_str);
+        r.register("Any.equals", native_equals);
+        r.register("Any.hashCode", native_hash_code);
         r.register("__size", native_size);
         r.register("__get", native_get);
         r.register("__callClosure", native_call_closure);
@@ -198,6 +211,10 @@ impl NativeRegistry {
         r.register("typeOf", native_type_of);
         r.register("aura_cast", native_cast);
         r.register("aura_cast_safety", native_cast_safety);
+        // P3.1: `Any` 类名前缀基础协议（与 NativeRegistry::new 保持一致；见该处说明）
+        r.register("Any.toString", native_to_str);
+        r.register("Any.equals", native_equals);
+        r.register("Any.hashCode", native_hash_code);
         // for 循环迭代器支持（__size/__get）：与 NativeRegistry::new 保持一致。
         // 选择性加载路径缺这两个会退化为「未链接 → 返回 0」，使 `for (x in list)`
         // 变成空循环且静默无输出。
@@ -388,6 +405,28 @@ impl NativeRegistry {
         r.register("FileOps.close", native_fileops_close);
         r.register("FileOps.read", native_fileops_read);
         r.register("FileOps.write", native_fileops_write);
+        // 2026-10-02 补齐 FileOps 其余 @native(SYS_*) 成员：接口声明了 11 个
+        // 方法而 VM 只注册了 4 个，缺口（access / lseek 等）在纯 VM 运行时
+        // 走 AOT 直调 → 失败返回 0（`Stdio.exists` / `File.size` 因此全错，
+        // phase6/9 报 `AOT interface call failed`）。
+        r.register("FileOps.lseek", native_fileops_lseek);
+        r.register("FileOps.fstat", native_fileops_fstat);
+        r.register("FileOps.access", native_fileops_access);
+        r.register("FileOps.unlink", native_fileops_unlink);
+        r.register("FileOps.mkdir", native_fileops_mkdir);
+        r.register("FileOps.rmdir", native_fileops_rmdir);
+        r.register("FileOps.rename", native_fileops_rename);
+        // ProcessNative.run — 与 AOT 发射器的「Windows → UCRT system」内置降级
+        // 同约定（见 native_process_run 的注记）。
+        r.register("ProcessNative.run", native_process_run);
+        // ProcessNative 低层 POSIX syscall：Windows 上显式失败（见上方注记）。
+        // 注意派发顺序：run 走 interp 的「前缀名单」（stdlib-aura 之前），
+        // 这批无 Aura 体的 @native 成员走 FfiAbi::Aura 分支即可命中。
+        r.register("ProcessNative.fork", native_process_fork);
+        r.register("ProcessNative.wait4", native_process_wait4);
+        r.register("ProcessNative.execve", native_process_execve);
+        r.register("ProcessNative.getpid", native_process_getpid);
+        r.register("ProcessNative.killSyscall", native_process_kill);
         r.register("Stdio.stringToBuffer", native_stdio_string_to_buffer);
         r.register("Stdio.bufferToString", native_stdio_buffer_to_string);
         r.register("Cpu.rdtsc", native_cpu_rdtsc);
@@ -929,6 +968,16 @@ pub fn current_vm_module_clone() -> Option<crate::codegen::opcode::BytecodeModul
     Some(unsafe { (*vm).module_clone() })
 }
 
+/// 获取当前 VM 的模块级全局存储器句柄（供 `Thread.spawn` 让新 VM 共享）。
+///
+/// P3.2：新线程 VM 若各自持有独立的全局存储，则顶层 `val`/`var` 的跨线程
+/// 共享语义失效（每个线程各写各的副本）。此处返回 `Arc` 让调用方
+/// `set_globals_store` 到新 VM 上。
+pub fn current_vm_globals_store() -> Option<std::sync::Arc<std::sync::Mutex<Vec<i64>>>> {
+    let vm = get_vm_ref()?;
+    Some(unsafe { (*vm).globals_store() })
+}
+
 /// spawn(expr) → Int：创建新协程（P10.1）
 ///
 /// 将表达式作为协程入口，创建新协程并返回协程 ID。
@@ -1415,9 +1464,26 @@ fn native_memory_set(args: &[Value]) -> Value {
 ///
 /// 这是 `aura.lang.concurrent` 纯 Aura 自旋锁的唯一原子原语：
 /// `fetch_add(1) == 0` 判定获取成功，未获取者 `fetch_add(-1)` 撤销探测。
+///
+/// ⚠ 参数布局兼容（2026-10-01 修复）：`extern interface` 成员经 VM 调用时可能
+/// 被注入 self 前缀（同 `nat_from_char_code` 修过的缺陷）——实测 `Cpu.atomicAdd(p, 5)`
+/// 收到 `[0, p, 5]`，于是 `arg_i64(args,0)` 取到接收者 0，命中下方 `addr == 0`
+/// 的早退分支恒返回 0，`fetch_add` **从未执行**（实测 `add(0,5)` 返回 10、
+/// 内存未变为 15，而是保持旧值；经包装函数调用时 `r=0, mem=1`）。连带整个
+/// `Atomic.add/sub/cas` 与所有基于自旋锁的并发原语（Mutex/Condvar/Semaphore）
+/// 全部失效——这是 `tests/concurrent/*` 的根因之一。此处按「末位 Int 为 delta、
+/// 其余 Int 中取最大值者为 addr」的布局兼容注入与未注入两种形态。
 fn native_cpu_atomic_add(args: &[Value]) -> Value {
-    let addr = arg_i64(args, 0);
-    let delta = arg_i64(args, 1);
+    // delta：无注入形态（len==2）取 args[1]；有注入形态（len>=3，首位为 self）
+    // 取 args[2]。两种布局都从「第二个位置之后」取，故统一用 len>=3 判定。
+    let delta: i64 = if args.len() >= 3 {
+        args.get(2).map(|v| v.as_int()).unwrap_or(0)
+    } else {
+        arg_i64(args, 1)
+    };
+    // addr：无注入形态取 args[0]；有注入形态取 args[1]（首位是接收者占位 0）。
+    // 接收者占位恒为 0（Hir 把单例接收者降级成常量 0），故 len>=3 即「被注入」。
+    let addr: i64 = if args.len() >= 3 { arg_i64(args, 1) } else { arg_i64(args, 0) };
     if addr == 0 {
         return Value::Int(0);
     }
@@ -1711,19 +1777,38 @@ fn native_send_process_actor(args: &[Value]) -> Value {
     Value::Null
 }
 
-/// __recvProcessActor(id) → Any: 从跨进程 Actor 接收响应（Phase 3）
+/// __recvProcessActor(id) → Any: 从 Actor 接收一条消息（Phase 3）
+///
+/// 先查**跨进程**注册表（`PROCESS_ACTORS`，socket 后端）；未命中时回落到
+/// **进程内** `ActorRuntime` 邮箱。
+///
+/// 为什么必须回落：`Actor.send(id, msg)` 写的是进程内 `actor.mailbox`，而本
+/// native 原先只查跨进程注册表 —— 两个存储不相交，于是
+/// `send(a, m); recvProcessActor(a)` 恒得 `null`（消息发进去却读不出来，
+/// `examples/concurrency/actor_system.aura` 的接收路径静默失效）。
 #[cfg(feature = "std-concurrent")]
 fn native_recv_process_actor(args: &[Value]) -> Value {
     if args.len() >= 1 {
         let actor_id = args[0].as_int() as usize;
-        let mut registry = crate::vm::actor_process::PROCESS_ACTORS.lock().unwrap();
-        if let Some(actor) = registry.get_mut(&actor_id) {
-            match actor.recv() {
-                Ok(Some(val)) => return val,
-                Ok(None) => return Value::Null,
-                Err(e) => {
-                    eprintln!("[Phase 3] Cross-process receive failed: {}", e);
-                    return Value::Null;
+        // ① 跨进程 Actor
+        {
+            let mut registry = crate::vm::actor_process::PROCESS_ACTORS.lock().unwrap();
+            if let Some(actor) = registry.get_mut(&actor_id) {
+                return match actor.recv() {
+                    Ok(Some(val)) => val,
+                    Ok(None) => Value::Null,
+                    Err(e) => {
+                        eprintln!("[Phase 3] Cross-process receive failed: {}", e);
+                        Value::Null
+                    }
+                };
+            }
+        }
+        // ② 进程内 Actor（`Actor.spawnActor` + `Actor.send` 走的路径）
+        if let Some(vm_ptr) = get_vm_ref() {
+            unsafe {
+                if let Some(v) = (*vm_ptr).actors.recv(actor_id) {
+                    return v;
                 }
             }
         }
@@ -1731,25 +1816,45 @@ fn native_recv_process_actor(args: &[Value]) -> Value {
     Value::Null
 }
 
-/// __processActorAlive(id) → Boolean: 检查跨进程 Actor 是否存活（Phase 3）
+/// __processActorAlive(id) → Boolean: 检查 Actor 是否存活（Phase 3）
+///
+/// 跨进程注册表优先，未命中回落到进程内 `ActorRuntime`。
 #[cfg(feature = "std-concurrent")]
 fn native_process_actor_alive(args: &[Value]) -> Value {
     if args.len() >= 1 {
         let actor_id = args[0].as_int() as usize;
-        let mut registry = crate::vm::actor_process::PROCESS_ACTORS.lock().unwrap();
-        if let Some(actor) = registry.get_mut(&actor_id) {
-            return Value::Bool(actor.is_alive());
+        {
+            let mut registry = crate::vm::actor_process::PROCESS_ACTORS.lock().unwrap();
+            if let Some(actor) = registry.get_mut(&actor_id) {
+                return Value::Bool(actor.is_alive());
+            }
+        }
+        if let Some(vm_ptr) = get_vm_ref() {
+            unsafe {
+                return Value::Bool((*vm_ptr).actors.is_alive(actor_id));
+            }
         }
     }
     Value::Bool(false)
 }
 
-/// __killProcessActor(id) → Unit: 关闭跨进程 Actor（Phase 3）
+/// __killProcessActor(id) → Unit: 关闭 Actor（Phase 3）
+///
+/// 跨进程注册表优先，未命中回落到进程内 `ActorRuntime`（标记死亡并保留邮箱，
+/// 与 `ActorRuntime::kill` 语义一致）。
 #[cfg(feature = "std-concurrent")]
 fn native_kill_process_actor(args: &[Value]) -> Value {
     if args.len() >= 1 {
         let actor_id = args[0].as_int() as usize;
-        crate::vm::actor_process::PROCESS_ACTORS.lock().unwrap().remove(&actor_id);
+        let removed =
+            crate::vm::actor_process::PROCESS_ACTORS.lock().unwrap().remove(&actor_id).is_some();
+        if !removed {
+            if let Some(vm_ptr) = get_vm_ref() {
+                unsafe {
+                    (*vm_ptr).actors.kill(actor_id);
+                }
+            }
+        }
     }
     Value::Null
 }
@@ -1958,6 +2063,154 @@ fn native_fileops_write(args: &[Value]) -> Value {
     }
     let n = unsafe { libc::write(fd, buf as *const libc::c_void, count) };
     Value::Int(n as i64)
+}
+
+/// 从 Long 实参（C 字符串指针）取路径文本；空指针返回 None。
+fn fileops_path(args: &[Value], i: usize) -> Option<String> {
+    let p = arg_i64(args, i);
+    if p == 0 {
+        return None;
+    }
+    let c_str = unsafe { std::ffi::CStr::from_ptr(p as *const libc::c_char) };
+    c_str.to_str().ok().map(|s| s.to_string())
+}
+
+/// FileOps.lseek(fd, off, whence) → Long（新偏移；-1 出错）。
+/// std `File.size` / `FileInputStream.available` 用 `lseek(fd, 0, SEEK_END)` 查容量。
+fn native_fileops_lseek(args: &[Value]) -> Value {
+    let fd = arg_i64(args, 0) as i32;
+    let off = arg_i64(args, 1);
+    let whence = arg_i64(args, 2) as i32;
+    if fd < 0 {
+        return Value::Int(-1);
+    }
+    let ret = unsafe { libc::lseek(fd, off as libc::off_t, whence) };
+    Value::Int(ret as i64)
+}
+
+/// FileOps.fstat(fd, buf) → Long（0 成功，-1 出错）。当前 std 代码未消费 stat 缓冲
+///（容量查询走 lseek/SEEK_END），保留 syscall 语义即可。
+fn native_fileops_fstat(args: &[Value]) -> Value {
+    let fd = arg_i64(args, 0) as i32;
+    let buf = arg_i64(args, 1);
+    if fd < 0 || buf == 0 {
+        return Value::Int(-1);
+    }
+    let ret = unsafe { libc::fstat(fd, buf as *mut libc::stat) };
+    Value::Int(ret as i64)
+}
+
+/// FileOps.access(path, mode) → Int（0 可访问，-1 不可）。
+/// std `Stdio.exists` 用 `access(path, F_OK=0)` 做存在性检查。
+fn native_fileops_access(args: &[Value]) -> Value {
+    let Some(path) = fileops_path(args, 0) else {
+        return Value::Int(-1);
+    };
+    let _mode = arg_i64(args, 1); // 只支持 F_OK 语义（mode=0），std 内唯一用法
+    match std::fs::metadata(&path) {
+        Ok(_) => Value::Int(0),
+        Err(_) => Value::Int(-1),
+    }
+}
+
+/// FileOps.unlink(path) → Int
+fn native_fileops_unlink(args: &[Value]) -> Value {
+    let Some(path) = fileops_path(args, 0) else {
+        return Value::Int(-1);
+    };
+    match std::fs::remove_file(&path) {
+        Ok(_) => Value::Int(0),
+        Err(_) => Value::Int(-1),
+    }
+}
+
+/// FileOps.mkdir(path, mode) → Int（mode 在 Windows 上忽略）
+fn native_fileops_mkdir(args: &[Value]) -> Value {
+    let Some(path) = fileops_path(args, 0) else {
+        return Value::Int(-1);
+    };
+    match std::fs::create_dir(&path) {
+        Ok(_) => Value::Int(0),
+        Err(_) => Value::Int(-1),
+    }
+}
+
+/// FileOps.rmdir(path) → Int
+fn native_fileops_rmdir(args: &[Value]) -> Value {
+    let Some(path) = fileops_path(args, 0) else {
+        return Value::Int(-1);
+    };
+    match std::fs::remove_dir(&path) {
+        Ok(_) => Value::Int(0),
+        Err(_) => Value::Int(-1),
+    }
+}
+
+/// FileOps.rename(old, new) → Int
+fn native_fileops_rename(args: &[Value]) -> Value {
+    let Some(old) = fileops_path(args, 0) else {
+        return Value::Int(-1);
+    };
+    let Some(new_path) = fileops_path(args, 1) else {
+        return Value::Int(-1);
+    };
+    match std::fs::rename(&old, &new_path) {
+        Ok(_) => Value::Int(0),
+        Err(_) => Value::Int(-1),
+    }
+}
+
+/// ProcessNative.run(command) → Int（退出码）。
+///
+/// 与 AOT 发射器对 `ProcessNative.run` 的**内置降级约定**一致
+///（见 ProcessNative.aura `run` 的注记：Windows → UCRT `system`，即 `cmd /C`）。
+/// VM 此前没有这一降级：`run` 的 Aura 组合体在解释执行下真去调 `fork()`
+///（Windows 不存在）→ 接口调用失败返回 0 → 被误判为「子进程」走进
+/// exitGroup(1) 分支。此处按名拦截，`std/Process.run` 与
+/// 编译器工具链调用（llc / clang / lld-link）在 VM 下恢复可用。
+fn native_process_run(args: &[Value]) -> Value {
+    let Some(cmd) = fileops_path(args, 0) else {
+        return Value::Int(-1);
+    };
+    let c_cmd = match std::ffi::CString::new(cmd) {
+        Ok(c) => c,
+        Err(_) => return Value::Int(-1),
+    };
+    let ret = unsafe { libc::system(c_cmd.as_ptr()) };
+    // libc::system 返回等待状态（Windows 上即退出码；POSIX 下为 wait 状态，
+    // 与既有 AOT 降级行为一致，不做 WEXITSTATUS 拆解）。
+    Value::Int(ret as i64)
+}
+
+// ── ProcessNative 低层 POSIX syscall（fork / execve / wait4 / kill）──
+//
+// Windows 无对应语义（与 AOT 发射器的处理一致：Emit.aura 对
+// `fork` / `execve` / `wait4` 一律「无法映射」）。注册为**显式失败**
+// 而不是留着不注册——不注册时接口调用失败同样返回 0，而 `fork` 的
+// 0 恰好是「子进程」语义：`spawn` 会因此走进子进程分支 `exitGroup(1)`，
+// 把整个 VM 进程带崩。返回 -1 让 `spawn` 走「fork 失败」分支。
+fn native_process_fork(args: &[Value]) -> Value {
+    let _ = args;
+    Value::Int(-1)
+}
+
+fn native_process_wait4(args: &[Value]) -> Value {
+    let _ = args;
+    Value::Int(-1)
+}
+
+fn native_process_execve(args: &[Value]) -> Value {
+    let _ = args;
+    Value::Int(-1)
+}
+
+fn native_process_getpid(_args: &[Value]) -> Value {
+    Value::Int(unsafe { libc::getpid() } as i64)
+}
+
+fn native_process_kill(args: &[Value]) -> Value {
+    let _ = args;
+    Value::Int(-1)
 }
 
 // ─────────────────────────────────────────────────────────────

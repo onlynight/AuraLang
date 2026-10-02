@@ -46,22 +46,37 @@ object Atomic {
         Memory.write64(atomic_id as Long, value as Long)
     }
 
-    /// 原子加法（返回加之前的值）
+    /// 原子加法（返回加**之后**的值）
     ///
     /// - 参数：`atomic_id` — 原子整数 ID
     /// - 参数：`delta` — 增量
-    /// - 返回：加之前的值
+    /// - 返回：加之后的新值。
+    ///   注意：底层 `Cpu.atomicAdd` 是 `fetch_add`（返回**旧值**），
+    ///   此处按 API 约定折算回新值，与测试套件 `atomic_ops` 的
+    ///   「`Atomic.add(a, 5)` 在值为 10 时返回 15」契约一致。
     fun add(atomic_id: Int, delta: Int): Int {
-        return Cpu.atomicAdd(atomic_id as Long, delta as Long) as Int
+        val base: Long = atomic_id as Long
+        val guard: Long = base + 8L
+        spinAcquire(guard)
+        val word: Long = Memory.read64(base)
+        Memory.write64(base, word + (delta as Long))
+        spinRelease(guard)
+        return (word + (delta as Long)) as Int
     }
 
-    /// 原子减法（返回减之前的值）
+    /// 原子减法（返回减**之后**的值）
     ///
     /// - 参数：`atomic_id` — 原子整数 ID
     /// - 参数：`delta` — 减量
-    /// - 返回：减之前的值
+    /// - 返回：减之后的新值（同 `add` 的折算约定）
     fun sub(atomic_id: Int, delta: Int): Int {
-        return Cpu.atomicAdd(atomic_id as Long, (0 - delta) as Long) as Int
+        val base: Long = atomic_id as Long
+        val guard: Long = base + 8L
+        spinAcquire(guard)
+        val word: Long = Memory.read64(base)
+        Memory.write64(base, word - (delta as Long))
+        spinRelease(guard)
+        return (word - (delta as Long)) as Int
     }
 
     /// 原子比较并交换（CAS）
@@ -70,17 +85,20 @@ object Atomic {
     /// - 参数：`expected` — 期望值
     /// - 参数：`desired` — 期望交换为的值
     /// - 返回：true 表示交换成功，false 表示当前值不等于期望值
+    ///
+    /// 实现说明：**不引入跨分支可变标志变量**。原写法 `var ok = false; if (...) { ok = true }`
+    /// 依赖条件分支对局部量的写回（SSA 需要 phi 节点），是 AOT 后端已知的脆弱点；
+    /// 此处直接返回比较表达式，语义等价且避开该形态。
     fun cas(atomic_id: Int, expected: Int, desired: Int): Boolean {
         val base: Long = atomic_id as Long
         val guard: Long = base + 8L
         spinAcquire(guard)
-        var ok: Boolean = false
-        if (Memory.read64(base) == (expected as Long)) {
+        val cur: Long = Memory.read64(base)
+        if (cur == (expected as Long)) {
             Memory.write64(base, desired as Long)
-            ok = true
         }
         spinRelease(guard)
-        return ok
+        return cur == (expected as Long)
     }
 
     /// 销毁原子整数

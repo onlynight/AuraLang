@@ -325,6 +325,8 @@ impl Heap {
 
     /// 读取数组 / **堆列表**元素
     pub fn get_index(&self, handle: usize, index: usize) -> Value {
+        // `ArrayList` 之类的**类实例**接收者：下标落在其字段 0 的底层列表上。
+        let handle = self.list_slot(handle).unwrap_or(handle);
         match self.slots.get(handle).and_then(|s| s.data.as_ref()) {
             Some(HeapData::Array(elems)) => elems.get(index).cloned().unwrap_or(Value::Null),
             // 堆列表（`arrayListOf` / `NEW_LIST`）同样支持下标读取
@@ -335,6 +337,8 @@ impl Heap {
 
     /// 写入数组 / **堆列表**元素
     pub fn set_index(&mut self, handle: usize, index: usize, value: Value) {
+        // 同 `get_index`：类实例接收者按字段 0 解引用到底层列表。
+        let handle = self.list_slot(handle).unwrap_or(handle);
         if let Some(slot) = self.slots.get_mut(handle) {
             match &mut slot.data {
                 Some(HeapData::Array(elems)) => {
@@ -354,29 +358,171 @@ impl Heap {
 
     // ── List 操作（5.7） ──
 
+    /// 把「列表接收者句柄」解析为**承载实际元素序列**的堆槽句柄。
+    ///
+    /// 多数调用点（`__list_push` / `listLen` / `listPop` / `listSet`）拿到的接收者
+    /// 有两种形态：
+    ///   1. 直接就是 `HeapData::List` 槽（`arrayListOf<T>()` 的返回值）；
+    ///   2. **用户类实例**（`ArrayList<T>()` / `LinkedList<T>()` …），其第 0 个字段
+    ///      才是真正的 `List<T>`（`ArrayList.aura` 里 `private var data: List<T>`）。
+    ///
+    /// 旧实现只处理形态 1：形态 2 下 `list_push` 静默无操作、`list_len` 恒返回 0。
+    /// 实测（P3.5 调试器验收）：`BreakpointManager` 用
+    /// `HashMap<Int, …>` + `ArrayList<Int>()`，`mgr.list().size` 恒为 0、
+    /// `SourceMapUtils.splitLines()` 恒返回空表 —— 根因即此。
+    ///
+    /// 约定「字段 0 是底层列表」与 AOT 侧 `emit.rs` 的 `__list_push` /
+    /// `add` 兜底分支完全一致（那里对 `%struct.*` 接收者取 `i32 0, i32 0` 字段）。
+    fn list_slot(&self, handle: usize) -> Option<usize> {
+        let slot = self.slots.get(handle)?;
+        match slot.data.as_ref()? {
+            HeapData::List(_) => Some(handle),
+            // 用户类实例：取字段 0；若它不是列表句柄（如未初始化 / 别的类型），
+            // 继续沿链最多再走一层，避免把 `HashMap` 之类的对象误当列表。
+            HeapData::Object {
+                fields, ..
+            } => {
+                // 字段按插入顺序存放；`data` 是 `ArrayList` 的首个字段。
+                for (_, v) in fields.iter().take(1) {
+                    if let Value::Ref(h) = v {
+                        if h != &handle {
+                            if matches!(
+                                self.slots.get(*h).and_then(|s| s.data.as_ref()),
+                                Some(HeapData::List(_))
+                            ) {
+                                return Some(*h);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// List 尾部追加元素
+    ///
+    /// 接收者可能是列表槽本身，也可能是 `ArrayList` 之类的**类实例**（见 `list_slot`）。
+    ///
+    /// 类实例接收者追加后额外**同步 `_size` 字段**：`ArrayList.add` 的 Aura 实现
+    /// 会 `_size = _size + 1`，但调用点的 `x.add(v)` 被 HIR 改派到 `__list_push`
+    /// 原地追加，方法体根本不执行 → `_size` 永远停在构造时的 0。而
+    /// `first`/`last`/`lastIndexOf`/`skip`/`take`/`sum`/`min`/`max`/`distinct`
+    /// 等**未被改派**的方法仍读 `_size` 做循环边界，于是全部失效
+    /// （实测 `lastIndexOf` 恒 -1、`skip(1).size` 恒 0、`sum` 恒 0）。
+    ///
+    /// 在这里补写 `_size` 是最小且收敛的修法：一处补齐，所有依赖 `_size` 的
+    /// Aura 方法立刻恢复正确语义，无需为每个方法再加一条指令。
     pub fn list_push(&mut self, handle: usize, value: Value) {
-        if let Some(slot) = self.slots.get_mut(handle) {
+        let Some(target) = self.list_slot(handle) else {
+            return;
+        };
+        if let Some(slot) = self.slots.get_mut(target) {
             if let Some(HeapData::List(elems)) = &mut slot.data {
                 elems.push(value);
             }
         }
+        // 类实例接收者：同步 `_size`。
+        if target != handle {
+            let len = self.list_len(target);
+            self.sync_list_size_field(handle, len);
+        }
     }
+
+    /// 把「列表长度」写回类实例接收者的 `_size` 字段（若存在）。
+    ///
+    /// 字段名哈希与 `codegen::emit::field_index` 一致；字段不存在时**不新增**
+    /// （避免给非 ArrayList 的类实例塞入无意义字段）。
+    fn sync_list_size_field(&mut self, handle: usize, len: i64) {
+        let f = crate::codegen::emit::field_index("_size");
+        if let Some(slot) = self.slots.get_mut(handle) {
+            if let Some(HeapData::Object { fields, .. }) = &mut slot.data {
+                for entry in fields.iter_mut() {
+                    if entry.0 == f {
+                        entry.1 = Value::Int(len);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
 
     /// List 弹出尾部元素
     pub fn list_pop(&mut self, handle: usize) -> Value {
-        match self.slots.get_mut(handle).and_then(|s| s.data.as_mut()) {
+        let target = self.list_slot(handle).unwrap_or(handle);
+        let popped = match self.slots.get_mut(target).and_then(|s| s.data.as_mut()) {
             Some(HeapData::List(elems)) => elems.pop().unwrap_or(Value::Null),
             _ => Value::Null,
+        };
+        if target != handle && !matches!(popped, Value::Null) {
+            let len = self.list_len(target);
+            self.sync_list_size_field(handle, len);
         }
+        popped
     }
 
     /// List 长度
     pub fn list_len(&self, handle: usize) -> i64 {
-        match self.slots.get(handle).and_then(|s| s.data.as_ref()) {
+        let target = match self.list_slot(handle) {
+            Some(t) => t,
+            None => handle,
+        };
+        match self.slots.get(target).and_then(|s| s.data.as_ref()) {
             Some(HeapData::List(elems)) => elems.len() as i64,
             _ => 0,
         }
+    }
+
+    /// List 是否包含某元素（兼容 `ArrayList` 类实例接收者，见 `list_slot`）。
+    pub fn list_contains(&self, handle: usize, needle: &Value) -> bool {
+        let target = self.list_slot(handle).unwrap_or(handle);
+        match self.slots.get(target).and_then(|s| s.data.as_ref()) {
+            Some(HeapData::List(elems)) => elems.iter().any(|v| v == needle),
+            Some(HeapData::Array(elems)) => elems.iter().any(|v| v == needle),
+            _ => false,
+        }
+    }
+
+    /// List 中某元素的下标（未找到返回 -1）。
+    pub fn list_index_of(&self, handle: usize, needle: &Value) -> i64 {
+        let target = self.list_slot(handle).unwrap_or(handle);
+        match self.slots.get(target).and_then(|s| s.data.as_ref()) {
+            Some(HeapData::List(elems)) => {
+                elems.iter().position(|v| v == needle).map(|i| i as i64).unwrap_or(-1)
+            }
+            Some(HeapData::Array(elems)) => {
+                elems.iter().position(|v| v == needle).map(|i| i as i64).unwrap_or(-1)
+            }
+            _ => -1,
+        }
+    }
+
+    /// List 按下标**删除**元素并返回被删元素（越界返回 `Null`）。
+    ///
+    /// 与 `list_set` 同理：`l.remove(i)` 必须**原地**生效（`__list_remove_at` 指令），
+    /// 因为 `ArrayList.remove` 的 Aura 实现读私有字段 `_size`，而该字段在运行期
+    /// 恒为 0（`add` 走 `__list_push` 原地追加，不回写 `_size`）—— 旧路径下
+    /// `l.remove(0)` 会以 "index: 0, size: 0" 抛越界异常。
+    pub fn list_remove_at(&mut self, handle: usize, index: usize) -> Value {
+        let target = self.list_slot(handle).unwrap_or(handle);
+        let mut removed = Value::Null;
+        let mut hit = false;
+        if let Some(slot) = self.slots.get_mut(target) {
+            if let Some(HeapData::List(elems)) = &mut slot.data {
+                if index < elems.len() {
+                    removed = elems.remove(index);
+                    hit = true;
+                }
+            }
+        }
+        // 类实例接收者：同步 `_size`（与 `list_push` 对称）。
+        if hit && target != handle {
+            let len = self.list_len(target);
+            self.sync_list_size_field(handle, len);
+        }
+        removed
     }
 
     /// 该句柄指向的是否为 Map（`set` 需要据此区分「列表下标」与「Map 键」）。
@@ -393,7 +539,8 @@ impl Heap {
     /// 生效，否则调用方丢弃返回值后列表毫无变化（纯函数式 native 只能返回值语义
     /// 的 `Value::List`，对 `Value::Ref` 直接返回 `Null`）。
     pub fn list_set(&mut self, handle: usize, index: usize, value: Value) {
-        if let Some(slot) = self.slots.get_mut(handle) {
+        let target = self.list_slot(handle).unwrap_or(handle);
+        if let Some(slot) = self.slots.get_mut(target) {
             if let Some(HeapData::List(elems)) = &mut slot.data {
                 if index < elems.len() {
                     elems[index] = value;

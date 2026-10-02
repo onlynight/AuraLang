@@ -63,6 +63,27 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         ret: "i64",
         params: &[("s", "i8*")],
     },
+    // 1 参 `substring(start)` → [start, 末尾)。此前缺失声明/实现，调用点的
+    // 缺失实参落成未初始化寄存器（HatParser.parseRet 注记的「1 参得到空串」）。
+    RuntimeFn {
+        name: "aura_string_substringFrom",
+        ret: "i8*",
+        params: &[
+            ("s", "i8*"),
+            ("start", "i64"),
+        ],
+    },
+    // `substringAt(from, len)` → [from, from+len)。此前映射表缺失，调用点
+    // 发射裸名 `@substringAt` → `llc: use of undefined value`。
+    RuntimeFn {
+        name: "aura_string_substringAt",
+        ret: "i8*",
+        params: &[
+            ("s", "i8*"),
+            ("from", "i64"),
+            ("len", "i64"),
+        ],
+    },
     RuntimeFn {
         name: "toStringFloat",
         ret: "i8*",
@@ -870,6 +891,16 @@ pub fn translate_to_legacy_c(name: &str) -> String {
         if let Some(mutex_rest) = rest.strip_prefix("Mutex_") {
             return format!("aura_lang_concurrent_Mutex_{}", mutex_rest);
         }
+        // Future 类：`await` 的 C 实现名为 `aura_lang_concurrent_FutureAwait`
+        //（只有 `spawn` / `isDone` / `cancel` 才是 `Future_<m>` 风格）。
+        // 不特判时调用点与声明都落到不存在的 `aura_lang_concurrent_Future_await`
+        // → 链接期 `undefined symbol`（`tests/concurrent/future_chain.aura` 的根因）。
+        if let Some(fut_rest) = rest.strip_prefix("Future_") {
+            return match fut_rest {
+                "await" => "aura_lang_concurrent_FutureAwait".to_string(),
+                _ => format!("aura_lang_concurrent_Future_{}", fut_rest),
+            };
+        }
         // Atomic / RwLock / Condvar / Barrier：保留完整形式
         let parts: Vec<&str> = rest.splitn(2, '_').collect();
         if parts.len() != 2 {
@@ -921,6 +952,8 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
                 P, "i64", "i64",
             ],
         ),
+        "aura_string_substringFrom" => (P, &[P, "i64"]),
+        "aura_string_substringAt" => (P, &[P, "i64", "i64"]),
         "aura_string_charAt" => (P, &[P, "i64"]),
         "aura_string_replace" | "aura_string_replaceAll" => (P, &[P, P, P]),
         "aura_string_padStart" => (
@@ -1082,7 +1115,11 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
                 "i64", "i64",
             ],
         ),
-        "aura_thread_join" => ("void", &["i64"]),
+        // `Thread.join` 返回工作线程的返回值（与 VM 路径一致，见 aura_syscalls.c
+        // 的线程结果注册表）；历史上这里误标为 void，调用点据此发射
+        // `call void @aura_thread_join(...)` 丢弃结果 —— AOT 下 `Thread.join(t)`
+        // 恒得 0（atomic_ops 用例 6 `winners=0 v=1` 的根因）。
+        "aura_thread_join" => ("i64", &["i64"]),
         "aura_thread_sleep" => ("void", &["i64"]),
         "aura_thread_id" => ("i64", &[]),
         "aura_thread_available_parallelism" => ("i64", &[]),
@@ -1236,9 +1273,18 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
                 "i64", "i64",
             ],
         ),
-        "aura_lang_concurrent_Future_await" => ("i64", &["i64"]),
+        // 符号名与 C 实现一致（`await` 无下划线，见 translate_to_legacy_c）
+        "aura_lang_concurrent_FutureAwait" => ("i64", &["i64"]),
         "aura_lang_concurrent_Future_isDone" => ("i32", &["i64"]),
         "aura_lang_concurrent_Future_cancel" => ("i32", &["i64"]),
+        // Promise（C 实现，见 aura_std_cffi.c；与 Future 共享「待完成槽」语义）
+        "aura_lang_concurrent_Promise_create" => ("i64", &[]),
+        "aura_lang_concurrent_Promise_resolve" => ("void", &["i64", "i64"]),
+        "aura_lang_concurrent_Promise_reject" => ("void", &["i64", "i64"]),
+        "aura_lang_concurrent_Promise_await" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Promise_isDone" => ("i1", &["i64"]),
+        "aura_lang_concurrent_Promise_isRejected" => ("i1", &["i64"]),
+        "aura_lang_concurrent_Promise_tryAwait" => ("i64", &["i64"]),
         // Thread
         "aura_lang_concurrent_Thread_spawn" => (
             "i64",
@@ -1246,7 +1292,7 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
                 "i64", "i64",
             ],
         ),
-        "aura_lang_concurrent_Thread_join" => ("void", &["i64"]),
+        "aura_lang_concurrent_Thread_join" => ("i64", &["i64"]),
         "aura_lang_concurrent_Thread_sleep" => ("void", &["i64"]),
         "aura_lang_concurrent_Thread_id" => ("i64", &[]),
         "aura_lang_concurrent_Thread_parallelism" => ("i64", &[]),

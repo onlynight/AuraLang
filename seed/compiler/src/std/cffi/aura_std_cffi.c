@@ -149,7 +149,7 @@ static int64_t g_aura_mem_big_trace = 0;    /* 大块追踪已打印条数 */
  * `__builtin_return_address` 被常量折叠成 0x0（实测：整张表塌成一个 ra0=NULL
  * 的桶）。默认零 I/O；报告在 `AURA_MEM_STATS=1` 时随 OOM 统计打印。
  * ─────────────────────────────────────────────────────────── */
-#define AURA_FN_COUNT 263
+#define AURA_FN_COUNT 265
 typedef struct { void *a; const char *n; } AuraFnEnt;
 
 /* ra0 → 函数名。AOT 产物被 strip（`llvm-nm` 报 no symbols），返回地址事后无从
@@ -2131,6 +2131,36 @@ const char *aura_lang_std_String_substring(const char *s, int64_t start, int64_t
     return aura_string_substring(s, start, end);
 }
 
+/* substringFrom(start)：1 参 `substring(start)` —— 取 [start, 末尾)。
+ *
+ * 1 参形态此前在 rust AOT 下没有对应实现：调用点按 2 参 C 符号
+ * `aura.lang.std.String.substring(s, from, to)` 发射，缺失的 `to` 落成
+ * 未初始化寄存器（实测 HatParser.aura parseRet 注记：「1 参…会得到空串
+ * （VM 正常）」，当时靠把全部调用点改写成显式 2 参规避）。补齐语义后，
+ * 1 参调用点直接正确，无需再改写。 */
+const char *aura_lang_std_String_substringFrom(const char *s, int64_t start) {
+    if (!s) return "";
+    return aura_string_substring(s, start, (int64_t)strlen(s));
+}
+
+/* legacy C 符号别名：AOT 发射端 translate_to_legacy_c 把 std 调用点符号
+ * 归一为 aura_string_* 后按此名链接（与其余字符串方法同一约定）。 */
+const char *aura_string_substringFrom(const char *s, int64_t start) {
+    return aura_lang_std_String_substringFrom(s, start);
+}
+
+/* substringAt(from, len)：与 Aura 侧 `String.substringAt` 同语义（[from, from+len)）。
+ * 同为映射表缺失项：ProcessNative.aura 等调用点此前发射裸名 `@substringAt`
+ * → `llc: use of undefined value`。 */
+const char *aura_lang_std_String_substringAt(const char *s, int64_t from, int64_t len) {
+    if (!s || len < 0) return "";
+    return aura_string_substring(s, from, from + len);
+}
+
+const char *aura_string_substringAt(const char *s, int64_t from, int64_t len) {
+    return aura_lang_std_String_substringAt(s, from, len);
+}
+
 const char *aura_lang_std_String_charAt(const char *s, int64_t idx) {
     return aura_string_charAt(s, idx);
 }
@@ -3192,7 +3222,9 @@ extern int64_t aura_barrier_wait(int64_t id);
 extern void aura_barrier_destroy(int64_t id);
 
 extern int64_t aura_thread_create(int64_t fn_id, int64_t arg);
-extern void aura_thread_join(int64_t id);
+/* 返回工作线程的返回值（Aura `Thread.join` 语义；实现见 aura_syscalls.c
+ * 的 handle→结果槽注册表）。 */
+extern int64_t aura_thread_join(int64_t id);
 extern void aura_thread_sleep(int64_t ms);
 extern int64_t aura_thread_id(void);
 extern int64_t aura_thread_available_parallelism(void);
@@ -3203,24 +3235,35 @@ extern int64_t aura_thread_available_parallelism(void);
 
 static void *concurrent_registry[CONCURRENCY_MAX_IDS];
 
+// 句柄是**从 1 开始**的槽位号：0 保留为「无效句柄」。
+//
+// 契约来源（三条独立证据，全部要求 0 无效）：
+//   1. 本文件/`aura_syscalls.c` 的每个消费者都以 `id <= 0` 判定无效
+//      （`aura_mutex_lock`、`aura_barrier_wait`、`aura_thread_join` …）；
+//   2. VM 侧 `concurrent_native.rs` 的 `NEXT_THREAD_ID` 初值为 1，
+//      `aura/core/.../Future.aura` 的 `spawn` 返回堆指针并把 0 备注为失败；
+//   3. 测试按 `handle > 0` 判有效（`future_chain.aura` 的 `f > 0`、
+//      `promise_test.aura` 的 `fid > 0L`）。
+// 旧实现返回裸下标 0 ⇒ AOT 下 `Future.spawn` 的首个句柄为 0 ⇒ 被误判为创建
+// 失败（AOT 独有的 `Future.spawn 返回无效 ID`）。
 static int64_t concurrent_alloc(void *obj) {
     for (int i = 0; i < CONCURRENCY_MAX_IDS; i++) {
         if (concurrent_registry[i] == NULL) {
             concurrent_registry[i] = obj;
-            return i;
+            return (int64_t)i + 1;
         }
     }
     return -1;
 }
 
 static void *concurrent_get(int64_t id) {
-    if (id < 0 || id >= CONCURRENCY_MAX_IDS) return NULL;
-    return concurrent_registry[id];
+    if (id < 1 || id > CONCURRENCY_MAX_IDS) return NULL;
+    return concurrent_registry[id - 1];
 }
 
 static void concurrent_free_slot(int64_t id) {
-    if (id < 0 || id >= CONCURRENCY_MAX_IDS) return;
-    concurrent_registry[id] = NULL;
+    if (id < 1 || id > CONCURRENCY_MAX_IDS) return;
+    concurrent_registry[id - 1] = NULL;
 }
 
 // ── Mutex (aura_lang_concurrent_Mutex_*) ────────────────────
@@ -3492,7 +3535,7 @@ int64_t aura_lang_concurrent_Future_spawn(int64_t fn_id, int64_t arg) {
 int64_t aura_lang_concurrent_FutureAwait(int64_t future_id) {
     AuraFuture *fut = (AuraFuture *)concurrent_get(future_id);
     if (!fut) return 0;
-    if (fut->thread_id > 0) aura_thread_join(fut->thread_id);
+    if (fut->thread_id > 0) fut->result = aura_thread_join(fut->thread_id);
     fut->done = 1;
     return fut->result;
 }
@@ -3520,6 +3563,71 @@ int64_t aura_lang_concurrent_Future_any(void *future_ids) {
     return 0;
 }
 
+// ── Promise (aura_lang_concurrent_Promise_*) ────────────────
+// 可外部写入的异步结果占位符。Aura 侧 `aura/lang/concurrent/Promise.aura`
+// 是纯 Aura object（基于 Memory.alloc/read64/write64）；VM 走嵌入镜像派发，
+// **AOT 没有嵌入镜像可用**，故这里给出等价的 C 实现（与 Future 同一风格）。
+// 语义与 Promise.aura 对齐：
+//   create()            → 句柄（0 表示失败）
+//   resolve(id, v)      → 完成，结果 = v
+//   reject(id, code)    → 拒绝，结果 = -code
+//   await(id)           → 阻塞到完成，返回结果（拒绝时为负的错误码）
+//   isDone(id)          → 完成（resolve 或 reject）为 true
+//   isRejected(id)      → 被拒绝为 true
+//   tryAwait(id)        → 未完成返回 -1，否则返回结果
+typedef struct {
+    int64_t state;  // 0 未完成 / 1 已完成 / -1 已拒绝
+    int64_t value;
+} AuraPromise;
+
+int64_t aura_lang_concurrent_Promise_create(void) {
+    AuraPromise *p = (AuraPromise *)malloc(sizeof(AuraPromise));
+    if (!p) return 0;
+    p->state = 0;
+    p->value = 0;
+    return (int64_t)(uintptr_t)p;
+}
+
+void aura_lang_concurrent_Promise_resolve(int64_t fid, int64_t value) {
+    AuraPromise *p = (AuraPromise *)(uintptr_t)fid;
+    if (!p) return;
+    p->value = value;
+    p->state = 1;
+}
+
+void aura_lang_concurrent_Promise_reject(int64_t fid, int64_t error_code) {
+    AuraPromise *p = (AuraPromise *)(uintptr_t)fid;
+    if (!p) return;
+    p->value = -error_code;
+    p->state = -1;
+}
+
+int64_t aura_lang_concurrent_Promise_await(int64_t fid) {
+    AuraPromise *p = (AuraPromise *)(uintptr_t)fid;
+    if (!p) return 0;
+    while (p->state == 0) aura_thread_sleep(1);
+    return p->value;
+}
+
+_Bool aura_lang_concurrent_Promise_isDone(int64_t fid) {
+    AuraPromise *p = (AuraPromise *)(uintptr_t)fid;
+    if (!p) return 0;
+    return p->state != 0;
+}
+
+_Bool aura_lang_concurrent_Promise_isRejected(int64_t fid) {
+    AuraPromise *p = (AuraPromise *)(uintptr_t)fid;
+    if (!p) return 0;
+    return p->state == -1;
+}
+
+int64_t aura_lang_concurrent_Promise_tryAwait(int64_t fid) {
+    AuraPromise *p = (AuraPromise *)(uintptr_t)fid;
+    if (!p) return -1;
+    if (p->state == 0) return -1;
+    return p->value;
+}
+
 // ── Thread (aura_lang_concurrent_Thread_*) ──────────────────
 // Thread 函数由 translate_to_legacy_c 映射到已有 C 实现，
 // 此处提供 aura_lang_concurrent_Thread_* 别名以兼容直接调用。
@@ -3527,8 +3635,8 @@ int64_t aura_lang_concurrent_Future_any(void *future_ids) {
 int64_t aura_lang_concurrent_Thread_spawn(int64_t fn_id, int64_t arg) {
     return aura_thread_create(fn_id, arg);
 }
-void aura_lang_concurrent_Thread_join(int64_t id) {
-    aura_thread_join(id);
+int64_t aura_lang_concurrent_Thread_join(int64_t id) {
+    return aura_thread_join(id);
 }
 void aura_lang_concurrent_Thread_sleep(int64_t ms) {
     aura_thread_sleep(ms);
@@ -3738,7 +3846,9 @@ static AuraFnEnt g_fn_table[AURA_FN_COUNT] = {
     AURA_FN(aura_lang_std_String_startsWith),
     AURA_FN(aura_lang_std_String_substring),
     AURA_FN(aura_lang_std_String_substringAfter),
+    AURA_FN(aura_lang_std_String_substringAt),
     AURA_FN(aura_lang_std_String_substringBefore),
+    AURA_FN(aura_lang_std_String_substringFrom),
     AURA_FN(aura_lang_std_String_toFloat),
     AURA_FN(aura_lang_std_String_toInt),
     AURA_FN(aura_lang_std_String_toLowerCase),

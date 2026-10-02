@@ -329,17 +329,44 @@ class PhotonObjectWriter {
         //    否则 call helper 会被链接到 .text 起点（main），导致调用错位。
         if (functionName != "") {
             val funcParts: List<String> = this.splitComma(functionName)
-            val offsetParts: List<String> = this.functionOffsetsList
+            // ⚠️ functionOffsetsList 只被旧 API（emitFromMachineCode/appendFunction）
+            // 填充；compileFromSsa 路径只设置 functionOffsets 字符串
+            // （`name|offset` 以 ';' 连接，';;' 为空段）。列表为空时必须从字符串
+            // 解析，否则每个函数符号都落回 offset=0 —— 链接后**所有**内部调用
+            // 都跳到 .text 起点（2026-10-02 实测：hello.exe 退出码 32、无输出，
+            // nm 显示全部函数符号在 00000000）。
+            var offsetParts: List<String> = this.functionOffsetsList
+            if (offsetParts.size == 0 && this.functionOffsets != "") {
+                val rawParts: List<String> = this.functionOffsets.split(";")
+                val parsed: List<String> = arrayListOf<String>()
+                var ri: Int = 0
+                while (ri < rawParts.size) {
+                    if (rawParts[ri] != "") {
+                        parsed.add(rawParts[ri])
+                    }
+                    ri = ri + 1
+                }
+                offsetParts = parsed
+            }
             var fi: Int = 0
             while (fi < funcParts.size) {
                 if (funcParts[fi] != "") {
-                    val symOffset: Int = 0
-                    if (fi < offsetParts.size) {
+                    var symOffset: Int = 0
+                    if (offsetParts.size == funcParts.size) {
+                        // 顺序一致（parseFuncNames 保持 offsets 串顺序）：按下标取。
                         val of: List<String> = this.splitPipe(offsetParts[fi])
-                        if (of.size >= 2 && of[0] == funcParts[fi]) {
+                        if (of.size >= 2) {
                             symOffset = this.strToInt(of[1])
-                        } else if (of.size >= 2) {
-                            symOffset = this.strToInt(of[1])
+                        }
+                    } else {
+                        // 顺序不一致：按名字精确匹配兜底。
+                        var oi: Int = 0
+                        while (oi < offsetParts.size) {
+                            val of2: List<String> = this.splitPipe(offsetParts[oi])
+                            if (of2.size >= 2 && of2[0] == funcParts[fi]) {
+                                symOffset = this.strToInt(of2[1])
+                            }
+                            oi = oi + 1
                         }
                     }
                     recs.add(funcParts[fi] + "|" + this.toStr(symOffset) + "|1|0x0020|2")

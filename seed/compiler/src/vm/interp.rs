@@ -395,6 +395,49 @@ impl Vm {
                 };
                 self.frames[top].stack.push(v);
             }
+            Instr::ListIsEmpty => {
+                let obj = self.pop(top)?;
+                // 内联列表与堆句柄（含 `ArrayList` 类实例）都要正确判定
+                let empty = match &obj {
+                    Value::Ref(h) => self.heap.list_len(*h) == 0,
+                    Value::List(items) => items.is_empty(),
+                    _ => true,
+                };
+                self.frames[top].stack.push(Value::Bool(empty));
+            }
+            Instr::ListContains => {
+                let obj = self.pop(top)?;
+                let needle = self.pop(top)?;
+                let found = self.heap_or_inline_contains(&obj, &needle);
+                self.frames[top].stack.push(Value::Bool(found));
+            }
+            Instr::ListIndexOf => {
+                let obj = self.pop(top)?;
+                let needle = self.pop(top)?;
+                let idx = self.heap_or_inline_index_of(&obj, &needle);
+                self.frames[top].stack.push(Value::Int(idx));
+            }
+            Instr::ListRemoveAt => {
+                // 栈：下标、列表引用
+                let obj = self.pop(top)?;
+                let idx_v = self.pop(top)?;
+                let removed = match obj {
+                    Value::Ref(h) => {
+                        let i = idx_v.as_int().max(0) as usize;
+                        self.heap.list_remove_at(h, i)
+                    }
+                    Value::List(mut items) => {
+                        let i = idx_v.as_int().max(0) as usize;
+                        if i < items.len() {
+                            items.remove(i)
+                        } else {
+                            Value::Null
+                        }
+                    }
+                    _ => Value::Null,
+                };
+                self.frames[top].stack.push(removed);
+            }
             Instr::ListLen => {
                 let obj = self.pop(top)?;
                 // 同时兼容堆列表（`Value::Ref`）与内联列表（native 产出，如 `split`）
@@ -466,14 +509,30 @@ impl Vm {
             }
 
             // ── P7 内存管理 ──
+            //
+            // ⚠ 栈约定修复（2026-10-02）：`RETAIN` / `RELEASE` **消费**栈顶值。
+            //
+            // 发射端（`codegen/emit.rs` 的 `Retain`/`Release` 分支）生成的是
+            // `LoadVar(src); RETAIN` —— 先把操作数压栈，再由本指令处理。原实现
+            // 用 `stack.last()` 只窥视不出栈，于是这一对被永远净增 1 个栈槽：
+            // 紧密循环内每次原生/函数调用（其后都插有一条 ARC 指令）都泄漏一个
+            // `Value`，实测 8 秒涨到 7GB（`tests/concurrent/*` 的「内存暴涨」根因）。
+            //
+            // `RETAIN`/`RELEASE` 的唯一生产者是 Rust 发射端（Aura 编译器从不发射
+            // 这两条），因此按「消费压栈操作数」约定修正。`INC_REF`/`DEC_REF`/
+            // `DROP_REF` 无生产者，保持原样以免误伤。
             Instr::Retain => {
-                if let Some(&Value::Ref(h)) = self.frames[top].stack.last() {
-                    self.heap.inc_ref(h);
+                if let Some(v) = self.frames[top].stack.pop() {
+                    if let Value::Ref(h) = v {
+                        self.heap.inc_ref(h);
+                    }
                 }
             }
             Instr::Release => {
-                if let Some(&Value::Ref(h)) = self.frames[top].stack.last() {
-                    self.heap.dec_ref(h);
+                if let Some(v) = self.frames[top].stack.pop() {
+                    if let Value::Ref(h) = v {
+                        self.heap.dec_ref(h);
+                    }
                 }
             }
             Instr::WeakRef => {
@@ -777,12 +836,42 @@ impl Vm {
                 };
                 self.frames[top].stack.push(Value::Int(tag as i64));
             }
+            // ── 模块级全局变量（P3.2）──
+            //
+            // 与 `LoadVar`/`StoreVar`（帧局部槽）相对：这两个指令读写
+            // `Vm::globals` —— 一份**跨函数、跨线程 VM 共享**的 `i64` 存储。
+            // `Thread.spawn` 创建的新 VM 通过 `set_globals_store` 共享父 VM 的
+            // 存储，因此 `NativeThread` 之类的顶层状态才能真正跨线程可见。
+            Instr::LoadGlobal(slot) => {
+                let v = {
+                    let g = self.globals.lock().unwrap();
+                    g.get(slot as usize).copied().unwrap_or(0)
+                };
+                self.frames[top].stack.push(Value::Int(v));
+            }
+            Instr::StoreGlobal(slot) => {
+                let v = self.pop(top)?.as_int();
+                let mut g = self.globals.lock().unwrap();
+                let i = slot as usize;
+                if g.len() <= i {
+                    g.resize(i + 1, 0);
+                }
+                g[i] = v;
+            }
             // Phase 3: 函数引用
+            //
+            // ⚠ 语义修正（2026-10-02）：压入**函数表下标（`Int`）**，而非
+            // `HeapData::FnRef` 引用对象。
+            //
+            // 理由：函数引用的唯一消费者是 `Thread.spawn(fn, arg)` /
+            // `Future.spawn(fn, arg)`，原生侧以 `args[0].as_int()` 取**函数下标**；
+            // AOT 后端同语义（`aot/emit.rs` 直接把裸函数名替换为 `Int(idx)` 字面量）。
+            // 原实现压入 `Ref`，`as_int()` 得 0 → 新线程恒执行函数 #0。
+            // `HeapData::FnRef` 无任何消费方，改为整数不损失能力。
             Instr::MakeFnRef(func_idx) => {
-                // 创建函数引用对象
-                let heap_data = crate::vm::heap::HeapData::FnRef(func_idx as usize);
-                let ref_id = self.heap.alloc(heap_data);
-                self.frames[top].stack.push(Value::Ref(ref_id));
+                self.frames[top]
+                    .stack
+                    .push(Value::Int(func_idx as i64));
             }
             // Phase 2: 跨模块调用
             Instr::CallExport(sym_idx) => {
@@ -1613,10 +1702,17 @@ impl Vm {
 
         // Env.* / FileUtils.* / FileSystem.* 函数优先使用 Rust native
         // （Aura 实现依赖 /proc/self/environ，在 Windows 上不可用）。
+        //
+        // `ProcessNative.run` 与 `ProcessNative.exitGroup` 同一约定：Aura 侧的
+        // `run` 用 fork/execve 组合（POSIX），AOT 发射器对其**内置降级**为
+        // Windows 的 UCRT `system`（见 ProcessNative.aura `run` 的注记）——
+        // VM 必须同样在解释 Aura 体之前拦截，否则 `fork` 在 Windows 下
+        // 接口调用失败返回 0，被 `spawn` 误判为「子进程」走进 exitGroup(1)。
         if native_name.starts_with("aura.lang.std.Env.")
             || native_name.starts_with("aura.lang.std.fs.FileUtils.")
             || native_name.starts_with("aura.lang.std.FileSystem.")
             || native_name == "ProcessNative.exitGroup"
+            || native_name == "ProcessNative.run"
             || native_name.starts_with("aura.lang.std.Process.")
         {
             if let Some(f) = self.natives.get(&native_name) {
@@ -1920,17 +2016,57 @@ impl Vm {
     }
 
     /// P9: 确保动态库已加载
+    ///
+    /// 与 [`Self::ensure_aot_lib_loaded`]（`extern interface` / `@aot`）共用同一套
+    /// 候选路径表 [`Self::candidate_lib_paths`]，避免两条 FFI 路径对「库在哪」给出
+    /// 不同答案。旧实现只试 `utils` / `libs/utils.dll` / `utils.dll` 三个名字，
+    /// 漏掉了 loom workspace 的实际产物位置（`libs/utils/libs/utils.dll`、
+    /// `target/build/libs/utils/utils.dll`），导致 `extern "C" "utils"` 声明在 demo
+    /// 里恒报 `Cannot load library: utils`、调用被静默降级为 0（见 P3.4 验收）。
+    ///
+    /// 除候选表外，还补充两处「相对入口文件」的搜索：
+    /// - 库名本身已是可加载路径（含 `/` 或 `\`）时原样使用；
+    /// - 入口脚本所在目录及其父目录下的 `libs/<name>.dll`，覆盖 demo 以
+    ///   `aura run demo_cffi/src/main.aura`（CWD 在 workspace 根）运行的场景。
     #[cfg(windows)]
     fn ensure_lib_loaded(&mut self, lib_name: &str) {
         if self.loaded_libs.contains_key(lib_name) {
             return;
         }
-        // 尝试多个可能的路径
-        let paths = [
-            lib_name.to_string(),
-            format!("libs/{}.dll", lib_name),
-            format!("{}.dll", lib_name),
-        ];
+        let mut paths = Self::candidate_lib_paths(lib_name);
+        // 库名本身就是路径（含分隔符）→ 提到最前，优先按调用方给的位置加载
+        if lib_name.contains('/') || lib_name.contains('\\') {
+            let p = lib_name.to_string();
+            paths.retain(|x| x != &p);
+            paths.insert(0, p);
+        }
+        // 入口文件相对路径（如 demo 的 `libs/utils/libs/utils.dll`）。
+        // 用 `PathBuf::join` 而非字符串拼接：`lib_search_dirs` 里的目录来自
+        // `canonicalize()`，在 Windows 上带 `\\?\` 前缀，手工拼 `/` 会得到
+        // 混合分隔符路径而 `LoadLibraryW` 找不到。
+        let search_dirs: Vec<String> = self.lib_search_dirs().to_vec();
+        for dir in &search_dirs {
+            let base = std::path::Path::new(dir);
+            paths.push(base.join("libs").join(format!("{}.dll", lib_name)).to_string_lossy().to_string());
+            paths.push(base.join(format!("{}.dll", lib_name)).to_string_lossy().to_string());
+            paths.push(
+                base.join("libs")
+                    .join("utils")
+                    .join("libs")
+                    .join(format!("{}.dll", lib_name))
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            paths.push(
+                base.join("target")
+                    .join("build")
+                    .join("libs")
+                    .join(lib_name)
+                    .join(format!("{}.dll", lib_name))
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
 
         for path in &paths {
             let wide: Vec<u16> =
@@ -1952,14 +2088,33 @@ impl Vm {
         if self.loaded_libs.contains_key(lib_name) {
             return;
         }
-        let paths = [
-            lib_name.to_string(),
-            format!("libs/lib{}.so", lib_name),
-            format!("lib{}.so", lib_name),
-        ];
+        let mut paths = Self::candidate_lib_paths(lib_name);
+        if lib_name.contains('/') {
+            let p = lib_name.to_string();
+            paths.retain(|x| x != &p);
+            paths.insert(0, p);
+        }
+        if let Some(dir) = self.lib_search_dirs().first() {
+            let base = std::path::Path::new(dir);
+            for rel in [
+                base.join("libs").join(format!("lib{}.so", lib_name)),
+                base.join(format!("lib{}.so", lib_name)),
+                base.join("libs").join("utils").join("libs").join(format!("lib{}.so", lib_name)),
+            ] {
+                paths.push(rel.to_string_lossy().to_string());
+            }
+        }
+        for dir in self.lib_search_dirs() {
+            let base = std::path::Path::new(dir);
+            paths.push(base.join("libs").join(format!("lib{}.so", lib_name)).to_string_lossy().to_string());
+            paths.push(base.join("libs").join(format!("lib{}.dylib", lib_name)).to_string_lossy().to_string());
+        }
 
         for path in &paths {
-            let c_path = std::ffi::CString::new(path.clone()).unwrap();
+            let c_path = match std::ffi::CString::new(path.clone()) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
             unsafe {
                 let handle = dlopen(c_path.as_ptr(), 2); // RTLD_NOW = 2
                 if !handle.is_null() {
@@ -1972,17 +2127,57 @@ impl Vm {
         eprintln!("[vm] Cannot load library: {}", lib_name);
     }
 
+    /// FFI 库搜索目录（来自 `VmOptions.lib_search_dirs`，已含入口脚本目录及其父目录）
+    fn lib_search_dirs(&self) -> &[String] {
+        &self.lib_search_dirs
+    }
+
     /// extern interface: 确保 AOT 库已加载
     fn ensure_aot_lib_loaded(&mut self, lib_name: &str) -> Option<u32> {
         if let Some(&id) = self.aot_module_map.get(lib_name) {
             return Some(id);
         }
         // 与 C FFI 一致的库查找逻辑：依次尝试多种路径
+        // P3.4: 除相对候选表外，也搜索 `VmOptions.lib_search_dirs`（入口目录及
+        // 各级父目录 + CWD），否则 `extern interface` 的 `@aot` 调用在
+        // workspace 布局（`libs/<name>/libs/<name>.dll`）下找不到产物。
         let lib_path = if std::path::Path::new(lib_name).exists() {
             lib_name.to_string()
         } else {
-            let paths = Self::candidate_lib_paths(lib_name);
-            paths.into_iter().find(|p| std::path::Path::new(p).exists())?
+            // 候选路径统一用 `PathBuf::join` 组装：Windows 上 `canonicalize()` 返回
+            // `\\?\D:\...` verbatim 前缀，若再用 `format!("{}/libs/...")` 手工拼接，
+            // 会得到 `\\?\D:\...\ext_ffi_demo/libs/x.dll` 这类混合分隔符路径，
+            // `Path::exists()` 判定失败（实测 demo 恒「no library file found」）。
+            let mut paths: Vec<std::path::PathBuf> =
+                Self::candidate_lib_paths(lib_name).into_iter().map(std::path::PathBuf::from).collect();
+            for dir in self.lib_search_dirs() {
+                let base = std::path::Path::new(dir);
+                paths.push(base.join("libs").join(format!("{}.dll", lib_name)));
+                paths.push(
+                    base.join("libs")
+                        .join("utils")
+                        .join("libs")
+                        .join(format!("{}.dll", lib_name)),
+                );
+                paths.push(
+                    base.join("target")
+                        .join("build")
+                        .join("libs")
+                        .join(lib_name)
+                        .join(format!("{}.dll", lib_name)),
+                );
+            }
+            match paths.into_iter().find(|p| p.exists()) {
+                Some(p) => p.to_string_lossy().to_string(),
+                None => {
+                    eprintln!(
+                        "[vm] AOT interface: no library file found for `{}` (search dirs: {:?})",
+                        lib_name,
+                        self.lib_search_dirs()
+                    );
+                    return None;
+                }
+            }
         };
 
         #[cfg(all(feature = "llvm", feature = "dynamic-ffi"))]
@@ -2047,8 +2242,17 @@ impl Vm {
         let module_id = self.ensure_aot_lib_loaded(lib_name)?;
 
         // 从函数名提取实际函数名（"Utils.add" → "add"）
-        let func_name = native_name.split('.').last().unwrap_or(native_name);
-        let func_idx = self.aot_runtime.lookup_func_idx(module_id, func_name)?;
+        let func_name = native_name.split('.').next_back().unwrap_or(native_name);
+        let func_idx = match self.aot_runtime.lookup_func_idx(module_id, func_name) {
+            Some(i) => i,
+            None => {
+                eprintln!(
+                    "[vm] AOT interface: symbol `{}` (from `{}`) not found in module {}",
+                    func_name, native_name, module_id
+                );
+                return None;
+            }
+        };
 
         eprintln!(
             "[vm] AOT interface call: {} (module={}, func_idx={})",
@@ -2062,6 +2266,33 @@ impl Vm {
     }
 
     // ── 栈辅助 ──
+
+    /// `list.contains(x)`：同时覆盖内联列表与堆句柄（含 `ArrayList` 类实例）。
+    ///
+    /// 比较用 `Value` 的相等语义（`Value::eq`），与 `ArrayList.contains` 的
+    /// `data[i] == item` 保持一致。
+    fn heap_or_inline_contains(&self, list: &Value, needle: &Value) -> bool {
+        match list {
+            Value::List(items) => items.iter().any(|v| v == needle),
+            Value::Ref(h) => self.heap.list_contains(*h, needle),
+            // 字符串接收者：`s.contains("x")`（needle 统一按字符串形式比较）
+            Value::Str(s) => s.contains(&format!("{}", needle)),
+            _ => false,
+        }
+    }
+
+    /// `list.indexOf(x)`：未找到返回 -1。
+    fn heap_or_inline_index_of(&self, list: &Value, needle: &Value) -> i64 {
+        match list {
+            Value::List(items) => items
+                .iter()
+                .position(|v| v == needle)
+                .map(|i| i as i64)
+                .unwrap_or(-1),
+            Value::Ref(h) => self.heap.list_index_of(*h, needle),
+            _ => -1,
+        }
+    }
 
     fn pop(&mut self, top: usize) -> Result<Value, VmError> {
         // 函数名只在栈下溢时才需要（用于错误信息）。`pop` 在热路径上被每条

@@ -1,9 +1,11 @@
-// utils_interface.aura — extern object 声明（独立文件）
+// utils_interface.aura — extern interface 声明（独立文件）
 // 供 demo_aot_direct/src/main.aura 通过 import 引入
-// 已迁移：extern interface → extern object + @aot
+//
+// 语法说明：`extern object` 已废弃（parser 会硬报错），
+// 统一使用 `extern interface` + `default fun loadLibrary()` + `@aot`。
 
-extern object Utils {
-    default fun loadLibrary(): String = "utils"
+extern interface Utils {
+    default fun loadLibrary(): String = "utils_aot"
     @aot fun add(a: Int, b: Int): Int
     @aot fun multiply(a: Int, b: Int): Int
     @aot fun factorial(n: Int): Int

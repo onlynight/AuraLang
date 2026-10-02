@@ -357,6 +357,20 @@ impl ActorRuntime {
         self.get(id).map(|a| a.mailbox.len()).unwrap_or(0)
     }
 
+    /// 从 Actor 邮箱取出最早的一条消息（非阻塞；空或 Actor 不存在时返回 `None`）。
+    ///
+    /// 与 `send`（写入 `actor.mailbox`）配对，是**进程内** Actor 的接收原语。
+    ///
+    /// 为什么需要它：`Actor.recvProcessActor` 原先只查**跨进程**注册表
+    /// （`actor_process::PROCESS_ACTORS`，基于 socket），与进程内 `send` 写入的
+    /// 邮箱是**两个不相交的存储**。于是
+    /// `send(a, m); recvProcessActor(a)` 恒得 `null` —— 消息发进去了却读不出来
+    /// （`examples/concurrency/actor_system.aura` 的接收路径因此静默失效）。
+    /// 该 native 现在先查跨进程注册表，未命中则回落到本方法。
+    pub fn recv(&mut self, id: ActorId) -> Option<Value> {
+        self.get_mut(id).and_then(|actor| actor.mailbox.pop_front())
+    }
+
     /// 获取 Actor 私有状态
     pub fn get_state(&self, id: ActorId, key: &str) -> Option<Value> {
         self.get(id).and_then(|a| a.state.get(key).cloned())

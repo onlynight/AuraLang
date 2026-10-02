@@ -15,7 +15,17 @@
 $ErrorActionPreference = 'Continue'
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $RootDir
-$exe = "rust\target\release\aura.exe"
+# Resolve the current seed compiler. `rust\target\release\aura.exe` is a stale path
+# left over from before the seed/ migration; prefer the cargo-built seed, then
+# build/bin, then the frozen seed shipped in-tree.
+$exe = $null
+foreach ($c in @('seed\target\release\aura.exe', 'seed\target\debug\aura.exe', 'build\bin\aura.exe', 'aura\seed\aura.exe')) {
+    if (Test-Path $c) { $exe = (Resolve-Path $c).Path; break }
+}
+if (-not $exe) {
+    Write-Host '[diff] ERROR: no seed compiler found (build it: cd seed; cargo build -p compiler --features llvm --release)' -ForegroundColor Red
+    exit 1
+}
 $diffDir = "build\diff"
 New-Item -ItemType Directory -Force -Path $diffDir | Out-Null
 

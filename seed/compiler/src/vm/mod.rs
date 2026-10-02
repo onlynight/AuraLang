@@ -156,6 +156,10 @@ pub struct VmOptions {
     pub jit: bool,
     /// 热点阈值：函数累计调用次数超过该值即标记为热点
     pub hotspot_threshold: u64,
+    /// P3.4: FFI 动态库搜索目录（按优先级）。CLI 会把入口脚本所在目录及其父目录
+    /// 填进来，`ensure_lib_loaded` 据此补全 `libs/<name>.dll` 之类的相对路径，
+    /// 使 `extern "C" "utils"` 能从入口所在 workspace 找到产物。
+    pub lib_search_dirs: Vec<String>,
 }
 
 impl Default for VmOptions {
@@ -164,6 +168,7 @@ impl Default for VmOptions {
             max_call_depth: 4096,
             jit: false,
             hotspot_threshold: 10_000,
+            lib_search_dirs: Vec::new(),
         }
     }
 }
@@ -262,6 +267,18 @@ pub enum Instr {
     ListPush,
     ListPop,
     ListLen,
+    /// 列表判空（兼容内联列表与 `ArrayList` 类实例句柄）→ Bool
+    ListIsEmpty,
+    /// 列表包含判定（栈：元素、List 引用）→ Bool
+    ListContains,
+    /// 列表下标查找（栈：元素、List 引用）→ Int
+    ListIndexOf,
+    /// 按下标删除列表元素（栈：index、List 引用/类实例句柄）→ 被删元素。
+    ///
+    /// 堆句柄感知：`ArrayList<T>` 类实例接收者会解包到其字段 0 的真实列表
+    /// （见 `Heap::list_slot`）。用于替代 `ArrayList.remove`（其 `_size`
+    /// 在运行期恒为 0，见 `codegen/hir.rs` 的拦截注释）。
+    ListRemoveAt,
     MapSet,
     MapGet,
     MapLen,
@@ -388,6 +405,12 @@ pub enum Instr {
     CondvarSignal,
     /// 唤醒所有（栈顶为句柄）
     CondvarBroadcast,
+
+    // ── 模块级全局变量（P3.2）──
+    /// 读取模块级全局槽位（下标），压栈。
+    LoadGlobal(u16),
+    /// 写入模块级全局槽位（弹栈取整数值）。
+    StoreGlobal(u16),
 }
 
 /// 合并嵌入模块时重定位指令中的「模块内下标」到宿主模块下标。
@@ -410,6 +433,13 @@ fn remap_embedded_instrs(code: &mut [Instr], const_base: u16, native_base: u16, 
                 *i = i.wrapping_add(func_base)
             }
             Instr::CallAot(i) | Instr::MakeFnRef(i) => *i = i.wrapping_add(func_base),
+            // ⚠ P3.2：`LoadGlobal`/`StoreGlobal` 的操作数是**模块级全局槽位**，
+            // 它**不属于**嵌入模块自己的三张表（常量/原生/函数），故**不做平移**。
+            //
+            // 不变量：嵌入的标准库模块（`aura/core/**`）**不得**声明顶层
+            // `val`/`var`——否则其全局槽位会与宿主程序（以及彼此）的槽位重叠，
+            // 互相踩写。当前 `aura/core/**` 已核实为 0 处顶层量；若将来新增，
+            // 必须在合并时为嵌入模块的全局槽位引入独立基址（类似 func_base）。
             _ => {}
         }
     }
@@ -659,6 +689,10 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
             crate::codegen::opcode::OpCode::ListPush => instrs.push(Instr::ListPush),
             crate::codegen::opcode::OpCode::ListPop => instrs.push(Instr::ListPop),
             crate::codegen::opcode::OpCode::ListLen => instrs.push(Instr::ListLen),
+            crate::codegen::opcode::OpCode::ListIsEmpty => instrs.push(Instr::ListIsEmpty),
+            crate::codegen::opcode::OpCode::ListContains => instrs.push(Instr::ListContains),
+            crate::codegen::opcode::OpCode::ListIndexOf => instrs.push(Instr::ListIndexOf),
+            crate::codegen::opcode::OpCode::ListRemoveAt => instrs.push(Instr::ListRemoveAt),
             crate::codegen::opcode::OpCode::MapSet => instrs.push(Instr::MapSet),
             crate::codegen::opcode::OpCode::MapGet => instrs.push(Instr::MapGet),
             crate::codegen::opcode::OpCode::MapLen => instrs.push(Instr::MapLen),
@@ -772,6 +806,24 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                 instrs.push(Instr::PushHandler(off as usize, slot, catch_type));
             }
             crate::codegen::opcode::OpCode::PopHandler => instrs.push(Instr::PopHandler),
+
+            // ── 模块级全局变量（P3.2）──
+            crate::codegen::opcode::OpCode::LoadGlobal(_) => {
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
+                ip += 2;
+                instrs.push(Instr::LoadGlobal(v));
+            }
+            crate::codegen::opcode::OpCode::StoreGlobal(_) => {
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
+                ip += 2;
+                instrs.push(Instr::StoreGlobal(v));
+            }
 
             // ── Phase B: 并发运行时指令 ──
             crate::codegen::opcode::OpCode::ThreadSpawn(_) => {
@@ -933,6 +985,17 @@ pub struct Vm {
     singletons: std::collections::HashMap<String, Value>,
     /// 异常处理器栈（`try/catch`，LIFO）
     handlers: Vec<Handler>,
+    /// 模块级全局变量存储（P3.2）：顶层 `val`/`var` 的共享槽位。
+    ///
+    /// 以 `i64` 承载，与 AOT 后端的 `@<name> = global i64 0` 语义一致
+    /// （整数 / 句柄 / 指针）。用 `Arc<Mutex<..>>` 而非裸 `Vec` 是为了让
+    /// `Thread.spawn` 拉起的新 VM **共享同一份存储** —— 否则每个线程各持一份
+    /// 副本，「跨线程共享状态」完全失效（`tests/concurrent/mutex_shared.aura`
+    /// 的 `count=0`、`integration.aura` 的 `done=0` 即此症状）。
+    ///
+    /// 已知限制：`Value` 含 `Rc<str>` 非 `Send`，故全局槽位只承载整数；
+    /// 非整数全局量会退化为 0。AOT 后端同样是 `global i64`，两路径一致。
+    globals: std::sync::Arc<std::sync::Mutex<Vec<i64>>>,
     /// `Process.exit(code)` 请求的退出码（None = 未请求退出）
     exit_code: Option<i32>,
     halt: bool,
@@ -963,6 +1026,8 @@ pub struct Vm {
     loaded_libs: std::collections::HashMap<String, usize>,
     #[cfg(unix)]
     loaded_libs: std::collections::HashMap<String, *mut std::os::raw::c_void>,
+    /// P3.4: FFI 动态库搜索目录（来自 `VmOptions.lib_search_dirs`）
+    lib_search_dirs: Vec<String>,
 }
 
 impl Vm {
@@ -1009,8 +1074,10 @@ impl Vm {
             result: None,
             singletons: std::collections::HashMap::new(),
             handlers: Vec::new(),
+            globals: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             exit_code: None,
             halt: false,
+            lib_search_dirs: opts.lib_search_dirs.clone(),
             opts,
             #[cfg(feature = "jit")]
             jit: if cfg!(feature = "jit") { Some(crate::vm::jit::JitState::new()) } else { None },
@@ -1564,6 +1631,16 @@ impl Vm {
     /// 返回字节码模块的克隆（供 `Thread.spawn` 创建新 VM 使用）
     pub fn module_clone(&self) -> crate::codegen::opcode::BytecodeModule {
         self.module.module.clone()
+    }
+
+    /// P3.2：取模块级全局存储器句柄（供 `Thread.spawn` 让新 VM 共享同一份存储）。
+    pub fn globals_store(&self) -> std::sync::Arc<std::sync::Mutex<Vec<i64>>> {
+        self.globals.clone()
+    }
+
+    /// P3.2：替换模块级全局存储器（新线程 VM 共享父 VM 存储时调用）。
+    pub fn set_globals_store(&mut self, store: std::sync::Arc<std::sync::Mutex<Vec<i64>>>) {
+        self.globals = store;
     }
 
     /// 回调派发入口（P8.7）：被 C 蹦床通过 thread-local 派发闭包调用

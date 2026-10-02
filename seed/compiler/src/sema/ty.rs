@@ -61,6 +61,15 @@ pub enum Ty {
     /// 泛型类型变量（推断中临时使用）
     TypeVar(u32),
 
+    /// 模块命名空间（`aura` / `aura.string` / `Math` 等）。
+    ///
+    /// 仅用于**成员访问链**的类型传播：`aura.string.length(s)` 里
+    /// `check_ident("aura")` 需要返回一个「这是模块」的记号，才能让
+    /// `check_member("aura", "string")` 继续往下走并最终解析出 `length`
+    /// 的返回类型 `Int`。没有这个变体时，`aura` 会被报 `unresolved reference`
+    /// 并退化成 `Ty::Error` ⇒ 整条链的类型丢失 ⇒ HIR 把结果当 `Any` 处理。
+    Module(String),
+
     /// 未知错误类型（无法推断）
     Error,
 }
@@ -311,6 +320,7 @@ impl Ty {
                 format!("({}) -> {}", ps.join(", "), ret.name())
             }
             Ty::TypeVar(i) => format!("T{}", i),
+            Ty::Module(path) => format!("<module {}>", path),
             Ty::Error => "<error>".into(),
         }
     }

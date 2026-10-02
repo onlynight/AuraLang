@@ -24,6 +24,11 @@ pub fn fold_hir(hir: &mut HirProgram) {
             f.body = fold_block(&f.body);
         }
     }
+    // 顶层语句（脚本模式）同样需要折叠：否则 `val X = Mutex.new()` 的常量
+    // 初始化式在顶层不被处理，与函数体内的语义不一致。
+    if let Some(tl) = &mut hir.top_level_statements {
+        *tl = fold_block(tl);
+    }
 }
 
 fn fold_block(b: &HirBlock) -> HirBlock {
@@ -307,6 +312,10 @@ pub fn inline_hir(hir: &mut HirProgram) {
         }
         let new_body = inline_block(&f.body, &candidates);
         f.body = new_body;
+    }
+    // 顶层语句（脚本模式）同样可能被内联候选命中（例如 `val f = makeAdder(5)`）。
+    if let Some(tl) = &mut hir.top_level_statements {
+        *tl = inline_block(tl, &candidates);
     }
 }
 
