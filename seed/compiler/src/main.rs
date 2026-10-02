@@ -22,6 +22,7 @@ fn real_main() {
     if args.len() < 2 {
         eprintln!("Usage: aura <command> [options]");
         eprintln!("Commands: run, compile, check, version, build, stdlib-compile, export-header");
+        eprintln!("run options: --vm=aura|rust (VM backend, default: rust unless AURA_DEFAULT_VM set)");
         process::exit(1);
     }
 
@@ -177,7 +178,40 @@ fn real_main() {
             }
         }
         "run" | "compile" | "check" | "build" => {
-            let entry = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            // P4.4: `run` 支持 VM 后端选择 `--vm=aura|rust`（或 `--vm aura|rust`）。
+            // 默认后端：环境变量 AURA_DEFAULT_VM > 构建期 option_env!（构建配置）> rust。
+            // 该开关不改变 `build` 的产物 —— 双实现共享同一 `.auc` 格式。
+            let mut vm_backend = std::env::var("AURA_DEFAULT_VM")
+                .unwrap_or_else(|_| default_vm_backend().to_string());
+            let entry: String;
+            if args[1] == "run" {
+                let mut picked: Option<String> = None;
+                let mut i = 2;
+                while i < args.len() {
+                    let a = &args[i];
+                    if let Some(rest) = a.strip_prefix("--vm=") {
+                        vm_backend = rest.to_string();
+                    } else if a == "--vm" {
+                        if i + 1 < args.len() {
+                            vm_backend = args[i + 1].clone();
+                            i += 1;
+                        }
+                    } else if picked.is_none() {
+                        picked = Some(a.clone());
+                    }
+                    i += 1;
+                }
+                entry = picked.unwrap_or_default();
+            } else {
+                entry = args.get(2).map(|s| s.as_str()).unwrap_or("").to_string();
+            }
+            if vm_backend != "aura" && vm_backend != "rust" {
+                eprintln!(
+                    "Error: unknown VM backend '{}' (expected --vm=aura|rust)",
+                    vm_backend
+                );
+                process::exit(1);
+            }
             if entry.is_empty() {
                 eprintln!("Error: no input file specified");
                 process::exit(1);
@@ -293,24 +327,99 @@ fn real_main() {
                     }
                 }
             } else {
-                match fs::read_to_string(entry) {
+                match fs::read_to_string(&entry) {
                     Ok(source) => {
                         // 先解析 import，内联所有引用的模块
                         let expanded = compiler::codegen::resolve_aura_imports(
                             &source,
-                            Some(entry),
+                            Some(entry.as_str()),
                         );
                         match compiler::codegen::compile_source(&expanded) {
                             Ok(module) => {
                                 println!("[ok] {} compiled ({} functions)", entry, module.functions.len());
                                 if args[1] == "run" {
-                                    // Execute the compiled module
-                                    let mut opts = compiler::vm::VmOptions::default();
-                                    // P3.4: 把入口脚本所在目录及其父目录加入 FFI 库搜索路径，
-                                    // 使 `extern "C" "utils"` 这类声明能找到 workspace 内的
-                                    // `libs/<name>.dll` 产物（见 interp.rs::ensure_lib_loaded）。
-                                    opts.lib_search_dirs = ffi_search_dirs(entry);
-                                    match compiler::vm::Vm::new(&module, opts) {
+                                    if vm_backend == "aura" {
+                                        // ── P4.4: Aura VM 后端 ──
+                                        // 同一份编译产物落为 .auc（双实现共享格式），
+                                        // 交给 Aura VM 运行器（纯 Aura 的 VmRunner）执行。
+                                        // 运行器 main 返回被测程序退出码（非零 Int 映射为进程退出码）。
+                                        if let Err(e) = fs::create_dir_all("build/vm") {
+                                            eprintln!("Error: mkdir build/vm: {}", e);
+                                            process::exit(1);
+                                        }
+                                        let auc_path = "build/vm/current.auc";
+                                        if let Err(e) =
+                                            compiler::codegen::serialize::write_auc(auc_path, &module)
+                                        {
+                                            eprintln!("Error writing {}: {}", auc_path, e);
+                                            process::exit(1);
+                                        }
+                                        println!("[vm] backend=aura ({})", auc_path);
+                                        let runner = match locate_vm_runner_source() {
+                                            Some(p) => p,
+                                            None => {
+                                                eprintln!(
+                                                    "Error: Aura VM runner not found \
+                                                     (examples/compiler/auc_vm_runner.aura); \
+                                                     run from a workspace directory"
+                                                );
+                                                process::exit(1);
+                                            }
+                                        };
+                                        let runner_src = match fs::read_to_string(&runner) {
+                                            Ok(s) => s,
+                                            Err(e) => {
+                                                eprintln!("Error reading {}: {}", runner.display(), e);
+                                                process::exit(1);
+                                            }
+                                        };
+                                        let runner_expanded = compiler::codegen::resolve_aura_imports(
+                                            &runner_src,
+                                            Some(runner.to_string_lossy().as_ref()),
+                                        );
+                                        match compiler::codegen::compile_source(&runner_expanded) {
+                                            Ok(runner_module) => {
+                                                let opts2 = compiler::vm::VmOptions::default();
+                                                match compiler::vm::Vm::new(&runner_module, opts2) {
+                                                    Ok(mut vm) => match vm.run() {
+                                                        Ok(val) => {
+                                                            if let compiler::vm::Value::Str(ref s) = val {
+                                                                println!("{}", s);
+                                                            }
+                                                            if let compiler::vm::Value::Int(ref code) = val {
+                                                                if *code != 0 {
+                                                                    process::exit(*code as i32);
+                                                                }
+                                                            }
+                                                            if let Some(code) = vm.requested_exit_code() {
+                                                                process::exit(code);
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            eprintln!("Runtime error: {}", e);
+                                                            process::exit(1);
+                                                        }
+                                                    },
+                                                    Err(e) => {
+                                                        eprintln!("VM init error: {}", e);
+                                                        process::exit(1);
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                eprintln!("Error: {}", e);
+                                                process::exit(1);
+                                            }
+                                        }
+                                    } else {
+                                        println!("[vm] backend=rust");
+                                        // Execute the compiled module
+                                        let mut opts = compiler::vm::VmOptions::default();
+                                        // P3.4: 把入口脚本所在目录及其父目录加入 FFI 库搜索路径，
+                                        // 使 `extern "C" "utils"` 这类声明能找到 workspace 内的
+                                        // `libs/<name>.dll` 产物（见 interp.rs::ensure_lib_loaded）。
+                                        opts.lib_search_dirs = ffi_search_dirs(&entry);
+                                        match compiler::vm::Vm::new(&module, opts) {
                                         Ok(mut vm) => {
                                             match vm.run() {
                                                 Ok(val) => {
@@ -331,6 +440,7 @@ fn real_main() {
                                             eprintln!("VM init error: {}", e);
                                             process::exit(1);
                                         }
+                                        }
                                     }
                                 }
                             }
@@ -350,6 +460,34 @@ fn real_main() {
         _ => {
             eprintln!("Unknown command: {}", args[1]);
             process::exit(1);
+        }
+    }
+}
+
+/// P4.4: 默认 VM 后端（构建期可配置）。
+///
+/// 优先级：运行时环境变量 `AURA_DEFAULT_VM` > 此构建期默认 > `rust`。
+/// 构建配置方式：`AURA_DEFAULT_VM=aura cargo build ...` 使该产物默认走
+/// Aura VM 后端（D6 双后端并存；`--vm=` 显式开关始终可覆盖）。
+fn default_vm_backend() -> &'static str {
+    match option_env!("AURA_DEFAULT_VM") {
+        Some("aura") => "aura",
+        _ => "rust",
+    }
+}
+
+/// P4.4: 定位 Aura VM 运行器源码（examples/compiler/auc_vm_runner.aura），
+/// 从当前目录逐级向上搜索（支持在 workspace 子目录中调用）。
+fn locate_vm_runner_source() -> Option<std::path::PathBuf> {
+    let rel = "examples/compiler/auc_vm_runner.aura";
+    let mut cur = std::env::current_dir().ok()?;
+    loop {
+        let cand = cur.join(rel);
+        if cand.is_file() {
+            return Some(cand);
+        }
+        if !cur.pop() {
+            return None;
         }
     }
 }

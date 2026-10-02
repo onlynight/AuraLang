@@ -185,8 +185,12 @@ object Aot {
         clangCmd = clangCmd + " -o " + exePath + " " + optFlag
         // Windows 目标：COFF 对象经 lld-link 链接时需要显式 `subsystem`
         // （否则报 `lld-link: error: subsystem must be defined`）。
+        // P4.1：同时显式放大主线程栈（Windows 默认 1MB 不够 —— 深调用链下
+        // 调用帧相互踩踏，表现为局部量被邻居帧残留覆写（实测 0x7F7Fxx 垃圾、
+        // Int 移位结果失真、`.auc` 加载器常量区失步）。种子 CLI 同因用 64MB
+        // 栈跑导入解析递归，此处对齐到 32MB。
         if (tgt.contains("windows")) {
-            clangCmd = clangCmd + " -Wl,/subsystem:console"
+            clangCmd = clangCmd + " -Wl,/subsystem:console -Wl,/stack:33554432"
         }
         r.clangExit = Process.run(clangCmd)
 

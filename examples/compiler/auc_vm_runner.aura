@@ -1,0 +1,26 @@
+// aura:///examples/compiler/auc_vm_runner.aura
+// ═══════════════════════════════════════════════════════════════
+// P4.4：`aura run <entry> --vm=aura` 的 Aura VM 执行通道。
+//
+// 种子 CLI 的 --vm=aura 路径把被测程序编译产物写到固定路径
+// `build/vm/current.auc`，再以本运行器（纯 Aura 的 VmRunner）执行它。
+// main 返回被测程序退出码：宿主 main.rs 把非零 Int 返回映射为进程退出码。
+//
+// 实现说明：路径不走命令行/环境变量传入 —— 冻结种子的 `Process.arg*` 有
+// 形参错位缺陷（Main.aura:748），`Env.get` 与 VmRunner 大规模内联共存时
+// 亦有取值异常（实测），固定路径是最可靠通道（同 auc_diff_runner.aura）。
+// ═══════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
+
+fun main(): Int {
+    val vm = VmRunner()
+    vm.loadAucAndRun("build/vm/current.auc")
+    val err: String = vm.getError()
+    if (err.length > 0) {
+        println("VM-ERROR=" + err)
+        return 1
+    }
+    return vm.getExitCode()
+}

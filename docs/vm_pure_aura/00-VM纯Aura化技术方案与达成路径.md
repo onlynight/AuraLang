@@ -815,6 +815,50 @@ D1 要求"保留但不引用"，因此本方案的必要工作不是删除，而
 
 **P4 工作量（v3.2 改写）**：~1,500 行改动，**删除量 0**（v3.1 原为 ~1,500 行改动 + 17,226 行删除），2–3 周
 
+> **P4 进展记录（2026-10-02，第一轮实施）**
+>
+> **状态：P4.3 / P4.4 / P4.5 / P4.6 验收达成；P4.1 框架就绪、Stage-2 基底受阻于 AOT emit 缺陷（已修复 3 项、根因定位 1 项，见下）；P4.2 全量差分框架建成并纳入 CI——首轮对账暴露 Aura VM 后端一批真实语义缺口（见差分清单），100% 一致的验收目标转为下一轮 Aura VM 工作清单。**
+>
+> | 任务 | 状态 | 交付物 |
+> | --- | --- | --- |
+> | P4.3 Rust VM 冻结 | ✅ | `seed/compiler/src/vm/` 全部 26 文件头加 `【冻结基线】[FROZEN BASELINE]` 双语标记（禁止新增能力、禁引 Aura VM、唯一交集 .auc）；`coroutine.rs` 加 `[LEGACY per D5]` 遗留标记；冻结状态由 P4.5 守卫约束 3 检查固化（新文件无标记即失败，对应 R15） |
+> | P4.4 双后端并存 | ✅ | `seed/compiler/src/main.rs` 的 `run` 路径新增 `--vm=aura\|rust`（亦支持 `--vm aura`）；默认后端优先级：运行时环境变量 `AURA_DEFAULT_VM` > 构建期 `option_env!("AURA_DEFAULT_VM")`（构建配置）> `rust`；`--vm=aura` 路径：同一份编译产物写 `build/vm/current.auc` → 纯 Aura 运行器 `examples/compiler/auc_vm_runner.aura`（VmRunner）执行，被测程序退出码经 main 返回值映射为进程退出码。**两后端共享同一 `.auc` 产物** |
+> | P4.5 双实现隔离守卫 | ✅ | `scripts/check-dual-impl-isolation.{sh,ps1}`：约束 1 `aura/compiler/**/*.aura` 禁现 Rust VM 符号（`compiler::vm`/`interp::`/`Value::Int`/`jit_compile_cranelift`/`VmOptions`，注释豁免）；约束 2 `seed/compiler/src/vm/*.rs` 禁引 Aura VM 符号（`AucLoader`/`VmRunner`/`Vm.aura`/`aura/compiler/`，注释豁免）；约束 3 全部 vm 文件必须有冻结标记（R15 固化）；约束 4 `coroutine.rs` D5 遗留标记。**双版本当前代码库 PASS** |
+> | P4.6 差分框架常驻化 | ✅ | `scripts/diff-test-full.ps1`（P4.2 全量差分，65 样本）+ `.github/workflows/ci.yml`（guards → differential → bootstrap-loop 三段流水线；守卫双版本、差分双套件、自举环 non-blocking） |
+> | P4.2 全量差分回归 | 🔶 框架达成 | `scripts/diff-test-full.ps1`：`tests/p2_diff` + `tests/language-test` + `tests/classes` + `tests/basics` + `examples/compiler` 全部样本，Rust VM（`aura run X`）vs Aura VM（`aura run X --vm=aura`）归一化 stdout 逐字节对比。`scripts/diff-test.ps1` 核心样本集 **6/6** 保持；全量对账首轮结果与失配分类见下方「差分清单」。**100% 一致转为下一轮 Aura VM 工作清单**（差分框架价值验证：R8/R14 预判成真，失配即缺陷清单） |
+> | P4.1 自举闭环 | 🚧 | **框架全部就绪**：`scripts/bootstrap-loop.sh`（Stage-1 种子编译 → Stage-2 Aura VM 执行自编译产物 AOT 编译 Main.aura → Stage-3 自举产物再编译 + 三基底 jit 差分）+ AOT 版 Aura VM 运行器 `build/bin/auc_vm_runner.exe` + 宿主 argv 透传通道（编译器入口自带 `run` base-offset 适配）。**Stage-2 基底受阻**，见下 |
+
+> **🔴 P4.1 实施中发现并修复的 AOT 基底缺陷（Aura VM 以 AOT 原生形态承载自举的路径）**
+>
+> 自举 Stage-2 需要 Aura VM 以原生速度执行 1.4MB 编译器 `.auc`。元循环基底（Rust VM 解释 Aura VM 再解释 `.auc`）实测不可行（240s 内未进入编译器 main——解释器套解释器的开销是平方级）；故采用「同一份纯 Aura VM 实现经种子 AOT 编译为原生 exe」的基底（Rust VM 运行时不参与）。该路径暴露出一族 AOT 后端缺陷：
+>
+> | # | 缺陷 | 根因 | 修复 | 验证 |
+> | - | --- | --- | --- | --- |
+> | 1 | `.auc` 加载器把常量区吃到 EOF（`consts=52 natives=-1 funcs=-1`） | `readConstValue` CONST_STR 用 `readU32`+`as Long` 取长度——自举 AOT 下 `as Long` 失真成巨值（P3 已登记的 `Int.toLong()` 类缺陷） | `AucLoader.aura` 改两次 `readU16` 组合，组合用**乘法**（`lenHi * 65536`）而非 `<< 16`（自举 AOT 下 Int 移位失真，实测 `lenHi=0` 时 `<<16` 产出巨值） | helloworld 常量区 52/52 全部读对 |
+> | 2 | 加载含 Float 常量的 `.auc` 即崩 `0xC0000094`（整数除零）；修复初版又把 5.0 读成 0.0（被 P2.4 差分当场抓住——差分框架价值的二次验证） | `f64BitsToText` 用 2^51/2^52 级巨型 Long **字面量作除数**，自举 AOT 下失真为 0；位模式改逐字节构造后 v1 又把小端首字节累到最高位 | 位模式按 b7..b0 **逆序**乘累加（写端小端），指数用 52 次 `/2` 提取，2^52 连乘构造；标量 Long 乘除在双基底均可靠（探针实测） | arithmetic 差分 6/6 恢复，5.0 正确 |
+> | 3 | **🔴 系统性**：`Memory.read` 等 Byte 返回值赋给 Int 局部量后变成 `v \| 0x7F7F00` 垃圾 | **`emit.rs::emit_store_converted` 缺 i8→i32/i64 宽度分支**：落到兜底发射 `store i8 %v, i32* %slot`（类型失配）——LLVM 接受但只写槽位低 1 字节，高 3 字节为栈上陈旧垃圾。此前只有 i32↔i64 两臂 | 新增通用整数宽度适配分支（`int_bits` 比较 → sext/trunc） | 探针 `A-literal/X-methret/Y/Z` 全部正确；加载器读数全部干净 |
+> | 4 | 🚧 **（未修，根因已定位）**：`List<T>` 的 `.size()` 在字段路径与局部/参数路径走**两套不一致的语义** | 字段路径内联为结构体域读（经 `%struct.VmFrameStack` 影子布局碰巧命中 size 槽）；局部/参数路径重路由 `Collections_count`（Collections 句柄布局语义）。同一列表两种读数（实测 1161 vs 垃圾值），`loadPredecoded` 的填充循环因此 0 次迭代，`opCodes` 恒空 | 需在 `emit.rs` 统一 `List<T>` 成员调用的类型分派（emit 类型表对泛型接口局部量的解析缺陷）——**单列任务** | 最小复现：`val names: List<String> = mod.numOpNames; names.size()` 与 `mod.numOpNames.size()` 同构建不同值 |
+>
+> **回归对账（本轮改动后全绿）**：`scripts/diff-test.ps1` 6/6；`scripts/run-concurrent-aot.sh` 9/9（emit 修复后 AOT 全族）；`phase5_vm_tests`/`vm_object_model_tests`/`vm_p2_tests`/`vm_runner_demo` 全 PASS；隔离守卫双脚本 PASS。全量差分（`scripts/diff-test-full.ps1`）最终数字见下方「差分清单」。
+>
+> **📋 P4.2 差分清单（首轮全量对账：`=== [difffull] 20 MATCH / 44 MISMATCH / 1 both-fail-skip (of 65) ===`，Aura VM 后端待补齐清单）**：
+>
+> | 类别 | 症状（实例） | 涉及样本（约） |
+> | --- | --- | --- |
+> | 1. **非 ASCII 编码分歧**（最大头） | Aura 侧 println 的非 ASCII 文本输出为 Latin-1 形态的乱码（Rust 侧 UTF-8 正常）；`10-memory` 等仅差前导乱码字节 | `tests/language-test` 大部（01-lexer…17-overload）、`toString_implicit_test`、`object_hierarchy_test` ≈ 20 个 |
+> | 2. **缺失内建/操作码** | `VM-ERROR=Unknown function: _throw`（07-exception-simple）、`Unknown function: intToPtr`（09-ffi）、`Unknown opcode: UNKNOWN_111`（16-script-mode，= P3 新增的 STORE_GLOBAL 未进 Aura VM 的 `Opcodes.aura`）、`Unknown function: aura_isOfType`（debug_when） | ≈ 5 个 |
+> | 3. **数值语义** | `abs(-5)` 得 4294967291（无符号回绕，test_stdlib_aura / 13-stdlib） | ≈ 2 个 |
+> | 4. **value-class/结构体字段** | Aura 侧字段读全 0（Rust 侧 3/7/1.0/808 正常） | `tests/classes/test_value_class*` 等 ≈ 9 个 |
+> | 5. **lambda/闭包** | Aura 侧闭包调用返回 0（Rust 侧 42） | `tests/basics/test_lambda*` 5 个 |
+> | 6. **列表 size 语义** | `[p] tlen=5` vs `tlen=1`、`count=0`（`__list_len` 与 `.auc` 列表对象错位，P3.5 同族问题的 VM 侧余留） | `aot_list_roundtrip`、`dynlist_string_roundtrip` |
+> | 7. **meta 类样本** | `--vm=aura` 下为元循环（Aura VM 宿主内再跑 VmRunner），`<TIMEOUT>`——结构性限制非语义缺口 | `vm_runner_demo`、`auc_diff_runner`、`showcase` ≈ 3 个 |
+>
+> （日志：`build/difffull-final.log`；PS 5.1 重定向为 UTF-16，读取用 `Get-Content`。本清单即下一轮 Aura VM 对齐工作清单——第 1 类修一处 println 编码可批量清账 ≈20 个；差分框架已在 CI 常驻，修一项对账一项。）
+>
+> **P4.1 收尾条件（移交后续轮次）**：修复缺陷 #4（emit 的 `List<T>` 成员分派统一）→ `auc_vm_runner.exe` 重建 → `bash scripts/bootstrap-loop.sh` 三阶段全通即 P4.1 验收达成；差分框架与守卫已在 CI 常驻（P4.6），不阻塞。
+>
+> **本轮改动文件清单**：`seed/compiler/src/main.rs`（--vm 开关 + Aura VM 通道 + 辅助函数）、`seed/compiler/src/codegen/aot/emit.rs`（i8 宽度适配）、`seed/compiler/src/vm/*.rs`（26 文件冻结标记）、`aura/compiler/aura/lang/compiler/serialize/AucLoader.aura`（缺陷 1/2 修复）、`aura/compiler/aura/lang/compiler/aot/Aot.aura`（链接加大栈 `/stack:32MB`，防御性）、`examples/compiler/auc_vm_runner.aura`（新增）、`scripts/check-dual-impl-isolation.{sh,ps1}`（新增）、`scripts/diff-test-full.ps1`（新增）、`scripts/bootstrap-loop.sh`（新增）、`.github/workflows/ci.yml`（新增）；另修复 `seed/compiler/src/vm/native.rs` 一处 P3.1 引入的 bootstrap 守卫注释回归。
+
 ---
 
 ## 四、不可纯 Aura 化的边界

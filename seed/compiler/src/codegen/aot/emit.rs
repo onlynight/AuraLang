@@ -2380,6 +2380,24 @@ fn emit_store_converted(
             "store {} {} , {}* {}",
             dst_ty, out, dst_ty, var_name
         ));
+    } else if is_int_ty(val_ty) && is_int_ty(dst_ty) && val_ty != dst_ty {
+        // 整数宽度适配（P4.1）：i8（`Memory.read` 返回的 `Byte`）/i16/i32/i64 互转。
+        // 原实现只有 i32↔i64 两臂，`val b: Int = reader.readByte()` 这类
+        // Byte→Int 赋值落到末尾兜底，生成 `store i8 %v, i32* %slot` ——
+        // LLVM 接受该 IR，但只写槽位低 1 字节，高 3 字节是栈上陈旧垃圾
+        // （实测 `Memory.read` 读出 `v | 0x7F7F00`，`.auc` 加载器常量区
+        // 整体失步、Aura VM 无法在 AOT 基底上加载字节码）。
+        let out = ctx.fresh_var();
+        let op = if int_bits(val_ty) < int_bits(dst_ty) { "sext" } else { "trunc" };
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = {} {} {} to {}",
+            out, op, val_ty, val_ir, dst_ty
+        ));
+        cur.body.push(format!(
+            "store {} {} , {}* {}",
+            dst_ty, out, dst_ty, var_name
+        ));
     } else if is_float_ty(val_ty) && is_int_ty(dst_ty) {
         // 浮点 → 整数：fptosi 到 i64，再按目标宽度截断
         let i64v = ctx.fresh_var();

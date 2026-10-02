@@ -1,4 +1,15 @@
+// ================================================================
+// 【冻结基线】Rust VM 双实现常驻（VM-PA-00 v3.2 / D6 / P4.3）
+// [FROZEN BASELINE] Rust VM dual-impl co-resident (D6/P4.3): bug-fix only, no new capabilities, never reference the Aura VM.
+// 本文件属于 Rust VM（只读冻结的兼容基线、第二实现）：
+//   - 禁止新增能力，仅允许修 bug 与安全修补；
+//   - 不得引用 Aura VM 实现（aura/compiler/aura/lang/compiler/vm/）；
+//   - 与 Aura VM 的唯一交集是 .auc 二进制格式（Rust 编译器产出，两侧各自执行）。
+// 依据：docs/vm_pure_aura/00-VM纯Aura化技术方案与达成路径.md 三-阶段P4 / 决策D6。
+// ================================================================
 //! 协程调度器（5.8）
+// 【遗留】协程已按 D5 废弃（2026-10-01，仅保留 Actor 并发模型）；本文件不再演进，按 D6 随 Rust VM 常驻保留。
+// [LEGACY per D5] coroutines deprecated (Actor-only); kept resident under D6, do not evolve.
 //!
 //! 对应 技术方案 §3.7 的 `suspend` / `await` 语义。每个协程由一个 [`Coroutine`]
 //! 表示，保存其调用帧栈快照、返回值通道。调度器维护运行队列（Ready / Suspended / Done），

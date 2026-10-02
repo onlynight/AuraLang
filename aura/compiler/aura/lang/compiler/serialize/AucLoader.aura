@@ -148,6 +148,8 @@ object AucLoaderUtils {
             val tag: Int = reader.readByte()
             constTags.add(tag)
             val value: String = readConstValue(reader, tag)
+            if (mod.constsCount <= 12) {
+            }
             if (mod.constPool != "") {
                 mod.constPool = mod.constPool + "\n"
             }
@@ -492,12 +494,42 @@ object AucLoaderUtils {
             // FloatOps.fromBits(2.5 的位模式) → 3.5），不能依赖新原生。
             // 常量按 f32 精度还原（Aura Float 为 32 位）——高位宽常量会
             // 舍入，已在 ADR 记录为已知限制。
-            val bits: Long = reader.readU64()
+            //
+            // P4.1（AOT 基底适配）：位模式改为逐字节构造。自举 AOT 下
+            // readU64 的 `(hi as Long) << 32` 路径不可靠（`as Long` 失真），
+            // 而标量 Long 的乘加在双基底均可靠（探针实测 2^52 精确）。
+            // 写端是小端：首字节为最低位，故按 b7..b0 逆序乘累加
+            //（v1 把首字节累到最高位，5.0 被读成 0x1440 → 0.0，差分当场抓住）。
+            val b0: Int = reader.readByte()
+            val b1: Int = reader.readByte()
+            val b2: Int = reader.readByte()
+            val b3: Int = reader.readByte()
+            val b4: Int = reader.readByte()
+            val b5: Int = reader.readByte()
+            val b6: Int = reader.readByte()
+            val b7: Int = reader.readByte()
+            var bits: Long = b7
+            bits = bits * 256 + b6
+            bits = bits * 256 + b5
+            bits = bits * 256 + b4
+            bits = bits * 256 + b3
+            bits = bits * 256 + b2
+            bits = bits * 256 + b1
+            bits = bits * 256 + b0
             return f64BitsToText(bits)
         } else if (tag == 2) {  // CONST_STR
-            val len: Long = reader.readU32()
+            // P4.1（AOT 基底适配）：长度改为两次 readU16 的组合。
+            // 原实现 readU32 → `as Long` 在自举 AOT 下失真成巨值 → 常量区
+            // 被吃穿到 EOF（实测 helloworld.auc consts=52 后 natives/funcs=-1）。
+            // 组合用**乘法**（`lenHi * 65536`）而不是 `<< 16`：自举 AOT 下
+            // Int 移位失真（实测 lenHi=0 时 `<<16` 产出巨值 → 吃穿到 EOF；
+            // Long 移位与 Int 乘法均可靠，见 readU32 与 list_probe 探针）。
+            // 串长实际 < 65536，读两个 u16 与写端 u32 字节序兼容。
+            val lenLo: Int = reader.readU16()
+            val lenHi: Int = reader.readU16()
+            var i: Int = 0
+            val len: Int = lenLo + lenHi * 65536
             var result: String = ""
-            var i: Long = 0
             while (i < len) {
                 val c: Int = reader.readByte()
                 if (c < 0) { break }
@@ -758,11 +790,27 @@ object AucLoaderUtils {
     /// 0.5 步进累加（f32 精确表示 0.5^i 直至 i=149），指数经 pow 缩放。
     /// 输出格式与 Rust f64 Display 一致的常见形态（"2.5"/"5.0"/"-1.25"）。
     private fun f64BitsToText(bits: Long): String {
-        // Long 位运算在 Aura 侧不可靠，用除法/取模拆位
+        // Long 位运算在 Aura 侧不可靠，用除法/取模拆位。
+        // P4.1（AOT 基底适配）：不再用 2^51/2^52 级巨型 Long 字面量作除数
+        //（自举 AOT 下触发 0xC0000094 整除零，实测 arithmetic 样例必崩）——
+        // 指数用 52 次 `/2` 提取，2^52 用连乘构造；标量 Long 的 `/2`、`%2048`
+        // 与连乘在双基底均可靠（list_probe 探针实测）。
         val neg: Boolean = bits < 0
         val mag: Long = if (neg) (0 - bits) else bits
-        val exp: Int = ((mag / 4503599627370496) % 2048) as Int   // bits >> 52 & 0x7FF
-        val mantissa: Long = mag % 4503599627370496               // bits & 0xFFFFFFFFFFFFF
+        var hi: Long = mag
+        var hs: Int = 0
+        while (hs < 52) {
+            hi = hi / 2
+            hs = hs + 1
+        }
+        val exp: Int = (hi % 2048) as Int   // bits >> 52 & 0x7FF
+        var p52: Long = 1
+        var pt: Int = 0
+        while (pt < 52) {
+            p52 = p52 * 2
+            pt = pt + 1
+        }
+        val mantissa: Long = mag % p52       // bits & 0xFFFFFFFFFFFFF
 
         // 零 / 特殊值
         if (exp == 0 && mantissa == 0) {
@@ -778,7 +826,7 @@ object AucLoaderUtils {
         // 1 + Σ fraction bit_i × 0.5^i（i = 1..52）
         var v: Float = 1.0
         var bitVal: Float = 0.5
-        var div: Long = 2251799813685248   // 2^51：从最高尾数位（i=1）向下
+        var div: Long = p52 / 2              // 2^51：从最高尾数位（i=1）向下
         var i: Int = 0
         while (i < 52) {
             val bit: Int = ((mantissa / div) % 2) as Int

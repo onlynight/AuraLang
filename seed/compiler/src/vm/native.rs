@@ -1,3 +1,12 @@
+// ================================================================
+// 【冻结基线】Rust VM 双实现常驻（VM-PA-00 v3.2 / D6 / P4.3）
+// [FROZEN BASELINE] Rust VM dual-impl co-resident (D6/P4.3): bug-fix only, no new capabilities, never reference the Aura VM.
+// 本文件属于 Rust VM（只读冻结的兼容基线、第二实现）：
+//   - 禁止新增能力，仅允许修 bug 与安全修补；
+//   - 不得引用 Aura VM 实现（aura/compiler/aura/lang/compiler/vm/）；
+//   - 与 Aura VM 的唯一交集是 .auc 二进制格式（Rust 编译器产出，两侧各自执行）。
+// 依据：docs/vm_pure_aura/00-VM纯Aura化技术方案与达成路径.md 三-阶段P4 / 决策D6。
+// ================================================================
 //! 原生（内置 / FFI）函数调度器
 //!
 //! 对应 技术方案 §7.1 的 `CallNative` / `CallC` 与 §9.3 的 FFI 调度。
@@ -98,7 +107,7 @@ impl NativeRegistry {
         r.register("typeOf", native_type_of);
         r.register("aura_cast", native_cast);
         r.register("aura_cast_safety", native_cast_safety);
-        // P3.1: `Any` 的**类名前缀**基础协议（Layer 0，bootstrap/any_core.rs）。
+        // P3.1: `Any` 的**类名前缀**基础协议（Layer 0，Rust 种子侧 any_core）。
         //
         // 静态类型退化为 `Any` 时（插值 `${expr}`、`"a" + int` 隐式转换），
         // `codegen::hir::wrap_tostring` 会刻意发出 `Any.toString(<expr>)` 而不是
