@@ -99,6 +99,10 @@ internal object Opcodes {
     const val LDLB_OP_STL: Int = 203
     /// LOAD_LOCAL a; CONST c; LT; STORE tmp; LOAD tmp; JUMP_IF_FALSE t —— 循环守卫 6 连
     const val LDLC_LTL_JIFS: Int = 204
+    /// LOAD_LOCAL a; LOAD_LOCAL b; LT; STORE t; LOAD t; JUMP_IF_FALSE j —— 双局部守卫 5 连
+    const val LDLB_LTL_JIFS: Int = 205
+    /// LOAD_LOCAL a; STORE_LOCAL b —— 局部拷贝
+    const val LDL_STL: Int = 206
     const val PHI: Int = 54
 
     // ── 调用与跨模块 (60-69) ──

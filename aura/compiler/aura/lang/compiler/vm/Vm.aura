@@ -522,6 +522,23 @@ class Vm {
             if (!VmOps.toBool(cond)) {
                 this.ip = VmOps.toI32(args.get(4))
             }
+        } else if (op == Opcodes.LDLB_LTL_JIFS) {
+            // local[a] < local[b] → tmp；false 跳 j（双局部守卫 5 连合一）
+            val x: Any = this.locals.getSlot(this.arg0IntOf())
+            val y: Any = this.locals.getSlot(this.arg1IntOf())
+            val cond: Any = VmOps.lt(x, y)
+            this.locals.putSlot(VmOps.toI32(args.get(2)), cond)
+            if (!VmOps.toBool(cond)) {
+                this.ip = VmOps.toI32(args.get(3))
+            }
+        } else if (op == Opcodes.LDL_STL) {
+            // local[a] → local[b]（拷贝合一）
+            val v: Any = this.locals.getSlot(this.arg0IntOf())
+            if (v == null) {
+                this.locals.putSlot(this.arg1IntOf(), 0)
+            } else {
+                this.locals.putSlot(this.arg1IntOf(), v)
+            }
         } else if (op == Opcodes.ADD) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
@@ -3080,6 +3097,31 @@ class Vm {
     private fun fuseHotPairs(): Unit {
         val n: Int = this.opCodes.size()
         if (n < 2) { return }
+        // 跳转目标位图：融合窗口 [r+1, r+span) 内不得含任何跳转目标行，
+        // 否则跳到中间行会命中 OP_NOP → 整条融合指令被跳过（语义错误）。
+        // 跳转目标是全局行号（AucLoader 解码期已归一），扫一遍即可。
+        val isTarget: List<Int> = arrayListOf<Int>()
+        var ti: Int = 0
+        while (ti < n) {
+            isTarget.add(0)
+            ti = ti + 1
+        }
+        var sj: Int = 0
+        while (sj < n) {
+            val jop: Int = this.opCodes.get(sj)
+            if (jop == Opcodes.JUMP || jop == Opcodes.JUMP_IF_FALSE || jop == Opcodes.JUMP_IF_TRUE) {
+                val a: List<String> = this.argCache.get(sj)
+                if (a.size() > 0) {
+                    val t: Int = VmOps.toI32(a.get(0))
+                    if (t >= 0 && t < n) {
+                        isTarget.set(t, 1)
+                    }
+                }
+            }
+            sj = sj + 1
+        }
+        // 窗口内是否含跳转目标（首行 r 允许是目标——目标落在融合对首行=执行整对 ✓）
+        // hasTarget(r+1, span-1)
         var r: Int = 0
         while (r < n - 1) {
             val op: Int = this.opCodes.get(r)
@@ -3144,6 +3186,54 @@ class Vm {
                 pairName = "LDLB_OP_STL"
                 span = 4
             }
+            // ── 6 连守卫：LOAD_LOCAL a; CONST c; LT; STORE t; LOAD t; JIF j ──
+            if (fused == 0 && r < n - 5
+                && op == Opcodes.LOAD_LOCAL
+                && this.opCodes.get(r + 1) == Opcodes.LOAD_CONST_I
+                && this.opCodes.get(r + 2) == Opcodes.LT
+                && this.opCodes.get(r + 3) == Opcodes.STORE_LOCAL
+                && this.opCodes.get(r + 4) == Opcodes.LOAD_LOCAL
+                && this.opCodes.get(r + 5) == Opcodes.JUMP_IF_FALSE) {
+                val a0: List<String> = this.argCache.get(r)
+                val a1: List<String> = this.argCache.get(r + 1)
+                val a3: List<String> = this.argCache.get(r + 3)
+                val a5: List<String> = this.argCache.get(r + 5)
+                if (a0.size() > 0) { pair.add(a0.get(0)) } else { pair.add("0") }
+                if (a1.size() > 0) { pair.add(a1.get(0)) } else { pair.add("0") }
+                pair.add(toStr(Opcodes.LT))
+                if (a3.size() > 0) { pair.add(a3.get(0)) } else { pair.add("-1") }
+                if (a5.size() > 0) { pair.add(a5.get(0)) } else { pair.add("0") }
+                fused = Opcodes.LDLC_LTL_JIFS
+                pairName = "LDLC_LTL_JIFS"
+                span = 6
+            }
+            // ── 5 连双局部守卫：LOAD_LOCAL a; LOAD_LOCAL b; LT; STORE t; LOAD t; JIF j ──
+            // 参数 4 个：[a, b, tmp, j]（LT 硬编码在分派臂，不进参数表）
+            if (fused == 0 && r < n - 5
+                && op == Opcodes.LOAD_LOCAL
+                && this.opCodes.get(r + 1) == Opcodes.LOAD_LOCAL
+                && this.opCodes.get(r + 2) == Opcodes.LT
+                && this.opCodes.get(r + 3) == Opcodes.STORE_LOCAL
+                && this.opCodes.get(r + 4) == Opcodes.LOAD_LOCAL
+                && this.opCodes.get(r + 5) == Opcodes.JUMP_IF_FALSE) {
+                val a0: List<String> = this.argCache.get(r)
+                val a1: List<String> = this.argCache.get(r + 1)
+                val a3: List<String> = this.argCache.get(r + 3)
+                val a5: List<String> = this.argCache.get(r + 5)
+                if (a0.size() > 0) { pair.add(a0.get(0)) } else { pair.add("0") }
+                if (a1.size() > 0) { pair.add(a1.get(0)) } else { pair.add("0") }
+                if (a3.size() > 0) { pair.add(a3.get(0)) } else { pair.add("-1") }
+                if (a5.size() > 0) { pair.add(a5.get(0)) } else { pair.add("0") }
+                fused = Opcodes.LDLB_LTL_JIFS
+                pairName = "LDLB_LTL_JIFS"
+                span = 6
+            }
+            // ── 2 连局部拷贝：LOAD_LOCAL a; STORE_LOCAL b ──
+            if (fused == 0 && op == Opcodes.LOAD_LOCAL && this.opCodes.get(r + 1) == Opcodes.STORE_LOCAL) {
+                fused = Opcodes.LDL_STL
+                pairName = "LDL_STL"
+            }
+            // ── 2 连：CONST 入槽 / 局部条件分支 ──
             if (fused == 0 && op == Opcodes.LOAD_CONST_I && this.opCodes.get(r + 1) == Opcodes.STORE_LOCAL) {
                 fused = Opcodes.LDIC_STL
                 pairName = "LDIC_STL"
@@ -3152,6 +3242,19 @@ class Vm {
                 pairName = "LDL_JIF"
             }
             if (fused != 0) {
+                var k2: Int = r + 1
+                var blocked: Int = 0
+                while (k2 < r + span) {
+                    if (k2 < n && isTarget.get(k2) == 1) {
+                        blocked = 1
+                        k2 = r + span
+                    }
+                    k2 = k2 + 1
+                }
+                if (blocked == 1) {
+                    r = r + 1
+                    continue
+                }
                 if (pair.size() == 0) {
                     val a0: List<String> = this.argCache.get(r)
                     if (a0.size() > 0) { pair.add(a0.get(0)) } else { pair.add("0") }
@@ -3435,6 +3538,21 @@ class Vm {
     /// 设置局部变量（测试用）。
     fun setLocal(idx: Int, value: String): Unit {
         this.locals.putSlot(idx, value)
+    }
+
+    /// 诊断：读融合后指令流的操作码名（dump 用，不进热路径）。
+    fun debugOpName(i: Int): String {
+        return this.ops.get(i)
+    }
+
+    /// 诊断：读融合后指令流的参数个数。
+    fun debugArgCount(i: Int): Int {
+        return this.argCache.get(i).size()
+    }
+
+    /// 诊断：读融合后指令流的第 j 个参数。
+    fun debugArg(i: Int, j: Int): String {
+        return this.argCache.get(i).get(j)
     }
 
     /// 获取局部变量（测试用）。
