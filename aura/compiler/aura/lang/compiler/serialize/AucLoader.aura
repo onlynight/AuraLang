@@ -153,7 +153,7 @@ object AucLoaderUtils {
             if (mod.constPool != "") {
                 mod.constPool = mod.constPool + "\n"
             }
-            mod.constPool = mod.constPool + value
+            mod.constPool = mod.constPool + escapeConstValue(value)
             ci = ci + 1
         }
 
@@ -425,6 +425,44 @@ object AucLoaderUtils {
         val f: Long = flags
         val b: Long = bit as Long
         return ((f / b) % 2L) == 1L
+    }
+
+    /// 常量值换行转义：值内 `\` → `\\`、换行(10) → `\n` 两字符序列。
+    ///
+    /// 维持常量池「一行一常量」不变式：值内裸换行会把一行打穿成两行，
+    /// 之后**所有**常量下标错位（实测 stdlib 的 `"\n"` 字符串常量让
+    /// loop50 的 const[41]（Int 50）读成 `}` → 循环条件恒假 → 循环整段
+    /// 被跳过）。反转义在 VM 侧 `Vm.getConst`。
+    private fun escapeConstValue(v: String): String {
+        var hasSpecial: Boolean = false
+        var i0: Int = 0
+        val n0: Int = v.length
+        while (i0 < n0) {
+            val c0: Int = v.charCodeAt(i0)
+            if (c0 == 92 || c0 == 10) {
+                hasSpecial = true
+                i0 = n0
+            }
+            i0 = i0 + 1
+        }
+        if (!hasSpecial) {
+            return v
+        }
+        var out: String = ""
+        var i: Int = 0
+        val n: Int = v.length
+        while (i < n) {
+            val c: Int = v.charCodeAt(i)
+            if (c == 92) {
+                out = out + String.fromCharCode(92) + String.fromCharCode(92)
+            } else if (c == 10) {
+                out = out + String.fromCharCode(92) + "n"
+            } else {
+                out = out + String.fromCharCode(c)
+            }
+            i = i + 1
+        }
+        return out
     }
 
     /// 文件读取的安全终点（AucReader 越界读返回 -1/0，这里防御性判断）。

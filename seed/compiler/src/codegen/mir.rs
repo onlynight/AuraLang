@@ -1210,6 +1210,16 @@ impl MirBuilder {
                     self.emit(MirInstr::ListIndexOf { dst, obj, item });
                     return dst;
                 }
+                // Plan A 低位标记检测（AOT 载体的 Any 判别）：种子 VM 下
+                // `typeof` 给出真实运行时类型名，该检测不被依赖
+                //（VmOps.isString 先按 typeof 短路），恒 false 即语义正确。
+                if callee == "__is_tagged_int" && args.len() == 1 {
+                    let _ = self.lower_expr(&args[0], ctx);
+                    let dst = self.alloc_reg();
+                    let ci = ctx.const_idx(&Literal::Int(0));
+                    self.emit(MirInstr::LoadConst { dst, ci });
+                    return dst;
+                }
                 // ── Thread.spawn / Future.spawn：函数引用 → 函数索引整数 ──
                 //
                 // 与 AOT 后端（`codegen/aot/emit.rs` 的 `is_spawn` 特判）保持一致：

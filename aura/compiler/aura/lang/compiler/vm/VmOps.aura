@@ -76,14 +76,47 @@ object VmOps {
     }
 
     /// 检查是否为字符串类型。
+    ///
+    /// AOT 载体（Plan A）下 `typeof` 按静态类型折叠：Any 形参**恒报 "String"**，
+    /// 装箱整数（`(v<<1)|1` 的奇数伪指针）会被误判成字符串 —— `100 + 23` 走
+    /// 拼接得 "10023"、循环计数 `i = i + 1` 拼成 "11" 永不终止（实测 AOT 载体
+    /// helloworld 算术全错 + Instruction limit exceeded）。
+    /// 奇偶判别（`raw/2*2 != raw`，兼容负数的奇偶）排除装箱整数；种子 VM 下
+    /// typeof 给出真实类型名，数值在第一个判断就被短路，行为不变。
     fun isString(v: Any): Boolean {
         if (v == null) {
             return false
         }
-        if (typeof(v) == "String") {
-            return true
+        if (typeof(v) != "String") {
+            return false
         }
-        return false
+        return !isTaggedInt(v)
+    }
+
+    /// Plan A 低位标记检测：值是否为「装箱整数」（64 位表示为奇数）。
+    ///
+    /// 经编译器内建 `__is_tagged_int`：AOT 侧发射**原始** ptrtoint + 奇偶检查
+    ///（`as Long` 会插入 `aura_to_int_any` 拆箱，奇偶性随即丢失——不能用）；
+    /// 种子 VM 侧降级为常量 false（typeof 已准确，该检测不被依赖）。
+    /// 真实字符串/对象指针恒为偶数（分配器 ≥2 字节对齐），奇数必是
+    /// `(v<<1)|1` 的装箱整数。
+    fun isTaggedInt(v: Any): Boolean {
+        return __is_tagged_int(v)
+    }
+
+    /// Any → Int：装箱整数走**无分配**快路径。
+    ///
+    /// `as Long` 在 AOT 下发射 `ptrtoint + aura_to_int_any`——对装箱整数
+    /// 正是拆箱值；再截断为 Int。此前数值分支一律 `toI32(toStr(v))`：
+    /// 每次运算分配两个十进制临时串且**永不释放**（运行时无字符串回收），
+    /// 25M 迭代基准实测累积 6GB+ 触发内存守卫中止；本快路径同时消除
+    /// 分配与串解析开销。种子 VM 下 isTaggedInt 恒 false，走慢路径不变。
+    fun intOf(v: Any): Int {
+        if (isTaggedInt(v)) {
+            val raw: Long = v as Long
+            return raw as Int
+        }
+        return toI32(toStr(v))
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -238,7 +271,7 @@ object VmOps {
         } else if (isString(a) || isString(b)) {
             return toStr(a) + toStr(b)
         } else {
-            return toI32(toStr(a)) + toI32(toStr(b))
+            return intOf(a) + intOf(b)
         }
     }
 
@@ -247,7 +280,7 @@ object VmOps {
         if (isFloat(a) || isFloat(b)) {
             return parseFloat(toStr(a)) - parseFloat(toStr(b))
         } else {
-            return toI32(toStr(a)) - toI32(toStr(b))
+            return intOf(a) - intOf(b)
         }
     }
 
@@ -256,7 +289,7 @@ object VmOps {
         if (isFloat(a) || isFloat(b)) {
             return parseFloat(toStr(a)) * parseFloat(toStr(b))
         } else {
-            return toI32(toStr(a)) * toI32(toStr(b))
+            return intOf(a) * intOf(b)
         }
     }
 
@@ -269,11 +302,11 @@ object VmOps {
             }
             return parseFloat(toStr(a)) / bb
         } else {
-            val bb: Int = toI32(toStr(b))
+            val bb: Int = intOf(b)
             if (bb == 0) {
                 return 0
             }
-            return toI32(toStr(a)) / bb
+            return intOf(a) / bb
         }
     }
 
@@ -286,11 +319,11 @@ object VmOps {
             }
             return parseFloat(toStr(a)) - parseFloat(toStr(a)) / bb * bb
         } else {
-            val bb: Int = toI32(toStr(b))
+            val bb: Int = intOf(b)
             if (bb == 0) {
                 return 0
             }
-            return toI32(toStr(a)) % bb
+            return intOf(a) % bb
         }
     }
 
@@ -299,7 +332,7 @@ object VmOps {
         if (isFloat(a)) {
             return -parseFloat(toStr(a))
         } else {
-            return -toI32(toStr(a))
+            return -intOf(a)
         }
     }
 
@@ -356,7 +389,7 @@ object VmOps {
         if (isFloat(a) || isFloat(b)) {
             return vmBool(parseFloat(toStr(a)) < parseFloat(toStr(b)))
         } else {
-            return vmBool(toI32(toStr(a)) < toI32(toStr(b)))
+            return vmBool(intOf(a) < intOf(b))
         }
     }
 
@@ -365,7 +398,7 @@ object VmOps {
         if (isFloat(a) || isFloat(b)) {
             return vmBool(parseFloat(toStr(a)) > parseFloat(toStr(b)))
         } else {
-            return vmBool(toI32(toStr(a)) > toI32(toStr(b)))
+            return vmBool(intOf(a) > intOf(b))
         }
     }
 
@@ -374,7 +407,7 @@ object VmOps {
         if (isFloat(a) || isFloat(b)) {
             return vmBool(parseFloat(toStr(a)) <= parseFloat(toStr(b)))
         } else {
-            return vmBool(toI32(toStr(a)) <= toI32(toStr(b)))
+            return vmBool(intOf(a) <= intOf(b))
         }
     }
 
@@ -383,7 +416,7 @@ object VmOps {
         if (isFloat(a) || isFloat(b)) {
             return vmBool(parseFloat(toStr(a)) >= parseFloat(toStr(b)))
         } else {
-            return vmBool(toI32(toStr(a)) >= toI32(toStr(b)))
+            return vmBool(intOf(a) >= intOf(b))
         }
     }
 
@@ -413,27 +446,27 @@ object VmOps {
     /// （实测 `x shl 8` 直接退化成 `x`，移位量被丢弃）——`.auc` 读取小端整数
     /// 因此高字节恒为 0（`natives_count` 594 被读成 82）。
     fun bitAnd(a: Any, b: Any): Any {
-        return toI32(toStr(a)) & toI32(toStr(b))
+        return intOf(a) & intOf(b)
     }
 
     /// 按位或。
     fun bitOr(a: Any, b: Any): Any {
-        return toI32(toStr(a)) | toI32(toStr(b))
+        return intOf(a) | intOf(b)
     }
 
     /// 按位异或。
     fun bitXor(a: Any, b: Any): Any {
-        return toI32(toStr(a)) ^ toI32(toStr(b))
+        return intOf(a) ^ intOf(b)
     }
 
     /// 左移。
     fun shl(a: Any, b: Any): Any {
-        return toI32(toStr(a)) << toI32(toStr(b))
+        return intOf(a) << intOf(b)
     }
 
     /// 右移。
     fun shr(a: Any, b: Any): Any {
-        return toI32(toStr(a)) >> toI32(toStr(b))
+        return intOf(a) >> intOf(b)
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -498,11 +531,6 @@ object VmOps {
             return ""
         }
         return text.substring(start, end)
-    }
-
-    /// 字符串切片（start 到 length）。
-    fun sub(text: String, start: Int, len: Int): String {
-        return vmSubstr(text, start, len)
     }
 
     /// `Any` → 原始 64 位表示。

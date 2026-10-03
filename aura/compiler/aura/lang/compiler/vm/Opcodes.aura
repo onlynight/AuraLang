@@ -86,6 +86,19 @@ internal object Opcodes {
     const val JUMP_IF_FALSE: Int = 51
     const val JUMP_IF_TRUE: Int = 52
     const val HALT: Int = 53
+
+    // ── 装载期超级指令（方案 D，2026-10-03）：仅 loadPredecoded 融合产生，
+    //    文本字节码不会出现。编号取 200+ 段避开既有指令。 ──
+    /// LOAD_CONST_I idx; STORE_LOCAL slot —— 常量入槽（循环初始化高频）
+    const val LDIC_STL: Int = 200
+    /// LOAD_LOCAL slot; JUMP_IF_FALSE target —— 局部条件分支（循环条件高频）
+    const val LDL_JIF: Int = 201
+    /// LOAD_LOCAL a; LOAD_CONST_I c; OP(ADD/SUB/MUL); STORE_LOCAL s —— 局部与常量算术入槽
+    const val LDLC_OP_STL: Int = 202
+    /// LOAD_LOCAL a; LOAD_LOCAL b; OP(ADD/SUB/MUL); STORE_LOCAL s —— 双局部算术入槽
+    const val LDLB_OP_STL: Int = 203
+    /// LOAD_LOCAL a; CONST c; LT; STORE tmp; LOAD tmp; JUMP_IF_FALSE t —— 循环守卫 6 连
+    const val LDLC_LTL_JIFS: Int = 204
     const val PHI: Int = 54
 
     // ── 调用与跨模块 (60-69) ──

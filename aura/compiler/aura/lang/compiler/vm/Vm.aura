@@ -37,7 +37,18 @@ class Vm {
 
     // ── 常量 ──
 
-    private var MAX_INSTRUCTIONS: Int = 10000000
+    private var MAX_INSTRUCTIONS: Int = 2000000000
+
+    // ── 加载期索引与诊断（方案 A2/D/E）──
+    private var traceMode: Boolean = false
+    private var funcOffsetMap: HashMap<String, Int> = HashMap<String, Int>()
+    private var funcParamMap: HashMap<String, Int> = HashMap<String, Int>()
+    private var constLines: List<String> = arrayListOf<String>()
+    private var arg0Ints: List<Int> = arrayListOf<Int>()
+    private var arg1Ints: List<Int> = arrayListOf<Int>()
+    private var argNoneMark: Int = 2147483647
+    // locals 帧池：调用帧局部表复用（retire 重置 / pop 取用），热身后零分配。
+    private var localsPool: List<VmLocals> = arrayListOf<VmLocals>()
 
     // ── VM 状态 ──
 
@@ -77,13 +88,13 @@ class Vm {
     private var stack: VmStack = VmStack()
 
     // 局部变量：slot -> value
-    private var locals: HashMap<Int, Any> = HashMap<Int, Any>()
+    private var locals: VmLocals = VmLocals()
 
     // 全局变量：name -> value
     private var globals: HashMap<String, Any> = HashMap<String, Any>()
 
     // 调用栈：每帧为 "returnIp|frameId|funcName"
-    private var callStack: VmStrStack = VmStrStack()
+    private var callStack: VmCallStack = VmCallStack()
 
     // 保存的局部变量帧（帧切换用）
     private var savedLocals: VmFrameStack = VmFrameStack()
@@ -174,9 +185,9 @@ class Vm {
         this.error = ""
         this.exitCode = 0
         this.stack = VmStack()
-        this.locals = HashMap<Int, Any>()
+        this.locals.reset()
         this.globals = HashMap<String, Any>()
-        this.callStack = VmStrStack()
+        this.callStack.reset()
         this.savedLocals = VmFrameStack()
         this.currentFrame = 0
         this.currentFunc = ""
@@ -212,9 +223,9 @@ class Vm {
         this.returnValue = null
         this.exitCode = 0
         this.stack = VmStack()
-        this.locals = HashMap<Int, Any>()
+        this.locals.reset()
         this.globals = HashMap<String, Any>()
-        this.callStack = VmStrStack()
+        this.callStack.reset()
         this.savedLocals = VmFrameStack()
         this.handlerStack = VmStrStack()
         this.instructionCount = 0
@@ -231,6 +242,7 @@ class Vm {
         this.closureCaptures = HashMap<Int, List<Any>>()
         this.currentClosure = -1
         this.buildLineCache()
+        this.buildLoadCaches()
     }
 
     /// 从二进制 .auc 文件加载并执行。
@@ -264,9 +276,9 @@ class Vm {
         this.error = ""
         this.returnValue = null
         this.stack = VmStack()
-        this.locals = HashMap<Int, Any>()
+        this.locals.reset()
         this.globals = HashMap<String, Any>()
-        this.callStack = VmStrStack()
+        this.callStack.reset()
         this.savedLocals = VmFrameStack()
         this.handlerStack = VmStrStack()
         this.instructionCount = 0
@@ -284,6 +296,7 @@ class Vm {
         this.closureCaptures = HashMap<Int, List<Any>>()
         this.currentClosure = -1
         this.buildLineCache()
+        this.buildLoadCaches()
         return this.run()
     }
 
@@ -314,9 +327,9 @@ class Vm {
         this.returnValue = null
         this.exitCode = 0
         this.stack = VmStack()
-        this.locals = HashMap<Int, Any>()
+        this.locals.reset()
         this.globals = HashMap<String, Any>()
-        this.callStack = VmStrStack()
+        this.callStack.reset()
         this.savedLocals = VmFrameStack()
         this.handlerStack = VmStrStack()
         this.instructionCount = 0
@@ -333,6 +346,8 @@ class Vm {
         this.currentClosure = -1
         this.accelEnabled = false
         this.accelTable = HashMap<String, Int>()
+        this.fuseHotPairs()
+        this.buildLoadCaches()
     }
 
     /// 注册 .auc 类定义表（P2.2c）：类名 + 父类下标 → 类继承注册表。
@@ -437,7 +452,104 @@ class Vm {
     /// 字符串比较；`opName` 仅用于未知指令的诊断信息。
     private fun dispatch(op: Int, opName: String, args: List<String>): Unit {
         // ── 常量指令 ──
-        if (op == Opcodes.CONST_INT) {
+        // ── 热指令快速分派（方案 D）：按动态频次把高频臂前置，
+        // 未命中落入下方原链（臂语义与原链逐字一致）。 ──
+        if (op == Opcodes.LOAD_LOCAL) {
+            val slot: Int = this.arg0IntOf()
+            val v: Any = this.locals.getSlot(slot)
+            if (v == null) {
+                this.stack.push(0)
+            } else {
+                this.stack.push(v)
+            }
+        } else if (op == Opcodes.STORE_LOCAL) {
+            this.locals.putSlot(this.arg0IntOf(), this.stack.pop())
+        } else if (op == Opcodes.LOAD_CONST_I) {
+            this.stack.push(toAny(VmOps.toI32(toStr(this.getConst(args.get(0))))))
+        } else if (op == Opcodes.JUMP_IF_FALSE) {
+            val cond: Any = this.stack.pop()
+            if (!VmOps.toBool(cond)) {
+                this.ip = this.arg0IntOf()
+            }
+        } else if (op == Opcodes.LDIC_STL) {
+            this.stack.push(toAny(VmOps.toI32(toStr(this.getConst(args.get(0))))))
+            this.locals.putSlot(this.arg1IntOf(), this.stack.pop())
+        } else if (op == Opcodes.LDL_JIF) {
+            val v: Any = this.locals.getSlot(this.arg0IntOf())
+            if (v == null) {
+                this.stack.push(0)
+            } else {
+                this.stack.push(v)
+            }
+            val cond: Any = this.stack.pop()
+            if (!VmOps.toBool(cond)) {
+                this.ip = this.arg1IntOf()
+            }
+        } else if (op == Opcodes.LDLC_OP_STL) {
+            // local[a] OP const[c] → local[s]
+            val b: Any = this.locals.getSlot(this.arg0IntOf())
+            val c: Any = toAny(VmOps.toI32(toStr(this.getConst(args.get(1)))))
+            val binop: Int = VmOps.toI32(args.get(2))
+            var r: Any = 0
+            if (binop == Opcodes.ADD) {
+                r = VmOps.add(b, c)
+            } else if (binop == Opcodes.SUB) {
+                r = VmOps.sub(b, c)
+            } else if (binop == Opcodes.MUL) {
+                r = VmOps.mul(b, c)
+            }
+            this.locals.putSlot(VmOps.toI32(args.get(3)), r)
+        } else if (op == Opcodes.LDLB_OP_STL) {
+            // local[a] OP local[b] → local[s]
+            val b: Any = this.locals.getSlot(this.arg0IntOf())
+            val c: Any = this.locals.getSlot(this.arg1IntOf())
+            val binop: Int = VmOps.toI32(args.get(2))
+            var r2: Any = 0
+            if (binop == Opcodes.ADD) {
+                r2 = VmOps.add(b, c)
+            } else if (binop == Opcodes.SUB) {
+                r2 = VmOps.sub(b, c)
+            } else if (binop == Opcodes.MUL) {
+                r2 = VmOps.mul(b, c)
+            }
+            this.locals.putSlot(VmOps.toI32(args.get(3)), r2)
+        } else if (op == Opcodes.LDLC_LTL_JIFS) {
+            // local[a] < const[c] → tmp；false 跳 t（循环守卫 6 连合一）
+            val b: Any = this.locals.getSlot(this.arg0IntOf())
+            val c: Any = toAny(VmOps.toI32(toStr(this.getConst(args.get(1)))))
+            val cond: Any = VmOps.lt(b, c)
+            this.locals.putSlot(VmOps.toI32(args.get(3)), cond)
+            if (!VmOps.toBool(cond)) {
+                this.ip = VmOps.toI32(args.get(4))
+            }
+        } else if (op == Opcodes.ADD) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.add(a, b))
+        } else if (op == Opcodes.SUB) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.sub(a, b))
+        } else if (op == Opcodes.LT) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.lt(a, b))
+        } else if (op == Opcodes.CALL) {
+            val funcName: String = args.get(0)
+            var argc: Int = 0
+            if (args.size() >= 2) {
+                argc = this.arg1IntOf()
+            } else {
+                argc = this.funcParamCount(funcName)
+                if (argc < 0) { argc = 0 }
+            }
+            this.callOrBuiltin(funcName, argc)
+        } else if (op == Opcodes.RETURN) {
+            this.returnFromFunc()
+        } else if (op == Opcodes.JUMP) {
+            this.ip = this.arg0IntOf()
+        } else {
+                if (op == Opcodes.CONST_INT) {
             val idx: Int = VmOps.toI32(toStr(this.getConst(args.get(0))))
             this.stack.push(toAny(idx))
         } else if (op == Opcodes.CONST_FLOAT) {
@@ -468,7 +580,7 @@ class Vm {
         // ── 栈操作 ──
         else if (op == Opcodes.LOAD_LOCAL) {
             val slot: Int = VmOps.toI32(args.get(0))
-            val v: Any = this.locals.get(slot)
+            val v: Any = this.locals.getSlot(slot)
             // **不要**写成 `push(if (v == null) 0 else v)`：混合类型 if 表达式会被
             // 推导成 `Int`，非空分支里的 `String` 指针会被截断成整数
             //（自检样例槽位里存的是整数所以看不出来；`.auc` 路径存字符串时，
@@ -480,10 +592,10 @@ class Vm {
             }
         } else if (op == Opcodes.STORE_LOCAL) {
             val slot: Int = VmOps.toI32(args.get(0))
-            this.locals.put(slot, this.stack.pop())
+            this.locals.putSlot(slot, this.stack.pop())
         } else if (op == Opcodes.DECL_LOCAL) {
             val slot: Int = VmOps.toI32(args.get(0))
-            this.locals.put(slot, 0)
+            this.locals.putSlot(slot, 0)
         } else if (op == Opcodes.POP) {
             this.stack.pop()
         } else if (op == Opcodes.DUP) {
@@ -876,6 +988,7 @@ class Vm {
             this.error = "Unknown opcode: " + opName
             this.running = false
         }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -910,6 +1023,22 @@ class Vm {
         } else if (funcName == "toBool") {
             val v: Any = this.stack.pop()
             this.stack.push(VmOps.toBool(v))
+            return
+        } else if (funcName == "aura_cast" || funcName == "aura_cast_safety") {
+            // `x as T` 的运行时转换（与 AOT emit 的 aura_cast 分支同语义）。
+            val targetTy: String = toStr(this.stack.pop())
+            val cv: Any = this.stack.pop()
+            if (targetTy == "Long") {
+                this.stack.push(VmOps.toI64(VmOps.toStrAny(cv)))
+            } else if (targetTy == "Int") {
+                this.stack.push(VmOps.intOf(cv))
+            } else if (targetTy == "Float" || targetTy == "Double") {
+                this.stack.push(VmOps.parseFloat(VmOps.toStrAny(cv)))
+            } else if (targetTy == "String") {
+                this.stack.push(VmOps.toStrAny(cv))
+            } else {
+                this.stack.push(cv)
+            }
             return
         } else if (funcName == "typeof" || funcName == "typeOf") {
             val v: Any = this.stack.pop()
@@ -1329,15 +1458,15 @@ class Vm {
         }
 
         // 保存返回地址和当前帧（第 4 字段为调用者的闭包上下文，P1.3）
-        this.callStack.push(toStr(this.ip) + "|" + toStr(this.currentFrame) + "|" + this.currentFunc + "|" + toStr(this.currentClosure))
+        this.callStack.push(this.ip, this.currentFrame, this.currentFunc, this.currentClosure)
         this.savedLocals.push(this.locals)
-        this.locals = HashMap<Int, Any>()
+        this.locals = this.popLocalsPool()
 
         // 绑定参数到槽位（槽基址随调用约定不同，见 `aucArgBase`）
         val pc: Int = this.funcParamCount(funcName)
         var k: Int = pc - 1
         while (k >= 0 && k < argc) {
-            this.locals.put(k + this.aucArgBase, this.stack.pop())
+            this.locals.putSlot(k + this.aucArgBase, this.stack.pop())
             k = k - 1
         }
 
@@ -1360,12 +1489,12 @@ class Vm {
             return
         }
 
-        val last: String = this.callStack.peek()
-        val returnIp: Int = VmOps.toI32(VmOps.fieldAt(last, 0, "|"))
-        val savedClosure: Int = VmOps.toI32(VmOps.fieldAt(last, 3, "|"))
+        val returnIp: Int = this.callStack.peekIp()
+        val savedClosure: Int = this.callStack.peekClosure()
         this.callStack.pop()
 
         // 恢复局部变量与闭包上下文
+        this.retireLocals(this.locals)
         this.locals = this.popSavedLocals()
         this.currentClosure = savedClosure
         this.currentFrame = this.currentFrame - 1
@@ -1392,11 +1521,12 @@ class Vm {
             this.running = false
             return
         }
-        this.locals = HashMap<Int, Any>()
+        this.retireLocals(this.locals)
+        this.locals = this.popLocalsPool()
         val pc: Int = this.funcParamCount(funcName)
         var k: Int = pc - 1
         while (k >= 0 && k < argc) {
-            this.locals.put(k + this.aucArgBase, this.stack.pop())
+            this.locals.putSlot(k + this.aucArgBase, this.stack.pop())
             k = k - 1
         }
         this.currentFunc = funcName
@@ -1404,11 +1534,28 @@ class Vm {
     }
 
     /// 弹出最后一个保存的局部变量块。
-    private fun popSavedLocals(): HashMap<Int, Any> {
+    private fun popSavedLocals(): VmLocals {
         if (this.savedLocals.size() == 0) {
-            return HashMap<Int, Any>()
+            return VmLocals()
         }
         return this.savedLocals.pop()
+    }
+
+    /// 从池中取一个（已重置的）locals；池空则新建。
+    private fun popLocalsPool(): VmLocals {
+        val n: Int = this.localsPool.size()
+        if (n > 0) {
+            val v: VmLocals = this.localsPool.get(n - 1)
+            this.localsPool.removeAt(n - 1)
+            return v
+        }
+        return VmLocals()
+    }
+
+    /// 退役帧 locals：代际重置后归还池（容量保留，热身后零分配）。
+    private fun retireLocals(m: VmLocals): Unit {
+        m.reset()
+        this.localsPool.add(m)
     }
 
     /// 弹出 argc 个实参并按源顺序拼接为字符串。
@@ -1984,6 +2131,11 @@ class Vm {
             this.stack.push(v)
             return
         }
+        // Plan A 装箱整数绝不可能是注册堆对象，直接透传（免 toStrAny 键分配）。
+        if (VmOps.isTaggedInt(v)) {
+            this.stack.push(v)
+            return
+        }
         val key: String = VmOps.toStrAny(v)
         val kind: String = this.heapKinds.getOrDefault(key, "")
         if (kind == "object" || kind == "box") {
@@ -2003,6 +2155,11 @@ class Vm {
         val v: Any = this.stack.pop()
         if (v == null || !VmOps.isNumeric(v)) {
             this.stack.push(null)
+            return
+        }
+        // 同 incRef：装箱整数透传，零分配。
+        if (VmOps.isTaggedInt(v)) {
+            this.stack.push(v)
             return
         }
         val key: String = VmOps.toStrAny(v)
@@ -2044,6 +2201,10 @@ class Vm {
     private fun dropRef(): Unit {
         val v: Any = this.stack.pop()
         if (v == null || !VmOps.isNumeric(v)) {
+            return
+        }
+        // 同 incRef：装箱整数透传，零分配。
+        if (VmOps.isTaggedInt(v)) {
             return
         }
         val key: String = VmOps.toStrAny(v)
@@ -2250,15 +2411,14 @@ class Vm {
             }
             // 帧截断：丢弃 handler 之上（含当前）的调用帧，恢复到 handler 帧
             while (this.currentFrame > frame && this.callStack.size() > 0) {
-                val entry: String = this.callStack.peek()
-                this.currentClosure = VmOps.toI32(VmOps.fieldAt(entry, 3, "|"))
+                this.currentClosure = this.callStack.peekClosure()
                 this.callStack.pop()
                 this.locals = this.popSavedLocals()
                 this.currentFrame = this.currentFrame - 1
             }
             // 异常值落槽（若 handler 指定）并压栈
             if (slot >= 0) {
-                this.locals.put(slot, ex)
+                this.locals.putSlot(slot, ex)
             }
             this.stack.push(ex)
             this.ip = target
@@ -2816,18 +2976,278 @@ class Vm {
 
     /// 查找函数入口偏移（未找到返回 0）。
     private fun funcOffset(funcName: String): Int {
+        val cached: Int = this.funcOffsetMap.getOrDefault(funcName, -1)
+        if (cached >= 0) {
+            return cached
+        }
         return VmOps.findFuncOffset(this.funcTable, funcName)
     }
 
     /// 查找函数参数个数（未找到返回 -1）。
     private fun funcParamCount(funcName: String): Int {
+        val cachedPc: Int = this.funcParamMap.getOrDefault(funcName, -1)
+        if (cachedPc >= 0) {
+            return cachedPc
+        }
         return VmOps.findFuncParamCount(this.funcTable, funcName)
     }
 
     /// 获取常量池中的值。
+    /// 算术融合白名单：与快速分派块的臂一一对应。
+    private fun isArithOp(op: Int): Boolean {
+        return op == Opcodes.ADD || op == Opcodes.SUB || op == Opcodes.MUL
+    }
+
+    /// 装载期索引构建（方案 A2+E）：函数表 → 两张 HashMap；常量池 → 行缓存；
+    /// 指令参数 → 预解析 Int。装载完成后调用一次；执行路径零解析零分配。
+    private fun buildLoadCaches(): Unit {
+        this.funcOffsetMap = HashMap<String, Int>()
+        this.funcParamMap = HashMap<String, Int>()
+        val ft: String = this.funcTable
+        var start: Int = 0
+        var i: Int = 0
+        val n: Int = ft.length
+        while (i < n) {
+            if (ft.charCodeAt(i) == 10) {
+                if (i > start) {
+                    val line: String = VmOps.vmSubstr(ft, start, i - start)
+                    val p1: Int = VmOps.indexOf(line, "|", 0)
+                    if (p1 >= 0) {
+                        val p2: Int = VmOps.indexOf(line, "|", p1 + 1)
+                        if (p2 > p1) {
+                            val name: String = VmOps.vmSubstr(line, 0, p1)
+                            if (name != "") {
+                                val off: Int = VmOps.toI32(VmOps.vmSubstr(line, p1 + 1, p2 - p1 - 1))
+                                val pc: Int = VmOps.toI32(VmOps.vmSubstr(line, p2 + 1, line.length - p2 - 1))
+                                this.funcOffsetMap.put(name, off)
+                                this.funcParamMap.put(name, pc)
+                            }
+                        }
+                    }
+                }
+                start = i + 1
+            }
+            i = i + 1
+        }
+        this.constLines = arrayListOf<String>()
+        val cp: String = this.constPool
+        var cs: Int = 0
+        var j: Int = 0
+        val cn: Int = cp.length
+        while (j < cn) {
+            if (cp.charCodeAt(j) == 10) {
+                this.constLines.add(this.unescapeConst(VmOps.vmSubstr(cp, cs, j - cs)))
+                cs = j + 1
+            }
+            j = j + 1
+        }
+        if (cs < cn) {
+            this.constLines.add(this.unescapeConst(VmOps.vmSubstr(cp, cs, cn - cs)))
+        }
+        this.arg0Ints = arrayListOf<Int>()
+        this.arg1Ints = arrayListOf<Int>()
+        var ai: Int = 0
+        val an: Int = this.opCodes.size()
+        while (ai < an) {
+            val a: List<String> = this.argCache.get(ai)
+            if (a.size() > 0) {
+                val s0: String = a.get(0)
+                if (VmOps.isAllDigits(s0)) {
+                    this.arg0Ints.add(VmOps.toI32(s0))
+                } else {
+                    this.arg0Ints.add(this.argNoneMark)
+                }
+            } else {
+                this.arg0Ints.add(this.argNoneMark)
+            }
+            if (a.size() > 1) {
+                val s1: String = a.get(1)
+                if (VmOps.isAllDigits(s1)) {
+                    this.arg1Ints.add(VmOps.toI32(s1))
+                } else {
+                    this.arg1Ints.add(this.argNoneMark)
+                }
+            } else {
+                this.arg1Ints.add(this.argNoneMark)
+            }
+            ai = ai + 1
+        }
+    }
+
+    /// 装载期超级指令融合（方案 D）：对预解码流做一次线性窥孔改写。
+    /// ⚠ 就地改写（不压缩流）：跳转目标是原始行号，压缩会错位（实测死循环）。
+    /// 融合对写首行，次行 OP_NOP 占位——行号全稳定，每对省一次完整分派。
+    private fun fuseHotPairs(): Unit {
+        val n: Int = this.opCodes.size()
+        if (n < 2) { return }
+        var r: Int = 0
+        while (r < n - 1) {
+            val op: Int = this.opCodes.get(r)
+            var fused: Int = 0
+            var pairName: String = ""
+            val pair: List<String> = arrayListOf<String>()
+            var span: Int = 2
+            if (r < n - 5
+                && op == Opcodes.LOAD_LOCAL
+                && this.opCodes.get(r + 1) == Opcodes.LOAD_CONST_I
+                && this.opCodes.get(r + 2) == Opcodes.LT
+                && this.opCodes.get(r + 3) == Opcodes.STORE_LOCAL
+                && this.opCodes.get(r + 4) == Opcodes.LOAD_LOCAL
+                && this.opCodes.get(r + 5) == Opcodes.JUMP_IF_FALSE) {
+                val a0: List<String> = this.argCache.get(r)
+                val a1: List<String> = this.argCache.get(r + 1)
+                val a3: List<String> = this.argCache.get(r + 3)
+                val a4: List<String> = this.argCache.get(r + 4)
+                val a5: List<String> = this.argCache.get(r + 5)
+                val tmpW: String = if (a3.size() > 0) { a3.get(0) } else { "-1" }
+                val tmpR: String = if (a4.size() > 0) { a4.get(0) } else { "-1" }
+                if (tmpW == tmpR) {
+                    if (a0.size() > 0) { pair.add(a0.get(0)) } else { pair.add("0") }
+                    if (a1.size() > 0) { pair.add(a1.get(0)) } else { pair.add("0") }
+                    pair.add(toStr(Opcodes.LT))
+                    pair.add(tmpW)
+                    if (a5.size() > 0) { pair.add(a5.get(0)) } else { pair.add("0") }
+                    fused = Opcodes.LDLC_LTL_JIFS
+                    pairName = "LDLC_LTL_JIFS"
+                    span = 6
+                }
+            }
+            if (fused == 0 && r < n - 3
+                && op == Opcodes.LOAD_LOCAL
+                && this.opCodes.get(r + 1) == Opcodes.LOAD_CONST_I
+                && this.isArithOp(this.opCodes.get(r + 2))
+                && this.opCodes.get(r + 3) == Opcodes.STORE_LOCAL) {
+                val a0: List<String> = this.argCache.get(r)
+                val a1: List<String> = this.argCache.get(r + 1)
+                val a3: List<String> = this.argCache.get(r + 3)
+                if (a0.size() > 0) { pair.add(a0.get(0)) } else { pair.add("0") }
+                if (a1.size() > 0) { pair.add(a1.get(0)) } else { pair.add("0") }
+                pair.add(toStr(this.opCodes.get(r + 2)))
+                if (a3.size() > 0) { pair.add(a3.get(0)) } else { pair.add("0") }
+                fused = Opcodes.LDLC_OP_STL
+                pairName = "LDLC_OP_STL"
+                span = 4
+            }
+            if (fused == 0 && r < n - 3
+                && op == Opcodes.LOAD_LOCAL
+                && this.opCodes.get(r + 1) == Opcodes.LOAD_LOCAL
+                && this.isArithOp(this.opCodes.get(r + 2))
+                && this.opCodes.get(r + 3) == Opcodes.STORE_LOCAL) {
+                val a0: List<String> = this.argCache.get(r)
+                val a1: List<String> = this.argCache.get(r + 1)
+                val a3: List<String> = this.argCache.get(r + 3)
+                if (a0.size() > 0) { pair.add(a0.get(0)) } else { pair.add("0") }
+                if (a1.size() > 0) { pair.add(a1.get(0)) } else { pair.add("0") }
+                pair.add(toStr(this.opCodes.get(r + 2)))
+                if (a3.size() > 0) { pair.add(a3.get(0)) } else { pair.add("0") }
+                fused = Opcodes.LDLB_OP_STL
+                pairName = "LDLB_OP_STL"
+                span = 4
+            }
+            if (fused == 0 && op == Opcodes.LOAD_CONST_I && this.opCodes.get(r + 1) == Opcodes.STORE_LOCAL) {
+                fused = Opcodes.LDIC_STL
+                pairName = "LDIC_STL"
+            } else if (fused == 0 && op == Opcodes.LOAD_LOCAL && this.opCodes.get(r + 1) == Opcodes.JUMP_IF_FALSE) {
+                fused = Opcodes.LDL_JIF
+                pairName = "LDL_JIF"
+            }
+            if (fused != 0) {
+                if (pair.size() == 0) {
+                    val a0: List<String> = this.argCache.get(r)
+                    if (a0.size() > 0) { pair.add(a0.get(0)) } else { pair.add("0") }
+                    val a1: List<String> = this.argCache.get(r + 1)
+                    if (a1.size() > 0) { pair.add(a1.get(0)) } else { pair.add("0") }
+                }
+                this.opCodes.set(r, fused)
+                this.argCache.set(r, pair)
+                this.ops.set(r, pairName)
+                var k: Int = r + 1
+                while (k < r + span) {
+                    this.opCodes.set(k, Opcodes.OP_NOP)
+                    this.argCache.set(k, arrayListOf<String>())
+                    this.ops.set(k, "")
+                    k = k + 1
+                }
+                r = r + span
+            } else {
+                r = r + 1
+            }
+        }
+    }
+
+    /// 第 i 条指令的 arg0 整数值（预解析未命中时回退现场解析）。
+    private fun arg0IntOf(): Int {
+        val v: Int = this.arg0Ints.get(this.ip - 1)
+        if (v != this.argNoneMark) {
+            return v
+        }
+        val a: List<String> = this.args.get(this.ip - 1)
+        if (a.size() > 0) {
+            return VmOps.toI32(a.get(0))
+        }
+        return 0
+    }
+
+    /// 第 i 条指令的 arg1 整数值（同上）。
+    private fun arg1IntOf(): Int {
+        val v: Int = this.arg1Ints.get(this.ip - 1)
+        if (v != this.argNoneMark) {
+            return v
+        }
+        val a: List<String> = this.args.get(this.ip - 1)
+        if (a.size() > 1) {
+            return VmOps.toI32(a.get(1))
+        }
+        return 0
+    }
+
     private fun getConst(idxStr: String): Any {
         val idx: Int = VmOps.toI32(idxStr)
-        return VmOps.getFieldAt(this.constPool, idx, "\n")
+        val n: Int = this.constLines.size()
+        if (idx >= 0 && idx < n) {
+            return this.constLines.get(idx)
+        }
+        return unescapeConst(VmOps.getFieldAt(this.constPool, idx, "\n"))
+    }
+
+    /// 反转义 AucLoader 的常量值转义（\\ → \、\n → 换行）。
+    private fun unescapeConst(s: String): String {
+        var hasEscape: Boolean = false
+        var i0: Int = 0
+        val n0: Int = s.length
+        while (i0 < n0) {
+            if (s.charCodeAt(i0) == 92) {
+                hasEscape = true
+                i0 = n0
+            }
+            i0 = i0 + 1
+        }
+        if (!hasEscape) {
+            return s
+        }
+        var out: String = ""
+        var i: Int = 0
+        val n: Int = s.length
+        while (i < n) {
+            val c: Int = s.charCodeAt(i)
+            if (c == 92 && i + 1 < n) {
+                val c2: Int = s.charCodeAt(i + 1)
+                if (c2 == 110) {
+                    out = out + String.fromCharCode(10)
+                    i = i + 2
+                } else if (c2 == 92) {
+                    out = out + String.fromCharCode(92)
+                    i = i + 2
+                } else {
+                    out = out + String.fromCharCode(c)
+                    i = i + 1
+                }
+            } else {
+                out = out + String.fromCharCode(c)
+                i = i + 1
+            }
+        }
+        return out
     }
 
     /// 检查字符串是否以指定前缀开头。
@@ -3014,12 +3434,12 @@ class Vm {
 
     /// 设置局部变量（测试用）。
     fun setLocal(idx: Int, value: String): Unit {
-        this.locals.put(idx, value)
+        this.locals.putSlot(idx, value)
     }
 
     /// 获取局部变量（测试用）。
     fun getLocal(idx: Int): String {
-        val v = this.locals.get(idx)
+        val v = this.locals.getSlot(idx)
         if (v == null) return ""
         return toStr(v)
     }

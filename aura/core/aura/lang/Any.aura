@@ -70,6 +70,15 @@ open class Any {
     /// @since 0.5
     open fun hashCode(): Int {
         if (this == null) return 0
+        // Plan A 装箱整数（AOT 载体）快路径：哈希 = 值本身（与 VM 的
+        // Int.hashCode 语义一致），**不经 toStr**——toStr 每次分配十进制
+        // 临时串且运行时不回收，HashMap 每次 put 的键哈希都会泄漏
+        //（实测 25M 迭代基准累积 6GB+ 触发内存守卫）。种子 VM 下
+        // __is_tagged_int 恒 false，走既有字符串散列路径。
+        if (__is_tagged_int(this)) {
+            val raw: Long = this as Long
+            return raw as Int
+        }
         // 31 进制字符串散列（见 toString 的说明：AOT 侧无 `typeof`）。
         // 与 `equals` 用同一规范形式，保证「相等 ⇒ 同哈希」；
         // 对 Int / Long / Boolean / String 等键，散列分布与 VM 的值分派等价。

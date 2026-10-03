@@ -94,51 +94,46 @@ impl Vm {
         // 输出尾部就是正在空转的函数与指令位置。
         //
         // 例：AURA_VM_WATCH=5000000 aura run build/auc/compiler/aura-compiler.auc
-        {
+        //
+        // 2026-10-02 性能修复：配置在 `Vm::new` 里读一次存入 `self.watch_interval`。
+        // 旧实现每条指令都 `OnceLock::get_or_init`（原子读 + env 查询的初始化检查）
+        // —— 基准 loop 用例 3 亿条指令就是 3 亿次原子操作。
+        let interval = self.watch_interval;
+        if interval > 0 {
             use std::sync::atomic::{AtomicU64, Ordering};
-            use std::sync::OnceLock;
-            static WATCH_INTERVAL: OnceLock<u64> = OnceLock::new();
             static WATCH_TICK: AtomicU64 = AtomicU64::new(0);
-            let interval = *WATCH_INTERVAL.get_or_init(|| {
-                std::env::var("AURA_VM_WATCH")
-                    .ok()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0)
-            });
-            if interval > 0 {
-                let tick = WATCH_TICK.fetch_add(1, Ordering::Relaxed) + 1;
-                if tick % interval == 0 {
-                    let mut stack = String::new();
-                    for (i, fr) in self.frames.iter().rev().enumerate() {
-                        if i >= 16 {
-                            stack.push_str("... ");
-                            break;
-                        }
-                        let n = self
-                            .module
-                            .funcs
-                            .get(fr.func)
-                            .map(|f| f.name.as_str())
-                            .unwrap_or("<bad>");
-                        stack.push_str(&format!("{}@{} <- ", n, fr.ip));
+            let tick = WATCH_TICK.fetch_add(1, Ordering::Relaxed) + 1;
+            if tick % interval == 0 {
+                let mut stack = String::new();
+                for (i, fr) in self.frames.iter().rev().enumerate() {
+                    if i >= 16 {
+                        stack.push_str("... ");
+                        break;
                     }
-                    eprintln!(
-                        "[vm] watch: tick={} depth={} {}",
-                        tick,
-                        self.frames.len(),
-                        stack
-                    );
-                    // 栈顶帧的局部变量（定位「参数异常」用，例如
-                    // `StringBuilder.reserve(sb, need)` 里的 need 是否为天文数字）
-                    if let Some(fr) = self.frames.last() {
-                        let locs: Vec<String> = fr
-                            .locals
-                            .iter()
-                            .take(6)
-                            .map(|v| format!("{:?}", v))
-                            .collect();
-                        eprintln!("[vm]   locals: [{}]", locs.join(", "));
-                    }
+                    let n = self
+                        .module
+                        .funcs
+                        .get(fr.func)
+                        .map(|f| f.name.as_str())
+                        .unwrap_or("<bad>");
+                    stack.push_str(&format!("{}@{} <- ", n, fr.ip));
+                }
+                eprintln!(
+                    "[vm] watch: tick={} depth={} {}",
+                    tick,
+                    self.frames.len(),
+                    stack
+                );
+                // 栈顶帧的局部变量（定位「参数异常」用，例如
+                // `StringBuilder.reserve(sb, need)` 里的 need 是否为天文数字）
+                if let Some(fr) = self.frames.last() {
+                    let locs: Vec<String> = fr
+                        .locals
+                        .iter()
+                        .take(6)
+                        .map(|v| format!("{:?}", v))
+                        .collect();
+                    eprintln!("[vm]   locals: [{}]", locs.join(", "));
                 }
             }
         }
@@ -1050,6 +1045,22 @@ impl Vm {
             }
             "aura_cast" if args.len() >= 2 => {
                 let target_name = args[1].as_string();
+                // 泛型实例化目标（`HashMap<Int, Any>`）按基类名比对：类注册表的
+                // 键是 `HashMap`，不剥则 Ref → 同类泛型的合法 cast 恒失败
+                //（实测 locals 帧池的 `v as HashMap<Int, Any>` 在元循环下
+                //  `as cast failed: cannot cast value to class '<type>'`）。
+                let target_base: String = target_name
+                    .split('<')
+                    .next()
+                    .unwrap_or(&target_name)
+                    .trim()
+                    .to_string();
+                let target_name: &str = &target_base;
+                // 编译期类型名未落（占位 `"<type>"` / 空串）：无法验证，按 AOT 的
+                // 指针透传语义处理（Ref → 类的 cast 在 AOT 侧本就不检查）。
+                if target_base.is_empty() || target_base.starts_with('<') {
+                    return Ok(Some(args[0].clone()));
+                }
                 // 窄整型（Byte/Short/Char/…）：先做**数值转换**，不要走下面的类实例检查。
                 //
                 // `core` 里存在 `Byte.aura` / `Short.aura` 等包装类，所以
@@ -1080,7 +1091,7 @@ impl Vm {
                             "Int", "Long", "Float", "Double", "Number", "Boolean", "Bool",
                             "String", "Null",
                         ];
-                        if BASIC_TYPES.contains(&target_name.as_str()) {
+                        if BASIC_TYPES.contains(&target_base.as_str()) {
                             crate::vm::native::native_cast(args)
                         } else {
                             return Err(VmError::Runtime(format!(
@@ -1093,6 +1104,16 @@ impl Vm {
             }
             "aura_cast_safety" if args.len() >= 2 => {
                 let target_name = args[1].as_string();
+                let target_base: String = target_name
+                    .split('<')
+                    .next()
+                    .unwrap_or(&target_name)
+                    .trim()
+                    .to_string();
+                let target_name: &str = &target_base;
+                if target_base.is_empty() || target_base.starts_with('<') {
+                    return Ok(Some(args[0].clone()));
+                }
                 match self.class_id_by_name(&target_name) {
                     Some(id) => {
                         if self.is_instance_of(&args[0], id) {

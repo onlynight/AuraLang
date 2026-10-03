@@ -444,6 +444,18 @@ class PhotonPipeline {
         if (this.outputType != "so" && this.outputType != "dylib") {
             runtimeObjPath = this.outDir + "/aura_runtime.obj"
             var runtimeResult: Boolean = FileUtils.exists(runtimeObjPath)
+            // 2026-10-02 缓存失效校验：旧实现只看「文件存在」——RUNTIME_SYMBOLS
+            // 变更后（新增 String_fromCharCode / ProcessOps_aura_process_* 等），
+            // 旧 obj 被继续链接，链接期全是 undefined symbol（实测自举 Main.aura）。
+            // sidecar 记录构建时的符号表，不一致即重建。
+            if (runtimeResult) {
+                val wantSyms: String = PhotonRuntime.RUNTIME_SYMBOLS
+                val gotSyms: String = FileUtils.readText(runtimeObjPath + ".syms")
+                if (gotSyms != wantSyms) {
+                    this.vprintln("    runtime obj 缓存失效（RUNTIME_SYMBOLS 变更）→ 重建")
+                    runtimeResult = false
+                }
+            }
             if (!runtimeResult) {
                 this.peProbe("genRuntimeObj path=" + runtimeObjPath)
                 val runtimeHex: String = PhotonRuntime.buildRuntimeObject()
@@ -453,6 +465,7 @@ class PhotonPipeline {
                 if (!runtimeResult) {
                     runtimeResult = PhotonRuntimeUtils.writeRuntimeObjectHexFile(runtimeObjPath)
                 }
+                FileUtils.writeText(runtimeObjPath + ".syms", PhotonRuntime.RUNTIME_SYMBOLS)
             }
             this.peProbe("writeRuntimeObj ok=" + this.toStr(runtimeResult) +
                     (if (runtimeResult) " (cached)" else ""))
@@ -741,6 +754,18 @@ class PhotonPipeline {
         if (this.outputType != "so" && this.outputType != "dylib") {
             runtimeObjPath = this.outDir + "/aura_runtime.obj"
             var runtimeResult: Boolean = FileUtils.exists(runtimeObjPath)
+            // 2026-10-02 缓存失效校验：旧实现只看「文件存在」——RUNTIME_SYMBOLS
+            // 变更后（新增 String_fromCharCode / ProcessOps_aura_process_* 等），
+            // 旧 obj 被继续链接，链接期全是 undefined symbol（实测自举 Main.aura）。
+            // sidecar 记录构建时的符号表，不一致即重建。
+            if (runtimeResult) {
+                val wantSyms: String = PhotonRuntime.RUNTIME_SYMBOLS
+                val gotSyms: String = FileUtils.readText(runtimeObjPath + ".syms")
+                if (gotSyms != wantSyms) {
+                    this.vprintln("    runtime obj 缓存失效（RUNTIME_SYMBOLS 变更）→ 重建")
+                    runtimeResult = false
+                }
+            }
             if (!runtimeResult) {
                 this.peProbe("genRuntimeObj path=" + runtimeObjPath)
                 val runtimeHex: String = PhotonRuntime.buildRuntimeObject()
@@ -750,6 +775,7 @@ class PhotonPipeline {
                 if (!runtimeResult) {
                     runtimeResult = PhotonRuntimeUtils.writeRuntimeObjectHexFile(runtimeObjPath)
                 }
+                FileUtils.writeText(runtimeObjPath + ".syms", PhotonRuntime.RUNTIME_SYMBOLS)
             }
             this.peProbe("writeRuntimeObj ok=" + this.toStr(runtimeResult) +
                     (if (runtimeResult) " (cached)" else ""))

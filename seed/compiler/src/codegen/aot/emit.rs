@@ -2167,8 +2167,13 @@ fn emit_variable_decl(
     let fn_sig = declared_sig.clone().or_else(|| inferred_sig.clone());
 
     // 当类型未显式标注时，从初始化器推断 LLVM 类型
+    //
+    // ⚠ 显式标注的局部槽必须用 `llvm_type_checked`：类型解析失败（目标类不在
+    // 本编译单元、跨模块类型缺失等）时退化为 `i8*` 而非残留 `%struct.X*`。
+    // 残留 unsized 结构体指针会让该槽位的所有 load/store 与后续 GEP 全部落到
+    // 错误的布局上（局部指针损坏家族缺陷的槽位侧）。
     let llvm_ty = if let Some(t) = ty {
-        ctx.llvm_type(t)
+        ctx.llvm_type_checked(t)
     } else if let Some(init_expr) = init {
         // 先发射初始化器获取其类型
         if let Some(ref sig) = fn_sig {
@@ -2505,9 +2510,14 @@ fn emit_member_assign(
     val_ir: String,
     val_ty: String,
 ) -> Result<(), AotError> {
-    // 字段索引 / 类型表：优先按对象静态类型解析（this/self → 当前类；变量 → 其声明类），
-    // 再退回按字段名全局扫描
-    let found = resolve_member_field_owner(ctx, object, None, field);
+    // ⚠ 先求值对象再解析归属：归属解析需要对象的**静态 LLVM 类型**
+    //（`%struct.X*`），与 `emit_member_access` 的 `Some(&obj_ty)` 同源。
+    // 传 None 会让解析退化成「按字段名全局字典序扫描」——闭包里任何
+    // 字母序更靠前的类若恰好有同名字段，写入就落到**无关类**：之后读取
+    // 该字段拿到的是另一个类的值（实测装箱整数被当字符串 strlen →
+    // 段错误；新增一个零调用 import 即复现，见 probe_gc 探针矩阵）。
+    let (obj_ir, obj_ty) = emit_expr_val(ctx, _blocks, object)?;
+    let found = resolve_member_field_owner(ctx, object, Some(&obj_ty), field);
 
     // 情形 1：对象是「结构体值的局部变量」→ load / insertvalue / store 回写
     if let (HirExpr::Var(var_name), Some((class, field_ty, field_idx))) = (object, &found) {
@@ -2537,7 +2547,6 @@ fn emit_member_assign(
     }
 
     // 情形 2：对象是「指向结构体的指针」→ GEP 取字段地址后 store
-    let (obj_ir, obj_ty) = emit_expr_val(ctx, _blocks, object)?;
     if let Some((class, field_ty, field_idx)) = found {
         let struct_ty = format!("%struct.{}", sanitizellvm(&class));
         if obj_ty.ends_with('*') || obj_ty == "i8*" || obj_ty == "ptr" {
@@ -4135,8 +4144,46 @@ fn emit_binary(
                 l_ty = target.clone();
                 r_ty = target;
             }
-            // 字符串内容比较：任一侧是 `i8*`（String）时，按指针比较语义不对，
-            // 统一降级为 runtime 内容比较 `aura_lang_std_String_equals`。
+            // 与 `null` 字面量的比较 → **指针判空**，不是字符串内容比较。
+            //
+            // 此前落到下方字符串分支（Any/String 的 LLVM 类型都是 i8*）：
+            // `Any.hashCode` 的 `if (this == null)` 被发射成
+            // `String_equals(this, null)` —— self 是装箱整数（`(v<<1)|1`
+            // 的伪指针）时按字符串解引用 → 段错误（实测 AOT 载体
+            // `HashMap<Int,Any>.get` 首次取桶即崩）。判空与内容无关。
+            if matches!(op, HirBinOp::Eq | HirBinOp::Ne) && (l_ir == "null" || r_ir == "null") {
+                if l_ir == "null" && r_ir == "null" {
+                    let v = if *op == HirBinOp::Eq { "true" } else { "false" };
+                    return Ok((v.to_string(), "i1".to_string()));
+                }
+                let (val_ir, val_ty) = if r_ir == "null" {
+                    (l_ir.clone(), l_ty.clone())
+                } else {
+                    (r_ir.clone(), r_ty.clone())
+                };
+                let pred = if *op == HirBinOp::Eq { "eq" } else { "ne" };
+                // 值侧是指针（i8*/%struct.X*/ptr）→ 指针判空；非指针
+                //（数值/结构体值/字符串结构体值）恒非 null。
+                if is_ptr_ty(&val_ty) || val_ty == "i8*" {
+                    let cmp = ctx.fresh_var();
+                    let cur = blocks.last_mut();
+                    cur.body.push(format!(
+                        "{} = icmp {} {} {}, null",
+                        cmp, pred, val_ty, val_ir
+                    ));
+                    return Ok((cmp, "i1".to_string()));
+                }
+                let v = if *op == HirBinOp::Eq { "false" } else { "true" };
+                return Ok((v.to_string(), "i1".to_string()));
+            }
+            // i8* 通用值比较：统一走 **Plan A 感知**的 `aura_any_equals`。
+            //
+            // 操作数可能是真实字符串指针（偶数）也可能是装箱整数
+            //（`(v<<1)|1`，奇数伪指针）。旧实现无条件 String_equals：
+            // `HashMap.valuesEqual` 的 `a == b`（Any 接收者）在键是装箱
+            // 整数时按字符串解引用 → 段错误（AOT 载体 HashMap.get 即崩）。
+            // aura_any_equals 按低位标记分派：奇数比标记、偶数比内容，
+            // 对纯 String 操作数与 String_equals 语义一致（无回归）。
             {
                 let is_str_like = |t: &str| t == "i8*";
                 if matches!(op, HirBinOp::Eq | HirBinOp::Ne)
@@ -4146,7 +4193,7 @@ fn emit_binary(
                     let eq = ctx.fresh_var();
                     let cur = blocks.last_mut();
                     cur.body.push(format!(
-                        "{} = call i32 @aura_lang_std_String_equals(i8* {}, i8* {})",
+                        "{} = call i32 @aura_any_equals(i8* {}, i8* {})",
                         eq, l_ir, r_ir
                     ));
                     if *op == HirBinOp::Eq {
@@ -4159,11 +4206,51 @@ fn emit_binary(
                     return Ok((cmp, "i1".to_string()));
                 }
                 // 混合类型：一侧是字符串结构体，另一侧不是字符串类型。
-                // 字符串与整数/浮点等永远不会相等，直接返回编译期常量。
+                //
+                // ⚠ 另一侧是**数值**时不能折叠为常量不等：i8* 侧可能是持有
+                // 装箱数值的 `Any`（Plan A `(v<<1)|1`）—— 实测
+                // `VmLocals.getSlot` 的 `marks.get(k) == this.gen` 被折叠成
+                // 常量 false → 所有局部槽恒判未初始化 → AOT 载体死循环。
+                // 走 Plan A 比较 ptrtoint + `aura_to_int_any` 拆箱后再比较；
+                // 真字符串 vs 数值在拆箱后仍几乎恒不等（与旧折叠行为一致）。
                 if matches!(op, HirBinOp::Eq | HirBinOp::Ne)
                     && (is_str_like(&l_ty) || is_str_like(&r_ty))
                     && !(is_str_like(&l_ty) && is_str_like(&r_ty))
                 {
+                    let other_ty = if is_str_like(&l_ty) { r_ty.clone() } else { l_ty.clone() };
+                    if is_int_ty(&other_ty) || other_ty == "i64" {
+                        let (p_ir, p_ty) = if is_str_like(&l_ty) {
+                            (l_ir.clone(), l_ty.clone())
+                        } else {
+                            (r_ir.clone(), r_ty.clone())
+                        };
+                        let (n_ir, n_ty) = if is_str_like(&l_ty) {
+                            (r_ir.clone(), r_ty.clone())
+                        } else {
+                            (l_ir.clone(), l_ty.clone())
+                        };
+                        let pi = ctx.fresh_var();
+                        let cur = blocks.last_mut();
+                        cur.body.push(format!("{} = ptrtoint {} {} to i64", pi, p_ty, p_ir));
+                        let ub = ctx.fresh_var();
+                        cur.body.push(format!(
+                            "{} = call i64 @aura_to_int_any(i64 {})",
+                            ub, pi
+                        ));
+                        let ni = ctx.fresh_var();
+                        if n_ty == "i64" {
+                            cur.body.push(format!("{} = {}", ni, n_ir));
+                        } else {
+                            cur.body.push(format!("{} = sext {} {} to i64", ni, n_ty, n_ir));
+                        }
+                        let pred = if *op == HirBinOp::Eq { "eq" } else { "ne" };
+                        let cmp = ctx.fresh_var();
+                        cur.body.push(format!(
+                            "{} = icmp {} i64 {}, {}",
+                            cmp, pred, ub, ni
+                        ));
+                        return Ok((cmp, "i1".to_string()));
+                    }
                     if *op == HirBinOp::Eq {
                         return Ok(("false".to_string(), "i1".to_string()));
                     }
@@ -4535,6 +4622,14 @@ fn emit_call(
     callee: &str,
     args: &[HirExpr],
 ) -> Result<(String, String), AotError> {
+    if std::env::var_os("AURA_DEBUG_EMITCALL").is_some() {
+        eprintln!("[EMITCALL] callee={} args={}", callee, args.len());
+        if callee.contains("add") || callee.contains("Add") || callee.starts_with("__list") {
+            for (i, a) in args.iter().enumerate() {
+                eprintln!("[EMITCALL]   arg{}: {:.300?}", i, a);
+            }
+        }
+    }
     // Phase D: __throw 异常桥 — 存储异常值并 longjmp 到最近的 try 块
     if callee == "__throw" {
         if let Some(exc_expr) = args.first() {
@@ -5000,16 +5095,31 @@ fn emit_call(
                 callee_owned = "aura_string_length".to_string();
             }
         }
-        if let Some(std_sym) = string_method_symbol(&bare_name, effective_args.len().saturating_sub(1)) {
-            let legacy = crate::codegen::aot::runtime::translate_to_legacy_c(&sanitizellvm(&std_sym));
-            // 签名表有两张：`runtime_signature`（内置 runtime 函数）与
-            // `cffi_signature`（aura_std_cffi.c 的 C 实现）。
+        // ⚠ 只对「裸名」或「owner 确为 String」的调用改派。
+        //
+        // 无限定条件时，**任何**末段撞名的点分调用都会被劫持：
+        // `VmOps.split(ft, "\n")` 曾被改写成
+        //   `aura_string_split(VmOps_instance, ft, "\n")`
+        // —— 单例对象指针被当字符串切分（实测 AOT 载体 funcTable 解析
+        // 全错 → "Unknown function: fibonacci"）。与程序内类方法同名的
+        // 字符串方法（split/trim/replace/charAt/…）必须先让位给类分派。
+        let str_owner = match callee_owned.rfind('.') {
+            Some(pos) => callee_owned[..pos].to_string(),
+            None => String::new(),
+        };
+        let owner_is_string = str_owner == "String" || str_owner.ends_with(".String");
+        if str_owner.is_empty() || owner_is_string {
+            if let Some(std_sym) = string_method_symbol(&bare_name, effective_args.len().saturating_sub(1)) {
+                let legacy = crate::codegen::aot::runtime::translate_to_legacy_c(&sanitizellvm(&std_sym));
+                // 签名表有两张：`runtime_signature`（内置 runtime 函数）与
+                // `cffi_signature`（aura_std_cffi.c 的 C 实现）。
 
-            // 字符串族只登记在**后者**里（`aura_string_substring` / `trim` /
-            // `split` …），只查前者会全部落空 ⇒ 返回 `NO-SIG`，符号与返回类型
-            // 都无法修正。
-            if runtime_lookup_sig(&legacy).is_some() {
-                callee_owned = legacy;
+                // 字符串族只登记在**后者**里（`aura_string_substring` / `trim` /
+                // `split` …），只查前者会全部落空 ⇒ 返回 `NO-SIG`，符号与返回类型
+                // 都无法修正。
+                if runtime_lookup_sig(&legacy).is_some() {
+                    callee_owned = legacy;
+                }
             }
         }
     }
@@ -5381,6 +5491,35 @@ fn emit_call(
         }
     }
 
+    // __is_tagged_int(v)：Plan A 低位标记检测（原始表示为奇数 = 装箱整数）。
+    //
+    // 必须用**原始** ptrtoint，不能走 coerce_int_width——那会插入
+    // `aura_to_int_any` 拆箱，奇偶性随即丢失（实测 isTaggedInt 恒 false，
+    // VmOps.isString 对装箱整数误真 → `100 + 23` 拼接成 "10023"）。
+    // 种子 VM 侧（mir.rs）降级为常量 false：那里 typeof 给出真实类型名，
+    // 该检测不被依赖（isString 在 typeof 短路后才调用它）。
+    if callee == "__is_tagged_int" && args_ir.len() == 1 {
+        let (v, v_ty) = &args_ir[0];
+        let cur = blocks.last_mut();
+        if is_ptr_ty(v_ty) || v_ty == "i8*" {
+            let pi = ctx.fresh_var();
+            cur.body.push(format!("{} = ptrtoint {} {} to i64", pi, v_ty, v));
+            let t = ctx.fresh_var();
+            cur.body.push(format!("{} = and i64 {}, 1", t, pi));
+            let r = ctx.fresh_var();
+            cur.body.push(format!("{} = icmp ne i64 {}, 0", r, t));
+            return Ok((r, "i1".to_string()));
+        }
+        // 非指针（已是标量）：整数视奇偶，浮点恒 false
+        if is_int_ty(v_ty) {
+            let t = ctx.fresh_var();
+            cur.body.push(format!("{} = and {}, 1", t, v));
+            let r = ctx.fresh_var();
+            cur.body.push(format!("{} = icmp ne {} {}, 0", r, v_ty, t));
+            return Ok((r, "i1".to_string()));
+        }
+        return Ok(("false".to_string(), "i1".to_string()));
+    }
     if callee == "__list_len" && args_ir.len() == 1 {
         let (l, _) = &args_ir[0];
         let c = ctx.fresh_var();
@@ -5393,6 +5532,46 @@ fn emit_call(
         let cur = blocks.last_mut();
         cur.body.push(format!("{} = trunc i64 {} to i32", r, c));
         return Ok((r, "i32".to_string()));
+    }
+    // __list_is_empty(x) → count(x) == 0（HIR 的 `l.isEmpty()` 拦截分支）
+    if callee == "__list_is_empty" && args_ir.len() == 1 {
+        let (l, _) = &args_ir[0];
+        let c = ctx.fresh_var();
+        blocks.last_mut().body.push(format!(
+            "{} = call i64 @aura_lang_std_Collections_count(i8* {})",
+            c, l
+        ));
+        let r = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = icmp eq i64 {}, 0", r, c));
+        return Ok((r, "i1".to_string()));
+    }
+    // __list_contains(l, v) → Collections.contains（HIR 的 `l.contains(v)` 拦截分支；
+    // 缺此分支时 `__list_contains` 被当裸名发射 → 链接期 undefined symbol，
+    // 实测 ArrayList.distinct 内联体）
+    if callee == "__list_contains" && args_ir.len() == 2 {
+        let (l, _) = &args_ir[0];
+        let (v, v_ty) = &args_ir[1];
+        let v_ptr = coerce_val_to_i8ptr(ctx, blocks, v, v_ty);
+        let r = ctx.fresh_var();
+        blocks.last_mut().body.push(format!(
+            "{} = call i32 @aura_lang_std_Collections_contains(i8* {}, i8* {})",
+            r, l, v_ptr
+        ));
+        return Ok((r, "i32".to_string()));
+    }
+    // __list_index_of(l, v) → Collections.indexOf（同上）
+    if callee == "__list_index_of" && args_ir.len() == 2 {
+        let (l, _) = &args_ir[0];
+        let (v, v_ty) = &args_ir[1];
+        let v_ptr = coerce_val_to_i8ptr(ctx, blocks, v, v_ty);
+        let r = ctx.fresh_var();
+        blocks.last_mut().body.push(format!(
+            "{} = call i64 @aura_lang_std_Collections_indexOf(i8* {}, i8* {})",
+            r, l, v_ptr
+        ));
+        let r32 = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = trunc i64 {} to i32", r32, r));
+        return Ok((r32, "i32".to_string()));
     }
     if callee == "__size" && args_ir.len() == 1 {
         let (it, _) = &args_ir[0];
@@ -5451,6 +5630,41 @@ fn emit_call(
         blocks.last_mut().body.push(format!(
             "{} = call i8* @aura_lang_std_Collections_listAppend(i8* {}, i8* {})",
             tmp, l_field, e_ptr
+        ));
+        return Ok((tmp, "i8*".to_string()));
+    }
+    if callee == "__list_remove_at" && args_ir.len() == 2 {
+        // 2026-10-02 补齐：`remove(i)`/`removeAt(i)` 经 HIR 重路由为
+        // `__list_remove_at`，此前 AOT 侧没有降级分支 → 链接期
+        // `undefined symbol: __list_remove_at`（实测 PhotonHatCompile 驱动构建）。
+        // 接收者若是类实例指针，取第 0 号字段（与 `__list_push` 分支一致）。
+        let (l_raw, l_ty) = &args_ir[0];
+        let l_field = if l_ty.starts_with("%struct.") {
+            let gep = ctx.fresh_var();
+            blocks.last_mut().body.push(format!(
+                "{} = getelementptr {}, {}* {}, i32 0, i32 0",
+                gep, l_ty.trim_end_matches("*"), l_ty.trim_end_matches("*"), l_raw
+            ));
+            let ld = ctx.fresh_var();
+            blocks.last_mut().body.push(format!("{} = load i8*, i8** {}", ld, gep));
+            ld
+        } else {
+            l_raw.clone()
+        };
+        let (idx, idx_ty) = &args_ir[1];
+        // 下标可能是**装箱指针**（Plan A `(v<<1)|1` 的 i8*）也可能是 i32/i64 ——
+        // 统一经 `coerce_int_width` 规整到 i64（ptr 分支内做 ptrtoint +
+        // `aura_to_int_any` 拆箱）。直接 zext 会在 idx 为 i8* 时产生
+        // `call ...(i64 %ptr)` 的类型失配（llc: defined with type 'ptr' but
+        // expected 'i64'，实测 RegisterAllocator_callStackPop）。
+        let idx_val = match coerce_int_width(ctx, blocks, idx, idx_ty, "i64") {
+            Some(v) => v,
+            None => idx.clone(),
+        };
+        let tmp = ctx.fresh_var();
+        blocks.last_mut().body.push(format!(
+            "{} = call i8* @aura_lang_std_Collections_listRemoveAt(i8* {}, i64 {})",
+            tmp, l_field, idx_val
         ));
         return Ok((tmp, "i8*".to_string()));
     }
@@ -6804,6 +7018,11 @@ fn emit_member_access(
     }
 
     // 内建属性：动态列表（不透明指针）的 size / length / isEmpty → runtime 计数
+    // ⚠ 2026-10-02 曾尝试把 `List<…>`/`Map<…>` 类型名也纳入本分支（让
+    // `pendingNames.size()` 走 Collections.count），结果引入新的段错误 ——
+    // 该调用点（零参方法调用被降级为成员访问）obj_ty 实为退化占位（"Basic"），
+    // 与「模糊字段扫描按方法名误配 VmFrameStack.size 槽位」两个缺陷叠加，
+    // 需在 emit 成员解析层统一重做（见 aura-vm-profile 文档专项）。
     if obj_ty == "i8*" || obj_ty == "ptr" {
         if name == "size" || name == "length" || name == "isEmpty" {
             let cnt = ctx.fresh_var();
@@ -6992,12 +7211,35 @@ fn resolve_member_field_owner(
     if obj_type_resolved {
         return None;
     }
+    // 2026-10-02：i8*/ptr 不透明句柄的接收者 → **不做模糊字段匹配**。
+    // 句柄可能是 String/List/Map 或任何对象 —— 按字段名全局扫描会误配到
+    // 无关类的同名字段/方法（实测 `.size()` 被配到 VmFrameStack 的 sp 槽位
+    // → List 句柄被 bitcast 后读偏移垃圾 → AucLoader 全链损坏）。
+    // 方法名应由 `__list_len` / `Collections.count` 等 runtime 调用处理
+    // （mapStdlibFuncName / 内建属性分支已覆盖）。
+    if obj_ty.map(|t| t == "i8*" || t == "ptr").unwrap_or(false) {
+        return None;
+    }
     // 兜底：按字段名全局扫描。⚠️ 必须**确定性**选择 —— 直接迭代 `HashMap`
     // 的语义（顺序随 `RandomState` 变化）会让**同一份源码在不同构建下发射出不同
     // 的 IR**：`Hir` / `Mir` 等类都有同名字段时，取到的类随机，
     // 于是自举产物行为随机（实测 `bitcast %struct.Hir* → %struct.Mir*` 交替出现，
     // Phi 回填读到错误结构体的字段 ⇒ 循环变量永不更新、产物死循环）。
     // 这里按类名字典序固定顺序，保证「同源码 → 同 IR」。
+    //
+    // 2026-10-02：排除方法名（size/length/isEmpty/…）—— `.size()` 零参方法调用
+    // 被前端降为 Member 后，模糊扫描会误配到任何类的 `size` 字段/方法，
+    // 把 List 句柄 bitcast 成那个类的指针并读偏移垃圾（实测 Vm.aura 的
+    // `pendingNames.size()` 读到 VmFrameStack 的 sp 字段 → AucLoader 全链损坏）。
+    // 这些名字应由 `__list_len` / `Collections.count` 等 runtime 调用处理。
+    const METHOD_ONLY_NAMES: &[&str] = &[
+        "size", "length", "isEmpty", "contains", "indexOf",
+        "keys", "values", "add", "get", "set", "remove",
+        "substring", "toString", "equals", "hashCode",
+    ];
+    if METHOD_ONLY_NAMES.contains(&name) {
+        return None;
+    }
     let mut classes: Vec<&String> = ctx.class_field_types.keys().collect();
     classes.sort();
     for class in classes {

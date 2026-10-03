@@ -291,6 +291,186 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
+    /// 编码 `String_fromCharCode(rcx = code) rax = char*`（2026-10-02 自举链接修复）
+    ///
+    /// 从 `heapArena` bump 出 8 字节，写入 `code & 0xFF` 一个字节 + 3 个隐式 NUL
+    ///（32 位 store 的高 3 字节恰为 0），返回 NUL 结尾的 1 字节字符串。
+    /// 与 `charCodeAt` 的 1 字节字符模型一致（>255 的码点按低字节截断）。
+    ///
+    /// ```asm
+    /// String_fromCharCode:
+    ///   push rbp; mov rbp, rsp
+    ///   mov  rax, [rel heapBump]
+    ///   lea  rdx, [rel heapArena]
+    ///   add  rax, rdx              ; rax = ptr
+    ///   mov  r9, rax
+    ///   add  rax, 8
+    ///   sub  rax, rdx              ; rax = base + 8
+    ///   cmp  rax, 8380000
+    ///   jg   fcc_ovf               ; 溢出：保持 bump 不动，返回 ptr（内容为旧值）
+    ///   mov  [rel heapBump], rax
+    /// fcc_ovf:
+    ///   movzx eax, cl
+    ///   mov  [r9], eax             ; dword 写入：byte + 3×NUL
+    ///   mov  rax, r9
+    ///   leave; ret
+    /// ```
+    fun emitFromCharCode(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitMovRIP("rax", "heapBump")
+        enc.emitLeaRIP("rdx", "heapArena")
+        enc.emitAddRR("rax", "rdx")     // rax = ptr = heapArena + base
+        enc.emitMovRR("r9", "rax")      // r9 = ptr（保存）
+        enc.emitAddRI("rax", 8)
+        enc.emitSubRR("rax", "rdx")     // rax = base + 8（新 bump 偏移）
+        enc.emitCmpRI("rax", 8380000)
+        enc.emitJccLabel("g", "fcc_ovf")
+        enc.emitStoreRIP("heapBump", "rax")
+        enc.emitLabel("fcc_ovf")
+        enc.emitMovzxRegReg8("eax", "ecx")
+        enc.emitStoreMemDisp32("r9", 0, "rax")   // dword 写入：byte + 3×NUL
+        enc.emitMovRR("rax", "r9")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `String_substring(rcx = str, rdx = start, r8 = len) rax = char*`
+    /// （2026-10-02：薄 VM 宿主链接修复 —— VmOps.vmSubstr / methodNameOf 的
+    /// `s.substring(a, len)` 调用点需要它。语义与 VM `String.substring` 一致：
+    /// 越界钳位，返回 NUL 结尾副本。heapArena bump 分配（与 strcat 同堆）。
+    ///
+    /// ```asm
+    /// String_substring:
+    ///   push rbp; mov rbp, rsp
+    ///   ; 钳位 start
+    ///   test rdx, rdx
+    ///   jg   ss_start_ok
+    ///   xor  rdx, rdx
+    /// ss_start_ok:
+    ///   ; len 钳位到 [0, strlen(str)-start]（保守：先按 len 存，副本以 NUL 结尾）
+    ///   cmp  r8, 0
+    ///   jg   ss_len_ok
+    ///   xor  r8, r8
+    /// ss_len_ok:
+    ///   ; 分配 len+1
+    ///   mov  rax, [rel heapBump]
+    ///   lea  r9, [rel heapArena]
+    ///   add  rax, r9               ; rax = ptr
+    ///   mov  r10, rax
+    ///   add  rax, r8
+    ///   inc  rax
+    ///   sub  rax, r9               ; newBase = base + len + 1
+    ///   cmp  rax, 8380000
+    ///   jg   ss_ovf
+    ///   mov  [rel heapBump], rax
+    ///   jmp  ss_copy
+    /// ss_ovf:                      ; 溢出：返回空串指针（堆首字节恒 0? 保守置 0）
+    ///   mov  r10, r9
+    ///   mov  byte [r10], 0
+    ///   mov  rax, r10
+    ///   leave; ret
+    /// ss_copy:
+    ///   ; r10 = 副本指针；逐字节从 str+start 拷 len 字节（遇 NUL 提前停，补 0）
+    ///   xor  r11, r11
+    /// ss_copy_loop:
+    ///   cmp  r11, r8
+    ///   jge ss_copy_done
+    ///   movzx eax, byte [rcx + r11]
+    ///   test al, al
+    ///   jz   ss_copy_zpad
+    ///   mov  [r10 + r11], al
+    ///   inc  r11
+    ///   jmp  ss_copy_loop
+    /// ss_copy_zpad:                ; 源串提前 NUL：剩余补 0
+    ///   mov  byte [r10 + r11], 0
+    ///   inc  r11
+    /// ss_zpad_loop:
+    ///   cmp  r11, r8
+    ///   jge  ss_copy_done
+    ///   mov  byte [r10 + r11], 0
+    ///   inc  r11
+    ///   jmp  ss_zpad_loop
+    /// ss_copy_done:
+    ///   mov  byte [r10 + r8], 0     ; 尾 NUL
+    ///   mov  rax, r10
+    ///   leave; ret
+    /// ```
+    fun emitStringSubstring(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        // start 钳位非负
+        enc.emitTestRR("rdx", "rdx")
+        enc.emitJccLabel("g", "ss_start_ok")
+        enc.emitXorRR("rdx", "rdx")
+        enc.emitLabel("ss_start_ok")
+        // len 钳位非负
+        enc.emitTestRR("r8", "r8")
+        enc.emitJccLabel("g", "ss_len_ok")
+        enc.emitXorRR("r8", "r8")
+        enc.emitLabel("ss_len_ok")
+        // bump 分配 len+1
+        enc.emitMovRIP("rax", "heapBump")
+        enc.emitLeaRIP("r9", "heapArena")
+        enc.emitAddRR("rax", "r9")          // rax = ptr
+        enc.emitMovRR("r10", "rax")         // r10 = ptr
+        enc.emitAddRR("rax", "r8")
+        enc.emitIncRR("rax")
+        enc.emitSubRR("rax", "r9")          // rax = base + len + 1
+        enc.emitCmpRI("rax", 8380000)
+        enc.emitJccLabel("g", "ss_ovf")
+        enc.emitStoreRIP("heapBump", "rax")
+        // 逐字节拷贝（源遇 NUL 提前停，剩余补 0）
+        enc.emitXorRR("r11", "r11")
+        enc.emitLabel("ss_copy_loop")
+        enc.emitCmpRR("r11", "r8")
+        enc.emitJccLabel("ge", "ss_copy_done")
+        enc.emitMovzxRegMemIndexed("eax", "rcx", "r11")
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("z", "ss_zpad")
+        enc.emitStoreIndexed8("r10", "r11", 0, "rax")
+        enc.emitIncRR("r11")
+        enc.emitJmpLabel("ss_copy_loop")
+        enc.emitLabel("ss_zpad")
+        enc.emitStoreIndexed8("r10", "r11", 0, "rax")  // 写 0（rax 此刻为 0）
+        enc.emitIncRR("r11")
+        enc.emitJmpLabel("ss_zpad")
+        enc.emitLabel("ss_copy_done")
+        // 尾 NUL：[r10 + len] = 0（eax 已为 0？保守再清）
+        enc.emitXorRR("eax", "eax")
+        enc.emitStoreIndexed8("r10", "r8", 0, "rax")
+        enc.emitMovRR("rax", "r10")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `ProcessOps_aura_process_argCount() rax = 0`（2026-10-02 自举链接修复）
+    ///
+    /// **有意的桩**：返回 0，使自举编译器 CLI 的 `cliArgCount()` 走既有的
+    /// **环境变量回退通道**（`AURA_ARGV_COUNT` / `AURA_ARG_N`，与冻结种子
+    /// 场景同一机制，scripts/bootstrap-*.ps1 已注入）。原生 argv（命令行解析）
+    /// 待后续轮次用 `GetCommandLineA` 实现。
+    fun emitProcArgCountStub(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitXorRR("rax", "rax")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `ProcessOps_aura_process_args() rax = char*`（空串；同上，配套桩）
+    fun emitProcArgsStub(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitMovRIP("rax", "heapBump")
+        enc.emitLeaRIP("rdx", "heapArena")
+        enc.emitAddRR("rax", "rdx")
+        enc.emitMovRR("r9", "rax")
+        enc.emitAddRI("rax", 8)
+        enc.emitSubRR("rax", "rdx")
+        enc.emitCmpRI("rax", 8380000)
+        enc.emitJccLabel("g", "pargs_ovf")
+        enc.emitStoreRIP("heapBump", "rax")
+        enc.emitLabel("pargs_ovf")
+        enc.emitXorRR("eax", "eax")
+        enc.emitStoreMemDisp32("r9", 0, "rax")
+        enc.emitMovRR("rax", "r9")
+        enc.emitEpilogue()
+    }
+
     /// 编码 `strcmp(rcx = char*, rdx = char*) rax = Int`
     ///
     /// ```asm
@@ -596,7 +776,7 @@ object PhotonRuntime {
         enc.emitMovRR("rbx", "rax")
         enc.emitAddRR("rbx", "rcx")
           // rbx = new
-        enc.emitCmpRI("rbx", 1048000)
+        enc.emitCmpRI("rbx", 8380000)
         enc.emitJccLabel("le", "strcat_alloc_ok")
         enc.emitXorRR("rax", "rax")
           // base = 0
@@ -683,7 +863,7 @@ object PhotonRuntime {
         enc.emitMovRIP("rax", "heapBump")
         enc.emitMovRR("rdx", "rax")
         enc.emitAddRR("rdx", "rcx")
-        enc.emitCmpRI("rdx", 1048000)
+        enc.emitCmpRI("rdx", 8380000)
         enc.emitJccLabel("le", "list_alloc_ok")
         enc.emitXorRR("rax", "rax")
         enc.emitMovRR("rdx", "rcx")
@@ -782,7 +962,7 @@ object PhotonRuntime {
     ///   mov  [rbp-0x10], rcx    ; size
     ///   mov  r12, [rip+objBump] ; 当前偏移
     ///   add  rdx, r12           ; new = old + size
-    ///   cmp  rdx, 1048000
+    ///   cmp  rdx, 8380000
     ///   jle  alloc_ok
     ///   xor  r12, r12           ; 回绕：base = 0
     ///   mov  rdx, [rbp-0x10]    ; new = size
@@ -826,7 +1006,7 @@ object PhotonRuntime {
         enc.emitAddRR("rdx", "r12")
 
         // 边界检
-        enc.emitCmpRI("rdx", 1048000)
+        enc.emitCmpRI("rdx", 8380000)
         enc.emitJccLabel("le", "oa_alloc_ok")
 
         // 回绕
@@ -1974,13 +2154,6 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// stub: fromCharCode 返回 0
-    fun emitFromCharCode(enc: X86Encoder): Unit {
-        enc.emitPrologue(0)
-        enc.emitMovRI("eax", 0)
-        enc.emitEpilogue()
-    }
-
     /// stub: ReadCStr 返回 0
     fun emitReadCStr(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
@@ -2245,7 +2418,7 @@ object PhotonRuntime {
     // ── 目标文件产出 ──
 
     /// 所有运行时函数名列表（逗号分隔）
-    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.listRemove,Collections.count,Collections.clear,Collections.hashMapPut,Collections.indexOf,Collections.contains,Collections.mapContainsKey,Collections.getAt,Collections.listAppend,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4"
+    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.listRemove,Collections.count,Collections.clear,Collections.hashMapPut,Collections.indexOf,Collections.contains,Collections.mapContainsKey,Collections.getAt,Collections.listAppend,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
     fun buildRuntimeObject(): String {
@@ -2637,6 +2810,20 @@ object PhotonRuntime {
         val encEg = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitEnvGetWin32(encEg)
         writer.appendFunction(encEg.toHex(), "env_get", PhotonObjectWriterUtils.joinRelocRecords(encEg.getRelocations()))
+        // 2026-10-02 自举链接修复：`String.fromCharCode` 与 Process.argv 桩
+        //（argCount/args 走 CLI 的 Env 回退通道，见 `emitProcArgCountStub` 说明）
+        val encFcc = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitFromCharCode(encFcc)
+        writer.appendFunction(encFcc.toHex(), "String_fromCharCode", PhotonObjectWriterUtils.joinRelocRecords(encFcc.getRelocations()))
+        val encPa0 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitProcArgCountStub(encPa0)
+        writer.appendFunction(encPa0.toHex(), "ProcessOps_aura_process_argCount", PhotonObjectWriterUtils.joinRelocRecords(encPa0.getRelocations()))
+        val encPa1 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitProcArgsStub(encPa1)
+        writer.appendFunction(encPa1.toHex(), "ProcessOps_aura_process_args", PhotonObjectWriterUtils.joinRelocRecords(encPa1.getRelocations()))
+        val encSs = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStringSubstring(encSs)
+        writer.appendFunction(encSs.toHex(), "String_substring", PhotonObjectWriterUtils.joinRelocRecords(encSs.getRelocations()))
         // 单例槽读写（见 `emitObjSlotGet` / `emitObjSlotSet`）：早前会话的
         // `synthesizeSingletonGetter` 只发调用点，实现必须由 runtime 提供。
         val encOsg = X86EncoderUtils.emptyEncoder()
@@ -2692,7 +2879,7 @@ object PhotonRuntime {
 
         // .data 段：toStrBuffer(32B) + arena(1MB) + bump 游标(8B) + 对象 bump(8B)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,heapArena:1048576,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096"
+        writer.dataSymbolName = "toStrBuffer:32,heapArena:8388608,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096"
         println("[rt] dataSection set, dataChars=" + writer.dataSection.length + " textChars=" + writer.textSection.length)
 
         // 构建符号表（包含所有函数和 .data 符号        println("[rt] before buildSymbols")
@@ -3041,6 +3228,20 @@ object PhotonRuntime {
         val encEg = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitEnvGetWin32(encEg)
         writer.appendFunction(encEg.toHex(), "env_get", PhotonObjectWriterUtils.joinRelocRecords(encEg.getRelocations()))
+        // 2026-10-02 自举链接修复：`String.fromCharCode` 与 Process.argv 桩
+        //（argCount/args 走 CLI 的 Env 回退通道，见 `emitProcArgCountStub` 说明）
+        val encFcc = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitFromCharCode(encFcc)
+        writer.appendFunction(encFcc.toHex(), "String_fromCharCode", PhotonObjectWriterUtils.joinRelocRecords(encFcc.getRelocations()))
+        val encPa0 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitProcArgCountStub(encPa0)
+        writer.appendFunction(encPa0.toHex(), "ProcessOps_aura_process_argCount", PhotonObjectWriterUtils.joinRelocRecords(encPa0.getRelocations()))
+        val encPa1 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitProcArgsStub(encPa1)
+        writer.appendFunction(encPa1.toHex(), "ProcessOps_aura_process_args", PhotonObjectWriterUtils.joinRelocRecords(encPa1.getRelocations()))
+        val encSs = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStringSubstring(encSs)
+        writer.appendFunction(encSs.toHex(), "String_substring", PhotonObjectWriterUtils.joinRelocRecords(encSs.getRelocations()))
         // 单例槽读写（见 `emitObjSlotGet` / `emitObjSlotSet`）：早前会话的
         // `synthesizeSingletonGetter` 只发调用点，实现必须由 runtime 提供。
         val encOsg = X86EncoderUtils.emptyEncoder()
@@ -3092,7 +3293,7 @@ object PhotonRuntime {
         writer.appendFunction(encMem.toHex(), "aura_mem_used_mb", PhotonObjectWriterUtils.joinRelocRecords(encMem.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,heapArena:1048576,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096"
+        writer.dataSymbolName = "toStrBuffer:32,heapArena:8388608,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
@@ -3444,6 +3645,20 @@ object PhotonRuntimeUtils {
         val encEg = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitEnvGetWin32(encEg)
         writer.appendFunction(encEg.toHex(), "env_get", PhotonObjectWriterUtils.joinRelocRecords(encEg.getRelocations()))
+        // 2026-10-02 自举链接修复：`String.fromCharCode` 与 Process.argv 桩
+        //（argCount/args 走 CLI 的 Env 回退通道，见 `emitProcArgCountStub` 说明）
+        val encFcc = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitFromCharCode(encFcc)
+        writer.appendFunction(encFcc.toHex(), "String_fromCharCode", PhotonObjectWriterUtils.joinRelocRecords(encFcc.getRelocations()))
+        val encPa0 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitProcArgCountStub(encPa0)
+        writer.appendFunction(encPa0.toHex(), "ProcessOps_aura_process_argCount", PhotonObjectWriterUtils.joinRelocRecords(encPa0.getRelocations()))
+        val encPa1 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitProcArgsStub(encPa1)
+        writer.appendFunction(encPa1.toHex(), "ProcessOps_aura_process_args", PhotonObjectWriterUtils.joinRelocRecords(encPa1.getRelocations()))
+        val encSs = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStringSubstring(encSs)
+        writer.appendFunction(encSs.toHex(), "String_substring", PhotonObjectWriterUtils.joinRelocRecords(encSs.getRelocations()))
         // 单例槽读写（见 `emitObjSlotGet` / `emitObjSlotSet`）：早前会话的
         // `synthesizeSingletonGetter` 只发调用点，实现必须由 runtime 提供。
         val encOsg = X86EncoderUtils.emptyEncoder()
@@ -3495,7 +3710,7 @@ object PhotonRuntimeUtils {
         writer.appendFunction(encMem.toHex(), "aura_mem_used_mb", PhotonObjectWriterUtils.joinRelocRecords(encMem.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,heapArena:1048576,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096"
+        writer.dataSymbolName = "toStrBuffer:32,heapArena:8388608,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）

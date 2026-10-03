@@ -1037,6 +1037,9 @@ pub struct Vm {
     loaded_libs: std::collections::HashMap<String, *mut std::os::raw::c_void>,
     /// P3.4: FFI 动态库搜索目录（来自 `VmOptions.lib_search_dirs`）
     lib_search_dirs: Vec<String>,
+    /// 死循环看门狗间隔（`AURA_VM_WATCH`，0=关）。2026-10-02 性能优化：
+    /// 旧实现每条指令 `OnceLock::get_or_init`（原子读），改为构造时读一次。
+    watch_interval: u64,
 }
 
 impl Vm {
@@ -1086,6 +1089,10 @@ impl Vm {
             globals: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             exit_code: None,
             halt: false,
+            watch_interval: std::env::var("AURA_VM_WATCH")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0),
             lib_search_dirs: opts.lib_search_dirs.clone(),
             opts,
             #[cfg(feature = "jit")]

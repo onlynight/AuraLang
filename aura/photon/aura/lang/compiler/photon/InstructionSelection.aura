@@ -72,10 +72,17 @@ class InstructionSelector {
     /// 的说明）：漏一项就会在链接期报 `duplicate symbol`。
     /// 成员方法按本表的 `.` 拼写书写，比较时由 `dotToUnderscore` 归一化，
     /// 因此 `Collections.getAt` 与 `Collections_getAt` 都能命中。
-    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.listRemove,Collections.count,Collections.clear,Collections.hashMapPut,Collections.indexOf,Collections.contains,Collections.mapContainsKey,Collections.getAt,Collections.listAppend,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4"
+    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.listRemove,Collections.count,Collections.clear,Collections.hashMapPut,Collections.indexOf,Collections.contains,Collections.mapContainsKey,Collections.getAt,Collections.listAppend,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args"
 
     /// `computeReachable` 的列表形式结果（供 `select()` 免分配查表）。
     private var reachableNames: List<String> = arrayListOf<String>()
+
+    /// LIR 全部定义函数名（select() 入口建一次，供 `resolveCalleeSymbol` 查表）。
+    private var lirFuncNames: List<String> = arrayListOf<String>()
+
+    /// 被调名解析缓存（名字 → 解析结果；解析结果等于名字时也缓存，查表免重扫）。
+    private var calleeCacheNames: List<String> = arrayListOf<String>()
+    private var calleeCacheTargets: List<String> = arrayListOf<String>()
 
     /// 强制纳入可达集合的符号清单（定义名）。
     ///
@@ -303,6 +310,15 @@ class InstructionSelector {
         this.probeStep = 0
         this.selProbe("select start fn=" + MachineDagUtils.toStr(src.functionCount) +
                 " probe=" + this.probePath)
+        // LIR 定义函数名索引（`resolveCalleeSymbol` 的查表底座）。
+        this.lirFuncNames = arrayListOf<String>()
+        this.calleeCacheNames = arrayListOf<String>()
+        this.calleeCacheTargets = arrayListOf<String>()
+        var nfi: Int = 0
+        while (nfi < src.functionCount) {
+            this.lirFuncNames.add(src.functionOf(nfi).name)
+            nfi = nfi + 1
+        }
         val reachable: String = this.computeReachable(src, "main")
         this.selProbe("reachable done n=" + MachineDagUtils.toStr(this.reachableNames.size) +
                 " strLen=" + MachineDagUtils.toStr(reachable.length))
@@ -448,8 +464,25 @@ class InstructionSelector {
                         while (ii < b.instrs.size) {
                             val vid: Int = b.instrs[ii]
                             val v: LirValue = src.valueOf(vid)
-                            if (v.op == "Call" && v.aux != "" && !this.listContains(outList, v.aux)) {
-                                queue.add(v.aux)
+                            if (v.op == "Call" && v.aux != "") {
+                                if (!this.listContains(outList, v.aux)) {
+                                    queue.add(v.aux)
+                                }
+                                // 2026-10-02 修复：**可达性与发射用同一个名字映射**。
+                                // emitCall 会把被调名经 mapStdlibFuncName 做接收者类型
+                                // 分派（裸名 `keys`→`HashMap_keys`、`textOf`→`Ast_textOf`、
+                                // `getSize`→`ArrayList_getSize`……），而此处此前只收集
+                                // **映射前**的裸名 —— 裸名没有同名定义，于是被调函数的
+                                // **定义**被死代码消除剪掉，`select()` 不编码，链接期报
+                                // `undefined symbol`（自举 Main.aura 实测 20 个，全部此类）。
+                                // 这里把映射后的名字也入队（无定义时自然收敛，无害）。
+                                val rTy: String = this.callReceiverTypeName(v.args)
+                                val mapped: String = this.mapStdlibFuncName(
+                                    v.aux, rTy, v.args.size, this.lastArgIsMemToken(v.args))
+                                if (mapped != "" && mapped != v.aux
+                                    && !this.listContains(outList, mapped)) {
+                                    queue.add(mapped)
+                                }
                             }
                             ii = ii + 1
                         }
@@ -481,6 +514,79 @@ class InstructionSelector {
             i = i + 1
         }
         return false
+    }
+
+    /// `s` 是否以后缀 `suffix` 结尾（charCodeAt 逐字节；AOT 下 `charCodeAt`
+    /// 是无边界检查的内联访存，循环条件必须在结构上保证下标合法）。
+    private fun endsWithStr(s: String, suffix: String): Boolean {
+        val slen: Int = s.length
+        val tlen: Int = suffix.length
+        if (slen < tlen) { return false }
+        var i: Int = 0
+        while (i < tlen) {
+            if (s.charCodeAt(slen - tlen + i) != suffix.charCodeAt(i)) { return false }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 被调名兜底解析（2026-10-02，链接失败修复的第二半）。
+    ///
+    /// `mapStdlibFuncName` 覆盖不了所有调用点：自举前端对成员方法**大量发裸名**
+    ///（实测 `@call @build(...)` / `@call @getSize(...)` / `@call @tokenCount(...)`），
+    /// 接收者类型缺位时映射表无从分派 → 引用裸名 → 链接期 `undefined symbol`。
+    ///
+    /// 规则（有界、可预测）：
+    ///   1. 名字是 runtime 符号或 LIR 已有同名定义 → 原样返回；
+    ///   2. 否则找 **`_<name>` 后缀唯一命中**的 LIR 定义（`<Class>_name` 命名约定）
+    ///      → 重写到该定义；
+    ///   3. 多个命中时若 `recvTy_name` 恰在命中列表 → 按接收者类型定；
+    ///      仍歧义 → 原样保留（链接期可见，不猜）。
+    ///
+    /// 与 `computeReachable` 的映射入队配套：这里改写的每个名字，可达集合里
+    /// 都已有同名定义（映射入队 + 本解析同用 `lirFuncNames` 查表），定义必被编码。
+    private fun resolveCalleeSymbol(name: String, recvTy: String): String {
+        var ci: Int = 0
+        while (ci < this.calleeCacheNames.size) {
+            if (this.calleeCacheNames[ci] == name) {
+                return this.calleeCacheTargets[ci]
+            }
+            ci = ci + 1
+        }
+        var target: String = name
+        if (!this.listContains(this.lirFuncNames, name) && !this.isRuntimeSymbol(name)) {
+            val cands: List<String> = arrayListOf<String>()
+            val suffix: String = "_" + name
+            var i: Int = 0
+            while (i < this.lirFuncNames.size) {
+                val n: String = this.lirFuncNames[i]
+                if (this.endsWithStr(n, suffix)) {
+                    cands.add(n)
+                }
+                i = i + 1
+            }
+            if (cands.size > 0) {
+                var csv: String = ""
+                var ci2: Int = 0
+                while (ci2 < cands.size) {
+                    if (ci2 > 0) { csv = csv + "," }
+                    csv = csv + cands[ci2]
+                    ci2 = ci2 + 1
+                }
+                println("[resolve] " + name + " -> cands(" + toStr(cands.size) + ")=[" + csv + "] recvTy=[" + recvTy + "]")
+            }
+            if (cands.size == 1) {
+                target = cands[0]
+            } else if (cands.size > 1 && recvTy != "") {
+                val pref: String = recvTy + "_" + name
+                if (this.listContains(cands, pref)) {
+                    target = pref
+                }
+            }
+        }
+        this.calleeCacheNames.add(name)
+        this.calleeCacheTargets.add(target)
+        return target
     }
 
     /// 进度/心跳开关：任一为 `1` 即开启。默认关闭（stdout 只留 `===...===`
@@ -1617,6 +1723,9 @@ class InstructionSelector {
         if (name == "Stdio_print" || name == "Stdio.print"
             || name == "aura.lang.std.Stdio.print") { return "print" }
         if (name == "String.charCodeAt" || name == "charCodeAt") { return "charCodeAt" }
+        // 2026-10-02：String.substring → runtime 的 String_substring
+        //（heapArena bump 副本，越界钳位；薄 VM 宿主链接修复）
+        if (name == "substring" || name == "String.substring") { return "String_substring" }
         if (name == "Any.toString") { return "toString" }
         if (name == "Any.equals") { return "streq" }
         // 裸名 + 接收者类型：`s.length()` / `s.size()` / `a.equals(b)`。
@@ -1881,6 +1990,9 @@ class InstructionSelector {
         val recvTy: String = this.callReceiverTypeName(args)
         val funcName: String = this.mapStdlibFuncName(val.aux, recvTy, args.size,
                                                       this.lastArgIsMemToken(args))
+        // 2026-10-02：映射后仍无定义的裸名 → 唯一后缀匹配兜底（见
+        // `resolveCalleeSymbol` 的说明；与可达性入队配套，定义必已被编码）。
+        val resolvedName: String = this.resolveCalleeSymbol(funcName, recvTy)
 
         // ── 特例：`toStr(<Bool 常量>)` ──
         //
@@ -1901,7 +2013,7 @@ class InstructionSelector {
         }
 
         val nodeId: Int = this.dag.addNode("Value", "Call", val.type,
-                                           "", "", "", this.curChain, funcName)
+                                           "", "", "", this.curChain, resolvedName)
         this.registerNode(vid, nodeId)
 
         // 把**实参节点**记到 Call 节点的 `args`，供发射器按 Win64 约定装载

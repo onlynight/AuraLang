@@ -102,6 +102,17 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("b", "i8*"),
         ],
     },
+    // Plan A 感知的 Any `==`（emit 的 i8*==i8* 统一比较入口）。
+    // 装箱整数（奇数指针）按标记值相等；真实指针（偶数）按字符串内容比较。
+    // C 实现见 aura_std_cffi.c 的 aura_any_equals。
+    RuntimeFn {
+        name: "aura_any_equals",
+        ret: "i32",
+        params: &[
+            ("a", "i8*"),
+            ("b", "i8*"),
+        ],
+    },
     // `s.charAt(i)`：emit.rs 会直接发起 `call i8* @aura_lang_std_String_charAt(i8*, i64)`，
     // 但该函数此前未在 runtime 表中登记 → llc 报 `@aura_lang_std_String_charAt` 未定义。
     // C 侧实现见 aura_std_cffi.c 的 aura_lang_std_String_charAt。
@@ -384,6 +395,16 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         params: &[
             ("list", "i8*"),
             ("value", "i8*"),
+        ],
+    },
+    // `remove(i)`/`removeAt(i)` 经 HIR 重路由的 `__list_remove_at` 的实现
+    //（aura_std_cffi.c）。未登记会报 `use of undefined value`（实测自举驱动构建）。
+    RuntimeFn {
+        name: "aura_lang_std_Collections_listRemoveAt",
+        ret: "i8*",
+        params: &[
+            ("list", "i8*"),
+            ("idx", "i64"),
         ],
     },
     // `to` 运算符 / Pair 构造：`a to b` 降级为 pairOf(a, b)，返回 2 元素列表（i8*）。

@@ -161,6 +161,8 @@ size_t aura_attr_off(void *ra);
 
 #define AURA_ATTR_MAX 64
 static void *g_attr_ra0[AURA_ATTR_MAX];
+static void *g_attr_ra1[AURA_ATTR_MAX];
+static void aura_attr_dump_atexit(void);
 static int64_t g_attr_calls[AURA_ATTR_MAX];
 static int64_t g_attr_bytes[AURA_ATTR_MAX];
 static int64_t g_attr_null_ra0 = 0;      /* ra0 取不到（= NULL）的分配次数 */
@@ -531,6 +533,9 @@ static void aura_mem_init(void) {
     if (g_aura_mem_limit >= 0) {
         return;
     }
+    if (getenv("AURA_ATTR_DUMP")) {
+        atexit(aura_attr_dump_atexit);
+    }
     g_aura_mem_limit = (int64_t)AURA_MEM_DEFAULT_LIMIT_MB * 1024 * 1024;
     const char *env = getenv("AURA_MEM_LIMIT_MB");
     if (env && env[0]) {
@@ -699,6 +704,18 @@ static void aura_mem_dump_stats(void) {
         "[aura] attribution: ra0_ok=%lld ra0_null=%lld\n",
         (long long)g_attr_nonnull_ra0, (long long)g_attr_null_ra0);
     aura_attr_dump(stderr, "oom-attr");
+    if (getenv("AURA_ATTR_DUMP")) {
+        HMODULE exe_base2 = GetModuleHandleW(NULL);
+        uintptr_t base2 = (uintptr_t)exe_base2;
+        int k2;
+        fprintf(stderr, "oom-ra1 (AOT callsites, rva relative to image base)\n");
+        for (k2 = 0; k2 < AURA_ATTR_MAX; k2++) {
+            if (g_attr_ra1[k2] != NULL) {
+                fprintf(stderr, "  ra1[%d] %p rva=0x%llx\n", k2, g_attr_ra1[k2],
+                        (unsigned long long)((uintptr_t)g_attr_ra1[k2] - base2));
+            }
+        }
+    }
     fflush(stderr);
 }
 
@@ -714,11 +731,29 @@ void *aura_mem_alloc(int64_t n) {
     /* 归因：就地取值（原因见 `AURA_ATTR_RECORD` 上方说明）。 */
     {
         void *r0 = __builtin_return_address(0);
+        void *r1 = __builtin_return_address(1);
         if (r0 == NULL) {
             g_attr_null_ra0 += 1;
         } else {
             g_attr_nonnull_ra0 += 1;
             AURA_ATTR_RECORD(r0, n);
+            /* ra1 = 调用者的调用者（AOT 产物内的调用点），供定位 Aura 级
+             * 分配风暴：exe .text 布局 = obj 段布局，rva-0x1000 双分到
+             * llvm-nm obj 符号即可落到 Aura 函数。 */
+            {
+                int _a1, _f1 = 0;
+                for (_a1 = 0; _a1 < AURA_ATTR_MAX; _a1++) {
+                    if (g_attr_ra1[_a1] == (r1)) {
+                        _f1 = 1;
+                        break;
+                    }
+                    if (g_attr_ra1[_a1] == NULL) {
+                        g_attr_ra1[_a1] = (r1);
+                        _f1 = 1;
+                        break;
+                    }
+                }
+            }
         }
     }
     /* 大块追踪：AURA_MEM_STATS=1 时把 >=256KB 的分配打到 stderr（前 200 次），
@@ -2343,6 +2378,24 @@ int aura_lang_std_String_equals(const char *a, const char *b) {
     return strcmp(a, b) == 0 ? 1 : 0;
 }
 
+/** Plan A 感知的 Any `==`（emit 的 i8*==i8* 统一比较走这里）。
+ *
+ *  此前一切 i8* 比较都降到 String_equals：`HashMap.valuesEqual` 的
+ *  `a == b`（Any 接收者）在操作数是**装箱整数**（`(v<<1)|1` 的伪指针，
+ *  实测 85）时按字符串解引用 → 段错误（AOT 载体 HashMap.get 首次
+ *  取桶即崩）。按低位标记区分：
+ *    - 奇数（装箱整数）：值相等当且仅当标记值相同；
+ *    - 偶数（真实指针）：null 参与时不等（双 null 已在 emit 判空分支处理，
+ *      这里 a==b 已覆盖）；同指针相等；否则按字符串内容比较。
+ *  真实字符串指针恒为偶数（分配器 ≥2 字节对齐），故对纯 String 操作数
+ *  的行为与 String_equals 完全一致（无回归）。 */
+int aura_any_equals(uint64_t a, uint64_t b) {
+    if (a == b) return 1;
+    if ((a & (uint64_t)1) || (b & (uint64_t)1)) return 0;
+    if (!a || !b) return 0;
+    return strcmp((const char *)(uintptr_t)a, (const char *)(uintptr_t)b) == 0 ? 1 : 0;
+}
+
 /* ── Console I/O ── */
 void aura_lang_std_Console_print(int64_t msg) {
     if (!msg) return;
@@ -2607,6 +2660,22 @@ const void *aura_lang_std_Collections_listAppend(const void *list, const void *v
         l = aura_dynlist_new(4);
     }
     aura_dynlist_push(l, (const char *)value);
+    return (const void *)l;
+}
+
+/* listRemoveAt(list, idx)：删除下标 idx 处的元素并左移后续元素（len--）。
+ * 2026-10-02 补齐：HIR 把 `remove(i)`/`removeAt(i)` 重路由到 `__list_remove_at`
+ * （见 codegen/hir.rs），而 AOT 侧此前没有实现 → 自举编译器链接期
+ * `undefined symbol: __list_remove_at`（实测 PhotonHatCompile 驱动构建）。 */
+const void *aura_lang_std_Collections_listRemoveAt(const void *list, int64_t idx) {
+    AuraDynList *l = (AuraDynList *)list;
+    if (!l || idx < 0 || idx >= l->len) return (const void *)l;
+    for (int64_t i = idx; i + 1 < l->len; i++) {
+        l->items[i] = l->items[i + 1];
+    }
+    if (l->len > 0) {
+        l->len--;
+    }
     return (const void *)l;
 }
 
@@ -3999,22 +4068,48 @@ size_t aura_attr_off(void *ra) {
  * ═════════════════════════════════════════════════════════════════════════ */
 #ifdef _WIN32
 
-static void aura_dump_stack_backtrace(void) {
-    typedef UINT (WINAPI *AuraCaptureFn)(DWORD, DWORD, PVOID *, PVOID *);
-    HMODULE h = LoadLibraryW(L"dbghelp.dll");
-    if (!h) {
-        fprintf(stderr, "[aura]   (dbghelp.dll unavailable; no backtrace)\n");
-        return;
+/* AURA_ATTR_DUMP=1：进程退出时把「分配调用点归因表」（ra0 → 次数/字节）
+ * 打到 stderr——定位小对象分配风暴的头号工具（ra0 是 AOT 产物内的返回
+ * 地址，减去镜像基址后用 llvm-nm obj 符号表即可落到 Aura 函数）。 */
+static void aura_attr_dump_atexit(void) {
+    aura_attr_dump(stderr, "exit-attr");
+    if (getenv("AURA_ATTR_DUMP")) {
+        HMODULE exe_base = GetModuleHandleW(NULL);
+        uintptr_t base = (uintptr_t)exe_base;
+        int k, cnt = 0;
+        fprintf(stderr, "exit-ra1 (AOT callsites, rva relative to image base)\n");
+        for (k = 0; k < AURA_ATTR_MAX; k++) {
+            if (g_attr_ra1[k] != NULL) {
+                fprintf(stderr, "  ra1[%d] %p rva=0x%llx\n", k, g_attr_ra1[k],
+                        (unsigned long long)((uintptr_t)g_attr_ra1[k] - base));
+                cnt++;
+            }
+        }
+        fflush(stderr);
     }
-    AuraCaptureFn csb = (AuraCaptureFn)GetProcAddress(h, "CaptureStackBackTrace");
+}
+
+static void aura_dump_stack_backtrace(void) {
+    typedef ULONG (WINAPI *AuraCaptureFn)(ULONG, ULONG, PVOID *, PULONG);
+    /* RtlCaptureStackBackTrace 在 kernel32：dbghelp 并不导出同名函数
+     *（实测 GetProcAddress 恒 NULL → 回溯恒缺失）。 */
+    HMODULE h = GetModuleHandleW(L"kernel32.dll");
+    AuraCaptureFn csb = h ? (AuraCaptureFn)GetProcAddress(h, "RtlCaptureStackBackTrace") : NULL;
     if (!csb) {
-        fprintf(stderr, "[aura]   (CaptureStackBackTrace unavailable)\n");
+        fprintf(stderr, "[aura]   (RtlCaptureStackBackTrace unavailable)\n");
         return;
     }
     PVOID frames[24];
     UINT n = csb(0, 24, frames, NULL);
+    /* 同时打印 RVA（相对主模块基址）：AOT Aura 函数不在 C 归因表内，
+     * 但 exe 的 .text 布局 = obj 段布局（.text RVA 起点 0x1000），用
+     * `llvm-nm --numeric-sort aotrepro.obj` 的 .text 符号表即可把
+     * rva-0x1000 双分到确切的 Aura 函数（见 docs/photon 排查手册）。 */
+    HMODULE exe_base = GetModuleHandleW(NULL);
+    uintptr_t base = (uintptr_t)exe_base;
     for (UINT i = 0; i < n; i++) {
-        fprintf(stderr, "  #%-2u %p %s+0x%zx\n", i, frames[i],
+        fprintf(stderr, "  #%-2u %p rva=0x%llx %s+0x%zx\n", i, frames[i],
+                (unsigned long long)((uintptr_t)frames[i] - base),
                 aura_attr_who(frames[i]), aura_attr_off(frames[i]));
     }
 }

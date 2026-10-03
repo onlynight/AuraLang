@@ -124,11 +124,11 @@ class VmStrStack {
 /// 保存的局部变量帧栈（函数调用时保存调用者的槽位表）。
 class VmFrameStack {
 
-    private var d: List<HashMap<Int, Any>> = arrayListOf<HashMap<Int, Any>>()
+    private var d: List<VmLocals> = arrayListOf<VmLocals>()
     private var sp: Int = 0
     private var cap: Int = 0
 
-    fun push(v: HashMap<Int, Any>): Unit {
+    fun push(v: VmLocals): Unit {
         if (this.sp < this.cap) {
             this.d[this.sp] = v
         } else {
@@ -138,9 +138,9 @@ class VmFrameStack {
         this.sp = this.sp + 1
     }
 
-    fun pop(): HashMap<Int, Any> {
+    fun pop(): VmLocals {
         if (this.sp <= 0) {
-            return HashMap<Int, Any>()
+            return VmLocals()
         }
         this.sp = this.sp - 1
         return this.d[this.sp]
@@ -154,5 +154,114 @@ class VmFrameStack {
         this.d = arrayListOf<HashMap<Int, Any>>()
         this.sp = 0
         this.cap = 0
+    }
+}
+
+
+/// VM 局部变量槽表（方案 D-2，2026-10-03）：平铺数组 + 代际标记。
+///
+/// 取代 `HashMap<Int, Any>`：槽号是小整数（0..N 连续），哈希表每次
+/// get/put 的哈希+桶链开销在热路径上占每条访存指令 ~100ns。代际标记
+/// 解决「帧切换后旧槽值残留」：reset() 只把 gen+1（零分配），put 写入
+/// 当前代标记，get 仅当槽位标记 == 当前代才返回值（否则视为未初始化
+/// → null，与空表语义一致）。
+class VmLocals {
+
+    private var slots: List<Any> = arrayListOf<Any>()
+    private var marks: List<Int> = arrayListOf<Int>()
+    private var filled: Int = 0
+    private var gen: Int = 1
+
+    /// 读取槽位；未在当前代写入过 → null。
+    /// （方法名刻意避开 get/put：emit 对裸名 get/put 有 Map 内建改派，
+    /// 会把 VmLocals 指针当 AuraDynList 送进 C mapSet → 崩溃。）
+    fun getSlot(k: Int): Any {
+        if (k >= 0 && k < this.filled) {
+            if (this.marks.get(k) == this.gen) {
+                return this.slots.get(k)
+            }
+        }
+        return null
+    }
+
+    /// 写入槽位（按需扩容，扩容后旧槽标记保持 0 → 仍是未初始化语义）。
+    fun putSlot(k: Int, v: Any): Unit {
+        while (this.filled <= k) {
+            this.slots.add(null)
+            this.marks.add(0)
+            this.filled = this.filled + 1
+        }
+        this.slots.set(k, v)
+        this.marks.set(k, this.gen)
+    }
+
+    /// 已扩容的槽位数（诊断/trace 用）。
+    fun getSize(): Int {
+        return this.filled
+    }
+
+    /// 帧复用重置：gen+1，零分配（槽位数组与标记数组容量保留）。
+    fun reset(): Unit {
+        this.gen = this.gen + 1
+    }
+}
+
+/// 调用栈（方案 D-1，2026-10-03）：四个并行列替代「toStr 拼接竖线串」。
+///
+/// 旧实现每次调用 `toStr(ip)+"|"+toStr(frame)+"|"+func+"|"+toStr(closure)`
+/// ≈ 7 次字符串分配 + 返回时 2 次 fieldAt substr —— 每调用 ~11 次分配
+/// 且从不释放（fib(30) 160 万调用即 GB 级）。并行列 push 复用容量
+/// （sp < cap 时 set 原位写，零分配），peek 取回的本来就是 Int。
+class VmCallStack {
+
+    private var ips: List<Int> = arrayListOf<Int>()
+    private var frames: List<Int> = arrayListOf<Int>()
+    private var funcs: List<String> = arrayListOf<String>()
+    private var closures: List<Int> = arrayListOf<Int>()
+    private var sp: Int = 0
+    private var cap: Int = 0
+
+    fun push(ip: Int, frame: Int, func: String, closure: Int): Unit {
+        if (this.sp < this.cap) {
+            this.ips.set(this.sp, ip)
+            this.frames.set(this.sp, frame)
+            this.funcs.set(this.sp, func)
+            this.closures.set(this.sp, closure)
+        } else {
+            this.ips.add(ip)
+            this.frames.add(frame)
+            this.funcs.add(func)
+            this.closures.add(closure)
+            this.cap = this.cap + 1
+        }
+        this.sp = this.sp + 1
+    }
+
+    fun pop(): Unit {
+        if (this.sp > 0) {
+            this.sp = this.sp - 1
+        }
+    }
+
+    fun peekIp(): Int {
+        if (this.sp <= 0) {
+            return 0
+        }
+        return this.ips.get(this.sp - 1)
+    }
+
+    fun peekClosure(): Int {
+        if (this.sp <= 0) {
+            return -1
+        }
+        return this.closures.get(this.sp - 1)
+    }
+
+    fun size(): Int {
+        return this.sp
+    }
+
+    fun reset(): Unit {
+        this.sp = 0
     }
 }

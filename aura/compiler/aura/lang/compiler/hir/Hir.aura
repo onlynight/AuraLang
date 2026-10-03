@@ -478,6 +478,22 @@ class HirLowerer {
     /// 输出的 HIR。
     private var hir: Hir = Hir()
 
+    // ── 2026-10-02 接收者类型传播（选项2 / 任务②）──
+    // 目标：`vm.loadAucAndRun()` 这类**小写接收者**的方法调用，前端直接限定为
+    // `VmRunner_loadAucAndRun`（过去只有"接收者名大写开头"的启发式，小写一律
+    // 发裸名 → Photon/AOT 链接期 undefined symbol）。
+    //   curTypeDecl   当前类型体名（class/object 体内部非空）
+    //   localVarTys   函数内局部量 name=Ty（CSV；函数入口清空）
+    //   typeMemberTys 类字段 Class.member=Ty（CSV；类型体声明登记）
+    //   typeMethods   类方法 Class.method（CSV；类型体声明预登记，限定前校验，
+    //                 防止把 toString 等误限定到不存在的 Class_toString）
+    private var curTypeDecl: String = ""
+    private var localVarTys: String = ""
+    private var typeMemberTys: String = ""
+    private var typeMethods: String = ""
+    /// 是否正处在类型体的直接成员层（方法体内部为 false）
+    private var inTypeBody: Boolean = false
+
     init() {
         this.ast = Ast()
         this.hir = Hir()
@@ -508,6 +524,24 @@ class HirLowerer {
         // 根节点是 Program，其子节点是顶层声明（与顶层可执行语句混排）
         val rootKids: List<Int> = program.kidsOfList(rootIdx)
         val kCount: Int = HirUtils.hirKidsCount(rootKids)
+        // 2026-10-02 接收者类型传播：**预登记**全部类型体的方法/字段 ——
+        // 必须在正式降级前完成，否则方法体内的调用点会早于同类其它方法的登记
+        // （typeMethods 不完整 → 限定校验失败 → 仍发裸名）。
+        // （2026-10-02：登记累进，不清空 —— localVarTys 由 lowerFunction 清，
+        //  curTypeDecl/inTypeBody 由 lowerTypeDecl 保存/恢复。）
+        var ri: Int = 0
+        while (ri < kCount) {
+            val declId: Int = HirUtils.hirKidsAt(rootKids, ri)
+            val dk: String = program.kindOf(declId)
+            if (dk == "Class" || dk == "Struct" || dk == "Object") {
+                val tName: String = program.textOf(declId)
+                val tKids: List<Int> = program.kidsOfList(declId)
+                if (HirUtils.hirKidsCount(tKids) >= 1) {
+                    this.preRegisterTypeMembers(tName, HirUtils.hirKidsAt(tKids, 0))
+                }
+            }
+            ri = ri + 1
+        }
         var hirKids: List<Int> = HirUtils.hirNoKids()
         i = 0
         while (i < kCount) {
@@ -641,6 +675,24 @@ class HirLowerer {
     /// 0xC0000005 的根因）。
     fun lowerTopLevel(program: Ast): List<Int> {
         this.ast = program
+        // 2026-10-02 接收者类型传播：本模块类型体的方法/字段**预登记**。
+        // ModuleLink 链路逐模块调 lowerTopLevel，登记累进到 loader 实例
+        // （跨模块共享，不清空 —— 局部表由 lowerFunction 清，类型体状态由
+        // lowerTypeDecl 保存/恢复）。
+        val pn2: Int = program.count
+        var ppi: Int = 0
+        while (ppi < pn2) {
+            val declId: Int = ppi
+            val dk: String = program.kindOf(declId)
+            if (dk == "Class" || dk == "Struct" || dk == "Object") {
+                val tName: String = program.textOf(declId)
+                val tKids: List<Int> = program.kidsOfList(declId)
+                if (HirUtils.hirKidsCount(tKids) >= 1) {
+                    this.preRegisterTypeMembers(tName, HirUtils.hirKidsAt(tKids, 0))
+                }
+            }
+            ppi = ppi + 1
+        }
         val n: Int = program.count
         var rootIdx: Int = -1
         var i: Int = 0
@@ -725,6 +777,8 @@ class HirLowerer {
 
     /// 降级函数声明。
     fun lowerFunction(ast: Ast, id: Int): Int {
+        // 2026-10-02 接收者类型传播：局部类型表按函数清空（作用域边界）。
+        this.localVarTys = ""
         val name: String = ast.textOf(id)
         val retTy: String = ast.tyOf(id)
         val sp: Span = ast.spanOf(id)
@@ -743,7 +797,13 @@ class HirLowerer {
             while (pi < pkCount) {
                 val pId: Int = HirUtils.hirKidsAt(paramsKids, pi)
                 val pName: String = ast.textOf(pId)
-                val pTy: String = ast.tyOf(pId)
+                val pTy: String = this.cleanTy(ast.tyOf(pId))
+                // 2026-10-02 接收者类型传播：参数登记进 localVarTys（List 参数
+                // 接收者的 .size()/.get() 限定依赖它 —— 实测 registerAucClasses
+                // 的 names.size()/parentIds.get(i) 全靠此登记）。
+                if (pTy != "" && this.localVarTy(pName) == "") {
+                    this.localVarTys = this.localVarTys + "," + pName + "=" + pTy
+                }
                 val pSp: Span = ast.spanOf(pId)
                 // 默认参数值：作为 HirParam 的 kids[0]，供调用点补齐实参
                 var pKids: List<Int> = HirUtils.hirNoKids()
@@ -927,6 +987,29 @@ class HirLowerer {
             if (ty == "" && initHirId >= 0) {
                 ty = this.hir.tyOf(initHirId)
             }
+            // 2026-10-02：注解在解析器侧丢失（实测 `val vm: VmRunner = VmRunner()`
+            // 的节点 ty 只剩 "#public|"）时，从构造器调用推断 —— 大写命名的
+            // 初始化调用即类名。
+            if ((this.cleanTy(ty) == "" || this.isScalarTy(this.cleanTy(ty))) && initHirId >= 0
+                && this.hir.kindOf(initHirId) == "HirCall") {
+                val calleeNm: String = this.hir.textOf(initHirId)
+                if (calleeNm.length() > 0) {
+                    val fc3: Int = calleeNm.substring(0, 1).charCodeAt(0)
+                    if (fc3 >= 65 && fc3 <= 90) {
+                        ty = calleeNm
+                    }
+                }
+            }
+        }
+        // 2026-10-02 接收者类型传播：登记局部/字段类型。
+        // 类型体直接成员 → typeMemberTys（隐式 this 字段解析用）；
+        // 函数内局部 → localVarTys（局部接收者解析用）。
+        val cty: String = this.cleanTy(ty)
+        if (cty != "") {
+            if (this.inTypeBody && this.curTypeDecl != "") {
+                this.typeMemberTys = this.typeMemberTys + "," + this.curTypeDecl + "." + name + "=" + cty
+            }
+            this.localVarTys = this.localVarTys + "," + name + "=" + cty
         }
         return this.hir.add("HirValDecl", name, ty, sp, hirKids)
     }
@@ -947,6 +1030,24 @@ class HirLowerer {
             if (ty == "" && initHirId >= 0) {
                 ty = this.hir.tyOf(initHirId)
             }
+            // 2026-10-02：同 lowerValDecl —— 注解丢失时从构造器调用推断类型。
+            if ((this.cleanTy(ty) == "" || this.isScalarTy(this.cleanTy(ty))) && initHirId >= 0
+                && this.hir.kindOf(initHirId) == "HirCall") {
+                val calleeNm: String = this.hir.textOf(initHirId)
+                if (calleeNm.length() > 0) {
+                    val fc3: Int = calleeNm.substring(0, 1).charCodeAt(0)
+                    if (fc3 >= 65 && fc3 <= 90) {
+                        ty = calleeNm
+                    }
+                }
+            }
+        }
+        val cty: String = this.cleanTy(ty)
+        if (cty != "") {
+            if (this.inTypeBody && this.curTypeDecl != "") {
+                this.typeMemberTys = this.typeMemberTys + "," + this.curTypeDecl + "." + name + "=" + cty
+            }
+            this.localVarTys = this.localVarTys + "," + name + "=" + cty
         }
         return this.hir.add("HirVarDecl", name, ty, sp, hirKids)
     }
@@ -959,6 +1060,14 @@ class HirLowerer {
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
+        // 2026-10-02：进入类型体 —— 记录当前类型名（this 限定 / 隐式 this 字段
+        // 解析用）。成员（方法/字段）已在 lower() 的预登记遍历里进入
+        // typeMethods / typeMemberTys。
+        val prevTypeDecl: String = this.curTypeDecl
+        val prevInTypeBody: Boolean = this.inTypeBody
+        this.curTypeDecl = name
+        this.inTypeBody = true
+
         var hirKids: List<Int> = HirUtils.hirNoKids()
         if (kCount > 0) {
             // 类型体的 Block
@@ -968,6 +1077,8 @@ class HirLowerer {
                 hirKids = HirUtils.hirKidsAdd(hirKids, bodyHirId)
             }
         }
+        this.curTypeDecl = prevTypeDecl
+        this.inTypeBody = prevInTypeBody
 
         val hirKind: String = if (kind == "Struct") { "HirStruct" }
             else if (kind == "Class") { "HirClass" }
@@ -1641,6 +1752,105 @@ class HirLowerer {
     }
 
     /// 降级函数调用表达式。
+    // ── 2026-10-02 接收者类型传播辅助 ──
+
+    /// 清理类型名：剥离访问修饰符前缀（解析器把 `#public|` 一并写进 ty 列，
+    /// 实测 `val x: Int` 的节点 ty 是 "#public|Int"，类类型只剩 "#public|" ——
+    /// 不剥离则一切基于类型名的逻辑失效）。
+    private fun cleanTy(ty: String): String {
+        if (ty == "") { return "" }
+        val bar: Int = ty.indexOf("|")
+        if (bar >= 0) {
+            return ty.substring(bar + 1, ty.length)
+        }
+        return ty
+    }
+
+    /// 是否标量类型（接收者类型限定只对类/对象类型生效）。
+    private fun isScalarTy(ty: String): Boolean {
+        if (ty == "Int" || ty == "Long" || ty == "Bool" || ty == "Float"
+            || ty == "Double" || ty == "String" || ty == "Unit" || ty == "Byte"
+            || ty == "Short" || ty == "Any" || ty == "Basic" || ty == "") {
+            return true
+        }
+        return false
+    }
+
+    /// CSV（逗号分隔）中是否含指定条目。
+    private fun csvContains(csv: String, item: String): Boolean {
+        if (csv == "" || item == "") { return false }
+        var start: Int = 0
+        var i: Int = 0
+        val n: Int = csv.length
+        while (i <= n) {
+            if (i == n || csv.charCodeAt(i) == 44) {
+                if (csv.substring(start, i) == item) { return true }
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// "k1=v1,k2=v2" 形式的 CSV 中按键取值（未命中返回 ""）。
+    private fun csvLookup(csv: String, key: String): String {
+        if (csv == "" || key == "") { return "" }
+        var start: Int = 0
+        var i: Int = 0
+        val n: Int = csv.length
+        while (i <= n) {
+            if (i == n || csv.charCodeAt(i) == 44) {
+                if (i > start) {
+                    val pair: String = csv.substring(start, i)
+                    val eq: Int = pair.indexOf("=")
+                    if (eq > 0 && pair.substring(0, eq) == key) {
+                        return pair.substring(eq + 1, pair.length)
+                    }
+                }
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 局部量声明类型（localVarTys 查表）。
+    private fun localVarTy(name: String): String {
+        return this.csvLookup(this.localVarTys, name)
+    }
+
+    /// 类字段声明类型（typeMemberTys 查表，owner 为类/对象名）。
+    private fun typeMemberTy(owner: String, field: String): String {
+        if (owner == "" || field == "") { return "" }
+        return this.csvLookup(this.typeMemberTys, owner + "." + field)
+    }
+
+    /// 类型体成员预登记（在正式降级**之前**对每个 Class/Struct/Object 调用，
+    /// 消除「方法体先于同类其它方法降级」的顺序依赖）。
+    private fun preRegisterTypeMembers(name: String, bodyAst: Int): Unit {
+        val mKids: List<Int> = this.ast.kidsOfList(bodyAst)
+        var mi: Int = 0
+        while (mi < mKids.size()) {
+            val mk: String = this.ast.kindOf(mKids[mi])
+            val mn: String = this.ast.textOf(mKids[mi])
+            if (mk == "Function") {
+                val key: String = name + "." + mn
+                if (!this.csvContains(this.typeMethods, key)) {
+                    this.typeMethods = this.typeMethods + "," + key
+                }
+            } else if (mk == "ValDecl" || mk == "VarDecl") {
+                val fty: String = this.cleanTy(this.ast.tyOf(mKids[mi]))
+                if (fty != "") {
+                    val key: String = name + "." + mn + "=" + fty
+                    if (this.csvLookup(this.typeMemberTys, name + "." + mn) == "") {
+                        this.typeMemberTys = this.typeMemberTys + "," + key
+                    }
+                }
+            }
+            mi = mi + 1
+        }
+    }
+
     fun lowerCall(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
@@ -1893,14 +2103,82 @@ class HirLowerer {
                     // 小写开头视为变量，保留裸名由 Emit.aura 回退逻辑解析。
                     if (ast.kindOf(recvId) == "Ident") {
                         val recvName: String = ast.textOf(recvId)
+                        var qualified: String = ""
                         if (recvName.length() > 0) {
                             val first: String = recvName.substring(0, 1)
                             val fc: Int = first.charCodeAt(0)
                             if (fc >= 65 && fc <= 90) {  // 'A'..'Z'
-                                calleeName = recvName + "_" + ast.textOf(calleeId)
+                                // 既有规则：大写开头（类名约定）
+                                qualified = recvName + "_" + ast.textOf(calleeId)
                             } else {
-                                calleeName = ast.textOf(calleeId)
+                                // 2026-10-02 接收者类型传播：小写接收者按
+                                // ① 局部声明类型（`val vm: VmRunner`）② 隐式 this
+                                // 字段声明类型，限定为 `Class_method` —— 且仅当
+                                // 目标类确实声明了该方法（typeMethods 校验，防止
+                                // 把 toString/equals 误限定到不存在的实现）。
+                                var rty: String = this.cleanTy(this.localVarTy(recvName))
+                                if (rty == "") {
+                                    rty = this.cleanTy(this.typeMemberTy(this.curTypeDecl, recvName))
+                                }
+                                if (rty != "" && !this.isScalarTy(rty) && this.csvContains(this.typeMethods, rty + "." + ast.textOf(calleeId))) {
+                                    qualified = rty + "_" + ast.textOf(calleeId)
+                                } else if ((rty.startsWith("List") || rty.startsWith("Map")) && ast.textOf(calleeId) == "size") {
+                                    // 接口类型 List/Map 的 size → Collections.count（runtime 导出）
+                                    qualified = "Collections.count"
+                                }
                             }
+                        }
+                        if (qualified != "") {
+                            calleeName = qualified
+                        } else {
+                            calleeName = ast.textOf(calleeId)
+                        }
+                    } else if (ast.kindOf(recvId) == "This") {
+                        // 2026-10-02：`this.method()` → Class_method（当前类型体）
+                        if (this.curTypeDecl != "" && !this.isScalarTy(this.curTypeDecl) && this.csvContains(this.typeMethods, this.curTypeDecl + "." + ast.textOf(calleeId))) {
+                            calleeName = this.curTypeDecl + "_" + ast.textOf(calleeId)
+                        } else {
+                            calleeName = ast.textOf(calleeId)
+                        }
+                    } else if (ast.kindOf(recvId) == "Member") {
+                        // 2026-10-02：一级字段链接收者 `this.field.m()` / `field.m()` ——
+                        // Member 节点 text 即字段名；基座 This → 当前类型体，
+                        // 小写 Ident → 同名局部（无则视为隐式 this 字段）。
+                        // 字段声明类型 → 限定；更深链保持裸名（既有行为）。
+                        var qualified: String = ""
+                        val fieldName: String = ast.textOf(recvId)
+                        val m2: List<Int> = ast.kidsOfList(recvId)
+                        if (fieldName != "" && HirUtils.hirKidsCount(m2) >= 1) {
+                            val baseId: Int = HirUtils.hirKidsAt(m2, 0)
+                            val baseKind: String = ast.kindOf(baseId)
+                            var owner: String = this.curTypeDecl
+                            var ok: Boolean = false
+                            if (baseKind == "This") {
+                                ok = true
+                            } else if (baseKind == "Ident") {
+                                val bn: String = ast.textOf(baseId)
+                                if (bn.length() > 0) {
+                                    val fc2: Int = bn.substring(0, 1).charCodeAt(0)
+                                    if (fc2 >= 97 && fc2 <= 122) {
+                                        val lt: String = this.localVarTy(bn)
+                                        if (lt != "") {
+                                            owner = lt
+                                            ok = true
+                                        }
+                                    }
+                                }
+                            }
+                            if (ok) {
+                                val fty: String = this.cleanTy(this.typeMemberTy(owner, fieldName))
+                                if (fty != "" && !this.isScalarTy(fty) && this.csvContains(this.typeMethods, fty + "." + ast.textOf(calleeId))) {
+                                    qualified = fty + "_" + ast.textOf(calleeId)
+                                } else if ((fty.startsWith("List") || fty.startsWith("Map")) && ast.textOf(calleeId) == "size") {
+                                    qualified = "Collections.count"
+                                }
+                            }
+                        }
+                        if (qualified != "") {
+                            calleeName = qualified
                         } else {
                             calleeName = ast.textOf(calleeId)
                         }
@@ -2177,7 +2455,13 @@ class HirLowerer {
             while (pi < pkCount) {
                 val pId: Int = HirUtils.hirKidsAt(paramsKids, pi)
                 val pName: String = ast.textOf(pId)
-                val pTy: String = ast.tyOf(pId)
+                val pTy: String = this.cleanTy(ast.tyOf(pId))
+                // 2026-10-02 接收者类型传播：参数登记进 localVarTys（List 参数
+                // 接收者的 .size()/.get() 限定依赖它 —— 实测 registerAucClasses
+                // 的 names.size()/parentIds.get(i) 全靠此登记）。
+                if (pTy != "" && this.localVarTy(pName) == "") {
+                    this.localVarTys = this.localVarTys + "," + pName + "=" + pTy
+                }
                 val pSp: Span = ast.spanOf(pId)
                 // 默认参数值：作为 HirParam 的 kids[0]，供调用点补齐实参
                 var pKids: List<Int> = HirUtils.hirNoKids()

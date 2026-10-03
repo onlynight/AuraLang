@@ -204,6 +204,11 @@ pub fn link_to_executable(
                 if options.debug_info {
                     cmd.arg("-g");
                 }
+                // Windows 主线程栈默认 1MB：自举编译器/解释器等递归下降程序
+                // （Parser/Lexer/link 递归 import）深层数即溢出——段错误且
+                // 无任何输出（实测 Photon 驱动编译任意输入瞬段错误，
+                // 64MB 栈重链后消失）。这里统一给 64MB。
+                cmd.arg("-Wl,/STACK:67108864");
                 run_and_report(&mut cmd, "clang")?;
                 return Ok(());
             }
@@ -221,7 +226,8 @@ pub fn link_to_executable(
             }
             cmd.arg(format!("/out:{}", exe_path.display()))
                 .arg("/entry:main")
-                .arg("/subsystem:console");
+                .arg("/subsystem:console")
+                .arg("/STACK:67108864");
             run_and_report(&mut cmd, "lld-link")?;
             return Ok(());
         }

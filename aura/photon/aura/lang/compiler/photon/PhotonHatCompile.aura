@@ -41,8 +41,6 @@
 //   ===ERR===<message>
 import aura.lang.std.String
 import aura.lang.std.fs.FileUtils
-import aura.lang.std.Env
-import aura.lang.std.Process
 import aura.lang.native.time.Clock
 
 
@@ -88,85 +86,46 @@ fun secOf(deltaNs: Long): String {
     return toStr(sec) + "." + pad + mss
 }
 
-fun main() {
-    val srcPath = Env.get("AURA_HAT_AURA", "")
-    val outDir = Env.get("AURA_HAT_OUT", "build/hat_test")
-    val moduleName = Env.get("AURA_HAT_MODULE", "program")
-    var hatPath = Env.get("AURA_HAT_SRC", "")
-    if (hatPath == "") {
-        hatPath = outDir + "/" + moduleName + ".hat"
-    }
+// ── 输入通道：固定路径约定 ──
+//
+// ⚠ 为什么不用环境变量/运行期配置文件：宿主二进制的 import 闭包含
+// photon 管线时，主流程里调用 `Env.get` 或 `FileUtils.exists/readText`
+// 之后进入 link() 会稳定段错误（最小复现见
+// docs/photon/photon-bootstrap-link-benchmark.md §2026-10-03；三者
+// 单独与 photon 闭包组合均安全，组合即崩——宿主侧 AOT 值模型残留缺陷）。
+// 与 `build/vm/current.auc` 通道同一先例：调用方脚本把入口源码**拷贝**
+// 到固定路径 `build/hat-vmhost/current.aura`，驱动从这里读取；
+// 产物固定为 `build/hat-vmhost/current.{hat,obj}`。
 
-    if (srcPath == "" || !FileUtils.exists(srcPath)) {
-        println("===RESULT===fail")
-        println("===ERR===source not found: " + srcPath)
-        Process.exit(1)
-    }
+fun main(): Int {
+    // 输入通道：固定路径约定（调用方脚本把入口源码拷贝到
+    // build/hat-vmhost/current.aura，产物固定 current.{hat,obj}）。
+    // ⚠ 宿主主流程刻意**只使用已验证安全**的设施：FileUtils.mkdirP /
+    // writeText / link 内部的源码读取（均有 photon 闭包共存的实测）。
+    // Env.get / FileUtils.exists+readText / Process.* 在 photon 闭包下
+    // 会令后续 link() 段错误（2026-10-03 探针矩阵，见 docs/photon/）。
+    val srcPath = "build/hat-vmhost/current.aura"
+    val outDir = "build/hat-vmhost"
+    val moduleName = "current"
+    val hatPath = "build/hat-vmhost/current.hat"
 
-    // ── 前端：源码（含递归 import）→ 合并 HIR ──
-    //
-    // `AURA_HAT_SKIP_FRONT=1` 跳过前端与 .hat 序列化，直接复用已有的 `hatPath`。
-    // 自举 `Main.aura` 的前端要 ~2 分钟，只调后端时用它迭代。
     FileUtils.mkdirP(outDir)
 
-    // 阶段进度/心跳默认关闭：stdout 只保留 ===...=== 协议标记（脚本逐行解析）。
-    // Env.get 每次调用都重读 environ 缓冲，这里只算一次。
-    val verboseOn = Env.get("AURA_PHOTON_VERBOSE", "") == "1"
-            || Env.get("AURA_PHOTON_TRACE", "") == "1"
-
-    // AURA_PHOTON_TIME=1 时逐阶段计时（秒）；默认不打印，保持协议标记纯净。
-    val timeOn: Boolean = Env.get("AURA_PHOTON_TIME", "") == "1"
+    // ── 前端：源码（含递归 import）→ 合并 HIR → SSA → HAT 文本 ──
     val tAll0: Long = tNs()
-
-    if (Env.get("AURA_HAT_SKIP_FRONT", "") == "1") {
-        if (verboseOn) { println("[hat-front] skipped (reuse " + hatPath + ")") }
-    } else {
-        val tLink0: Long = tNs()
-        val linker = AotModuleLinker()
-        val hir: Hir = linker.link(srcPath)
-        if (verboseOn) {
-            println("[hat-front] modules=" + toStr(linker.loadedCount()) +
-                    " hirNodes=" + toStr(hir.count))
-        }
-        if (timeOn) { println("[time] link=" + secOf(tNs() - tLink0) + " s") }
-        if (linker.missing != "") {
-            // 注意：不要用 String.replace — VM 路径下类方法调用未链接。
-            // 缺失 import 会直接变成链接期 undefined symbol，因此始终报出来。
-            println("[hat-front] missing imports: " + linker.missing)
-        }
-
-        // ── 前端阶段短路：AURA_PHOTON_STOP=FRONT 在前端完成后停止 ──
-        if (Env.get("AURA_PHOTON_STOP", "") == "FRONT") {
-            println("===STOPPED_AFTER_FRONTEND===")
-            Process.exit(0)
-        }
-
-        // ── HIR → SSA MIR → HAT 文本（HAT 是这条链路的中间表示）──
-        val tSsa0: Long = tNs()
-        if (verboseOn) { println("[hat-front] ssa start (nodes=" + toStr(hir.count) + ")") }
-        val ssa: MirSsaProgram = SsaBuilderUtils.build(hir)
-        if (timeOn) { println("[time] ssa=" + secOf(tNs() - tSsa0) + " s") }
-        if (verboseOn) {
-            println("[hat-front] ssa done")
-            println("[hat-front] ssa functions=" + toStr(ssa.functionCount) +
-                    " values=" + toStr(ssa.valueCount) +
-                    " blocks=" + toStr(ssa.blockCount))
-        }
-
-        val tHat0: Long = tNs()
-        val hatText: String = HatSerializerUtils.serializeHat(ssa, moduleName)
-        FileUtils.writeText(hatPath, hatText)
-        if (timeOn) { println("[time] hatSerialize=" + secOf(tNs() - tHat0) + " s") }
-        if (verboseOn) {
-            println("[hat-front] .hat = " + hatPath + " (" + toStr(hatText.length) + " 字符)")
-        }
-
-        // ── 前端阶段短路：AURA_PHOTON_STOP=HAT 在 HAT 序列化后停止 ──
-        if (Env.get("AURA_PHOTON_STOP", "") == "HAT") {
-            println("===STOPPED_AFTER_HAT===")
-            Process.exit(0)
-        }
+    val tLink0: Long = tNs()
+    val linker = AotModuleLinker()
+    val hir: Hir = linker.link(srcPath)
+    if (linker.missing != "") {
+        println("[hat-front] missing imports: " + linker.missing)
     }
+
+    val tSsa0: Long = tNs()
+    val ssa: MirSsaProgram = SsaBuilderUtils.build(hir)
+
+    val tHat0: Long = tNs()
+    val hatText: String = HatSerializerUtils.serializeHat(ssa, moduleName)
+    FileUtils.writeText(hatPath, hatText)
 
     // ── HAT 文本 → SSA MIR → LIR → DAG → RegAlloc → X86 → COFF ──
     val tBack0: Long = tNs()
@@ -174,28 +133,22 @@ fun main() {
     pipeline.outDir = outDir
     pipeline.moduleName = moduleName
     val result = pipeline.compileHat(hatPath)
-    if (timeOn) { println("[time] compileHat=" + secOf(tNs() - tBack0) + " s") }
 
-    // 输出 COFF hex（主对象）
+    // 输出 COFF hex（主对象 / runtime 对象）与链接信息
     println("===COFF-MAIN===")
     println(result.coffHex)
-
-    // 输出 COFF hex（runtime 对象）
     val rtHex: String = PhotonRuntime.buildRuntimeObject()
     println("===COFF-RUNTIME===")
     println(rtHex)
-
-    // 输出链接信息
     println("===LINK===")
     println(result.linkCommand)
 
-    if (timeOn) { println("[time] total=" + secOf(tNs() - tAll0) + " s") }
-
-    println("===RESULT===" + (if (result.success) "success" else "fail"))
+    var resultTag: String = "fail"
+    if (result.success) { resultTag = "success" }
+    println("===RESULT===" + resultTag)
     if (!result.success) {
         println("===ERR===" + result.errorMessage)
-        Process.exit(1)
+        return 1
     }
-
-    Process.exit(0)
+    return 0
 }

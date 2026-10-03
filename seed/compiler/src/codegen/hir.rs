@@ -502,26 +502,96 @@ fn resolve_receiver_type_deep(e: &Expr) -> Option<String> {
             return Some(t);
         }
     }
+    // `局部变量.字段` / `形参.字段` / 嵌套链（`a.b.c`）的字段接收者。
+    //
+    // 此前只认 `this.<field>` 与类内裸字段：对象是**局部变量/形参**时
+    // （`val b: Box = Box(); b.names.add("x")`、`decodeNumeric` 的
+    // `mod.numOpNames.add(...)` —— `mod` 是形参），接收者类型解析恒为 None，
+    // **列表/Map 拦截分支**（add/size/get/put/…）全部失手，调用退化成
+    // 「全表唯一候选」模糊匹配 —— `add` 被配到 `ArrayList.add`：堆列表句柄
+    // 被当 `%struct.ArrayList*` 做 GEP（把 len/cap/items 写在错误偏移），
+    // `size` 被配到无关类的同名字段/方法 —— 表现为 AOT 产物堆损坏、
+    // 段错误、字段读到垃圾（实测 Aura VM AOT 载体 `auc_vm_runner.exe`
+    // 装载链全断、bisect6 `b.names.add("x")` 即崩）。
+    //
+    // 这里对对象表达式**递归**求静态类型（局部表 → 类内字段 → 嵌套链），
+    // 命中已知类后沿继承链查字段声明类型。仅当字段真实存在时才返回；
+    // 查不到则维持原路径（方法解析/裸名兜底），不改变既有行为。
+    if let Expr::MemberAccess { object, name, .. } = e {
+            if let Some(base_ty) = resolve_receiver_type_deep(object) {
+            let base_name = base_ty.trim_end_matches('?');
+            let base_name = base_name.split('<').next().unwrap_or(base_name).trim();
+            if let Some(found) = field_type_in_class(base_name, name) {
+                return Some(found);
+            }
+        }
+    }
+    // `容器.get(i)` / `容器[i]` 形态的接收者（链式下标后接方法调用，
+    // `args.get(0).size()` / `rows[0].add(x)`）：容器是 List 系 → 元素类型
+    // 取**泛型参数**（`List<String>` → `String`、`List<List<String>>` →
+    // `List<String>`）。无泛型信息时返回 `Any`（动态接收者，方法解析走
+    // 既有兜底，不劣于修复前）。
+    //
+    // 此前这类接收者恒为 None → `.size()`/`.add()` 落不到列表拦截分支，
+    // 退化成模糊方法解析（实测 AOT 载体把 getAt 返回的句柄读成无关字段）。
+    let index_container: Option<&Expr> = match e {
+        Expr::Index { container, .. } => Some(container.as_ref()),
+        // `x.get(i)` 调用形态（HIR 会把 List 的 get 降级为下标读取，
+        // 但**外层**方法调用的接收者在 AST 层仍是这个 Call 节点）
+        Expr::Call { callee, args: cargs, .. } if cargs.len() == 1 => {
+            match callee.as_ref() {
+                Expr::MemberAccess { object, name, .. }
+                    if name == "get" || name == "getAt" =>
+                {
+                    Some(object.as_ref())
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    if let Some(container) = index_container {
+        if let Some(c_ty) = resolve_receiver_type_deep(container) {
+            let base = c_ty.trim_end_matches('?');
+            let base = base.split('<').next().unwrap_or(base).trim();
+            if is_list_like_type(&c_ty) || base == "ArrayList" {
+                if let (Some(open), Some(close)) = (c_ty.find('<'), c_ty.rfind('>')) {
+                    if open < close {
+                        let elem = c_ty[open + 1..close].trim().to_string();
+                        if !elem.is_empty() {
+                            return Some(elem);
+                        }
+                    }
+                }
+                return Some("Any".to_string());
+            }
+        }
+    }
     // 既不是已知字段、也给不出接收者类型（原逻辑：`?` 早返回 None）
     None
 }
 
-/// 沿继承链查**类内字段**的声明类型（`resolve_receiver_type_deep` 的查表体）。
-fn field_type_of(field_name: String) -> Option<String> {
+/// 沿继承链在**指定类**上查字段声明类型（`resolve_receiver_type_deep`
+/// 的对象字段臂与 `field_type_of` 共用的查表体）。
+fn field_type_in_class(class_name: &str, field_name: &str) -> Option<String> {
     let table = CLASS_TABLE.with(|t| t.borrow().clone());
-    let start = CLASS_CTX.with(|c| c.borrow().as_ref().map(|x| x.class.clone()))?;
-    // 沿继承链查字段声明类型（与 `field_receiver_method` 同源）
-    let mut cur = Some(start);
+    let mut cur = Some(class_name.to_string());
     while let Some(cn) = cur {
         let Some(entry) = table.get(&cn) else {
             break;
         };
-        if let Some(ty) = entry.field_types.get(&field_name) {
+        if let Some(ty) = entry.field_types.get(field_name) {
             return hir_type_name(ty);
         }
         cur = entry.superclass.clone();
     }
     None
+}
+
+/// 沿继承链查**类内字段**的声明类型（`resolve_receiver_type_deep` 的查表体）。
+fn field_type_of(field_name: String) -> Option<String> {
+    let start = CLASS_CTX.with(|c| c.borrow().as_ref().map(|x| x.class.clone()))?;
+    field_type_in_class(&start, &field_name)
 }
 
 /// 推断声明的静态类型：显式类型提示优先；无提示时从初始化表达式推断。
@@ -540,6 +610,22 @@ fn infer_decl_type(type_hint: Option<&crate::ast::Type>, init: Option<&Expr>) ->
             let table = CLASS_TABLE.with(|t| t.borrow().clone());
             if table.contains_key(name.as_str()) {
                 return Some(name.to_string());
+            }
+        }
+        // 集合工厂函数 → 集合类型。`val l2 = arrayListOf<String>()` 这类**无类型
+        // 标注**的局部量此前查不到类型 → `.add`/`.size` 落不到列表拦截分支，
+        // 退化成模糊方法解析（bisect5 实测 `l2.add` 静默失效）。
+        // 与 `is_list_like_type` / `is_map_like_type` 的接受名一致。
+            if let Expr::Ident(name, _) = callee.as_ref() {
+            let ty = match name.as_str() {
+                "arrayListOf" | "arrayOf" => Some("ArrayList"),
+                "listOf" | "mutableListOf" | "emptyList" => Some("List"),
+                "setOf" | "mutableSetOf" | "hashSetOf" => Some("HashSet"),
+                "mapOf" | "mutableMapOf" | "hashMapOf" | "emptyMap" => Some("HashMap"),
+                _ => None,
+            };
+            if let Some(t) = ty {
+                return Some(t.to_string());
             }
         }
         // 静态工厂 / 工具对象方法：**优先采用 sema 给出的静态类型**。
@@ -788,6 +874,24 @@ fn any_base_method(
     if e.methods.contains(method) { Some(("Any".to_string(), e.clone())) } else { None }
 }
 
+/// String 内建方法名集合（`resolve_method_owner` 的唯一候选守卫用）。
+///
+/// 这些方法在 String 上是原生实现（不在 CLASS_TABLE），任何未知/字符串
+/// 接收者的同名调用都不能被「全表唯一候选」劫持到无关类。
+fn is_string_builtin_method(method: &str) -> bool {
+    matches!(
+        method,
+        "substring" | "charAt" | "startsWith" | "endsWith"
+            | "toUpperCase" | "toLowerCase" | "toUpper" | "toLower"
+            | "trim" | "replace" | "replaceAll" | "split"
+            | "padStart" | "padEnd"
+            | "substringBefore" | "substringAfter"
+            | "substringBeforeLast" | "substringAfterLast"
+            | "lastIndexOf" | "countChar" | "fromCharCode"
+            | "isBlank" | "repeat"
+    )
+}
+
 /// 方法调用的接收者类解析：静态类型命中（含继承链）→ 全表唯一候选兜底
 /// （无类型信息时按「方法名 + 实参个数」过滤，仍唯一才采用）
 /// `[DEBUG] resolve_method_owner` 系列输出开关（**默认关闭**）。
@@ -844,7 +948,16 @@ fn resolve_method_owner(
         if resolve_debug_enabled() {
             eprintln!("[DEBUG]   trying find_method_in_chain for type='{}' method='{}'", ty, method);
         }
-        if let Some(found) = find_method_in_chain(&table, ty, method) {
+        // 泛型实例化类型名先剥参数：`HashMap<Int, Any>` 的 CLASS_TABLE 键是
+        // `HashMap` —— 不剥则 find_method_in_chain 恒失手，非集合内建方法
+        // （如 `resetForReuse`）退化成裸名（链接期 undefined symbol，
+        // 实测 Vm.retireLocals）。集合内建（get/put/size…）有拦截分支
+        // 掩盖了此缺口，非内建方法一加即暴露。
+        let ty_base: String = match ty.split('<').next() {
+            Some(b) => b.trim().to_string(),
+            None => ty.clone(),
+        };
+        if let Some(found) = find_method_in_chain(&table, &ty_base, method) {
             if resolve_debug_enabled() {
                 eprintln!("[DEBUG]   found: {}", found.0);
             }
@@ -875,7 +988,7 @@ fn resolve_method_owner(
         // 已知接收者类型且是成员表中的类但无此方法 → 尝试 `Any` 的默认实现
         //（所有 class / object 都隐式继承 Any，`hashCode` / `equals` / `toString`
         //  等基类方法即使未显式重写也应命中 Any 的默认实现）
-        if table.contains_key(ty) && !dynamic_recv {
+        if table.contains_key(&ty_base) && !dynamic_recv {
             if resolve_debug_enabled() {
                 eprintln!("[DEBUG]   type '{}' is in CLASS_TABLE but method not found, trying any_base_method", ty);
             }
@@ -915,6 +1028,27 @@ fn resolve_method_owner(
     //      （`hashCode` / `equals` 被大量类重写，唯一候选兜底必然失败）
     if let Some(found) = any_base_method(&table, method) {
         return Some(found);
+    }
+    // 1.9) 字符串内建方法名 × 字符串/动态接收者：**不参与**「全表唯一候选」。
+    //
+    // String 的方法是原生实现，不在 CLASS_TABLE —— 于是闭包里**任何**定义了
+    // 同名方法的类都会成为「唯一候选」并劫持未解析接收者的调用：实测
+    // `Lexer.sliceOf` 的 `src.substring(a, b)` 被配到 `PhotonPipeline.substring`
+    //（无关类，字符串指针被按其结构体 GEP）→ 读出装箱整数 →
+    // `aura_string_length(1)` 段错误——这就是宿主二进制「闭包尺寸阈值」
+    // 崩溃的根因：闭包越大越容易出现定义了同名的类（加一个零调用的
+    // import 即复现，probe_gc 探针矩阵）。
+    //
+    // 返回 None 后：真字符串调用由发射器的 string_method_symbol 改派兜底；
+    // 真用户类调用点退化成裸名（链接期响亮报未定义符号，优于静默写坏堆）。
+    if sema_ty.as_deref().map_or(true, |t| {
+        t.is_empty() || t == "Any" || t == "Nothing" || t == "String"
+    }) && (is_string_builtin_method(method) || crate::std::decl::is_prelude(method))
+    {
+        // prelude 全局名（toStr/toInt/println/…）：裸调用由自由函数/原生
+        // 分派兜底；绝不能被「闭包里恰好定义了同名的类」劫持
+        //（实测 PhotonPipeline.toStr 劫持 Lexer.sliceOf 的 toStr）。
+        return None;
     }
     // 2) 兜底（无类型信息时）：整个成员表中唯一拥有该方法的类
     //    当方法名在多个类中重名（如 `kidsOf` 同时属于 Ast 与 Hir）时，
