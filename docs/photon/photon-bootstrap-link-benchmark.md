@@ -344,3 +344,13 @@ AURA_FIX_OFF="assign_ty,nullcmp,anycmp,slotchecked" AURA_NO_DEEPFIELD=1 \
 AURA_CRASH_DUMP=1 + 上述 env 运行即得崩溃现场（target=0x233 装箱整数
 被当字符串 strlen；帧 #9 = compileFromSsa+0x26a1 的 writeText 调用点）
 ```
+
+**2026-10-03 终更新**：本轮六项 emit/hir 修复后复测——仍崩，但崩溃点
+从 Step-4 后的 RELCHK/[rt] 阶段推进到 compileFromSsa 的 Step-4
+vprintln eager 参数（`this.substring(machineCodeHex, 0, min(...))`，
+machineCodeHex 读出装箱整数 0x171=184 → strlen 崩）。**崩溃点随构建
+漂移**（此前 RELCHK 后、现 Step-4）⇒ 根因是更早的内存踩踏，崩点只是
+首个受害者。另注意 vprintln 参数是急切求值（verbose 关闭时
+substring/concat 仍执行），本身是无谓分配源。下一轮：ra1 AOT 调用点
+追踪 + 在 X86Emitter/PhotonObjectWriter 的 textSection 累加路径加
+canary 定位首次越界写。
