@@ -79,7 +79,7 @@ class InstructionSelector {
     /// 桩（getAt 恒返回空串 —— `Env.get` 历史落点），要么布局分叉。保留名单
     /// 会把 guest 真实现抑制掉（`!isRuntimeSymbol` 跳过发射），实测
     /// `tl.get(0)` 返回空串。仅保留 guest 没有的 clear/hashMapPut。
-    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.clear,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args"
+    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.clear,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,aura_heapbump"
 
     /// `computeReachable` 的列表形式结果（供 `select()` 免分配查表）。
     private var reachableNames: List<String> = arrayListOf<String>()
@@ -2309,6 +2309,8 @@ class InstructionSelector {
         // （2026-10-06，P0-2）先前这些调用随被丢弃的分支一起消失；分支活了
         // 之后第一次到达链接期。映射目标见 PhotonRuntime 各桩的说明。
         if (name == "typeof" || name == "Builtin_typeof") { return "aura_typeof" }
+        // P239 诊断：分配器 bump 裸值读取（解码期写手追踪）
+        if (name == "HeapDiag_heapbump" || name == "aura_heapbump") { return "aura_heapbump" }
         if (name == "__is_tagged_int") { return "aura_is_tagged_int" }
         if (name == "removeAt") { return "Collections_listPop" }
         if (name == "Collections.count" || name == "aura.lang.std.Collections.count") { return "Collections_count" }

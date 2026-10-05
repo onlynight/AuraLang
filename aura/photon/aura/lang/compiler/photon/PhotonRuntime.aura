@@ -2478,6 +2478,14 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
+    /// 编码 `aura_heapbump() rax = heapBump 裸值`（P239 诊断：解码期分配器
+    /// 状态追踪——bump 应单调递增，骤降/归零即写手）。
+    fun emitAuraHeapBump(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitMovRIP("rax", "heapBump")
+        enc.emitEpilogue()
+    }
+
     // ── print 实现（无换行）──
 
     /// 编码 `print(rcx = char*)`
@@ -3282,6 +3290,9 @@ object PhotonRuntime {
         val encMem = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitAuraMemUsedMb(encMem)
         writer.appendFunction(encMem.toHex(), "aura_mem_used_mb", PhotonObjectWriterUtils.joinRelocRecords(encMem.getRelocations()))
+        val encHb = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitAuraHeapBump(encHb)
+        writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
 
         // Cpu 原语（@native(asm=…) extern interface 成员，B2 探针 2026-10-03）
         val encCrd = X86EncoderUtils.emptyEncoder()
@@ -3728,6 +3739,9 @@ object PhotonRuntime {
         val encMem = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitAuraMemUsedMb(encMem)
         writer.appendFunction(encMem.toHex(), "aura_mem_used_mb", PhotonObjectWriterUtils.joinRelocRecords(encMem.getRelocations()))
+        val encHb = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitAuraHeapBump(encHb)
+        writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         writer.dataSymbolName = "toStrBuffer:32,heapArena:33554432,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
@@ -4138,6 +4152,9 @@ object PhotonRuntimeUtils {
         val encMem = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitAuraMemUsedMb(encMem)
         writer.appendFunction(encMem.toHex(), "aura_mem_used_mb", PhotonObjectWriterUtils.joinRelocRecords(encMem.getRelocations()))
+        val encHb = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitAuraHeapBump(encHb)
+        writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         writer.dataSymbolName = "toStrBuffer:32,heapArena:33554432,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"

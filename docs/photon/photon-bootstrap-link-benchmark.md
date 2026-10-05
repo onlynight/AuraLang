@@ -2261,3 +2261,25 @@ heapBump 算术（逐条反汇编）。
 
 **本轮落地**：窗口括号法实证 + readStr 递归化 + PushHandler 化维持。
 探针（winA/winB/winA3）暂留。
+
+### 10.45 P240：解码正确性里程碑——6 指令全对（2026-10-06 续XXIV）
+
+**决定性数据**（fresh front+back 后的全元素 dump）：
+```
+numArgsFlat = ["0","1","2","","4",""]     ✓
+numOpNames  = [LOAD_CONST_I, STORE_LOCAL, LOAD_LOCAL, RETAIN, LOAD_LOCAL, RETURN] ✓
+fresh=[AABB] ✓  heapBump=651747（单调合理）✓
+```
+tiny4 main 的 6 条指令（CONST 0 / STORE 1 / LOAD 2 / RETAIN / LOAD 4 / RETURN）
+**全部正确解码**——PushHandler 化 + readStr 递归化 + 接收者注入 + Opcodes
+平行表的组合修复**在解码路径上全部生效**。
+
+**重要教训**：P239 的「e0=[6] 元素全 6」是 **SKIP_FRONT 下的旧 hat 假象**
+（旧探针读旧内容）——「front+back 都重跑」必须是探针实验的纪律。
+
+**当前崩点**：winA 之后（loadModule 尾段 funcTable/exports 解析，或
+loadPredecoded/buildLoadCaches/run 准备段）。探针 winA/winA3/hb 已留。
+
+**下轮**：
+1. winC（loadPredecoded 入口）/ winD（run 入口）探针定位剩余崩点；
+2. 端到端 minimal.auc → helloworld → fib。
