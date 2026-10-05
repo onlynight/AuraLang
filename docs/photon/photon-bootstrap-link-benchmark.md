@@ -2937,3 +2937,30 @@ P274 的 read64(1) = 同一级联在 32MB arena+回绕时代的更早死亡点�
 （opCodes.set(r, fused) / setArgsRow(r, pair) 的 SSA 值 → 槽分配），
 找出「列表句柄槽」被选作 `r` 的值来源——ISel/RA 的 load-slot 选择。
 修复后 helloworld 端到端（前有 LOADONLY ✓ / 解码 1194 ✓ 双绿基线）。
+
+### 10.72 追加 P277：终极形态——栈衰竭 + 野转移，一切「参数错误」皆为幻象（2026-10-06 续LV）
+
+**决定性新证据**（p277 noaslr，huge-r 断点命中时）：
+- **[rsp] = 0**（返回地址槽为零——正常 call 不可能）
+- SIGSEGV 落在 setArgsRow **prologue push 序列中间**（入口+7 字节）
+  = **栈耗尽（guard page）特征**
+
+**终极定性**：崩溃形态 = **野返回链导致的栈衰竭**。某处返回地址被
+踩 → `ret` 落入函数入口/中部 → 逐层"递归"堆栈 → rsp 耗尽 → prologue
+push 触 guard page。此前所有「参数装载错误」观察（P274 的 rcx=1、
+§10.72 的 r=列表句柄）皆为**野转移 + 寄存器残留的幻象**：
+- rdx=0x14016cdb0 恒定 = 上一轮野转移路径的寄存器残留
+- 「5001+ 次调用」= 递归深度 5001+ 层
+- read64(1)/read64(0)/listSet(list=1) = 野转移落点的寄存器残留
+
+**真正的根（仍未定位）**：**向线程栈写入返回地址槽的野写**。
+排除项：arena 写（.data 区，与栈分离）；Memory.copy（堆→堆）；
+substring 越界（NULL 修复后安全）。嫌疑集中：某列表的 items 指针
+被栈地址污染后 push 写入 `[items+len*8]` 落栈——需找出「items 指针
+= 栈地址」的污染源。
+
+**下轮首查**：第一次野 ret 时刻（SIGILL@listAppend+0x60 或首个
+[rsp]=0 的帧）全栈 DIFF——在 loadArgsFlat 入口快照整帧，野 ret 时
+DIFF 找被改槽；或 VirtualProtect 栈底 guard page 抓首个越界写。
+**工具教训追加**：条件断点 `if $rdx>1000` 命中时的 SIGSEGV 标签 =
+prologue 栈耗尽，非断点异常；[rsp]=0 = 野转移铁证。
