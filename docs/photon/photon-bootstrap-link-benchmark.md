@@ -2783,3 +2783,26 @@ listSet——类型系统在 demoted 调用（receiver 降级为首实参）时*
 
 **下轮**：在 gdb 中让 listSet 断点只捕获**非法调用**（list < 0x140000000
 即非堆/非镜像地址），一次性抓出垃圾调用的完整调用链。
+
+### 10.68 P273：终极定位——Collections_getInstance 破坏 callee-saved rbx（2026-10-06 续XLVIII）
+
+**gdb 条件断点结论**：listSet 从未被非法 list 调用（条件断点未触发）。
+崩点 = **listSet 内部的 rbx 被覆写**：
+```
+listSet 入口：rbx = list（有效指针）✓
+...call Collections_getInstance...
+read64(rbx) 时：rbx = 1（被覆写！）✗
+```
+rbx 是 Win64 callee-saved 寄存器，**被调函数必须保存/恢复**。
+`Collections_getInstance` 破坏了 rbx ⇒ 全栈槽模式下 callee-saved
+保障失效。
+
+**根因**：全栈槽模式（P270 禁用着色）下 `collectSavedRegs` 返回空集
+（无着色 = 无 callee-saved 使用），而 emitter 序言的 savedRegs 被固定
+为 7 个。如果 getInstance 的序言/尾声与实际 push 数不匹配（或固定
+7 push 的 savedRegs 与实际恢复列表不同步），callee-saved 就会被
+覆写。
+
+**修复路径**：查 X86Emitter 的 savedRegs 固定与 emitPrologue/epilogue
+的 push/pop 对称性——特别是 P270 禁用着色后 `collectSavedRegs` 的
+行为。
