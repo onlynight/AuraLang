@@ -2769,3 +2769,17 @@ listSet——类型系统在 demoted 调用（receiver 降级为首实参）时*
 1. 在 listSet 入口断点抓调用者（[rsp] 返回地址 → obj 偏移 → 函数名）；
 2. 修复该调用方（类型修正或防御性检查）；
 3. 端到端。
+
+### 10.67 P273：listSet 调用链分析——opCodes 填充合法，垃圾调用在后（2026-10-06 续XLVII）
+
+**listSet 入口断点数据**：
+* 合法调用：list=0x14011b2e8/0x140174430，idx=0/1/2/0x33f...，
+  val=堆指针/0x1（opCodes Int 填充）——正常；
+* **崩点在后续某个 listSet(garbage-list)**——全部合法调用之后。
+
+**重要发现**：`val=0x1` 的 listSet 是 opCodes 的 Int 填充
+（`opCodes.add(Opcodes.fromName(...))`），list=0x140174430 = this.opCodes
+列表。这些调用是合法的——说明 fromName 线性扫描 + add 正常工作。
+
+**下轮**：在 gdb 中让 listSet 断点只捕获**非法调用**（list < 0x140000000
+即非堆/非镜像地址），一次性抓出垃圾调用的完整调用链。
