@@ -2160,3 +2160,26 @@ readStr 递归化 ✓。
 
 **下轮**：对 Vm_setArgsRow/loadArgsFlat 区做同款去 HashMap/去 phi 改写；
 或直接攻前端虚方法展平（`Class_method` 命名 + @this 形参保留）。
+
+### 10.41 前端虚方法展平缺陷精确定位（下轮专项施工图）
+
+**定义侧**：`Hir.aura::lowerStmt` 的 Function 分支（~1174 行）——类体方法
+直接 `lowerFunction(ast, id)`，而 `lowerFunction` 取 `name = ast.textOf(id)`
+（**裸方法名**），既不限定 `Class_method` 也不注入接收者形参。
+HashMap_hashKey（带 @this）与 hashCode（裸名无 this）的差异来源待查：
+pre-registerTypeMembers（1854 行）登记 `Class.method`，调用侧
+lowerCall（2129/2141/2156/2191 行）按 `recvName + "_" + method` 限定——
+**调用侧有限定、定义侧无对应重命名** ⇒ `key.hashCode()`（key: Any）走到
+裸名分支 ⇒ 与无参裸定义「匹配」，接收者被物化成常量 0。
+
+**修复方向（下轮）**：
+1. 定义侧：lowerTypeDecl 的方法子节点降级时，HirFunction 名改为
+   `Class_method` 且 params 注入 `this: Class`（与 HashMap_hashKey 对齐）；
+   调用侧同名限定已存在，天然对齐；
+2. 兼容面：`@fn hashCode()`/`isEmpty()` 等裸名定义的既有调用点
+   （String 字面量 receiver 的 `.hashCode()`/`.isEmpty()` 派发）逐一核对；
+3. 回归面：HashMap/DebugHashMap 全链 + minimal.auc → helloworld。
+
+**当前绕过状态**：Opcodes 平行表已消最大的一个炸点；剩余崩点
+Vm_setArgsRow 区 strlen(0x1) 同属此家族（装载期还有别的 hashCode/
+虚方法调用点—— 每次绕过一个，崩点前移一次）。
