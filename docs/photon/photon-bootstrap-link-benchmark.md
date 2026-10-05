@@ -2283,3 +2283,27 @@ loadPredecoded/buildLoadCaches/run 准备段）。探针 winA/winA3/hb 已留。
 **下轮**：
 1. winC（loadPredecoded 入口）/ winD（run 入口）探针定位剩余崩点；
 2. 端到端 minimal.auc → helloworld → fib。
+
+### 10.46 P241：崩点锁入 loadPredecoded 段——winA 与 winB 之间（2026-10-06 续XXV）
+
+**窗口推进**：
+```
+winA（decode 完成）  numArgsFlat = ["0","1","2","","4",""] ✓ 正确
+winC（pre-loadPredecoded）✓
+winB（loadArgsFlat 前）n=6 e0=[6] e1=[6] ✗ 已损坏！
+```
+**numArgsFlat 在 loadModule 返回后、loadArgsFlat 消费前被覆写**——窗口 =
+registerAucClasses + loadPredecoded 的字段赋值/容器构造段
+（HashMap() 构造器 × 8、VmStack/VmFrameStack/VmStrStack/VmLocals 构造）。
+
+**已排除**：VmStack 系容器（arrayListOf 承载，无巨 alloc）；VmCollections
+的裸 Memory.alloc（cap*8 小尺寸）。
+
+**下轮**：
+1. 二分窗口：registerAucClasses 前后各一探针 → HashMap 构造器逐个插探针；
+2. 首选怀疑：HashMap() 构造器的桶数组分配（capacity/扩容算术）；
+3. 或 heapBump 值探针（aura_heapbump 已就位）在每个构造器后打点——
+   bump 回退即定位写手。
+
+**里程碑保持**：解码 6 指令全对（§10.45）；探针 winA/winA3/hb/winB/winC
+暂留。

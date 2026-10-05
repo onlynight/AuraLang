@@ -282,8 +282,10 @@ class Vm {
         if (mod.numericMode) {
             // P2.2c：类表 → 类继承注册表（parent_id 0 = Any；防自环）
             this.registerAucClasses(mod.classNames, mod.classParentIds)
+            println("[winC] pre-loadPredecoded")
             this.loadPredecoded(mod.numOpNames, mod.numArgsFlat, mod.constPool,
                 mod.funcTable, mod.exports, mod.imports)
+            println("[winC2] post-loadPredecoded")
             val r: Any = this.run()
             return r
         }
@@ -407,9 +409,11 @@ class Vm {
     /// （`lines` / `ops` / 参数扁平槽）。AOT 运行时**没有 GC**，若在执行循环里
     /// 逐条 `substring`/`parseArgs`，长循环会把临时字符串累积成 GB 级内存。
     fun run(): Any {
+        println("[winD] run enter")
         // 从 main 函数入口开始
         this.ip = this.funcOffset("main")
         this.currentFunc = "main"
+        println("[winD2] ip=" + toStr(this.ip))
 
         while (this.running && this.ip < this.opCodes.size()) {
             this.instructionCount = this.instructionCount + 1
