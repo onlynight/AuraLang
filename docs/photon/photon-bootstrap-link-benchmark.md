@@ -2624,3 +2624,26 @@ winE3 callStack ✓ winE4 frames ✓
 
 **下轮**：winE 细分探针（6 ctor 逐个）→ 定位具体特化 → 查该特化的
 构造器代码生成（新特化的 gens/范围）。
+
+### 10.61 P265：布局敏感恶性循环——探针自身改变布局致崩点前移（2026-10-06 续XLII）
+
+**实验**：winE4→winE5a 间加逐 field-set 探针 → 崩点**前移到 winE1 之前**
+（进程刚启动即段错误，探针输出全无）。加入诊断探针改变布局 → 激活
+更早的潜伏缺陷 → 诊断手段自我失效。
+
+**元结论定稿**：逐点修复（牧民式）对布局敏感家族**无效**——每改一处
+（包括加诊断）就改变布局使缺陷换位。**唯一出路是根治 RA/phi 底层**：
+1. phi 精确配边（pred:vid 基建已就位，front 管线旁路表待补）；
+2. RA 跨块生命周期（Phi 强制溢出 + output 扫描已回到树中 ✓）；
+3. 返回值传递链/长寿命值的 RA 区间保障。
+
+**当前有效资产**（全部保持）：
+* 六项系统性修复：栈参 ABI、负号、空串物化、Memory_copy 过量复制、
+  Long↔Int 转换、toStr 别名
+* 四项工程修复：接收者注入、Opcodes 平行表、PushHandler 化、readStr 递归化
+* Phi 强制溢出 + instr.output 扫描（P249 重启）
+* LOADONLY valid=true funcs=7 consts=54 ✓
+* helloworld 1194 条解码全对 ✓（P244 布局）
+
+**根治后的验收标准**：同一构建下 helloworld 端到端打印 Hello World
+（或至少不受探针增减影响）。

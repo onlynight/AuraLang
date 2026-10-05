@@ -248,18 +248,31 @@ class Vm {
         this.savedLocals = VmFrameStack()
         this.handlerStack = VmStrStack()
         println("[winE4] frames ok")
+        println("[winE4a] pre-field-sets this.len-check ok")
         this.instructionCount = 0
+        println("[winE4b] instructionCount ok")
         this.currentFrame = 0
+        println("[winE4c] currentFrame ok")
         this.currentFunc = ""
+        println("[winE4d] currentFunc ok")
         this.suspended = false
+        println("[winE4e] suspended ok")
         this.aucArgBase = 0
+        println("[winE4f] aucArgBase ok")
         this.aucMode = false
+        println("[winE4g] aucMode ok")
         this.objectFields = HashMap<String, HashMap<String, Any>>()
+        println("[winE5a] objectFields ok")
         this.objectClass = HashMap<String, String>()
+        println("[winE5b] objectClass ok")
         this.classParents = HashMap<String, String>()
+        println("[winE5c] classParents ok")
         this.heapKinds = HashMap<String, String>()
+        println("[winE5d] heapKinds ok")
         this.boxValues = HashMap<String, Any>()
+        println("[winE5e] boxValues ok")
         this.closureCaptures = HashMap<Int, List<Any>>()
+        println("[winE5f] closureCaptures ok")
         this.currentClosure = -1
         this.buildLineCache()
         this.buildLoadCaches()
@@ -331,11 +344,17 @@ class Vm {
         this.aucArgBase = 1
         this.aucMode = true
         this.objectFields = HashMap<String, HashMap<String, Any>>()
+        println("[winE5a] objectFields ok")
         this.objectClass = HashMap<String, String>()
+        println("[winE5b] objectClass ok")
         this.classParents = HashMap<String, String>()
+        println("[winE5c] classParents ok")
         this.heapKinds = HashMap<String, String>()
+        println("[winE5d] heapKinds ok")
         this.boxValues = HashMap<String, Any>()
+        println("[winE5e] boxValues ok")
         this.closureCaptures = HashMap<Int, List<Any>>()
+        println("[winE5f] closureCaptures ok")
         this.currentClosure = -1
         println("[winE5] maps ok")
         this.buildLineCache()
