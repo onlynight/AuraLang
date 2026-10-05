@@ -554,6 +554,11 @@ class X86Encoder {
         return true
     }
 
+    /// 当前 .text 字节数（函数区间扫描的右边界）。
+    private fun textBytes(): Int {
+        return this.byteCount()
+    }
+
     /// 在指定字节偏移处覆盖写入 4 字节小端整数。
     private fun patchInt32(byteOffset: Int, value: Int): Unit {
         if (byteOffset < 0 || byteOffset + 4 > this.byteHex.size) {

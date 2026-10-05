@@ -2079,3 +2079,30 @@ fn0 派发头崩。临时探针（hop/stb/rfb/pb0/[lm]/[pre-dn]/[dn]）已全部
    或 labelOffset 的同名首/尾匹配策略；
 3. 修复后 [pre-dn] 式值探针复验 name/a0/a1（P230 的 phi 值错乱可能与
    跳转错位同根——边 MOV 落在错函数体内等于没落）。
+
+### 10.38 P234：跳转错位假说证伪——strlen(NULL) 是合法调用（2026-10-06 续XVIII）
+
+**自我纠错两条**：
+1. §10.37 的「[rsp] 是栈地址 ⇒ 跳转转入」误读：strlen 序言后 [rsp] =
+   saved rbp（调用者的 rbp，栈地址属正常），[rbp+8] 才是返回地址——
+   strlen(rcx=NULL) 是**合法 call 进入**，控制流无辜；
+2. 曾给 resolveLabels 加越界断言探针，但引用了 X86Encoder **不存在**的
+   `functionOffsetsList` 字段（它在 PhotonObjectWriter）——seed 对未知
+   字段静默解析成 i32 ⇒ `.size` 生成 `Collections_count(i32)` ⇒ 链接
+   undefined symbol。已还原。**教训：跨类引用不存在的成员，seed 不报错**
+   （第三次踩「静默错解析」坑，前两次：栈参槽、functionOffsets）。
+
+**修正后的定位**：decodeNumeric fn0 派发头 strlen(NULL) = **合法调用、
+实参 NULL**——回到 P230 二分的老结论（name/a0/a1 多分支 phi 值错乱
+家族），加上解码链新证据：文件读取全通后，loadModule 尾段（函数表
+fill）与 decodeNumeric 的派发头都有 NULL 串流动。
+
+**基线保持**：LOADONLY valid=true numeric=true ✓；干净构建 P234。
+
+**下轮（收束点）**：
+1. P230 的 direct/n 双打探针复用（该探针已证明 opcodeName 直连正确）
+   ——**实用绕过**：decodeNumeric 的 `mod.numOpNames.add(name)` 改为
+   `add(opcodeName(opcode))`（0/26/27 三特例在分支内已单独 add），
+   绕开 name phi，先让端到端跑起来；
+2. name/a0/a1 phi 值错乱的根治（RA 跨块区间）继续作为 photon 成熟度
+   的独立工作线。
