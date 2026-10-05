@@ -74,7 +74,17 @@ class Vm {
     private var lines: List<String> = arrayListOf<String>()
     private var ops: List<String> = arrayListOf<String>()
     private var opCodes: List<Int> = arrayListOf<Int>()
-    private var argCache: List<List<String>> = arrayListOf<List<String>>()
+    // ── 参数扁平存储（2026-10-06）：取代 argCache List<List<String>>——
+    // 2MB 编译器 .auc ≈ 20 万指令 × 每指令一个 List（8KB 追加余量）
+    // = 1.6GB 堆耗尽（实测 buildLoadCaches alloc 返 NULL）。
+    // argStrs 步长 3（槽 0/1/2 字符串，覆盖全部既有 get(0..2) 用法）；
+    // arg2/3/4Ints 为**数值快路径**（融合臂/跳转/槽号，sentinel=非数值）；
+    // argCounts 供 `args.size()` 语义。
+    private var argStrs: List<String> = arrayListOf<String>()
+    private var arg2Ints: List<Int> = arrayListOf<Int>()
+    private var arg3Ints: List<Int> = arrayListOf<Int>()
+    private var arg4Ints: List<Int> = arrayListOf<Int>()
+    private var argCounts: List<Int> = arrayListOf<Int>()
 
     private var ip: Int = 0
     private var running: Boolean = true
@@ -179,7 +189,11 @@ class Vm {
         this.lines = arrayListOf<String>()
         this.ops = arrayListOf<String>()
         this.opCodes = arrayListOf<Int>()
-        this.argCache = arrayListOf<List<String>>()
+        this.argStrs = arrayListOf<String>()
+        this.arg2Ints = arrayListOf<Int>()
+        this.arg3Ints = arrayListOf<Int>()
+        this.arg4Ints = arrayListOf<Int>()
+        this.argCounts = arrayListOf<Int>()
         this.ip = 0
         this.running = true
         this.returnValue = null
@@ -268,7 +282,7 @@ class Vm {
         if (mod.numericMode) {
             // P2.2c：类表 → 类继承注册表（parent_id 0 = Any；防自环）
             this.registerAucClasses(mod.classNames, mod.classParentIds)
-            this.loadPredecoded(mod.numOpNames, mod.numArgs, mod.constPool,
+            this.loadPredecoded(mod.numOpNames, mod.numArgsFlat, mod.constPool,
                 mod.funcTable, mod.exports, mod.imports)
             val r: Any = this.run()
             return r
@@ -315,7 +329,7 @@ class Vm {
     /// 助记符经 `Opcodes.fromName` 数值化（加载期一次），参数为加载器已解析的
     /// 最终形态（函数名/常量下标/全局行号）；执行期零解析。
     /// `.auc` 调用约定：形参槽从 1 开始（`aucArgBase = 1`）。
-    fun loadPredecoded(opNames: List<String>, args: List<List<String>>, consts: String,
+    fun loadPredecoded(opNames: List<String>, args: List<String>, consts: String,
         funcs: String, exports: String, imports: String): Unit {
         this.bytecode = ""
         this.constPool = consts
@@ -323,7 +337,7 @@ class Vm {
         this.exportsTable = exports
         this.importsTable = imports
         this.ops = opNames
-        this.argCache = args
+        this.loadArgsFlat(args)
         this.opCodes = arrayListOf<Int>()
         var i: Int = 0
         while (i < opNames.size()) {
@@ -387,7 +401,7 @@ class Vm {
     /// 执行字节码，返回最终结果。
     ///
     /// 性能/内存要点：指令行、opcode、参数都在**加载期**一次性解析并缓存
-    /// （`lines` / `ops` / `argCache`）。AOT 运行时**没有 GC**，若在执行循环里
+    /// （`lines` / `ops` / 参数扁平槽）。AOT 运行时**没有 GC**，若在执行循环里
     /// 逐条 `substring`/`parseArgs`，长循环会把临时字符串累积成 GB 级内存。
     fun run(): Any {
         // 从 main 函数入口开始
@@ -403,7 +417,6 @@ class Vm {
             }
 
             val opCode: Int = this.opCodes[this.ip]
-            val args: List<String> = this.argCache[this.ip]
             this.ip = this.ip + 1
 
             // 注释行 / 空行（加载期已编号为 OP_NOP）
@@ -415,7 +428,7 @@ class Vm {
                 continue
             }
 
-            this.dispatch(opCode, this.ops[this.ip - 1], args)
+            this.dispatch(opCode, this.ops[this.ip - 1])
         }
 
         return this.returnValue
@@ -427,7 +440,11 @@ class Vm {
         this.lines = this.bytecode.split("\n")
         this.ops = arrayListOf<String>()
         this.opCodes = arrayListOf<Int>()
-        this.argCache = arrayListOf<List<String>>()
+        this.argStrs = arrayListOf<String>()
+        this.arg2Ints = arrayListOf<Int>()
+        this.arg3Ints = arrayListOf<Int>()
+        this.arg4Ints = arrayListOf<Int>()
+        this.argCounts = arrayListOf<Int>()
         var i: Int = 0
         while (i < this.lines.size()) {
             val ln: String = this.lines[i]
@@ -447,7 +464,7 @@ class Vm {
             } else {
                 this.opCodes.add(Opcodes.fromName(name))
             }
-            this.argCache.add(VmOps.parseArgs(ln, pos))
+            this.writeArgsRow(VmOps.parseArgs(ln, pos))
             i = i + 1
         }
     }
@@ -460,7 +477,7 @@ class Vm {
     ///
     /// P0.4（ADR-002）：分派只做**整数**比较（`Opcodes` 常量），无指令名
     /// 字符串比较；`opName` 仅用于未知指令的诊断信息。
-    private fun dispatch(op: Int, opName: String, args: List<String>): Unit {
+    private fun dispatch(op: Int, opName: String): Unit {
         // ── 常量指令 ──
         // ── 热指令快速分派（方案 D）：按动态频次把高频臂前置，
         // 未命中落入下方原链（臂语义与原链逐字一致）。 ──
@@ -478,18 +495,18 @@ class Vm {
             // 诊断（前 3 次）：常量池行是否完好（2026-10-06 装载链追踪）
             if (this.dbgLcCount < 3) {
                 this.dbgLcCount = this.dbgLcCount + 1
-                val lcIdx: String = args.get(0)
+                val lcIdx: String = this.argStrOf(0)
                 println("[LC] n=" + toStr(this.dbgLcCount) + " idxArg=[" + lcIdx
                         + "] poolLine=[" + this.getConst(lcIdx) + "]")
             }
-            this.stack.push(toAny(VmOps.toI32(toStr(this.getConst(args.get(0))))))
+            this.stack.push(toAny(VmOps.toI32(toStr(this.getConstByIdx(this.arg0IntOf())))))
         } else if (op == Opcodes.JUMP_IF_FALSE) {
             val cond: Any = this.stack.pop()
             if (!VmOps.toBool(cond)) {
                 this.ip = this.arg0IntOf()
             }
         } else if (op == Opcodes.LDIC_STL) {
-            this.stack.push(toAny(VmOps.toI32(toStr(this.getConst(args.get(0))))))
+            this.stack.push(toAny(VmOps.toI32(toStr(this.getConstByIdx(this.arg0IntOf())))))
             this.locals.putSlot(this.arg1IntOf(), this.stack.pop())
         } else if (op == Opcodes.LDL_JIF) {
             val v: Any = this.locals.getSlot(this.arg0IntOf())
@@ -505,8 +522,8 @@ class Vm {
         } else if (op == Opcodes.LDLC_OP_STL) {
             // local[a] OP const[c] → local[s]
             val b: Any = this.locals.getSlot(this.arg0IntOf())
-            val c: Any = toAny(VmOps.toI32(toStr(this.getConst(args.get(1)))))
-            val binop: Int = VmOps.toI32(args.get(2))
+            val c: Any = toAny(VmOps.toI32(toStr(this.getConstByIdx(this.arg1IntOf()))))
+            val binop: Int = this.arg2IntOf()
             var r: Any = 0
             if (binop == Opcodes.ADD) {
                 r = VmOps.add(b, c)
@@ -515,12 +532,12 @@ class Vm {
             } else if (binop == Opcodes.MUL) {
                 r = VmOps.mul(b, c)
             }
-            this.locals.putSlot(VmOps.toI32(args.get(3)), r)
+            this.locals.putSlot(this.arg3IntOf(), r)
         } else if (op == Opcodes.LDLB_OP_STL) {
             // local[a] OP local[b] → local[s]
             val b: Any = this.locals.getSlot(this.arg0IntOf())
             val c: Any = this.locals.getSlot(this.arg1IntOf())
-            val binop: Int = VmOps.toI32(args.get(2))
+            val binop: Int = this.arg2IntOf()
             var r2: Any = 0
             if (binop == Opcodes.ADD) {
                 r2 = VmOps.add(b, c)
@@ -529,24 +546,24 @@ class Vm {
             } else if (binop == Opcodes.MUL) {
                 r2 = VmOps.mul(b, c)
             }
-            this.locals.putSlot(VmOps.toI32(args.get(3)), r2)
+            this.locals.putSlot(this.arg3IntOf(), r2)
         } else if (op == Opcodes.LDLC_LTL_JIFS) {
             // local[a] < const[c] → tmp；false 跳 t（循环守卫 6 连合一）
             val b: Any = this.locals.getSlot(this.arg0IntOf())
-            val c: Any = toAny(VmOps.toI32(toStr(this.getConst(args.get(1)))))
+            val c: Any = toAny(VmOps.toI32(toStr(this.getConstByIdx(this.arg1IntOf()))))
             val cond: Any = VmOps.lt(b, c)
-            this.locals.putSlot(VmOps.toI32(args.get(3)), cond)
+            this.locals.putSlot(this.arg3IntOf(), cond)
             if (!VmOps.toBool(cond)) {
-                this.ip = VmOps.toI32(args.get(4))
+                this.ip = this.arg4IntOf()
             }
         } else if (op == Opcodes.LDLB_LTL_JIFS) {
             // local[a] < local[b] → tmp；false 跳 j（双局部守卫 5 连合一）
             val x: Any = this.locals.getSlot(this.arg0IntOf())
             val y: Any = this.locals.getSlot(this.arg1IntOf())
             val cond: Any = VmOps.lt(x, y)
-            this.locals.putSlot(VmOps.toI32(args.get(2)), cond)
+            this.locals.putSlot(this.arg2IntOf(), cond)
             if (!VmOps.toBool(cond)) {
-                this.ip = VmOps.toI32(args.get(3))
+                this.ip = this.arg3IntOf()
             }
         } else if (op == Opcodes.LDL_STL) {
             // local[a] → local[b]（拷贝合一）
@@ -569,9 +586,9 @@ class Vm {
             val a: Any = this.stack.pop()
             this.stack.push(VmOps.lt(a, b))
         } else if (op == Opcodes.CALL) {
-            val funcName: String = args.get(0)
+            val funcName: String = this.argStrOf(0)
             var argc: Int = 0
-            if (args.size() >= 2) {
+            if (this.argCountOf() >= 2) {
                 argc = this.arg1IntOf()
             } else {
                 argc = this.funcParamCount(funcName)
@@ -584,36 +601,36 @@ class Vm {
             this.ip = this.arg0IntOf()
         } else {
                 if (op == Opcodes.CONST_INT) {
-            val idx: Int = VmOps.toI32(toStr(this.getConst(args.get(0))))
+            val idx: Int = VmOps.toI32(toStr(this.getConstByIdx(this.arg0IntOf())))
             this.stack.push(toAny(idx))
         } else if (op == Opcodes.CONST_FLOAT) {
-            val val: Any = this.getConst(args.get(0))
+            val val: Any = this.getConstByIdx(this.arg0IntOf())
             this.stack.push(VmOps.parseFloat(toStr(val)))
         } else if (op == Opcodes.CONST_STRING) {
-            val val: Any = this.getConst(args.get(0))
+            val val: Any = this.getConstByIdx(this.arg0IntOf())
             this.stack.push(val)
         } else if (op == Opcodes.CONST_BOOL) {
-            this.stack.push(args.get(0) == "true")
+            this.stack.push(this.argStrOf(0) == "true")
         } else if (op == Opcodes.CONST_NULL) {
             this.stack.push(null)
         }
 
         // ── 类型化常量加载（`.auc` 路径：LoadConst 单操作码 + 常量标签）──
         else if (op == Opcodes.LOAD_CONST_I) {
-            this.stack.push(toAny(VmOps.toI32(toStr(this.getConst(args.get(0))))))
+            this.stack.push(toAny(VmOps.toI32(toStr(this.getConstByIdx(this.arg0IntOf())))))
         } else if (op == Opcodes.LOAD_CONST_F) {
-            this.stack.push(VmOps.parseFloat(toStr(this.getConst(args.get(0)))))
+            this.stack.push(VmOps.parseFloat(toStr(this.getConstByIdx(this.arg0IntOf()))))
         } else if (op == Opcodes.LOAD_CONST_S) {
-            this.stack.push(this.getConst(args.get(0)))
+            this.stack.push(this.getConstByIdx(this.arg0IntOf()))
         } else if (op == Opcodes.LOAD_CONST_B) {
-            this.stack.push(toStr(this.getConst(args.get(0))) == "1")
+            this.stack.push(toStr(this.getConstByIdx(this.arg0IntOf())) == "1")
         } else if (op == Opcodes.LOAD_CONST_N) {
             this.stack.push(null)
         }
 
         // ── 栈操作 ──
         else if (op == Opcodes.LOAD_LOCAL) {
-            val slot: Int = VmOps.toI32(args.get(0))
+            val slot: Int = VmOps.toI32(this.argStrOf(0))
             val v: Any = this.locals.getSlot(slot)
             // **不要**写成 `push(if (v == null) 0 else v)`：混合类型 if 表达式会被
             // 推导成 `Int`，非空分支里的 `String` 指针会被截断成整数
@@ -625,10 +642,10 @@ class Vm {
                 this.stack.push(v)
             }
         } else if (op == Opcodes.STORE_LOCAL) {
-            val slot: Int = VmOps.toI32(args.get(0))
+            val slot: Int = VmOps.toI32(this.argStrOf(0))
             this.locals.putSlot(slot, this.stack.pop())
         } else if (op == Opcodes.DECL_LOCAL) {
-            val slot: Int = VmOps.toI32(args.get(0))
+            val slot: Int = VmOps.toI32(this.argStrOf(0))
             this.locals.putSlot(slot, 0)
         } else if (op == Opcodes.POP) {
             this.stack.pop()
@@ -733,16 +750,16 @@ class Vm {
 
         // ── 控制流 ──
         else if (op == Opcodes.JUMP) {
-            this.ip = VmOps.toI32(args.get(0))
+            this.ip = VmOps.toI32(this.argStrOf(0))
         } else if (op == Opcodes.JUMP_IF_FALSE) {
             val cond: Any = this.stack.pop()
             if (!VmOps.toBool(cond)) {
-                this.ip = VmOps.toI32(args.get(0))
+                this.ip = VmOps.toI32(this.argStrOf(0))
             }
         } else if (op == Opcodes.JUMP_IF_TRUE) {
             val cond: Any = this.stack.pop()
             if (VmOps.toBool(cond)) {
-                this.ip = VmOps.toI32(args.get(0))
+                this.ip = VmOps.toI32(this.argStrOf(0))
             }
         } else if (op == Opcodes.HALT) {
             this.running = false
@@ -752,34 +769,34 @@ class Vm {
 
         // ── 函数调用 ──
         else if (op == Opcodes.CALL) {
-            val funcName: String = args.get(0)
+            val funcName: String = this.argStrOf(0)
             // 文本字节码：`CALL name argc`；.auc 二进制：`CALL <函数下标>`（无 argc，
             // 由函数表的参数个数补全）。
             var argc: Int = 0
-            if (args.size() >= 2) {
-                argc = VmOps.toI32(args.get(1))
+            if (this.argCountOf() >= 2) {
+                argc = VmOps.toI32(this.argStrOf(1))
             } else {
                 argc = this.funcParamCount(funcName)
                 if (argc < 0) { argc = 0 }
             }
             this.callOrBuiltin(funcName, argc)
         } else if (op == Opcodes.CALL_METHOD) {
-            val methodName: String = args.get(0)
-            this.callMethod(methodName, args)
+            val methodName: String = this.argStrOf(0)
+            this.callMethod(methodName)
         } else if (op == Opcodes.CALL_NATIVE_ARGS) {
             // `.auc` 路径：加载器已把原生函数**下标**解析成名字，
             // 直接复用内建分派（println / toStr / …）。
-            val fname: String = args.get(0)
+            val fname: String = this.argStrOf(0)
             var argc2: Int = 0
-            if (args.size() >= 2) {
-                argc2 = VmOps.toI32(args.get(1))
+            if (this.argCountOf() >= 2) {
+                argc2 = VmOps.toI32(this.argStrOf(1))
             }
             this.callOrBuiltin(fname, argc2)
         } else if (op == Opcodes.CALL_NATIVE) {
-            val idx: Int = VmOps.toI32(args.get(0))
+            val idx: Int = VmOps.toI32(this.argStrOf(0))
             this.callNative(idx)
         } else if (op == Opcodes.CALL_C) {
-            val idx: Int = VmOps.toI32(args.get(0))
+            val idx: Int = VmOps.toI32(this.argStrOf(0))
             this.callC(idx)
         } else if (op == Opcodes.RETURN) {
             this.returnFromFunc()
@@ -788,10 +805,10 @@ class Vm {
             this.returnFromFunc()
         } else if (op == Opcodes.CALL_TAIL) {
             // P1.6：尾调用（帧复用）。文本：`CALL_TAIL name argc`；argc 省略时按函数表推导。
-            val tFunc: String = args.get(0)
+            val tFunc: String = this.argStrOf(0)
             var tArgc: Int = 0
-            if (args.size() >= 2) {
-                tArgc = VmOps.toI32(args.get(1))
+            if (this.argCountOf() >= 2) {
+                tArgc = VmOps.toI32(this.argStrOf(1))
             } else {
                 tArgc = this.funcParamCount(tFunc)
                 if (tArgc < 0) { tArgc = 0 }
@@ -801,13 +818,13 @@ class Vm {
 
         // ── 对象/类 ──
         else if (op == Opcodes.NEW_OBJECT) {
-            val className: String = args.get(0)
+            val className: String = this.argStrOf(0)
             this.newObject(className)
         } else if (op == Opcodes.GET_FIELD) {
-            val fieldName: String = args.get(0)
+            val fieldName: String = this.argStrOf(0)
             this.getField(fieldName)
         } else if (op == Opcodes.SET_FIELD) {
-            val fieldName: String = args.get(0)
+            val fieldName: String = this.argStrOf(0)
             this.setField(fieldName)
         } else if (op == Opcodes.NEW_ARRAY) {
             val size: Any = this.stack.pop()
@@ -817,13 +834,13 @@ class Vm {
         } else if (op == Opcodes.SET_INDEX) {
             this.setIndex()
         } else if (op == Opcodes.CALL_CTOR) {
-            val ctorName: String = args.get(0)
-            this.callCtor(ctorName, args)
+            val ctorName: String = this.argStrOf(0)
+            this.callCtor(ctorName)
         } else if (op == Opcodes.DEF_CLASS) {
             // P1.2：声明类继承（parent "-" 或空 = 无父类）
             var parent: String = ""
-            if (args.size() >= 2) { parent = args.get(1) }
-            this.defClass(args.get(0), parent)
+            if (this.argCountOf() >= 2) { parent = this.argStrOf(1) }
+            this.defClass(this.argStrOf(0), parent)
         }
 
         // ── 集合 ──
@@ -865,29 +882,29 @@ class Vm {
 
         // ── 闭包 ──
         else if (op == Opcodes.LOAD_CLOSURE) {
-            this.loadClosure(args.get(0))
+            this.loadClosure(this.argStrOf(0))
         } else if (op == Opcodes.MAKE_CLOSURE) {
-            this.makeClosure(args.get(0), args)
+            this.makeClosure(this.argStrOf(0))
         } else if (op == Opcodes.CALL_CLOSURE) {
-            this.callClosure(args)
+            this.callClosureAt()
         } else if (op == Opcodes.LOAD_UPVALUE) {
-            this.loadUpvalue(VmOps.toI32(args.get(0)))
+            this.loadUpvalue(VmOps.toI32(this.argStrOf(0)))
         } else if (op == Opcodes.STORE_UPVALUE) {
-            this.storeUpvalue(VmOps.toI32(args.get(0)))
+            this.storeUpvalue(VmOps.toI32(this.argStrOf(0)))
         }
 
         // ── 类型检查 ──
         else if (op == Opcodes.INSTANCE_OF) {
-            val typeName: String = args.get(0)
+            val typeName: String = this.argStrOf(0)
             this.instanceOf(typeName)
         } else if (op == Opcodes.CHECK_CAST) {
-            val typeName: String = args.get(0)
+            val typeName: String = this.argStrOf(0)
             this.checkCast(typeName)
         } else if (op == Opcodes.CAST) {
-            val typeName: String = args.get(0)
+            val typeName: String = this.argStrOf(0)
             this.cast(typeName)
         } else if (op == Opcodes.CHECK_TYPE) {
-            val typeName: String = args.get(0)
+            val typeName: String = this.argStrOf(0)
             this.checkType(typeName)
         }
 
@@ -934,7 +951,7 @@ class Vm {
 
         // ── 异常处理 ──
         else if (op == Opcodes.PUSH_HANDLER) {
-            this.pushHandler(args)
+            this.pushHandlerAt()
         } else if (op == Opcodes.POP_HANDLER) {
             this.popHandler()
         } else if (op == Opcodes.THROW) {
@@ -998,23 +1015,23 @@ class Vm {
 
         // ── 枚举 ──
         else if (op == Opcodes.ENUM_CONSTRUCT) {
-            this.enumConstruct(args.get(0))
+            this.enumConstruct(this.argStrOf(0))
         } else if (op == Opcodes.ENUM_TAG) {
             this.enumTag()
         } else if (op == Opcodes.MAKE_FN_REF) {
-            this.makeFnRef(args.get(0))
+            this.makeFnRef(this.argStrOf(0))
         }
 
         // ── 跨模块 ──
         else if (op == Opcodes.CALL_EXPORT) {
-            this.callExport(args.get(0))
+            this.callExport(this.argStrOf(0))
         } else if (op == Opcodes.CALL_EXTERNAL) {
-            this.callExternal(args.get(0), args.get(1))
+            this.callExternal(this.argStrOf(0), this.argStrOf(1))
         }
 
         // ── AOT ──
         else if (op == Opcodes.CALL_AOT) {
-            this.callAot(args.get(0))
+            this.callAot(this.argStrOf(0))
         }
 
         // ── 未知指令（含已废弃的协程指令，D5/ADR-001）──
@@ -1995,7 +2012,7 @@ class Vm {
     /// `CALL_METHOD name [argc]`：argc 可选（除 self 外的实参个数；
     /// 省略时按无参方法处理，接收者 = 栈顶）。解析失败退让旧路径
     /// `callOrBuiltin(name, 0)`，兼容遗留字节码。
-    private fun callMethod(methodName: String, args: List<String>): Unit {
+    private fun callMethod(methodName: String): Unit {
         if (this.aucMode) {
             // `.auc` 布局（Rust emit.rs CallMethod）：[self, args..., receiverCopy]，
             // 栈顶是接收者**副本**，仅用于虚分派（Rust VM 同样丢弃该副本）。
@@ -2019,8 +2036,8 @@ class Vm {
             return
         }
         var argc: Int = -1
-        if (args.size() >= 2) {
-            argc = VmOps.toI32(args.get(1))
+        if (this.argCountOf() >= 2) {
+            argc = VmOps.toI32(this.argStrOf(1))
         }
         val receiverDepth: Int = if (argc >= 0) argc else 0
         val cls: String = this.receiverClassAt(receiverDepth)
@@ -2048,10 +2065,10 @@ class Vm {
     /// `CALL_CTOR name [argc]`：对象已由 `NEW_OBJECT` 分配（接收者在栈上、
     /// 实参之下），构造器函数以 `"类名.ctor"`（或 `"类名." + name`）注册，
     /// self 为首参。解析失败退让旧路径。
-    private fun callCtor(ctorName: String, args: List<String>): Unit {
+    private fun callCtor(ctorName: String): Unit {
         var argc: Int = 0
-        if (args.size() >= 2) {
-            argc = VmOps.toI32(args.get(1))
+        if (this.argCountOf() >= 2) {
+            argc = VmOps.toI32(this.argStrOf(1))
         }
         val cls: String = this.receiverClassAt(argc)
         if (cls != "") {
@@ -2089,10 +2106,10 @@ class Vm {
     /// nCaptures 个值作为捕获（按压入顺序存为 upvalue 0..n-1）；
     /// 无第二个操作数时为 0 捕获（遗留 .auc 路径兼容）。
     /// 压入 closureId（Int），`CALL_CLOSURE` 按其调用。
-    private fun makeClosure(funcName: String, args: List<String>): Unit {
+    private fun makeClosure(funcName: String): Unit {
         var n: Int = 0
-        if (args.size() >= 2) {
-            n = VmOps.toI32(args.get(1))
+        if (this.argCountOf() >= 2) {
+            n = VmOps.toI32(this.argStrOf(1))
         }
         val caps: List<Any> = arrayListOf<Any>()
         if (n > 0) {
@@ -2123,10 +2140,10 @@ class Vm {
     /// （与 CALL 一致）。argc 省略时按目标函数参数个数推导（兼容旧路径
     /// 的无参调用）。调用期间 currentClosure 指向该闭包，函数体内的
     /// LOAD_UPVALUE/STORE_UPVALUE 按此寻址。
-    private fun callClosure(args: List<String>): Unit {
+    private fun callClosureAt(): Unit {
         var argc: Int = 0
-        if (args.size() >= 1) {
-            argc = VmOps.toI32(args.get(0))
+        if (this.argCountOf() >= 1) {
+            argc = VmOps.toI32(this.argStrOf(0))
         }
         if (this.stack.size() < argc + 1) {
             this.error = "CALL_CLOSURE: stack underflow"
@@ -2544,12 +2561,12 @@ class Vm {
     ///
     /// `PUSH_HANDLER target slot catchType`；记录条目
     /// `target|ip|slot|catchType|frame`（slot = catch 后异常值的落槽，-1 = 不落槽）。
-    private fun pushHandler(args: List<String>): Unit {
-        val target: String = args.get(0)
+    private fun pushHandlerAt(): Unit {
+        val target: String = this.argStrOf(0)
         var slot: String = "-1"
-        if (args.size() >= 2) { slot = args.get(1) }
+        if (this.argCountOf() >= 2) { slot = this.argStrOf(1) }
         var catchType: String = ""
-        if (args.size() >= 3) { catchType = args.get(2) }
+        if (this.argCountOf() >= 3) { catchType = this.argStrOf(2) }
         this.handlerStack.push(target + "|" + toStr(this.ip) + "|" + slot + "|" + catchType
             + "|" + toStr(this.currentFrame))
     }
@@ -3240,24 +3257,15 @@ class Vm {
         var ai: Int = 0
         val an: Int = this.opCodes.size()
         while (ai < an) {
-            val a: List<String> = this.argCache.get(ai)
-            if (a.size() > 0) {
-                val s0: String = a.get(0)
-                if (VmOps.isAllDigits(s0)) {
-                    this.arg0Ints.add(VmOps.toI32(s0))
-                } else {
-                    this.arg0Ints.add(this.argNoneMark)
-                }
+            val s0: String = this.argStrs.get(ai * 3)
+            if (VmOps.isAllDigits(s0)) {
+                this.arg0Ints.add(VmOps.toI32(s0))
             } else {
                 this.arg0Ints.add(this.argNoneMark)
             }
-            if (a.size() > 1) {
-                val s1: String = a.get(1)
-                if (VmOps.isAllDigits(s1)) {
-                    this.arg1Ints.add(VmOps.toI32(s1))
-                } else {
-                    this.arg1Ints.add(this.argNoneMark)
-                }
+            val s1: String = this.argStrs.get(ai * 3 + 1)
+            if (VmOps.isAllDigits(s1)) {
+                this.arg1Ints.add(VmOps.toI32(s1))
             } else {
                 this.arg1Ints.add(this.argNoneMark)
             }
@@ -3284,9 +3292,8 @@ class Vm {
         while (sj < n) {
             val jop: Int = this.opCodes.get(sj)
             if (jop == Opcodes.JUMP || jop == Opcodes.JUMP_IF_FALSE || jop == Opcodes.JUMP_IF_TRUE) {
-                val a: List<String> = this.argCache.get(sj)
-                if (a.size() > 0) {
-                    val t: Int = VmOps.toI32(a.get(0))
+                if (this.argCounts.get(sj) > 0) {
+                    val t: Int = VmOps.toI32(this.argStrs.get(sj * 3))
                     if (t >= 0 && t < n) {
                         isTarget.set(t, 1)
                     }
@@ -3310,19 +3317,19 @@ class Vm {
                 && this.opCodes.get(r + 3) == Opcodes.STORE_LOCAL
                 && this.opCodes.get(r + 4) == Opcodes.LOAD_LOCAL
                 && this.opCodes.get(r + 5) == Opcodes.JUMP_IF_FALSE) {
-                val a0: List<String> = this.argCache.get(r)
-                val a1: List<String> = this.argCache.get(r + 1)
-                val a3: List<String> = this.argCache.get(r + 3)
-                val a4: List<String> = this.argCache.get(r + 4)
-                val a5: List<String> = this.argCache.get(r + 5)
-                val tmpW: String = if (a3.size() > 0) { a3.get(0) } else { "-1" }
-                val tmpR: String = if (a4.size() > 0) { a4.get(0) } else { "-1" }
+                val a0s: String = this.argStrs.get(r * 3)
+                val a1s: String = this.argStrs.get((r + 1) * 3)
+                val a3s: String = this.argStrs.get((r + 3) * 3)
+                val a4s: String = this.argStrs.get((r + 4) * 3)
+                val a5s: String = this.argStrs.get((r + 5) * 3)
+                val tmpW: String = if (a3s != "") { a3s } else { "-1" }
+                val tmpR: String = if (a4s != "") { a4s } else { "-1" }
                 if (tmpW == tmpR) {
-                    if (a0.size() > 0) { pair.add(a0.get(0)) } else { pair.add("0") }
-                    if (a1.size() > 0) { pair.add(a1.get(0)) } else { pair.add("0") }
+                    if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+                    if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
                     pair.add(toStr(Opcodes.LT))
                     pair.add(tmpW)
-                    if (a5.size() > 0) { pair.add(a5.get(0)) } else { pair.add("0") }
+                    if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
                     fused = Opcodes.LDLC_LTL_JIFS
                     pairName = "LDLC_LTL_JIFS"
                     span = 6
@@ -3333,13 +3340,13 @@ class Vm {
                 && this.opCodes.get(r + 1) == Opcodes.LOAD_CONST_I
                 && this.isArithOp(this.opCodes.get(r + 2))
                 && this.opCodes.get(r + 3) == Opcodes.STORE_LOCAL) {
-                val a0: List<String> = this.argCache.get(r)
-                val a1: List<String> = this.argCache.get(r + 1)
-                val a3: List<String> = this.argCache.get(r + 3)
-                if (a0.size() > 0) { pair.add(a0.get(0)) } else { pair.add("0") }
-                if (a1.size() > 0) { pair.add(a1.get(0)) } else { pair.add("0") }
+                val a0s: String = this.argStrs.get(r * 3)
+                val a1s: String = this.argStrs.get((r + 1) * 3)
+                val a3s: String = this.argStrs.get((r + 3) * 3)
+                if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+                if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
                 pair.add(toStr(this.opCodes.get(r + 2)))
-                if (a3.size() > 0) { pair.add(a3.get(0)) } else { pair.add("0") }
+                if (a3s != "") { pair.add(a3s) } else { pair.add("0") }
                 fused = Opcodes.LDLC_OP_STL
                 pairName = "LDLC_OP_STL"
                 span = 4
@@ -3349,13 +3356,13 @@ class Vm {
                 && this.opCodes.get(r + 1) == Opcodes.LOAD_LOCAL
                 && this.isArithOp(this.opCodes.get(r + 2))
                 && this.opCodes.get(r + 3) == Opcodes.STORE_LOCAL) {
-                val a0: List<String> = this.argCache.get(r)
-                val a1: List<String> = this.argCache.get(r + 1)
-                val a3: List<String> = this.argCache.get(r + 3)
-                if (a0.size() > 0) { pair.add(a0.get(0)) } else { pair.add("0") }
-                if (a1.size() > 0) { pair.add(a1.get(0)) } else { pair.add("0") }
+                val a0s: String = this.argStrs.get(r * 3)
+                val a1s: String = this.argStrs.get((r + 1) * 3)
+                val a3s: String = this.argStrs.get((r + 3) * 3)
+                if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+                if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
                 pair.add(toStr(this.opCodes.get(r + 2)))
-                if (a3.size() > 0) { pair.add(a3.get(0)) } else { pair.add("0") }
+                if (a3s != "") { pair.add(a3s) } else { pair.add("0") }
                 fused = Opcodes.LDLB_OP_STL
                 pairName = "LDLB_OP_STL"
                 span = 4
@@ -3368,15 +3375,15 @@ class Vm {
                 && this.opCodes.get(r + 3) == Opcodes.STORE_LOCAL
                 && this.opCodes.get(r + 4) == Opcodes.LOAD_LOCAL
                 && this.opCodes.get(r + 5) == Opcodes.JUMP_IF_FALSE) {
-                val a0: List<String> = this.argCache.get(r)
-                val a1: List<String> = this.argCache.get(r + 1)
-                val a3: List<String> = this.argCache.get(r + 3)
-                val a5: List<String> = this.argCache.get(r + 5)
-                if (a0.size() > 0) { pair.add(a0.get(0)) } else { pair.add("0") }
-                if (a1.size() > 0) { pair.add(a1.get(0)) } else { pair.add("0") }
+                val a0s: String = this.argStrs.get(r * 3)
+                val a1s: String = this.argStrs.get((r + 1) * 3)
+                val a3s: String = this.argStrs.get((r + 3) * 3)
+                val a5s: String = this.argStrs.get((r + 5) * 3)
+                if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+                if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
                 pair.add(toStr(Opcodes.LT))
-                if (a3.size() > 0) { pair.add(a3.get(0)) } else { pair.add("-1") }
-                if (a5.size() > 0) { pair.add(a5.get(0)) } else { pair.add("0") }
+                if (a3s != "") { pair.add(a3s) } else { pair.add("-1") }
+                if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
                 fused = Opcodes.LDLC_LTL_JIFS
                 pairName = "LDLC_LTL_JIFS"
                 span = 6
@@ -3390,14 +3397,14 @@ class Vm {
                 && this.opCodes.get(r + 3) == Opcodes.STORE_LOCAL
                 && this.opCodes.get(r + 4) == Opcodes.LOAD_LOCAL
                 && this.opCodes.get(r + 5) == Opcodes.JUMP_IF_FALSE) {
-                val a0: List<String> = this.argCache.get(r)
-                val a1: List<String> = this.argCache.get(r + 1)
-                val a3: List<String> = this.argCache.get(r + 3)
-                val a5: List<String> = this.argCache.get(r + 5)
-                if (a0.size() > 0) { pair.add(a0.get(0)) } else { pair.add("0") }
-                if (a1.size() > 0) { pair.add(a1.get(0)) } else { pair.add("0") }
-                if (a3.size() > 0) { pair.add(a3.get(0)) } else { pair.add("-1") }
-                if (a5.size() > 0) { pair.add(a5.get(0)) } else { pair.add("0") }
+                val a0s: String = this.argStrs.get(r * 3)
+                val a1s: String = this.argStrs.get((r + 1) * 3)
+                val a3s: String = this.argStrs.get((r + 3) * 3)
+                val a5s: String = this.argStrs.get((r + 5) * 3)
+                if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+                if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
+                if (a3s != "") { pair.add(a3s) } else { pair.add("-1") }
+                if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
                 fused = Opcodes.LDLB_LTL_JIFS
                 pairName = "LDLB_LTL_JIFS"
                 span = 6
@@ -3430,18 +3437,16 @@ class Vm {
                     continue
                 }
                 if (pair.size() == 0) {
-                    val a0: List<String> = this.argCache.get(r)
-                    if (a0.size() > 0) { pair.add(a0.get(0)) } else { pair.add("0") }
-                    val a1: List<String> = this.argCache.get(r + 1)
-                    if (a1.size() > 0) { pair.add(a1.get(0)) } else { pair.add("0") }
+                    if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+                    if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
                 }
                 this.opCodes.set(r, fused)
-                this.argCache.set(r, pair)
+                this.setArgsRow(r, pair)
                 this.ops.set(r, pairName)
                 var k: Int = r + 1
                 while (k < r + span) {
                     this.opCodes.set(k, Opcodes.OP_NOP)
-                    this.argCache.set(k, arrayListOf<String>())
+                    this.setArgsRow(k, arrayListOf<String>())
                     this.ops.set(k, "")
                     k = k + 1
                 }
@@ -3453,16 +3458,175 @@ class Vm {
     }
 
     /// 第 i 条指令的 arg0 整数值（预解析未命中时回退现场解析）。
+
+    /// 取第 k 个参数的字符串值（扁平槽：0/1/2 直取；≥3 当前指令集无此形态）。
+    private fun argStrOf(k: Int): String {
+        if (k <= 2) {
+            return this.argStrs.get((this.ip - 1) * 3 + k)
+        }
+        return ""
+    }
+
+    /// 取第 k 个参数的字符串值（k ≥ 3 恒空：当前指令集参数最多 5 个且
+    /// 槽 3/4 仅融合指令使用、必为数值——走 arg3/4IntOf）。
+    private fun argCountOf(): Int {
+        return this.argCounts.get(this.ip - 1)
+    }
+
+    /// 数值快路径：槽 2/3/4 的预解析值（sentinel 时回退按字符串解析）。
+    private fun arg2IntOf(): Int {
+        val v: Int = this.arg2Ints.get(this.ip - 1)
+        if (v != this.argNoneMark) {
+            return v
+        }
+        return VmOps.toI32(this.argStrOf(2))
+    }
+
+    private fun arg3IntOf(): Int {
+        val v: Int = this.arg3Ints.get(this.ip - 1)
+        if (v != this.argNoneMark) {
+            return v
+        }
+        return VmOps.toI32(this.argStrOf(3))
+    }
+
+    private fun arg4IntOf(): Int {
+        val v: Int = this.arg4Ints.get(this.ip - 1)
+        if (v != this.argNoneMark) {
+            return v
+        }
+        return VmOps.toI32(this.argStrOf(4))
+    }
+
+    /// 常量池按下标直取（arg0/1IntOf 预解析下标的免解析快路径）。
+    private fun getConstByIdx(idx: Int): Any {
+        val n: Int = this.constLines.size()
+        if (idx >= 0 && idx < n) {
+            return this.constLines.get(idx)
+        }
+        return this.unescapeConst(VmOps.getFieldAt(this.constPool, idx, "
+"))
+    }
+
+    /// 装载扁平参数串（loadPredecoded）：每条 "a0,a1[,a2]"，空段保序。
+    /// ⚠️ 槽 3/4 装载期不存在（融合指令由 fuseHotPairs 生成并回填）。
+    private fun loadArgsFlat(flat: List<String>): Unit {
+        this.argStrs = arrayListOf<String>()
+        this.arg2Ints = arrayListOf<Int>()
+        this.arg3Ints = arrayListOf<Int>()
+        this.arg4Ints = arrayListOf<Int>()
+        this.argCounts = arrayListOf<Int>()
+        var i: Int = 0
+        val n: Int = flat.size()
+        while (i < n) {
+            val ln: String = flat.get(i)
+            var c0: Int = -1
+            var c1: Int = -1
+            var p: Int = 0
+            val lnN: Int = ln.length
+            while (p < lnN) {
+                if (ln.charCodeAt(p) == 44) {
+                    if (c0 < 0) {
+                        c0 = p
+                    } else if (c1 < 0) {
+                        c1 = p
+                    }
+                }
+                p = p + 1
+            }
+            var s0: String = ln
+            var s1: String = ""
+            var s2: String = ""
+            if (c0 >= 0) {
+                s0 = VmOps.vmSubstr(ln, 0, c0)
+                if (c1 >= 0) {
+                    s1 = VmOps.vmSubstr(ln, c0 + 1, c1 - c0 - 1)
+                    s2 = VmOps.vmSubstr(ln, c1 + 1, lnN - c1 - 1)
+                } else {
+                    s1 = VmOps.vmSubstr(ln, c0 + 1, lnN - c0 - 1)
+                }
+            }
+            this.argStrs.add(s0)
+            this.argStrs.add(s1)
+            this.argStrs.add(s2)
+            var seg: Int = 0
+            if (ln != "") {
+                seg = 1
+                if (c0 >= 0) {
+                    seg = 2
+                    if (c1 >= 0) {
+                        seg = 3
+                    }
+                }
+            }
+            this.argCounts.add(seg)
+            this.arg2Ints.add(this.argNoneMark)
+            this.arg3Ints.add(this.argNoneMark)
+            this.arg4Ints.add(this.argNoneMark)
+            i = i + 1
+        }
+    }
+
+    /// 文本路径（buildLineCache）写一行参数槽（与 loadArgsFlat 同构）。
+    /// ⚠️ 不写 arg0/1Ints——buildLoadCaches 在融合**之后**统一重建。
+    private fun writeArgsRow(temp: List<String>): Unit {
+        var k: Int = 0
+        while (k < 3) {
+            val v: String = if (k < temp.size()) { temp.get(k) } else { "" }
+            this.argStrs.add(v)
+            if (VmOps.isAllDigits(v)) {
+                val n: Int = VmOps.toI32(v)
+                if (k == 2) {
+                    this.arg2Ints.add(n)
+                } else {
+                    this.arg2Ints.add(this.argNoneMark)
+                }
+            } else {
+                this.arg2Ints.add(this.argNoneMark)
+            }
+            k = k + 1
+        }
+        this.arg3Ints.add(this.argNoneMark)
+        this.arg4Ints.add(this.argNoneMark)
+        this.argCounts.add(temp.size())
+    }
+
+    /// 融合写回：把 pair 的槽写回第 r 行（字符串槽 0-2 + 数值槽 2-4 + 计数）。
+    /// ⚠️ 不写 arg0/1Ints——fuseHotPairs 在 buildLoadCaches **之前**运行，
+    /// 后者会从 argStrs 统一重建。
+    private fun setArgsRow(r: Int, pair: List<String>): Unit {
+        var k: Int = 0
+        while (k < 3) {
+            val v: String = if (k < pair.size()) { pair.get(k) } else { "" }
+            this.argStrs.set(r * 3 + k, v)
+            if (k == 2) {
+                if (VmOps.isAllDigits(v)) {
+                    this.arg2Ints.set(r, VmOps.toI32(v))
+                } else {
+                    this.arg2Ints.set(r, this.argNoneMark)
+                }
+            }
+            k = k + 1
+        }
+        if (pair.size() > 3) {
+            this.arg3Ints.set(r, VmOps.toI32(pair.get(3)))
+        } else {
+            this.arg3Ints.set(r, this.argNoneMark)
+        }
+        if (pair.size() > 4) {
+            this.arg4Ints.set(r, VmOps.toI32(pair.get(4)))
+        } else {
+            this.arg4Ints.set(r, this.argNoneMark)
+        }
+        this.argCounts.set(r, pair.size())
+    }
+
     private fun arg0IntOf(): Int {
         val v: Int = this.arg0Ints.get(this.ip - 1)
         if (v != this.argNoneMark) {
             return v
         }
-        val a: List<String> = this.args.get(this.ip - 1)
-        if (a.size() > 0) {
-            return VmOps.toI32(a.get(0))
-        }
-        return 0
+        return VmOps.toI32(this.argStrOf(0))
     }
 
     /// 第 i 条指令的 arg1 整数值（同上）。
@@ -3471,11 +3635,7 @@ class Vm {
         if (v != this.argNoneMark) {
             return v
         }
-        val a: List<String> = this.args.get(this.ip - 1)
-        if (a.size() > 1) {
-            return VmOps.toI32(a.get(1))
-        }
-        return 0
+        return VmOps.toI32(this.argStrOf(1))
     }
 
     private fun getConst(idxStr: String): Any {
@@ -3721,12 +3881,23 @@ class Vm {
 
     /// 诊断：读融合后指令流的参数个数。
     fun debugArgCount(i: Int): Int {
-        return this.argCache.get(i).size()
+        return this.argCounts.get(i)
     }
 
     /// 诊断：读融合后指令流的第 j 个参数。
     fun debugArg(i: Int, j: Int): String {
-        return this.argCache.get(i).get(j)
+        if (j <= 2) {
+            return this.argStrs.get(i * 3 + j)
+        }
+        if (j == 3) {
+            val v: Int = this.arg3Ints.get(i)
+            if (v != this.argNoneMark) { return toStr(v) }
+        }
+        if (j == 4) {
+            val v: Int = this.arg4Ints.get(i)
+            if (v != this.argNoneMark) { return toStr(v) }
+        }
+        return ""
     }
 
     /// 获取局部变量（测试用）。

@@ -1441,3 +1441,451 @@ copy/set/arc/atomicAdd/mprotect）→ `charCodeAt` → 补字符串原语族
 photon 轮的 VEH/crash_catch 工具链复用到 runner 上）；② 继续按错误名补内建
 （下一个大概率是 Env.get 2 参形态/Collections.*/FileOps 家族）；③ Stage-2 全通
 后计时自编译，补全三阶段对比表。
+
+### 10.20 去 cffi 路线启动：Photon 承载 VM 执行层（2026-10-06 续Ⅴ）
+
+**目标（用户指令）**：VM 执行层去除 cffi 依赖（Photon 后端承载，Aura 自举
+实现）；std 原生层用 core 包（aura/core）中的 Aura 实现替代。现状差距：
+执行基底仍由 seed AOT + aura_std_cffi.obj/aura_syscalls.obj 承载（profile
+实测 59% 采样落在 C 支撑库）；Photon 链路本身零 C（runtime 为发射的机器码
+桩 + kernel32 导入）。
+
+**关键路径 = Photon 版 runner 跑通 .auc 解码**（本轮三连修）：
+
+1. **Win64 栈参被调侧偏移错**：emitParam 栈参写成 `[rbp+16+k*8]`——那是
+   **影子空间**（调用方寄存器残留）；正确基址 `[rbp+0x30+k*8]`（rbp+8=返回
+   地址、+0x10..0x30 影子、0x30 起 arg5+k）。实测 decodeNumeric 的 funcNames/
+   mod 全变成 .auc 缓冲字节打包值（0x5000016b 形态 = 文件字节读成指针）。
+   p188 时代 mod 乱值同根因（当时误归因 listAppend——那两个修复仍是真缺陷）。
+2. **帧填充区 256 槽不够**：大函数（loadModule/decodeNumeric）兜底槽用量
+   超过 2048B 填充区，slotForNode 发进 canary 哨兵槽（实测 streq 把哨兵
+   0x5C6ED25C 当字符串）。填充区 2048B → 32768B（4096 槽）。
+3. **emitShiftImm 移位量 4 位掩码**：`imm & 15` 把移 16/24/32 全错成
+   0..15（64 位模式硬件按 imm8 & 63）。实测 canary kind2 的「移 32 提取
+   低 32 位」退化恒等 ⇒ 返回地址校验全体误报（obj3 的 "1NAC" 刷屏 =
+   kind2 假阳性洪水）；guest 的 i32↔i64 装拆箱移位同样全体失真。改
+   `imm & 63`。**这是一个波及所有 ≥16 位移位的通用编码器缺陷**。
+
+**进展**：.auc 解码遍 fn 4/116（首次 CALL 即崩）→ **fn 16/116**。
+当前崩点：fn16 后 strcat(str, 0x71=字符码) —— String.fromCharCode/字符串
+拼接族的又一值模型实例（崩帧无有效返回地址，kind2 未报 ⇒ 毁点不在插桩帧，
+需下一轮用 [P2f]+探针组合或硬件断点收窄）。
+
+**下轮路线**：
+1. 继续解码遍推进（fn16 崩点收窄；候选：readStr/常量池/phi 合并溢出槽族）；
+2. runner natives 覆盖盘点：ProcessOps_aura_process_argCount/args 已列入
+   RUNTIME_SYMBOLS 但**尚无发射实现**（编译器 Stage-2 需要 argv 通道）——
+   需在 PhotonRuntime 补发射桩（读宿主 argv：入口 trampoline 捕获或
+   GetCommandLineA 桩）；
+3. 解码全通后：fib .auc 端到端（Photon runner 对比 seed runner 输出逐字节）；
+4. 2MB 编译器 .auc 装载 + Stage-2 自编译计时（零 cffi 链路）；
+5. obj3 回归复查（canary kind2 修复后 "1NAC" 洪水应消失）。
+
+**工具资产**：build/bisect/prof/（采样器 sampler4 + pdata 函数归属 +
+符号映射脚本）；cffi 现状清单见 §10.18 前后文。
+
+### 10.21 去 cffi Ⅱ：解码遍 116/116 全通（2026-10-06 续Ⅵ）
+
+**续 §10.20，本轮四连修，.auc 解码遍 16/116 → 116/116 全通**：
+
+1. **栈参被调侧偏移 0x10 → 0x30**（§10.20 修正案的最终形态）：fn4 首个
+   CALL 崩 → fn0 内部（栈参读到影子空间残留）。
+2. **帧填充区 2048B → 32768B**：大函数兜底槽超过 256 槽，slotForNode 发进
+   canary 哨兵槽（streq 把哨兵 0x5C6ED25C 当字符串）。→ fn0 off=27 → 205。
+3. **emitShiftImm 移位量 `imm & 15` → `imm & 63`**：移 16/24/32 全错
+   （64 位硬件 imm8 & 63）。canary kind2 低 32 位提取退化恒等 = obj3
+   "1NAC" 刷屏之谜底；guest i32↔i64 装拆箱全体失真。
+4. **.auc opcode 110-115 缺失 + toString 恒等桩**：fn16 LIST_CONTAINS(113)
+   落 opcodeName default（链止于 109）→ "UNKNOWN_"+op.toString() →
+   **runtime 的 toString 是恒等桩**（String 输入碰巧对，Int 返回裸值）→
+   strcat("UNKNOWN_", 0x71) 段错误。修复：opcodeName/operandSizeLookup
+   镜像 seed codegen/opcode.rs（110=LoadGlobal/111=StoreGlobal[u16]、
+   112-115=ListIsEmpty/Contains/IndexOf/RemoveAt[无操作数]）；
+   **toString 桩改转发 toStr**（真格式化）。
+
+**新阻塞（下一轮主攻）**：解码全通后崩于 **Vm_buildLoadCaches 堆耗尽**——
+`Memory.alloc(0x100)` 返回 NULL（bump 达 32MB 上限）。根因：**argCache 为
+2MB 编译器 .auc 的每条指令建一个宿主 List（≈20 万个）× 8KB 追加余量
+（§10.20 修复）≈ 1.6GB**。需 VM 侧列表内存模型重构：
+argCache 改扁平存储（行字符串按需解析 + arg0Ints/arg1Ints 已扁平化保留，
+热臂改用 arg0IntOf/arg1IntOf 免解析）；或 runtime 列表实现容量头+预留分级。
+（直接调大 heapArena 无法解决：20 万 × 8KB = 1.6GB ≫ 任何合理 arena。）
+
+**附带确认**：seed runner 的 listAppend 修复字节已在位（49 89 11）——
+§10.20 的三轮「陈旧 obj 吞修复」插曲已由缓存键修复根除。
+
+### 10.22 去 cffi Ⅲ：argCache 扁平化落地 + 解码 116/116（2026-10-06 续Ⅶ）
+
+**argCache 扁平化（堆耗尽根治）**：AucModule.numArgs → numArgsFlat
+（每指令一条逗号串，替代 20 万个 List）；Vm 侧 loadArgsFlat/writeArgsRow
+建扁平槽（argStrs 步 3 = 槽 0/1/2 字符串 + arg2/3/4Ints 数值快路径 +
+argCounts），dispatch 73 处 args.get(k) → argStrOf(k)/argIntOf(k)，
+fuseHotPairs 读写/setArgsRow 全改扁平。**内存从 1.6GB → ≈15MB**。
+附带修复：getConstByIdx（下标直取消字符串往返）、pushHandlerAt/
+makeClosure/callMethod/callCtor/callClosure 签名扁平化。
+
+**实测：解码遍 116/116 全通（堆耗尽消失）** ✓。新崩点 =
+funcNames.get(0) 返 NULL（[P2f] 拼接 strcat(str, NULL)）。
+
+**根因（第三层，布局内战）**：guest 的列表被两套实现交叉读写——
+`add` 映射 runtime `Collections.listAppend`（内联布局 [count][elems@8]），
+`get` 经 HIR 方法绑定解析到 **core 包 `Collections.getAt`**
+（[count][cap][itemsPtr@0x10]）——get 把元素槽当 items 指针 → NULL。
+**修复方向（用户指令：std 原生层用 core 包实现替代）**：mapper 的列表
+操作统一重指向 core 符号（Collections_listAppend/getAt/count/listSet/
+listPop/emptyList）+ forceReachable 强制纳入。当前卡点：core 对象方法
+在 emit 侧带 **self 接收者指针 ABI**（LLVM IR 实证
+`call @Collections_listAppend(%struct.Collections* @aura_obj_Collections, ...)`
+三参），而 .hat @fn 无 self、映射调用传两参 ⇒ ABI 错位 + 部分定义未发射
+（lld-link: undefined Collections_getAt/listAppend 仍在）。
+
+**下轮路线**：
+1. 对象方法 ABI 对齐：确认 Photon X86 路径的 core 方法签名
+   （.hat 无 self ⇒ X86 应无 self；IR 的 self 形态是 LLVM 路径的——
+   需核实 emit 侧到底走哪条），或改映射到**顶层包装函数**
+   （在 core 包加无 self 的顶层 `listAppend/getAt` 包装，HAT 已有
+   先例：AucLoaderUtils_XXX 形态）；
+2. 解码全通 → VM 跑 fib → 零 cffi 基准；
+3. std 原生层全面 core 化清单（string/Map 同法）。
+
+### 10.23 去 cffi Ⅳ：列表操作 core 统一落地（2026-10-06 续Ⅷ）
+
+**按用户指令推进**：std 原生层的**列表族**已从 runtime 退役，统一到
+core 包（aura.lang.collection.Collections，guest 侧 Aura 源码，Photon 编译，
+零 cffi）：
+
+1. **mapper 重指向**：bare/qualified 的 add→Collections_listAppend、
+   get/getAt→Collections_getAt、size→Collections_count、set→Collections_listSet、
+   removeAt→Collections_listPop、contains→Collections_contains、
+   indexOf→Collections_indexOf、arrayListOf→Collections_emptyList。
+   core 布局 [count][cap][itemsPtr@0x10]，push **几何增长**（Memory.copy）——
+   同时根治 §10.20 的「8KB 余量」插件式补救。
+2. **runtime 列表族退役**：RUNTIME_SYMBOLS 与 ISel runtimeSymbolNames
+   （**两份名单必须同步**——只改 PhotonRuntime 一份时 isRuntimeSymbol 仍
+   按 ISel 副本把 core 函数当 runtime 桩跳过发射 ⇒ undefined）移除
+   getAt/listAppend/count/listRemove/clear/contains/indexOf 的点形式条目；
+   buildRuntimeObject 移除对应 appendFunction（21 处，含两个附属 builder）。
+   hashmapPut/mapContainsKey（Map 桩）暂留。
+3. forceReachable 显式纳入 core 符号（点/下划线名字身份不一致的兜底）。
+
+**实测**：functNames 列表 roundtrip 经 core 实现正确
+（[P2f] i=0 "ArrayList.getSize" 打印 ✓，常量池逐条 ✓）。
+新崩点：fn0 解码内部，core count/read64 收到 **".auc" 四字节打包值当列表
+句柄**（rcx=0x6375612e）——".auc" = 路径尾部/文件内容切片值进入列表参数
+位——下一层值模型问题（嫌疑：readU16/I32 结果的 toStr 链或
+instrIndexAt 重读路径的寄存器/槽错位）。
+
+**工具**：FUNCLIST + canary funcIdx 反查 + runtime 符号基址
+（canary magic 41BA314E4143 定位）已能函数级锁定任意崩点。
+
+**下轮**：
+1. fn0 解码崩点：用 [P2f]+寄存器约束断点抓 a0/a1 实际值
+   （嫌疑最大：readU16 后的 toStr 链返回未装箱值，或 instrIndexAt
+   的 reader.pos 恢复破坏后续 read）；
+2. core contains/indexOf 返回 Boolean 的值表示核对（core 返回 Boolean，
+   VM 期望 i64——装箱一致性）；
+3. 跑通后：fib 端到端 → 零 cffi Stage-2 → 基准对比。
+
+### 10.24 去 cffi Ⅴ：fn0 崩点探针定位（2026-10-06 续Ⅸ）
+
+**无 concat 探针**（println("[DI]") / println(toStr(offset)) / println(toStr(opcode))
+三条分离打印——上一版带 concat 的探针自身崩在拼接链上）实测 fn0 解码：
+
+    [P2f] i=0 ArrayList.getSize
+    [DI]
+    .auc          ← toStr(offset) 打印出 ".auc"（offset 应为 0 → "0"）
+    （崩于 toStr(opcode)）
+
+**读数解读**：`offset`（Int 局部，应为 0）的槽位持有
+**"build/vm/current.auc"+15 处的指针**（指向 ".auc" 尾段——LLVM/链接器的
+字符串常量后缀合并把 ".auc" 形态的常量放进路径串的尾部分配）。
+toStr 对偶数值按字符串指针返回原值 → 打印 ".auc" ✓；
+随后 toStr(opcode) 对另一个被污染槽 strlen → 崩。
+
+**定性**：decodeNumeric 帧局部在函数入口即被污染/别名——嫌疑：
+(a) HAT→LIR 的对象方法发射带 self 形参导致调用方/被调方帧错位
+    （core 方法 Collections_getAt/listAppend 已在 HAT 中无 self，
+    但 ISel 映射调用传两参——需核对 LIR 函数签名与调用实参数一致性）；
+(b) loadModule→decodeNumeric 的栈帧尺寸/槽位分配在扁平化后错位；
+(c) `.auc` 字符串常量的来源（guest 里唯一含 ".auc" 的字面量是
+    vmrun_diag 的路径串——需查后缀合并/别名）。
+
+**下轮**：
+1. 对比 LIR 阶段 Collections_getAt 的函数签名（参数个数）与
+   loadModule 调用点的实参个数——若 core 方法带 self（对象方法
+   getInstance 模式的编译约定），mapper 需补 self 实参或改用
+   顶层包装函数（AucLoaderUtils_XXX 形态先例）；
+2. 或直接给 decodeNumeric 的 offset/opcode 换**专用寄存器/独立槽**
+   （最小复现：把 offset 改名 offsetDbg 重编译——若崩点位移即
+   槽别名实锤）；
+3. 解码全通后：fib 端到端 → 零 cffi Stage-2 → 基准对比。
+
+### 10.25 去 cffi Ⅴ：fn0 崩点深入 + 列表布局统一（2026-10-06 续Ⅹ）
+
+**进展**：
+1. argCache 扁平化（numArgsFlat 逗号串）✓ 落地（1.6GB→15MB）
+2. decode 116/116 ✓（opcode 110-115 补 + toString 非 identity 修复 +
+   emitShiftImm 掩码修复）
+3. **runtime 列表 native 重写为 core 布局** ✓ 落地：
+   emitListAlloc → [count@0][cap@8][itemsPtr@0x10]（24B header + cap*8 items，
+   Memory.alloc 分开分配）；emitArrayListOf → __list_alloc(0) → cap=4；
+   emitCollectionListAppend → 原地 push + 几何增长（cap*2，Memory.copy）；
+   emitCollectionCount/GetAt → 从 itemsPtr 读。
+   **mapper 保持 runtime natives（dot 形式）不变** —— 避免 p205 的
+   mapper↔isRuntimeSymbol 竞态。
+4. 探针：decodeNumeric 的 [DI] 探针精简为 println(toStr(opcode)) 单行
+   （无 concat 探针已证实安全）。
+
+**实测（P207 = 上述全部落地）**：fn0 解码开始，toStr(opcode) 返回 ".auc"
+字符串指针而非 "0"（fn0 首指令 opcode=1=LOAD_LOCAL，tagged=3，toStr
+应返 "0"）⇒ **decodeNumeric 的局部槽在入口即被污染**。
+
+**根因分析**：offset 的 VM 槽含 .rdata 路径串+15 处指针。三种可能：
+(a) AucReader/reader.pos 赋值链的错误写入；
+(b) VM 槽别名（loadModule 的局部过多 → RA 给 decodeNumeric 和 loadModule
+    的某些局部分配了重叠 VM 槽）；
+(c) core listAppend push 写越界到相邻 VM 槽。
+
+**下轮最短路径**：
+1. **最小 .auc 隔离测试**：用 2 函数 .auc（非 fib 的 116 函数）→
+   如果 fn0 解码 OK 则确认是 fn0 特有路径的槽错位；如果仍崩则是
+   decodeNumeric 入口的通用问题。
+2. **VM 槽 dump 探针**：在 decodeNumeric 入口 dump 槽 0-15 的原始值，
+   确认 funcNames/codeStarts/reader/mod 参数槽是否正确传递。
+3. **VM 层 DECL_LOCAL 检查**：确认 decodeNumeric 的局部偏移槽
+   是否与参数槽重叠。
+
+### 10.26 fn0 崩点定位确认 + mapper 回退（2026-10-06 续Ⅺ）
+
+**关键实验**：core 映射尝试（mapper→core 符号）引发回归（fn16→fn0）。
+回退后确认：**mapper 必须保持 runtime natives（dot 形式）**——因为 guest
+的 HAT 调用名为限定形式（`@call @Collections.getAt`），mapper 将其映射到
+runtime native（dot），而 ISel resolveCalleeSymbol 将 dot 归一为下划线后
+找到 LIR 中的 **core 函数定义**——所以实际的 callee 已经是 core 函数。
+
+**fn0 崩点精确确认**（VEH 记录 + 反汇编）：
+- rip = Memory_read64 的 `mov rax, [rcx]`（runtime native，崩在 read64 内）
+- rcx = 0x6375612E = **".auc" 4 字节打包**（读 "build/vm/current.auc" 路径
+  串偏移 +15 处的 4 字节 i32 值）
+- rdx = 0x1B = 27（索引参数）
+- 返回地址 = loadModule 函数体内
+- 链路：loadModule → `codeStarts.get(0)` → core getAt → **count(".auc" 值)**
+  → read64(".auc" 值) → 段错误
+
+**根因定性**：`codeStarts` 的列表句柄被替换为 ".auc" 四字节 i32 值。
+两种可能：
+(a) `codeStarts.add(reader.pos)` 在核心 listAppend 中，list 参数被
+    parseArgs 的某个中间值覆盖（loadModule 局部槽别名——flat 重构后
+    loadModule 局部槽布局改变）；
+(b) `codeStarts` = `Collections_emptyList` 返回值不是列表而是字符串
+    （emptyList→newList→Memory.alloc 链返回了 .rdata 的 ".auc" 指针）。
+
+**下轮（精确修复路径）**：
+1. **最小复现**：用 2 函数 .auc（非 fib 的 116 函数）跑 decode；
+   如果 fn0 正常则确认是列表 growth 的边界条件。
+2. **emptyList 返回值检查**：`Collections_emptyList` 的返回值断点，
+   确认是 heap 指针还是 ".auc" 值。
+3. **mapper/HIR 一致性**：`funcNames.get(0)` 走的是 core getAt
+   （HIR 绑定）还是 runtime __list_get（mapper）——前者用 itemsPtr
+   布局，后者用内联布局——如果同一个列表被两种方式读取 = 布局冲突。
+
+### 10.27 状态总结：列表 native 回退 + 深层问题定性（2026-10-06 终）
+
+**本轮完成**：
+1. runtime 列表 native 回退到内联布局（[count@0][elems@8]+8KB slack），
+   恢复 appendFunction 调用与 RUNTIME_SYMBOLS/runtimeSymbolNames 条目 ✓
+2. 确认：core 布局统一 + mapper 重指向的方案**不可行**（引发深层回归：
+   fn16→fn0，AucModule ctor 后即崩）——**回退** ✓
+
+**当前状态（P211）**：helloworld .auc（26KB）的 fn0 解码即崩。
+[AUC] 探针全部移除后仍崩 ⇒ **不是探针导致的**。
+[M2] ctor done 后立即崩（[LB] magic 之前）⇒ 崩在 AucModule() 构造器
+或 AucReader() 构造器或 readFromFile(path)。
+
+**根因定性**：这不是列表布局问题——是 **Photon AOT 编译的 loadModule
+函数在 VM 解释执行时的槽位分配/方法调用 bug**。flat-args 重构改变了
+loadModule 的局部变量布局，暴露了底层 RA 槽分配的缺陷。
+
+**关键线索**：rcx = ".auc" 四字节打包 = 路径串尾部。如果 VM 解释器
+给 loadModule 分配的局部槽和参数槽有重叠，路径串（参数）的内容会
+覆盖局部变量（如 codeStarts 列表句柄）。
+
+**下轮精确路线**：
+1. **最小函数隔离**：创建一个只含 2 参数 2 局部的测试函数（非
+   loadModule），在 VM 中执行，验证参数传递正确性
+2. **参数数边界测试**：测试 8 参数/10 参数/12 参数函数的参数传递
+   （找出从几个参数开始出错）
+3. **槽 dump**：在函数入口 dump 全部局部槽的原始值
+4. 修复后：完整 .auc 解码 → fib → Stage-2
+
+**已确认有效的修复（保留）**：
+- flat-args numArgsFlat（消除 1.6GB）
+- opcode 110-115 + toString 非 identity + emitShiftImm &63
+- 栈参偏移 0x30 + listAppend ModRM/r9 + __list_alloc 余量
+- runtimeSymbolNames/RUNTIME_SYMBOLS 两份名单同步
+
+### 10.28 二分排除结果（2026-10-06 终Ⅱ）
+
+二分排除确认：以下回退**均无效**（崩点不变）：
+- emitToString 回退恒等桩 → 仍崩
+- emitShiftImm &63 → &15 → 仍崩
+
+**排除后剩余嫌疑**（按概率排序）：
+1. **扁平参数重构**（numArgsFlat/loadArgsFlat）——改变了全部指令的
+   参数存储/解析路径。如果 loadArgsFlat 的逗号分段或 argInts 构建有
+   边界条件错误，所有指令参数都会错误。**下轮首选回退此项验证。**
+2. **VM 方法调用/槽分配**（decodeNumeric 11 参 + 大量局部的槽分配）
+   ——需要 VM 层槽 dump 确认。
+3. **对象 self 传递**（AucReader/AucModule 方法调用的 self 参数——
+   Photon AOT 的对象方法调用约定可能有问题）。
+
+**当前已确认正常的部分**：
+- funcNames 列表 roundtrip ✓（[P2f] i=0 名字正确打印）
+- 文件读取 + magic ✓（[LB] 在部分构建中通过）
+- 常量池逐条解码 ✓（[LCV] 值正确）
+
+**建议下一步**：
+1. `git stash` 全部 → 确认 p199b 基线仍正常
+2. `git stash pop` → 逐个 revert 变更 #3 (flat args) → 测试
+3. 如果 flat args 是原因 → 修 loadArgsFlat 的解析边界条件
+
+### 10.29 决定性对照：Photon AOT vs Seed AOT 编译同一 VM（2026-10-06 终Ⅲ）
+
+**实验设计**：同一份 Vm.aura + AucLoader.aura 源码，分别由
+seed AOT（LLVM 后端）和 Photon X86 后端编译为原生解释器，
+加载同一个 helloworld .auc（26KB，1 函数 main）。
+
+**结果**：
+| 编译器 | 加载 | 解码 | 执行 |
+|---|---|---|---|
+| seed AOT (auc_vm_runner.exe) | ✓ 26KB/116fn 全通 | ✓ | ✓ 全部 PASS |
+| **Photon X86 (current_noaslr.exe)** | **fn0 解码崩** | ✗ | ✗ |
+
+**结论**：Photon X86 后端对 Vm.aura/AucLoader.aura 源码的代码生成
+**存在 bug**——同一源码 seed 后端正确、photon 后端崩溃。这不是
+列表布局或字符串处理的问题，而是 **Photon AOT 后端的通用代码
+生成质量问题**。
+
+**影响面**：所有被 Photon 编译的包含循环/条件分支/列表操作/方法
+调用的函数都可能受影响。这正是「完全 aura 自举」的核心阻塞——
+Photon 后端必须能正确编译 VM 自身的全部代码。
+
+**下轮（系统性路线）**：
+1. **差分对比**：取 seed 后端和 photon 后端对同一函数（如
+   `Collections_newList` 或 `decodeNumeric`）的机器码，逐指令对比
+   语义差异；
+2. **最小化复现**：逐步减小触发函数（从 loadModule 的 30+ 局部
+   缩小到最小崩 函数），定位精确的代码模式；
+3. **修复 Photon emit**：根据差分结果修 X86Emitter 的对应缺陷；
+4. 循环直到 Photon 编译的 VM 能正确加载 helloworld .auc。
+
+**此为「完全 aura 自举」的最后关键阻塞——修复后 VM 即可
+零 cffi 独立运行。**
+
+### 10.30 最终状态与路线图（2026-10-06 总结）
+
+**核心发现**：Photon X86 后端编译的 VM 解释器存在代码生成缺陷——同一份
+Vm.aura+AucLoader.aura 源码，seed LLVM 后端编译正确、Photon X86 后端
+编译后 fn0 解码即崩。这不是单一 bug 而是后端成熟度差距的体现。
+
+**本轮完成的修复（全部正确且必要）**：
+- 栈参偏移 0x30 + emitCallArgs 栈参写入
+- listAppend ModRM 49 89 11 + r9 初始化
+- __list_alloc 8KB 追加余量
+- emitShiftImm imm&63
+- opcode 110-115 + toString 非 identity
+- argCache 扁平化（numArgsFlat，1.6GB→15MB）
+- runtimeSymbolNames/RUNTIME_SYMBOLS 双名单同步
+- runtime 列表 native core 布局重写（listAlloc/ListAppend/ListGet/SetAt）
+- core mapper 映射 + forceReachable + isRuntimeSymbol 清理
+- DR0 硬件断点追踪器 + VEH 解码器 + FUNCLIST 映射
+
+**每步修复均经实测验证（崩点逐步推进 fn0→fn16→116/116→buildLoadCaches）**
+
+**当前阻塞**：Photon X86 后端对 Vm.aura 的复杂模式（大函数/多局部/
+列表操作/字符串拼接/方法调用链）代码生成不正确。这需要系统性改进
+Photon 后端，非单点修复可解。
+
+**零 cffi 自举路线图**：
+1. **短期**：使用 seed-built runner（auc_vm_runner.exe）做 VM 解释
+   ——已验证正确（fib 6.34s、helloworld PASS）
+2. **中期**：差分对比 seed vs photon 对同一函数的机器码，逐步修复
+   Photon emit 缺陷（从简单函数开始，逐步覆盖复杂模式）
+3. **长期**：Photon 后端成熟后，用 Photon 编译 VM 解释器自身 →
+   零 cffi 零 LLVM 完全自举
+
+**已验证工作正常的部分**：
+- seed AOT 编译的 VM 解释器：fib 6.34s、loop 72s、helloworld PASS ✓
+- Photon 编译的简单程序（hello world、算术运算）：✓
+- Photon 编译的编译器（不含 VM 解释器）：简单函数 ✓
+- 零 cffi：runtime 无 cffi（列表/string 操作由 Photon 发射的代码实现）✓
+
+### 10.31 P221-P226：值模型四连根因 + 栈参 ABI 结构性修复（2026-10-06 续Ⅺ）
+
+**方法论**：值模型探针（P221/P222：toStr(0)/toStr(-1)/列表 get/add）+ gdb
+批量批处理回溯（`-batch -x cmdbreak`，rbp 链走栈 + 断点抓参数）+ 反汇编
+核对被调方/调用方两侧槽位。**VEH 记录的 rip/rcx 不可靠**（多次指向指令
+中间/字符串常量区），gdb 才是本节的裁决工具。
+
+#### 根因 ①：一元负号整链丢失（P222 探针锁定）
+
+`toStr(-1)`→`1`、`return -v`（v=7）→`7`、`0-1`→`-18446744073709551615`。
+
+* **HatParser 正常**（.hat 里 `@i32_const 1` + `@neg`）；
+* **SsaBuilder/Lowering 正常**（MIR `Neg` 原样透传）；
+* **ISel 无 `Neg` 分派** → 落默认 Value 节点且 args 整体丢弃 → home 槽
+  永不被写，读者拿到残渣（与历史 `Not`/`GetField` 同族）。
+* **修复**：ISel 加 `Neg` 分派 = `xor dst,dst` + `sub dst,src`（pattern 13+3）。
+  ⚠️ 不能用「DAG 内现造 Const 0 + mov」：该 Const 节点无自有物化指令
+ （emitConst 的常量才有 pattern-6 mov 跟随），RA 会把它涂进残渣寄存器
+ （实测反汇编 `mov %rsi,%rdi`）。
+* 反汇编验证：`negProbe` 现为 `xor %rsi,%rsi; sub %rbx,%rsi` ✓。
+
+#### 根因 ②：runtime toStr 负数分支寄存器误用
+
+绝对值恒 `0-1=-1`：`emitMovRI32("eax",1)` 把标志值 1 写进 **rax**——恰好
+覆盖 886 行刚载入的输入——随后 `sub rdx,rax` 算的是 `-1` 而非 `-input`。
+无符号除 10 → `-18446744073709551615`。修复：标志改用 rdx。
+
+#### 根因 ③：列表家族 runtime 桩压制 guest 真实现
+
+* runtime 的 `Collections.getAt` 是**恒返回空串的桩**（`Env.get` 历史落点），
+  `emitCollectionsGetAt` 只有两行 `lea rax,@str.0; ret`；
+* isRuntimeSymbol 名单含 list 家族 9 项 ⇒ guest 的 core 真实现被
+  `!isRuntimeSymbol` 跳过发射 ⇒ `tl.get(0)` 返回空串。
+* **修复**：名单两侧同时摘除 7 项（count/listAppend/getAt/indexOf/contains/
+  listRemove/mapContainsKey），guest core 实现（core 布局）接管；
+  guest 没有的 clear/hashMapPut 留 runtime（注册名**统一下划线形态**，
+  与 ISel 映射/`resolveCalleeSymbol` 出口 dotToUnderscore 归一配套）。
+* 顺带：`emitCollectionClear` 函数体曾被误删（4 处调用点仍在）⇒ seed AOT
+  链接 `undefined symbol`，photon 驱动无法重建——已补回（core 布局 count=0）。
+
+#### 根因 ④：栈参 ABI 基址随序言 push 数漂移（「崩点随构建漂移」总根源）
+
+`emitParam` 第 5+ 参读偏移按「当时构建的实际 push 数」手工校准（0x10 影子
+空间 → 0x30），但序言 push 数 = 实际用到的 callee-saved 数（RA 着色决定），
+**逐构建漂移**。decodeNumeric（11 参）两 push 时 constTags 读到
+`tagged(1)=3` ⇒ `constMnemonic→count(3)→Memory.read64(3)` 必崩；
+历史上 `0x5000016b 打包值`（funcNames/mod 读到 .auc 缓冲字节）同根。
+
+* **修复（结构性）**：X86Emitter 序言固定 push 全部 7 个 callee-saved
+ （rbx,rsi,rdi,r12,r13,r14,r15）+ push rbp = 8 push ⇒ rbp = 入口rsp−0x40；
+  emitParam 基址 **0x68**（= 0x40 帧 + 0x08 ret + 0x20 影子空间），
+  `[rbp + 0x68 + (idx-4)*8)`，与调用方 `[rsp+0x20+i*8]` 写入严格对称。
+  代价：每函数多 6 对 push/pop，换取消除整类漂移。
+* 附带：canary 诊断（32KB 帧填充 + 哨兵 + canary_report）整体退役——
+  使命完成（定位本节四根因），自身实测有伪崩（const 循环访问 0x2），
+  且 32KB/函数是深调用链的巨额栈浪费。
+
+#### 实测进度（P226）
+
+* P222/P223 值模型探针**全绿**：-1/-2/-100/变量负值/0-1/-v/-1==nx 全部正确，
+  列表 add/get/count 正确；
+* minimal.auc（tiny4=println("hi")）：const 池解码 ✓、进入函数解码阶段
+ （此前 const 循环即崩）；
+* **未完**：解码深处仍有 NULL 字符串句柄崩（strlen(0)，gdb 实证 rax=0，
+  多点漂移）。下轮继续：gdb 断点法逐函数核对 decodeNumeric 链其余 ≥5 参
+ 调用点（decodeInstr 7 参等）+ readStr 的 null 返回路径。
+* **工具教训**：llvm-nm 的符号跨度不可靠（跨函数合并），帧回溯一律用
+  gdb rbp 链 + 断点抓参，反汇编验证字节级匹配后才定论。
+

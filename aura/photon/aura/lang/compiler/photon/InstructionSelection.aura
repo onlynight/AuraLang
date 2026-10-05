@@ -72,7 +72,14 @@ class InstructionSelector {
     /// 的说明）：漏一项就会在链接期报 `duplicate symbol`。
     /// 成员方法按本表的 `.` 拼写书写，比较时由 `dotToUnderscore` 归一化，
     /// 因此 `Collections.getAt` 与 `Collections_getAt` 都能命中。
-    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.listRemove,Collections.count,Collections.clear,Collections.hashMapPut,Collections.indexOf,Collections.contains,Collections.mapContainsKey,Collections.getAt,Collections.listAppend,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args"
+    ///
+    /// ⚠️ 2026-10-06：list 家族 7 项（count/listAppend/getAt/indexOf/contains/
+    /// listRemove/mapContainsKey）**移出**本名单 —— guest 的 core
+    /// `Collections.aura` 已带同名真实现（core 布局），runtime 侧对应物要么是
+    /// 桩（getAt 恒返回空串 —— `Env.get` 历史落点），要么布局分叉。保留名单
+    /// 会把 guest 真实现抑制掉（`!isRuntimeSymbol` 跳过发射），实测
+    /// `tl.get(0)` 返回空串。仅保留 guest 没有的 clear/hashMapPut。
+    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.clear,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args"
 
     /// `computeReachable` 的列表形式结果（供 `select()` 免分配查表）。
     private var reachableNames: List<String> = arrayListOf<String>()
@@ -111,7 +118,12 @@ class InstructionSelector {
     /// 仍未被映射，仍是未定义）"，却各拉进自己的传递闭包，代价是 6 倍编译时间
     /// （自举 43s → 265s）。移除后若出现新的 `undefined symbol`，按"哪一项回来
     /// 就带来哪批未定义"逐个补回，**不要一次加回全部**（调用点映射本来就没修好）。
-    private var forceReachable: String = "MirUtils_mirNoKids,MirUtils_mirKidsAdd,Linearizer_mirNoKids,Linearizer_mirKidsAdd,FileUtils_mkdir"
+    // 2026-10-06 追加：core 包列表实现（aura.lang.collection.Collections）——
+    // HAT 调用名为点形式（@Collections.getAt），定义名为下划线
+    //（@fn Collections_getAt），computeReachable 的映射入队对
+    // listAppend（无限定映射规则）不生效 ⇒ 定义被剪 → undefined symbol。
+    // 显式强制纳入（有界清单机制的本职用途）。
+    private var forceReachable: String = "MirUtils_mirNoKids,MirUtils_mirKidsAdd,Linearizer_mirNoKids,Linearizer_mirKidsAdd,FileUtils_mkdir,Collections_listAppend,Collections_getAt,Collections_count,Collections_listSet,Collections_listPop,Collections_emptyList,Collections_newList,Collections_push,Collections_contains,Collections_indexOf,Collections_mapContainsKey,Collections_listRemove"
 
     /// Phase C 定位探针（见 `selProbe` 的说明）。
     private var probePath: String = ""
@@ -623,6 +635,13 @@ class InstructionSelector {
             }
         }
         this.calleeCacheNames.add(name)
+        // ⚠️ 返回前把点号归一为下划线：runtime obj 的导出名自 2026-10-06 起
+        // 统一为下划线形态（`Collections_count` 而非 `Collections.count`，
+        // 与 ISel 映射表、"定义名为下划线"约定一致）。旧实现把命中
+        // runtime 名单的名字**原样保留**——名单里是点号 ⇒ guest obj 引用
+        // 点号符号 ⇒ 链接期 `undefined symbol: Collections.hashMapPut`
+        //（实测 P223：hashMapPut/mapContainsKey/indexOf 三处）。
+        target = this.dotToUnderscore(target)
         this.calleeCacheTargets.add(target)
         return target
     }
@@ -1581,6 +1600,33 @@ class InstructionSelector {
             return notNode
         }
 
+        // ── 一元负号：Neg x ≡ 0 - x ──
+        //
+        // ⚠️ 旧实现 Neg 不在**任何**分派里：落到默认 Value 节点且 **args 整体
+        // 丢弃** ⇒ 没有任何指令写 home ⇒ 读者拿到未初始化槽的残渣。
+        // 实测（2026-10-06，P222 值模型探针）：`toStr(-1)` 打印 `1`、
+        // `return -v`（v=7）原样返回 `7` —— 字面量与变量上的负号全部静默
+        // 丢失，VM 解释器所有 `return -1` 错误哨兵变正，错误检查整体失效。
+        //
+        // ⚠️ 实现必须用 **xor dst,dst + sub dst,src**，不能「mov dst, 0常量节点
+        // + sub」：DAG 内现造的 Const 节点没有自己的物化指令（emitConst 的常量
+        // 才有 pattern-6 `mov reg, imm` 跟随），RA 会把它涂进一个**内容为残渣的
+        // 寄存器**（实测反汇编 `negProbe`：`mov %rsi,%rdi; sub %rbx,%rdi` ——
+        // rsi 是 caller 残留）。
+        if (op == "Neg" && val.args.size >= 1) {
+            val negSrc: Int = this.resolveNode(val.args[0])
+            val negRes: Int = this.dag.addNode("Reg", "Sub", val.type,
+                                               "", "", "", this.curChain, "")
+            this.registerNode(vid, negRes)
+            // xor dst, dst —— 硬件清零（pattern 13），不依赖常量物化
+            this.dag.selectPattern(13, MachineDagUtils.toStr(negRes) + "," +
+                                   MachineDagUtils.toStr(negRes), negRes)
+            // sub dst, src —— dst = 0 - src
+            this.dag.selectPattern(3, MachineDagUtils.toStr(negRes) + "," +
+                                   MachineDagUtils.toStr(negSrc), negRes)
+            return negRes
+        }
+
         // ── 比较运算 → CMP + SETcc ──
         //
         // ⚠️ SsaBuilder.mapBinaryOp 产出的是 **ICmp\* 系列**（`ICmpEq` /
@@ -1872,20 +1918,20 @@ class InstructionSelector {
     private fun emitParam(val: LirValue, vid: Int): Int {
         // 确定 ABI 寄存器。
         //
-        // ⚠️ 第 5+ 参数走**栈传递**（Win64：arg5+i 在调用方 [rsp+0x20+i*8]，
-        // 进入被调方后位于 [rbp+16+i*8]——rbp+8 是返回地址、+0x10..0x20 是
-        // 影子空间）。旧实现 `else "rcx"` 让所有栈参**全读 rcx**（且调用方
-        // 也从没写过栈参区，见 `emitCallArgs` 的配套修复）⇒ 参数 ≥5 的函数
-        // 收到的全是垃圾（实测 decodeNumeric 11 参的 `mod` 读成打包字节码 →
-        // listAppend 野指针崩溃，2026-10-06）。
-        // Param 源节点的 `reg` 直接填 `stack:+24` 形态：`regOfNode` ①会原样
-        // 返回，`resolveToReg` 对栈引用发 `mov r10, [rbp+24]` 按需加载——
-        // 调用方写进栈参区的字节本就在那里，无需入口拷贝。
+        // ⚠️ 第 5+ 参数走**栈传递**（Win64：调用方在 [rsp+0x20+i*8] 写 arg5+i，
+        // 即影子空间之上）。被调方视野：入口 rsp=E 指向返回地址，arg5 在
+        // **E+0x28**（返回地址 8 + 影子空间 0x20 之上）。X86Emitter 自 P226 起
+        // 固定 push 7 个 callee-saved + push rbp = 8 push ⇒ rbp = E − 0x40。
+        // arg_k 在 E+0x28+8*(k−5) ⇒ [rbp + 0x68 + (idx−4)*8)（idx 0 基，idx=4 即 arg5）。
+        // ⚠️ 历史：基址按「当时的实际 push 数」手工校准过三次（0x10 影子空间 →
+        // 0x30 → 0x48），每次只对当轮构建成立 ⇒ 栈参错位反复复发（0x5000016b
+        // 打包值、constTags=tagged(1) 等实测）。P226 起序言固定 8 push，本基址
+        // 0x68 结构恒定（0x40=8push 帧 + 0x28=ret+影子空间）。
         val abiRegs: List<String> = listOf("rcx", "rdx", "r8", "r9")
         val idx: Int = this.paramIndex
         this.paramIndex = this.paramIndex + 1
         val abiReg: String = if (idx < abiRegs.size) abiRegs[idx]
-                             else "stack:" + toStr(16 + (idx - 4) * 8)
+                             else "stack:" + toStr(0x68 + (idx - 4) * 8)
 
         // 源节点：固定 ABI 寄存器（易失寄存器，不参与着色）。
         val srcNode: Int = this.dag.addNode("Param", "Param", val.type,
@@ -2139,12 +2185,19 @@ class InstructionSelector {
         // 2026-10-02：String.substring → runtime 的 String_substring
         //（heapArena bump 副本，越界钳位；薄 VM 宿主链接修复）
         if (name == "substring" || name == "String.substring") { return "String_substring" }
+        // ── 列表创建统一到 core 包（[count][cap][itemsPtr@0x10]，push 几何增长；
+        // 与 getAt/listAppend 同源，根除两套布局交叉读写——2026-10-06）──
+        if (name == "arrayListOf" || name == "mutableListOf") { return "Collections_emptyList" }
         // ── else-if 链修复（Hir.lowerBranch 补 If 用例）后暴露的裸名 ──
         // （2026-10-06，P0-2）先前这些调用随被丢弃的分支一起消失；分支活了
         // 之后第一次到达链接期。映射目标见 PhotonRuntime 各桩的说明。
         if (name == "typeof" || name == "Builtin_typeof") { return "aura_typeof" }
         if (name == "__is_tagged_int") { return "aura_is_tagged_int" }
-        if (name == "removeAt") { return "Collections.listRemove" }
+        if (name == "removeAt") { return "Collections_listPop" }
+        if (name == "Collections.count" || name == "aura.lang.std.Collections.count") { return "Collections_count" }
+        if (name == "Collections.listAppend" || name == ".Collections.listAppend") { return "Collections_listAppend" }
+        if (name == "contains") { return "Collections_contains" }
+        if (name == "indexOf") { return "Collections_indexOf" }
         // Clock_clockGettime / ThreadOps_create / IO_readFile / IO_writeFile
         // 的 .hat 裸名即最终符号名，runtime 同名导出，无需映射。
         if (name == "Any.toString") { return "toString" }
@@ -2164,14 +2217,19 @@ class InstructionSelector {
         // Aura 自举前端（`HirLowerer.lowerAssign` 直接写 `Collections.set`）——
         // 三种写法都要映射，否则链接期报 `undefined symbol: Collections.set`。
         if (name == "aura.lang.std.Collections.set" || name == "Collections.set"
-            || name == ".Collections.set") { return "__list_setat" }
+            || name == ".Collections.set") { return "Collections_listSet" }
         if (name == "aura.lang.std.Collections.get" || name == "Collections.get"
-            || name == ".Collections.get") { return "__list_get" }
+            || name == ".Collections.get") { return "Collections_getAt" }
+        // contains/indexOf：HIR 绑定的限定形式（点名直传 runtime 的旧路径已退役）
+        if (name == "Collections.contains" || name == ".Collections.contains"
+            || name == "aura.lang.std.Collections.contains") { return "Collections_contains" }
+        if (name == "Collections.indexOf" || name == ".Collections.indexOf"
+            || name == "aura.lang.std.Collections.indexOf") { return "Collections_indexOf" }
         // `Collections.getAt` / `Collections.at`：与 `get` 同语义（`arr[i]` 的读侧），
         // HIR 降级对「带下标的读」写出的名字与 `set` 侧不对称，三种拼法都要命中，
         // 否则链接期报 `undefined symbol: Collections.getAt`（实测自举 Main.aura）。
         if (name == "aura.lang.std.Collections.getAt" || name == "Collections.getAt"
-            || name == ".Collections.getAt") { return "__list_get" }
+            || name == ".Collections.getAt") { return "Collections_getAt" }
         if (name == "aura.lang.std.Collections.at" || name == "Collections.at"
             || name == ".Collections.at") { return "__list_get" }
         // syscall 封装：`Syscalls.exit(code)` → runtime 的 `exit`
@@ -2290,7 +2348,7 @@ class InstructionSelector {
         // `VmStack_push`（`__field_get(this,0) : List<Any>` 后接 `.add(v)`）、
         // `keys` ← `Codegen_varTableStr`。用 `recvTy == "List"` 之类的等值判断
         // 永远命中不了（类型名里有 `<...>`），这是上一次改造没生效的原因。
-        if (name == "add" && recvTy.indexOf("List") >= 0) { return "Collections.listAppend" }
+        if (name == "add" && recvTy.indexOf("List") >= 0) { return "Collections_listAppend" }
         // ⚠️ 集合的 `add` 还有一种**三参**形态：`add(this, item, memToken)`
         //（调用点把内存链 token 作为最后一个实参，见 HAT 的 `@MemToken`）。
         // 这时**不能用类型判定**：接收者常来自 `arrayListOf(...)`，HAT 把它的类型
@@ -2308,7 +2366,7 @@ class InstructionSelector {
         // `VmOps_add(@a, @b)`（VM 算术 `+`）两参、无 mem token，天然不受影响。
         // 目标 `ArrayList_add(@this, @item)` 只用 rcx/rdx，多传的 r8 被忽略，
         // 因此三参调用点绑到它**语义与 ABI 都安全**。
-        if (name == "add" && lastIsMem) { return "Collections.listAppend" }
+        if (name == "add" && lastIsMem) { return "Collections_listAppend" }
         if (name == "keys" && recvTy.indexOf("HashMap") >= 0) { return "HashMap_keys" }
         if (name == "keys" && recvTy.indexOf("Map") >= 0) { return "HashMap_keys" }
         // ── 元数兜底（判据来自**全量实测**，不是猜测）──
@@ -2322,11 +2380,11 @@ class InstructionSelector {
         // ⇒ 3 参的 `add` 只可能是「集合 add + 内存链 token」，2 参的 `keys` 只可能是
         // `HashMap_keys`。前面基于接收者类型/MemToken 的判定在这些调用点上都不命中
         //（接收者类型常被标注成 `Basic`，见 HAT），故在此按元数兜底。
-        if (name == "add" && argCount >= 3) { return "Collections.listAppend" }
+        if (name == "add" && argCount >= 3) { return "Collections_listAppend" }
         if (name == "keys" && argCount >= 2) { return "HashMap_keys" }
         // Collections.listRemove(list, idx) → 运行时移除元素
         if (name == "aura.lang.std.Collections.listRemove" || name == "Collections.listRemove"
-            || name == ".Collections.listRemove" || name == "remove") { return "Collections.listRemove" }
+            || name == ".Collections.listRemove" || name == "remove") { return "Collections_listPop" }
         return name
     }
 

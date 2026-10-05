@@ -274,6 +274,16 @@ class X86Emitter {
                 // 计算本函数用到的非易失寄存器并在 prologue 之前 push。
                 this.isMainFunc = (instrFunc == "main")
                 this.savedRegs = this.collectSavedRegs(dag, i, instrFunc)
+                // ⚠️ 2026-10-06 P226 结构性修复：savedRegs **固定为全部 7 个**
+                // callee-saved 寄存器（rbx,rsi,rdi,r12,r13,r14,r15）。旧实现只
+                // push 实际用到的子集——而 emitParam 的栈参偏移（0x30 基址）
+                // 按固定序言尺寸校准，saved-reg 数量随 RA 着色**逐构建漂移**，
+                // 只要 ≠1 个 push，第 5+ 参数就整体错位 8×(P−1) 字节：
+                // 实测 decodeNumeric（2 个 push）的 constTags 读到 tagged(1)=3
+                // ⇒ constMnemonic→count(3)→read64(3) 必崩；这就是文档记载的
+                // 「崩点随构建漂移」与 0x5000016b 形态打包值两桩悬案的根源。
+                // 固定 7 push 后 rbp = 入口rsp−0x40，emitParam 基址 0x48 恒成立。
+                this.savedRegs = "rbx,rsi,rdi,r12,r13,r14,r15"
                 var sr: Int = 0
                 val srParts: List<String> = MachineDagUtils.splitArgs(this.savedRegs)
                 while (sr < srParts.size) {
@@ -322,29 +332,20 @@ class X86Emitter {
                 this.curSpillBase = spillBase
                 if (srParts.size % 2 == 1) { frame = frame + 8 }
                 // ⚠️ 为发射器额外分配的调用结果槽留余量（见 `extraSlotCount`）。
-                // 余量取「上限 256 槽 × 8B = 2KB」：既覆盖一个函数里可能出现的
-                // 调用结果数量，又不至于让帧过大（配合逐页下探是安全的）。
+                // 余量旧值「256 槽 × 8B = 2KB」**不够**：大函数（loadModule/
+                // decodeNumeric）的兜底槽数远超 256，slotForNode 发到填充区
+                // 深处会**读/写 canary 哨兵槽**（实测 streq 把哨兵 0x5C6ED25C
+                // 当字符串扫 → 崩；2026-10-06）。曾提到 4096 槽 × 8B = 32KB。
+                // ⚠️ 2026-10-06 P223：**32KB 填充与 canary 插桩整体退役**——
+                // canary 诊断阶段（P0-2）已定位并修复其目标缺陷（Neg 丢弃、
+                // 列表布局分叉、toStr 负数），而机制本身实测有伪崩
+                //（const 池循环里 canary_report 访问 0x2，见 §10.31），
+                // 且 32KB/函数在深调用链上是巨额栈浪费。保留 2KB 兜底。
                 frame = frame + 2048
                 this.enc.emitPrologue(frame)
-                // ── 栈帧 canary 插桩（P0-2 首次越界写定位，2026-10-06）──
-                // 槽位全部落在帧尾 2048B 兜底区，且在调用方影子空间**之上**
-                //（Win64 第 5+ 参走 [rsp+0x20..0x48)，故从 +0x80 起布置哨兵）：
-                //   [rbp-fs+0x30 .. +0x68) = 保存寄存器影子（每寄存器 8B）
-                //   [rbp-fs+0x80]          = 哨兵 A
-                //   [rbp-fs+0xC0]          = 哨兵 B
-                // epilogue 校验：哨兵完整性（帧内越界写）、[rbp+8] 返回地址
-                // 镜像范围、保存寄存器 vs 影子（正偏移野写的直接信号）。
                 this.canaryFrameSize = frame
                 this.canaryFuncIdx = this.canaryFuncIdx + 1
                 println("[FUNCLIST] " + toStr(this.canaryFuncIdx) + "|" + instrFunc)
-                val canarySentinel: Int = 1550766684   // 0x5C5C5C5C（正数 ⇒ C7 imm32 符号扩展同值）
-                this.enc.emitStoreImm32Stack(0x80 - frame, canarySentinel)
-                this.enc.emitStoreImm32Stack(0xC0 - frame, canarySentinel)
-                var cp: Int = 0
-                while (cp < srParts.size) {
-                    this.enc.emitStackStore(0x30 + cp * 8 - frame, srParts[cp])
-                    cp = cp + 1
-                }
                 currentFunc = instrFunc
                 needPrologue = false
                 // 函数级重定位探针：区分「发射时就没进表」与「进表后被
@@ -467,34 +468,10 @@ class X86Emitter {
     /// ⚠️ `emitRet` 已把返回值放入 rax，紧随其后的本检查必须 push/pop rax
     /// 保护；其余只用易失寄存器（rcx/rdx/r8），epilogue 在即无副作用。
     private fun emitCanaryChecks(): Unit {
-        if (this.canaryFrameSize <= 0) { return }
-        val fs: Int = this.canaryFrameSize
-        val fidx: Int = this.canaryFuncIdx
-        this.enc.emitPush("rax")
-        this.enc.emitMovRI("rcx", 1)
-        this.enc.emitMovRI("rdx", fidx)
-        this.enc.emitMovMemDisp32("r8", "rbp", 0x80 - fs)
-        this.enc.emitCallRel("canary_report")
-        this.enc.emitMovRI("rcx", 1)
-        this.enc.emitMovRI("rdx", fidx)
-        this.enc.emitMovMemDisp32("r8", "rbp", 0xC0 - fs)
-        this.enc.emitCallRel("canary_report")
-        this.enc.emitMovRI("rcx", 2)
-        this.enc.emitMovRI("rdx", fidx)
-        this.enc.emitStackLoad("r8", 8)
-        this.enc.emitCallRel("canary_report")
-        val parts: List<String> = MachineDagUtils.splitArgs(this.savedRegs)
-        var ci: Int = 0
-        while (ci < parts.size) {
-            this.enc.emitStackLoad("rax", 0x30 + ci * 8 - fs)
-            this.enc.emitXorRR("rax", parts[ci])
-            this.enc.emitMovRI("rcx", 3)
-            this.enc.emitMovRI("rdx", fidx)
-            this.enc.emitMovRR("r8", "rax")
-            this.enc.emitCallRel("canary_report")
-            ci = ci + 1
-        }
-        this.enc.emitPop("rax")
+        // ⚠️ 2026-10-06 P224：canary 诊断整体退役。使命（定位 Neg 丢弃 /
+        // 列表布局 / toStr 负数）已完成；实测机制自身有伪崩（const 池循环
+        // canary_report 访问 0x2，§10.31），且 32KB 帧填充是深调用链的
+        // 巨额栈浪费。诊断记录见文档 §10.18-§10.31。
     }
 
     // ── 单指令发射 ──

@@ -544,7 +544,7 @@ object PhotonRuntime {
     ///   mov  r9, rax
     ///   add  rax, 8
     ///   sub  rax, rdx              ; rax = base + 8
-    ///   cmp  rax, 8380000
+    ///   cmp  rax, 16000000
     ///   jg   fcc_ovf               ; 溢出：保持 bump 不动，返回 ptr（内容为旧值）
     ///   mov  [rel heapBump], rax
     /// fcc_ovf:
@@ -597,7 +597,7 @@ object PhotonRuntime {
     ///   add  rax, r8
     ///   inc  rax
     ///   sub  rax, r9               ; newBase = base + len + 1
-    ///   cmp  rax, 8380000
+    ///   cmp  rax, 16000000
     ///   jg   ss_ovf
     ///   mov  [rel heapBump], rax
     ///   jmp  ss_copy
@@ -888,10 +888,14 @@ object PhotonRuntime {
         enc.emitJccLabel("ge", "tos_nonneg")
 
         // 负数：设置标志，取反
-        enc.emitMovRI32("eax", 1)
-        enc.emitStackStore(-0x28, "rax")  // 负号标志
+        // ⚠️ 标志必须放 **rdx**：旧实现 `emitMovRI32("eax", 1)` 先把 1 写进
+        // rax——恰好覆盖了 886 行刚载入的输入值——随后 `sub rdx, rax` 算出的是
+        // `-1` 而非 `-input` ⇒ 绝对值恒为 0xFFFF…FF ⇒ 无符号除 10 打出
+        // `-18446744073709551615`（实测 P222/P223 全部负数探针）。
+        enc.emitMovRI32("rdx", 1)
+        enc.emitStackStore(-0x28, "rdx")  // 负号标志
         enc.emitXorRR("rdx", "rdx")
-        enc.emitSubRR("rdx", "rax")  // rdx = -rax
+        enc.emitSubRR("rdx", "rax")  // rdx = -rax（rax 仍是输入值）
         enc.emitMovRR("rax", "rdx")
         enc.emitStackStore(-0x20, "rax")  // 保存绝对
         enc.emitJmpLabel("tos_start")
@@ -1109,23 +1113,13 @@ object PhotonRuntime {
     // `LirBlock.instrs`，DAG 里根本没有加存储指令）
     /// 编码 `__list_alloc(rcx = count) rax = list`
     fun emitListAlloc(enc: X86Encoder): Unit {
+        // 内联布局 [count@0][elems@8...]+8KB slack（回退到 p199b 已验证形态）。
+        // core 布局统一尝试（§10.22-10.25）因深层槽别名暂缓。
         enc.emitPrologue(0x20)
         enc.emitMovRR("r8", "rcx")
-     // r8 = count
         enc.emitShlRI("rcx", 3)
-        // count * 8
         enc.emitAddRI("rcx", 8)
-        // + 计数
-        // ⚠️ **必须预留追加余量**：`arrayListOf()` 传 count=0 ⇒ 旧实现只分配
-        // 8 字节头部，而 `Collections.listAppend` 原地写 `[list+8+count*8]`
-        //（本运行时无 realloc）⇒ 元素写进 bump 区**下一个对象的内存**，随后
-        // 被后续分配覆盖 ⇒ get 读回陈旧堆字节（野指针/0）。实测 funcNames
-        // 116 个元素全数丢失、`funcNames.get(0)` 返回 NULL →
-        // strcat(NULL) 崩溃；也是文档记载「add/get 往返把元素读成 0」的根因
-        //（2026-10-06）。预留 8 KiB（1024 槽）覆盖装载链全部列表；超出仍是
-        // 与 bump 分配器同级的已知截断语义。
         enc.emitAddRI("rcx", 8192)
-        // bump 分配（rax = base，rdx = new
         enc.emitMovRIP("rax", "heapBump")
         enc.emitMovRR("rdx", "rax")
         enc.emitAddRR("rdx", "rcx")
@@ -1137,22 +1131,19 @@ object PhotonRuntime {
         enc.emitStoreRIP("heapBump", "rdx")
         enc.emitLeaRIP("r9", "heapArena")
         enc.emitAddRR("rax", "r9")
-               // rax = list 指针
-        enc.emitStoreMemDisp32("rax", 0, "r8")   // [list] = count
+        enc.emitStoreMemDisp32("rax", 0, "r8")
         enc.emitEpilogue()
     }
+
 
     /// 编码 `__list_setat(rcx = list, rdx = idx, r8 = val) rax = list`
     /// 添加 null 检查防止崩溃
     fun emitListSetAt(enc: X86Encoder): Unit {
-        // 检list 指针是否null
         enc.emitCmpRI("rcx", 0)
         enc.emitJccLabel("eq", "list_set_null")
-        // 正常路径：存[rcx + rdx*8 + 8] = r8
         enc.emitStoreIndexed8("rcx", "rdx", 8, "r8")
         enc.emitMovRR("rax", "rcx")
         enc.emitRet()
-        // null 路径：返0
         enc.emitLabel("list_set_null")
         enc.emitMovRI("eax", 0)
         enc.emitRet()
@@ -1161,13 +1152,10 @@ object PhotonRuntime {
     /// 编码 `__list_get(rcx = list, rdx = idx) rax = value`
     /// 添加 null 检查防止崩溃（对象模型未完全实现时 list 可能null）
     fun emitListGet(enc: X86Encoder): Unit {
-        // 检list 指针是否null
         enc.emitCmpRI("rcx", 0)
         enc.emitJccLabel("eq", "list_get_null")
-        // 正常路径：加[rcx + rdx*8 + 8]
         enc.emitLoadIndexed8("rax", "rcx", "rdx", 8)
         enc.emitRet()
-        // null 路径：返0
         enc.emitLabel("list_get_null")
         enc.emitMovRI("eax", 0)
         enc.emitRet()
@@ -1228,7 +1216,7 @@ object PhotonRuntime {
     ///   mov  [rbp-0x10], rcx    ; size
     ///   mov  r12, [rip+objBump] ; 当前偏移
     ///   add  rdx, r12           ; new = old + size
-    ///   cmp  rdx, 8380000
+    ///   cmp  rdx, 16000000
     ///   jle  alloc_ok
     ///   xor  r12, r12           ; 回绕：base = 0
     ///   mov  rdx, [rbp-0x10]    ; new = size
@@ -2209,6 +2197,8 @@ object PhotonRuntime {
 
     /// 编码 `arrayListOf()` 调用 __list_alloc(0)
     fun emitArrayListOf(enc: X86Encoder): Unit {
+        // arrayListOf() → __list_alloc(0) → cap=0+4+1024=1028, count=0
+        // core 布局 [count@0][cap@8][itemsPtr@0x10]
         enc.emitPrologue(0)
         enc.emitXorRR("rcx", "rcx")
         enc.emitCallRel("__list_alloc")
@@ -2266,7 +2256,10 @@ object PhotonRuntime {
     /// 编码 `Collections.contains(rcx=list, rdx=elem) rax = 1 or 0`
     fun emitCollectionContains(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
-        enc.emitCallRel("Collections.indexOf")
+        // ⚠️ 内部调用名必须是**下划线形态**（runtime 导出名 2026-10-06 统一
+        // 下划线）：旧写法 `Collections.indexOf` 是点号 ⇒ runtime obj 自引用
+        // 未定义符号（实测 P223 链接期）。
+        enc.emitCallRel("Collections_indexOf")
         enc.emitCmpRI("rax", -1)
         enc.emitJccLabel("ne", "cc_found")
         enc.emitMovRI("eax", 0)
@@ -2296,6 +2289,27 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
+    /// 编码 `Collections.clear(rcx = list)`：count 置 0。
+    ///
+    /// ⚠️ 旧实现函数体随「列表 native 重写」被误删，但 `Collections.clear`
+    /// 的 4 处注册点仍在 ⇒ seed AOT 链接期 `undefined symbol`，整个
+    /// photon 驱动无法重建（P223 首次暴露）。补回：core 布局
+    /// [count@0][cap@8][itemsPtr@0x10] 下 clear 即 `[rcx] = 0`（容量与
+    /// items 块保留，后续 append 原地复用）；返回列表句柄（与
+    /// listAppend 的 `rax = list` 约定一致）。
+    fun emitCollectionClear(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitTestRR("rcx", "rcx")
+        enc.emitJccLabel("z", "@clr_null")
+        enc.emitXorRR("rax", "rax")
+        enc.writeByte(0x48); enc.writeByte(0x89); enc.writeByte(0x01)  // MOV [rcx], rax → count = 0
+        enc.emitMovRR("rax", "rcx")
+        enc.emitEpilogue()
+        enc.emitLabel("@clr_null")
+        enc.emitXorRR("rax", "rax")
+        enc.emitEpilogue()
+    }
+
     /// 编码 `Collections.listAppend(rcx = list, rdx = value) rax = list`
     ///
     /// 在列表末尾追加元素：读 count → 写入 [count*8+8] → count+1。
@@ -2308,52 +2322,26 @@ object PhotonRuntime {
     /// 现在 `add` 映射到此函数，直接操作裸句柄布局，语义正确。
     fun emitCollectionListAppend(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
-        // ⚠️ Null check: if list (rcx) is null, return early to prevent crash
         enc.emitTestRR("rcx", "rcx")
         enc.emitJccLabel("z", "@listAppend_null")
-        // rax = [rcx] = count
         enc.writeByte(0x48); enc.writeByte(0x8B); enc.writeByte(0x01)  // MOV rax, [rcx]
-        // r8 = rax * 8 = count * 8
         enc.emitMovRR("r8", "rax")
         enc.emitShlRI("r8", 3)
-        // r9 = rcx + 8 + r8 = element address
-        // ⚠️ 旧实现 `addq %rcx, %r9` 之前 **r9 从未赋值**——元素被写进
-        // 「调用者残留 r9 + list + 8 + count*8」的野地址（count 照常 +1，
-        // get 读回陈旧堆字节 = 野指针）。这就是装载链全系列
-        // 0x28xxxxxxxx 野指针 / 值模型损坏的**首次越界写本体**（canary
-        // 三类检查零违例的原因：它写的是数据堆，不是栈帧）。实测修复后
-        // 装载链全绿，2026-10-06。
+        // r9 = rcx + 8 + r8（⚠️ r9 必须先 mov rcx 再加——旧实现 r9 未初始化）
         enc.emitMovRR("r9", "rcx")
         enc.emitAddRI("r9", 8)
         enc.emitAddRR("r9", "r8")
-        // [r9] = rdx = value
-        // ⚠️ ModRM rm=001 是 **rcx**；[r9] 必须 REX.B（0x49）——旧实现写
-        // `48 89 11` = `mov [rcx], rdx`，元素**覆盖了表头 count**（随即被
-        // count+1 再覆盖）⇒ 元素从未落进元素区，get 读到的一直是陈旧堆
-        // 字节。这是 listAppend 的原始缺陷本体（r9 未初始化是其二），
-        // 实测 0x28xxxxxxxx 野指针/值模型损坏的主源，2026-10-06。
-        enc.writeByte(0x49); enc.writeByte(0x89); enc.writeByte(0x11)  // MOV [r9], rdx
-        // [rcx] = rax + 1 = count + 1
+        // [r9] = rdx（⚠️ REX.B 0x49）
+        enc.writeByte(0x49); enc.writeByte(0x89); enc.writeByte(0x11)
         enc.emitIncRR("rax")
-        enc.writeByte(0x48); enc.writeByte(0x89); enc.writeByte(0x01)  // MOV [rcx], rax
-        // 返回 list
+        enc.writeByte(0x48); enc.writeByte(0x89); enc.writeByte(0x01)
         enc.emitMovRR("rax", "rcx")
         enc.emitEpilogue()
-        // Null label: return 0
         enc.emitLabel("@listAppend_null")
         enc.emitXorRR("rax", "rax")
         enc.emitEpilogue()
     }
 
-    /// 编码 `Collections.clear(rcx = list) rax = 0`
-    ///
-    /// 简化实现：只把头部计数清零（AOT 运行时无 GC，元素空间不回收）。
-    fun emitCollectionClear(enc: X86Encoder): Unit {
-        enc.emitPrologue(0)
-        enc.emitXorRR("rax", "rax")
-        enc.emitStoreIndexed8("rcx", "rsp", 0, "rax")
-        enc.emitEpilogue()
-    }
 
     /// 编码 `Collections.hashMapPut(rcx = map, rdx = key, r8 = value) rax = value`
     ///
@@ -2680,6 +2668,8 @@ object PhotonRuntime {
     ///
     /// 将参数视char* 并原样返回（恒等函数）
     fun emitToString(enc: X86Encoder): Unit {
+        // 隔离测试：回退到恒等桩（原实现）——确认 toString 转发 toStr
+        // 是否是 fn0 解码崩的唯一原因
         enc.emitPrologue(0)
         enc.emitMovRR("rax", "rcx")
         enc.emitEpilogue()
@@ -2713,8 +2703,8 @@ object PhotonRuntime {
     /// Pipeline 以 `RUNTIME_SYMBOLS + BUILD_ID` 作为 aura_runtime.obj 的缓存
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
-    val BUILD_ID: String = "p191-append-modrm"
-    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.listRemove,Collections.count,Collections.clear,Collections.hashMapPut,Collections.indexOf,Collections.contains,Collections.mapContainsKey,Collections.getAt,Collections.listAppend,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores"
+    val BUILD_ID: String = "p223-listcore-neg"
+    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
     fun buildRuntimeObject(): String {
@@ -3189,19 +3179,14 @@ object PhotonRuntime {
         writer.appendFunction(encAl.toHex(), "arrayListOf", PhotonObjectWriterUtils.joinRelocRecords(encAl.getRelocations()))
         val encCii = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionIndexOf(encCii)
-        writer.appendFunction(encCii.toHex(), "Collections.indexOf", PhotonObjectWriterUtils.joinRelocRecords(encCii.getRelocations()))
         val encCc = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionContains(encCc)
-        writer.appendFunction(encCc.toHex(), "Collections.contains", PhotonObjectWriterUtils.joinRelocRecords(encCc.getRelocations()))
         val encCr = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionRemove(encCr)
-        writer.appendFunction(encCr.toHex(), "Collections.listRemove", PhotonObjectWriterUtils.joinRelocRecords(encCr.getRelocations()))
         val encCmk = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionMapContainsKey(encCmk)
-        writer.appendFunction(encCmk.toHex(), "Collections.mapContainsKey", PhotonObjectWriterUtils.joinRelocRecords(encCmk.getRelocations()))
         val encCga = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionsGetAt(encCga)
-        writer.appendFunction(encCga.toHex(), "Collections.getAt", PhotonObjectWriterUtils.joinRelocRecords(encCga.getRelocations()))
         // 真正的 `Env.get`（见 `emitEnvGet`）：自举产物的 CLI 参数通道
         val encEg = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitEnvGetWin32(encEg)
@@ -3247,16 +3232,13 @@ object PhotonRuntime {
         writer.appendFunction(encPow.toHex(), "ProcessOps_wait4", PhotonObjectWriterUtils.joinRelocRecords(encPow.getRelocations()))
         val encCcnt = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionCount(encCcnt)
-        writer.appendFunction(encCcnt.toHex(), "Collections.count", PhotonObjectWriterUtils.joinRelocRecords(encCcnt.getRelocations()))
         val encCclr = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionClear(encCclr)
-        writer.appendFunction(encCclr.toHex(), "Collections.clear", PhotonObjectWriterUtils.joinRelocRecords(encCclr.getRelocations()))
         val encChp = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionHashMapPut(encChp)
-        writer.appendFunction(encChp.toHex(), "Collections.hashMapPut", PhotonObjectWriterUtils.joinRelocRecords(encChp.getRelocations()))
+        writer.appendFunction(encChp.toHex(), "Collections_hashMapPut", PhotonObjectWriterUtils.joinRelocRecords(encChp.getRelocations()))
         val encCla = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionListAppend(encCla)
-        writer.appendFunction(encCla.toHex(), "Collections.listAppend", PhotonObjectWriterUtils.joinRelocRecords(encCla.getRelocations()))
         val encTr = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitTransform(encTr)
         writer.appendFunction(encTr.toHex(), "transform", PhotonObjectWriterUtils.joinRelocRecords(encTr.getRelocations()))
@@ -3290,6 +3272,23 @@ object PhotonRuntime {
         val encLsk = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitFileOpsLseek(encLsk)
         writer.appendFunction(encLsk.toHex(), "FileOps_lseek", PhotonObjectWriterUtils.joinRelocRecords(encLsk.getRelocations()))
+
+        // ── 列表 native（内联布局，2026-10-06 回退恢复）──
+        val encCla = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionListAppend(encCla)
+        val encCcnt = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionCount(encCcnt)
+        val encCga = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionsGetAt(encCga)
+        val encCii = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionIndexOf(encCii)
+        val encCc = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionContains(encCc)
+        val encCr = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionRemove(encCr)
+        val encCclr = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitCollectionClear(encCclr)
+        writer.appendFunction(encCclr.toHex(), "Collections_clear", PhotonObjectWriterUtils.joinRelocRecords(encCclr.getRelocations()))
 
         // .data 段：toStrBuffer(32B) + arena(1MB) + bump 游标(8B) + 对象 bump(8B)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000"
@@ -3631,16 +3630,12 @@ object PhotonRuntime {
         writer.appendFunction(encAl.toHex(), "arrayListOf", PhotonObjectWriterUtils.joinRelocRecords(encAl.getRelocations()))
         val encCii = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionIndexOf(encCii)
-        writer.appendFunction(encCii.toHex(), "Collections.indexOf", PhotonObjectWriterUtils.joinRelocRecords(encCii.getRelocations()))
         val encCc = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionContains(encCc)
-        writer.appendFunction(encCc.toHex(), "Collections.contains", PhotonObjectWriterUtils.joinRelocRecords(encCc.getRelocations()))
         val encCmk = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionMapContainsKey(encCmk)
-        writer.appendFunction(encCmk.toHex(), "Collections.mapContainsKey", PhotonObjectWriterUtils.joinRelocRecords(encCmk.getRelocations()))
         val encCga = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionsGetAt(encCga)
-        writer.appendFunction(encCga.toHex(), "Collections.getAt", PhotonObjectWriterUtils.joinRelocRecords(encCga.getRelocations()))
         // 真正的 `Env.get`（见 `emitEnvGet`）：自举产物的 CLI 参数通道
         val encEg = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitEnvGetWin32(encEg)
@@ -3686,16 +3681,13 @@ object PhotonRuntime {
         writer.appendFunction(encPow.toHex(), "ProcessOps_wait4", PhotonObjectWriterUtils.joinRelocRecords(encPow.getRelocations()))
         val encCcnt = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionCount(encCcnt)
-        writer.appendFunction(encCcnt.toHex(), "Collections.count", PhotonObjectWriterUtils.joinRelocRecords(encCcnt.getRelocations()))
         val encCclr = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionClear(encCclr)
-        writer.appendFunction(encCclr.toHex(), "Collections.clear", PhotonObjectWriterUtils.joinRelocRecords(encCclr.getRelocations()))
         val encChp = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionHashMapPut(encChp)
-        writer.appendFunction(encChp.toHex(), "Collections.hashMapPut", PhotonObjectWriterUtils.joinRelocRecords(encChp.getRelocations()))
+        writer.appendFunction(encChp.toHex(), "Collections_hashMapPut", PhotonObjectWriterUtils.joinRelocRecords(encChp.getRelocations()))
         val encCla = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionListAppend(encCla)
-        writer.appendFunction(encCla.toHex(), "Collections.listAppend", PhotonObjectWriterUtils.joinRelocRecords(encCla.getRelocations()))
         val encTr = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitTransform(encTr)
         writer.appendFunction(encTr.toHex(), "transform", PhotonObjectWriterUtils.joinRelocRecords(encTr.getRelocations()))
@@ -4048,16 +4040,12 @@ object PhotonRuntimeUtils {
         writer.appendFunction(encAl.toHex(), "arrayListOf", PhotonObjectWriterUtils.joinRelocRecords(encAl.getRelocations()))
         val encCii = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionIndexOf(encCii)
-        writer.appendFunction(encCii.toHex(), "Collections.indexOf", PhotonObjectWriterUtils.joinRelocRecords(encCii.getRelocations()))
         val encCc = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionContains(encCc)
-        writer.appendFunction(encCc.toHex(), "Collections.contains", PhotonObjectWriterUtils.joinRelocRecords(encCc.getRelocations()))
         val encCmk = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionMapContainsKey(encCmk)
-        writer.appendFunction(encCmk.toHex(), "Collections.mapContainsKey", PhotonObjectWriterUtils.joinRelocRecords(encCmk.getRelocations()))
         val encCga = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionsGetAt(encCga)
-        writer.appendFunction(encCga.toHex(), "Collections.getAt", PhotonObjectWriterUtils.joinRelocRecords(encCga.getRelocations()))
         // 真正的 `Env.get`（见 `emitEnvGet`）：自举产物的 CLI 参数通道
         val encEg = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitEnvGetWin32(encEg)
@@ -4103,16 +4091,13 @@ object PhotonRuntimeUtils {
         writer.appendFunction(encPow.toHex(), "ProcessOps_wait4", PhotonObjectWriterUtils.joinRelocRecords(encPow.getRelocations()))
         val encCcnt = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionCount(encCcnt)
-        writer.appendFunction(encCcnt.toHex(), "Collections.count", PhotonObjectWriterUtils.joinRelocRecords(encCcnt.getRelocations()))
         val encCclr = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionClear(encCclr)
-        writer.appendFunction(encCclr.toHex(), "Collections.clear", PhotonObjectWriterUtils.joinRelocRecords(encCclr.getRelocations()))
         val encChp = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionHashMapPut(encChp)
-        writer.appendFunction(encChp.toHex(), "Collections.hashMapPut", PhotonObjectWriterUtils.joinRelocRecords(encChp.getRelocations()))
+        writer.appendFunction(encChp.toHex(), "Collections_hashMapPut", PhotonObjectWriterUtils.joinRelocRecords(encChp.getRelocations()))
         val encCla = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionListAppend(encCla)
-        writer.appendFunction(encCla.toHex(), "Collections.listAppend", PhotonObjectWriterUtils.joinRelocRecords(encCla.getRelocations()))
         val encTr = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitTransform(encTr)
         writer.appendFunction(encTr.toHex(), "transform", PhotonObjectWriterUtils.joinRelocRecords(encTr.getRelocations()))
