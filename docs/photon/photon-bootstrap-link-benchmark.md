@@ -2351,3 +2351,28 @@ fromCharCode（8 字节写 8 字节槽 ✓）、**escapeConstValue / readConstVa
    经 __field_get 前端通路或临时 StrPrims extern 读 Long）；
 2. 或 escapeConstValue/readConstValue 加 NUL 越界探针；
 3. 修复后端到端。
+
+### 10.49 P244：helloworld 大规模解码验证——1194 条目全对（2026-10-06 续XXVIII）
+
+**用户指令全链执行**：photon 驱动重编（PhotonP238，seed 一次通过）→
+vmhost 重编（front/back 双绿）→ seed 生成 helloworld.auc（26288 字节、
+7 函数）→ photon vmhost 运行。
+
+**解码里程碑在大规模成立**：
+```
+n=1194 条 argStr 条目全部正确：
+e0=[0] e1=[1] e2=[2] e3=[println,1] e4=[4] ... e10=[println,1] ...
+heapBump 单调：hb7=756184 → hb8=757531 → hb2p=757751 → hbWinA=824762
+```
+println 调用（含参数个数）、局部声明、字面量——**helloworld 全程序
+7 个函数的解码完全正确**（P235-P237 修复组合在 26KB 规模验证通过）。
+
+**剩余拦截**（与 minimal.auc 同族同位）：
+* winB2：e0 0→1、winB：→4——loadPredecoded 段相邻分配越界写
+  （§10.43 定性的单字符/小值越界家族）未修复 ⇒ helloworld 未达
+  run 阶段；
+* 崩点仍在 loadPredecoded 容器构造段（winD 未达）。
+
+**下轮**：§10.43 的写手定位（escapeConstValue/readConstValue NUL 越界
+逐字复核 + loadPredecoded 容器构造段逐构造器 hb 打点）。
+修复后 helloworld 端到端即通。
