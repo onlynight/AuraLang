@@ -2752,3 +2752,20 @@ RA 的干扰计算对**跨块值**在控制流汇合处不可靠。
 **资产保持**：10 项系统性修复 + 接收者注入 + Opcodes 平行表 +
 PushHandler 化 + readStr 递归化 + argInt 缓存跳过 + 全栈槽模式 +
 返回值全局槽中转 + 窗口括号/PE 解析/gdb 断点法工具链。
+
+### 10.66 P272：崩点精确到 listSet(list=1)——Int 被当列表句柄（2026-10-06 续XLVI）
+
+**gdb 实证**：`Collections_listSet` 入口的 list handle = **1**（一个 Int
+值被当作列表指针传入）。`read64(list=1)` → 读取地址 1 → 段错误。
+
+**反汇编核对**：listSet 内 `read64(list)` = `len = read64(l)`（列表头
+count 读取）——rcx=1 即 list=1。调用方传入垃圾句柄。
+
+**根因定性**：某个调用方将 **Int 值 1** 传给了期望 **List 句柄** 的
+listSet——类型系统在 demoted 调用（receiver 降级为首实参）时**不做
+类型检查**，Int/Str/List 全是 64 位裸值。
+
+**下轮**：
+1. 在 listSet 入口断点抓调用者（[rsp] 返回地址 → obj 偏移 → 函数名）；
+2. 修复该调用方（类型修正或防御性检查）；
+3. 端到端。
