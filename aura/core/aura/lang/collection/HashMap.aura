@@ -390,14 +390,11 @@ class HashMap<K, V> : Map<K, V> {
     /// Aura 侧 `binPrec` 不接受单词形式），自举时会把它们降级成未定义调用或
     /// 错误的逻辑指令。符号形式在两个后端都有确定语义。
     private fun hashKey(key: Any): Int {
-        var h: Int = key.hashCode()
-        h = h + 0x9e3779b9
-        h = h ^ (h >> 16)
-        h = h * 16777619
-        h = h ^ (h >> 13)
-        h = h * 16777619
-        h = h ^ (h >> 16)
-        return h
+        // ⚠️ P237：key 类型收紧为 String 局部——`key.hashCode()`（key: Any）
+        // 会派发到裸名 hashCode（无 this 的旧展平形态）；String 局部的
+        // `.hashCode()` 才会限定到 String_hashCode（带 this 的新定义）。
+        val ks: String = key as String
+        return ks.hashCode() * 31 + 0
     }
 
     /// 计算键的桶下标。`capacity` 是 2 的幂，故用 `& (capacity - 1)`

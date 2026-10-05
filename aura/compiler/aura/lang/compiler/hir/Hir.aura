@@ -488,6 +488,20 @@ class HirLowerer {
     //   typeMethods   类方法 Class.method（CSV；类型体声明预登记，限定前校验，
     //                 防止把 toString 等误限定到不存在的 Class_toString）
     private var curTypeDecl: String = ""
+
+    // ⚠️ P237：类体方法降级的**接收者注入通道**。lowerStmt 的 Function 分支
+    // 在类型体上下文里把它设为类名，lowerFunction 据此：① 方法名限定为
+    // `Class_method`；② params 顶部注入 `this: Class` 形参（并登记
+    // localVarTys，方法体的 this.xxx / 隐式 this 字段解析依赖它）。
+    // 旧实现值类方法展平成**无 this 的裸 @fn**（接收者物化成 @i32_const 0
+    // ⇒ String.hashCode → strlen(0)，§10.40/§10.41）。
+    private var pendingMethodSelf: String = ""
+
+    // ⚠️ P237：接收者注入的**作用域白名单**——值包装类闭集。`value`/`override`
+    // 修饰符在 AST 里不保留（parser 跳过软关键字），无法按修饰符判定；而这
+    // 些包装类的 override 方法正是「无 this 展平」家族的全部成员（常规类
+    // HashMap/FileUtils 等的既有调用图依赖裸名互调，不能波及）。
+    private var valueLikeTypes: String = ",String,Byte,Boolean,Double,Unit,Char,Float,Int,Long,Short,"
     private var localVarTys: String = ""
     private var typeMemberTys: String = ""
     private var typeMethods: String = ""
@@ -779,7 +793,7 @@ class HirLowerer {
     fun lowerFunction(ast: Ast, id: Int): Int {
         // 2026-10-02 接收者类型传播：局部类型表按函数清空（作用域边界）。
         this.localVarTys = ""
-        val name: String = ast.textOf(id)
+        var name: String = ast.textOf(id)
         val retTy: String = ast.tyOf(id)
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
@@ -787,6 +801,18 @@ class HirLowerer {
 
         var paramsStr: List<Int> = HirUtils.hirNoKids()
         var bodyId: Int = -1
+
+        // ⚠️ P237：类体方法 → 限定名 `Class_method` + 顶部注入 `this` 形参。
+        // 通道由 lowerStmt 的 Function 分支设置（仅类型体上下文非空）。
+        if (this.pendingMethodSelf != "") {
+            name = this.pendingMethodSelf + "_" + name
+            val thisParam: Int = this.hir.add("HirParam", "this",
+                this.pendingMethodSelf, sp, HirUtils.hirNoKids())
+            paramsStr = HirUtils.hirKidsAdd(paramsStr, thisParam)
+            // 接收者登记（方法体 this.length / this.charCodeAt 的派发依赖）
+            this.localVarTys = this.localVarTys + ",this=" + this.pendingMethodSelf
+            this.pendingMethodSelf = ""
+        }
 
         // 子节点 0: Params 节点
         if (kCount > 0) {
@@ -1173,7 +1199,18 @@ class HirLowerer {
             return this.lowerVarDecl(ast, id)
         } else if (kind == "Function") {
             // 类体/嵌套块中的函数声明（类方法）——此前未处理，导致类方法整体丢失
-            return this.lowerFunction(ast, id)
+            // ⚠️ P237：类型体上下文且为**值包装类** ⇒ 设置接收者注入通道。
+            if (this.inTypeBody && this.curTypeDecl != ""
+                && this.csvContains(this.valueLikeTypes, this.curTypeDecl)
+                // ⚠️ 暂排除 toUpperCase/toLowerCase：其现有调用点（Vm_callOrBuiltin
+                // 的表达式 receiver）经解析期 demotion 保持裸名——限定定义会
+                // 断链。待调用侧 demotion 限定补齐后移除排除。
+                && ast.textOf(id) != "toUpperCase" && ast.textOf(id) != "toLowerCase") {
+                this.pendingMethodSelf = this.curTypeDecl
+            }
+            val fnHirId: Int = this.lowerFunction(ast, id)
+            this.pendingMethodSelf = ""
+            return fnHirId
         } else if (kind == "InitBlock") {
             // 构造初始化块 `init { ... }` → 合成 `<Class>.init` 方法体（Phase 6.5.1b）
             return this.lowerInitBlock(ast, id)

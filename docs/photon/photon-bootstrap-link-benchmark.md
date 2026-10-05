@@ -2183,3 +2183,32 @@ lowerCall（2129/2141/2156/2191 行）按 `recvName + "_" + method` 限定——
 **当前绕过状态**：Opcodes 平行表已消最大的一个炸点；剩余崩点
 Vm_setArgsRow 区 strlen(0x1) 同属此家族（装载期还有别的 hashCode/
 虚方法调用点—— 每次绕过一个，崩点前移一次）。
+
+### 10.42 P237：接收者注入落地（值类白名单）——半程达成（2026-10-06 续XXI）
+
+**实现**（Hir.aura）：
+1. `pendingMethodSelf` 通道：lowerStmt Function 分支（类型体上下文）设置，
+   lowerFunction 消费——方法名限定 `Class_method` + params 顶部注入
+   `this: Class` + 登记 localVarTys（方法体 this.length/this.charCodeAt
+   派发依赖）；
+2. **作用域白名单** valueLikeTypes = String/Byte/Boolean/Double/Unit/Char/
+   Float/Int/Long/Short——`value`/`override` 修饰符在 AST 不保留（parser
+   跳过软关键字），无法按修饰符判定；常规类（HashMap/FileUtils/Collections
+   的裸名互调图）不能波及（首版全类注入实测断裂：exists/readLine/
+   Collections_Collections_count 等连环 undefined）；
+3. **暂排除 toUpperCase/toLowerCase**：其调用点（Vm_callOrBuiltin 的
+   `toStr(v).toUpperCase()` 表达式 receiver）经解析期 demotion 保持裸名，
+   限定定义会断链（实测 front 链接失败）；
+4. HashMap.aura hashKey：`val ks: String = key as String; ks.hashCode()`——
+   String 局部的 `.hashCode()` 限定到 String_hashCode ✓。
+
+**实测**：String_hashCode/String_isEmpty/String_toInt 等带 this 定义 ✓；
+裸 `@fn hashCode` 定义消失 ✓；LOADONLY valid=true ✓；front/back 双绿 ✓。
+全量跑仍在同族崩（另一个 NULL 串源——装载链还有未排查的虚方法/串循环
+调用点，逐个绕过的牧民式推进继续）。
+
+**遗留（下轮）**：
+1. 当前 strlen(NULL) 调用者定位（PE 字节模式法，§10.36 工具）；
+2. 调用侧 demotion 限定补齐（解析期 demoted 调用的 receiver 类型查表
+   限定）→ 移除 toUpperCase/LowerCase 排除；
+3. 端到端 minimal.auc → helloworld → fib。

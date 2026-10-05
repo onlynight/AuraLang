@@ -1271,11 +1271,13 @@ class Vm {
             return
         } else if (funcName == "String.toUpper" || funcName == "toUpper") {
             val v: Any = this.stack.pop()
-            this.stack.push(toStr(v).toUpperCase())
+            val svtoUpperCase: String = toStr(v)
+            this.stack.push(svtoUpperCase.toUpperCase())
             return
         } else if (funcName == "String.toLower" || funcName == "toLower") {
             val v: Any = this.stack.pop()
-            this.stack.push(toStr(v).toLowerCase())
+            val svtoLowerCase: String = toStr(v)
+            this.stack.push(svtoLowerCase.toLowerCase())
             return
         } else if (funcName == "String.contains" || funcName == "contains") {
             val sub: Any = this.stack.pop()
@@ -1336,11 +1338,13 @@ class Vm {
         //    与上方短名不同；差分框架实测补齐）──
         else if (funcName == "String.toUpperCase" || funcName == "toUpperCase") {
             val v: Any = this.stack.pop()
-            this.stack.push(toStr(v).toUpperCase())
+            val svtoUpperCase: String = toStr(v)
+            this.stack.push(svtoUpperCase.toUpperCase())
             return
         } else if (funcName == "String.toLowerCase" || funcName == "toLowerCase") {
             val v: Any = this.stack.pop()
-            this.stack.push(toStr(v).toLowerCase())
+            val svtoLowerCase: String = toStr(v)
+            this.stack.push(svtoLowerCase.toLowerCase())
             return
         } else if (funcName == "String.charAt" || funcName == "charAt") {
             val idx: Any = this.stack.pop()
