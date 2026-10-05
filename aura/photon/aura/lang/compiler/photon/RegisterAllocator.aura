@@ -211,6 +211,13 @@ class RegisterAllocator {
         var i: Int = 0
         while (i < d.nodeCount) {
             val node: DagNode = d.nodeOf(i)
+            // ⚠️ P231 实验记录：曾尝试 Phi 强制溢出栈槽（退出着色）——机制
+            // 本身成立（slotForNode 专属槽 + emitMovRR isStackRef 写槽），
+            // 但**布局位移重新激活了 readFromFile 段的已知「布局敏感」潜伏
+            // 缺陷**（stringToBuffer 的 path 串变 NULL，§10.34/§10.35），
+            // 不得不再先根治布局敏感家族。phi 正确路线维持「启发式配边 +
+            // P229 状态」，RA 专项（跨块 MOV 定义的区间合成）留待布局
+            // 根治后重启。
             if (node.kind == "Value" || node.kind == "Reg" || node.kind == "Const") {
                 val interference: String = this.buildIntervalInterference(i)
                 this.assignColor(i, interference)

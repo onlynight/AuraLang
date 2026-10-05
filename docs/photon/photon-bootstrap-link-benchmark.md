@@ -1988,3 +1988,32 @@ Aura 的 AOT 下 `s.charCodeAt(i)` 判 ':'/'=' 等可打印字符时直接写数
 
 **状态**：LOADONLY valid=true（解码结构完整）；name 值错乱只影响
 numOpNames 助记符正确性（执行期 opcode 数值化）。
+
+### 10.35 P231：phi 强制溢出栈槽实验——机制成立，布局敏感拦路（2026-10-06 续XV）
+
+**实验**：RA Step2 对 `op == "Phi"` 跳过着色（强制走 slotForNode 专属栈槽；
+emitMovRR 的 isStackRef 分支真实写槽、消费者读同槽——读写家一致，机制
+成立）。同时补 scanFunctionMaxSlots 的 **instr.output 扫描**（phi 只作为
+边 MOV 的 output 出现，旧扫描漏计 ⇒ 槽号超出帧预算写红区）。
+
+**结果**：结构上成立，但**布局位移重新激活 readFromFile 段的「布局敏感」
+潜伏缺陷**（stringToBuffer 的 path 串变 NULL → strlen(0)，与 2026-10-03
+bench_loop p43-p47、emitConst 空串注释同族）——该家族尚未根治前，任何
+改变代码布局的修复都可能「按下葫芦浮起瓢」。
+
+**处置**：还原 phi 着色（回到 P229 最佳状态：LOADONLY valid=true numeric=
+true），实验记录在案。**「布局敏感」家族升级为独立专项**——它已是
+本轮三个修复（栈参 0x68、空串物化、phi 栈槽）的共同拦路虎。
+
+**布局敏感家族症状清单**（供专项归因）：
+1. bench_loop 循环变量随布局漂移（p43-p47 二分未果）；
+2. emitConst 空串分支曾致随机错乱（2026-10-03 注）；
+3. P231 readFromFile path 串 NULL（stringToBuffer 入参）；
+4. 崩点随构建漂移（栈参 ABI 时代，已根治）。
+共同点：**值在「物化点」与「消费点」之间被第三方写入覆写**——嫌疑集中
+在 slotForNode 兜底槽的**生命周期**（无色节点槽在发射期惰性分配，跨
+pred/merge 块的值其槽可能被中间块的其他惰性分配复用）。专项方向：
+给「跨调用/跨块存活的值」一个**持久槽**（RA 溢出区而非发射期兜底区）。
+
+**下轮**：布局敏感专项（slotForNode 槽生命周期）→ name phi 复验 →
+minimal.auc 端到端 → helloworld → fib。
