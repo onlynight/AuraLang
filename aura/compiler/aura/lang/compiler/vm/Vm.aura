@@ -3267,25 +3267,13 @@ class Vm {
         if (cs < cn) {
             this.constLines.add(this.unescapeConst(VmOps.vmSubstr(cp, cs, cn - cs)))
         }
+        // ⚠️ P271：arg0Ints/arg1Ints 构建**暂时跳过**——这些 Int 值经
+        // Collections_listAppend 写入列表，如果 arg0Ints/arg1Ints 的句柄
+        // 与 argStrs 混叠（Vm 对象字段索引冲突），Int 写入会破坏 argStrs
+        // 的串数据（实测 strlen(0x7fffffff) 即 argNoneMark 泄漏）。
+        // 跳过构建 = 性能回退（每次从串解析）但保证正确性。
         this.arg0Ints = arrayListOf<Int>()
         this.arg1Ints = arrayListOf<Int>()
-        var ai: Int = 0
-        val an: Int = this.opCodes.size()
-        while (ai < an) {
-            val s0: String = this.argStrs.get(ai * 3)
-            if (VmOps.isAllDigits(s0)) {
-                this.arg0Ints.add(VmOps.toI32(s0))
-            } else {
-                this.arg0Ints.add(this.argNoneMark)
-            }
-            val s1: String = this.argStrs.get(ai * 3 + 1)
-            if (VmOps.isAllDigits(s1)) {
-                this.arg1Ints.add(VmOps.toI32(s1))
-            } else {
-                this.arg1Ints.add(this.argNoneMark)
-            }
-            ai = ai + 1
-        }
     }
 
     /// 装载期超级指令融合（方案 D）：对预解码流做一次线性窥孔改写。

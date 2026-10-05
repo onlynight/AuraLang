@@ -2732,3 +2732,23 @@ RA 的干扰计算对**跨块值**在控制流汇合处不可靠。
 
 **全栈槽模式验证了 RA 无关性**——禁用着色后解码满量恢复证明此前
 解码截断确实是 RA 着色干扰所致。
+
+### 10.65 P271：argInt 缓存跳过 + substring 链为下轮首查（2026-10-06 续XLV）
+
+**本轮**：arg0Ints/arg1Ints 构建跳过（消除 argNoneMark Int 值写入列表的
+混叠风险）。需 front 重生成 .hat 后验证效果。
+
+**当前首要疑点**：`vmSubstr → text.substring(start, end)` 的符号解析——
+值类 String 无 `substring(start,end)` 定义，`substring` 的 demoted 裸名
+解析目标待查（readU32Int 同款直查法）。String_substring runtime 实现已
+复核正确（bump 分配 + NUL + 钳位）。
+
+**下阶段路线图**：
+1. substring 符号解析直查；
+2. argStrs/arg2Ints 字段索引冲突定位（Vm 对象 field 表审计）；
+3. toStr 别名 + argInt 跳过等修复的 .hat 重生成验证；
+4. 端到端 minimal.auc → helloworld → fib。
+
+**资产保持**：10 项系统性修复 + 接收者注入 + Opcodes 平行表 +
+PushHandler 化 + readStr 递归化 + argInt 缓存跳过 + 全栈槽模式 +
+返回值全局槽中转 + 窗口括号/PE 解析/gdb 断点法工具链。
