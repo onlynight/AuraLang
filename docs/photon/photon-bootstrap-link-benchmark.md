@@ -2423,3 +2423,27 @@ grow 后的 capacity**——「items 指针 == 列表 header 地址」的 self-v
    aura_heapbump 在两次 alloc 间打点）；
 2. emitObjectAlloc 的 align 与 store 时序逐指令复核；
 3. 修复后端到端。
+
+### 10.52 P248：Memory_copy 归因实验——修复无罪，损坏为布局依赖（2026-10-06 续XXXI）
+
+**对照实验**：还原 Memory_copy 旧行为（8× 过量复制）后解码仍 n=8 ⇒
+P247 修复**无罪**。结合全轮证据，最终定性：
+
+**同一个底层值损坏缺陷，表现随 guest 布局漂移**：
+* P244 布局：helloworld 1194 条解码全对，崩点在 loadPredecoded；
+* P248 布局（加了 HeapDiag extern + win 探针）：解码仅 8 条即止
+  （reader.data/pos 值损坏家族——readByte 提前 -1 break）；
+* 旧布局：const 池即崩 / 派发头崩 / ……
+
+**已排除**：栈参 ABI（已修+勘误）、Memory_copy（无罪）、bump 回退
+（单调证伪）、emitObjectAlloc/strcat/fromCharCode 算术（逐条复核）、
+探针自身（单行化后仍现）。
+
+**残留头号嫌疑**：堆块的**延迟写**（某函数在返回后仍持有并写入
+陈旧 dst 寄存器/槽——emitStrcat 的 r12 写指针跨调用残留家族）或
+**AucReader 对象字段的值损坏**（与 mod.numArgsFlat 同族，P245 已证
+mod 字段内容真实变化）。
+
+**状态**：LOADONLY 绿；修复清单（栈参/负号/空串/Memory_copy/接收者
+注入/Opcodes 平行表/PushHandler 化/readStr 递归）全部保持；探针
+（winA/winA3/hb/winB2/winC/winB/HeapDiag）暂留供下轮继续。

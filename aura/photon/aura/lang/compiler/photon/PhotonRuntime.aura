@@ -1827,6 +1827,9 @@ object PhotonRuntime {
         // 都把 dst 之后 7n 字节的相邻堆块刷成源数据（实测 numArgsFlat
         // items 被grow 的旧元素成批覆盖、§10.47 渐进覆写模式的真身）。
         enc.emitPrologue(0)
+        // P248 归因实验结论：还原旧行为后解码仍 n=8 ⇒ Memory_copy 修复无罪，
+        // 解码回归为**布局依赖的同一底层缺陷**（探针/extern interface 加入
+        // 即改变表现位置）。恢复 ceil(n/8) 正确语义。
         enc.emitMovRR("r10", "r8")             // r10 = qword 次数 = ceil(n/8)
         enc.emitAddRI("r10", 7)
         enc.emitShrRI("r10", 3)

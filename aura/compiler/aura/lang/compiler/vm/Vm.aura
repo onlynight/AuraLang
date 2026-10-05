@@ -282,8 +282,7 @@ class Vm {
         if (mod.numericMode) {
             // P241 窗口二分：registerAucClasses 之前
             println("[winB2-0]=[" + mod.numArgsFlat.get(0) + "]")
-            println("[winB2-1]=[" + mod.numArgsFlat.get(1) + "]")
-            println("[winB2-2]=[" + mod.numArgsFlat.get(2) + "]")
+            println("[winB2-n]=" + toStr(mod.numArgsFlat.size()) + " onN=" + toStr(mod.numOpNames.size()) + " on0=[" + mod.numOpNames.get(0) + "] ftLen=" + toStr(mod.funcTable.length) + " cpN=" + toStr(mod.constsCount))
             // P2.2c：类表 → 类继承注册表（parent_id 0 = Any；防自环）
             this.registerAucClasses(mod.classNames, mod.classParentIds)
             println("[winC-0]=[" + mod.numArgsFlat.get(0) + "]")
@@ -347,7 +346,12 @@ class Vm {
         // P239 括号探针 B：loadArgsFlat 消费点
         println("[winB] n=" + toStr(args.size()))
         println("[winB-0]=[" + args.get(0) + "]")
-        println("[winB-1]=[" + args.get(1) + "]")
+        println("[hbB]=" + toStr(HeapDiag.heapbump()))
+        val probeL2: List<String> = arrayListOf<String>()
+        probeL2.add("CC")
+        probeL2.add("DD")
+        println("[winB3] fresh=[" + probeL2.get(0) + probeL2.get(1) + "]")
+        println("[hbB2]=" + toStr(HeapDiag.heapbump()))
         println("[winB-2]=[" + args.get(2) + "]")
         this.loadArgsFlat(args)
         this.opCodes = arrayListOf<Int>()
