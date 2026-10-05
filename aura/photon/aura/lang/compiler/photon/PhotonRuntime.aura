@@ -995,6 +995,22 @@ object PhotonRuntime {
         enc.emitStackStore(-0x90, "rcx")  // s1
         enc.emitStackStore(-0xC0, "rdx")  // s2
 
+        // ⚠️ P227 NULL 安全（防御性）：phi 简化缺陷会把未初始化的 String 局部
+        // 传成 NULL（实测 decodeNumeric 的 a1 合并路径）——把 NULL 当空串处理，
+        // 把崩溃变成可观测的错误串，供上层探针定位 phi 缺陷。
+        enc.emitStackLoad("rax", -0x90)
+        enc.emitCmpRI("rax", 0)
+        enc.emitJccLabel("ne", "strcat_s1_ok")
+        enc.emitLeaRIP("rax", "@str.0")
+        enc.emitStackStore(-0x90, "rax")
+        enc.emitLabel("strcat_s1_ok")
+        enc.emitStackLoad("rax", -0xC0)
+        enc.emitCmpRI("rax", 0)
+        enc.emitJccLabel("ne", "strcat_s2_ok")
+        enc.emitLeaRIP("rax", "@str.0")
+        enc.emitStackStore(-0xC0, "rax")
+        enc.emitLabel("strcat_s2_ok")
+
         // 计算 s1 长度
         enc.emitStackLoad("rax", -0x90)   // rax = s1
         enc.emitXorRR("rdx", "rdx")

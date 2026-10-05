@@ -334,9 +334,60 @@ class HatSerializer {
     private fun serializePhi(mir: MirSsaProgram, phiId: Int): Unit {
         val phi: MirValue = mir.valueOf(phiId)
         var ty: String = this.typeName(mir, phi.type)
-        val operands: String = this.operandsText(mir, phi.args)
+        // ⚠️ P228：phi 入边是 `前驱块:值` 对（SsaBuilder 起携带前驱块 ID），
+        // 序列化为 `@phi(bb3=@t12, bb9=@t18)`；旧格式（裸 vid）按原样输出。
+        val operands: String = this.phiOperandsText(mir, phi.args)
         this.w("    @" + this.targetName(phi) + " = @phi(" +
             operands + ") : " + ty + "\n")
+    }
+
+    /// phi 入边格式化：`pred:vid` 对 → `bb<pred>=@t<vid>`；裸 vid → `@t<vid>`。
+    private fun phiOperandsText(mir: MirSsaProgram, args: String): String {
+        var ai: Int = 0
+        var aStart: Int = 0
+        var aLen: Int = args.length
+        var result: String = ""
+        var first: Boolean = true
+        while (ai <= aLen) {
+            if (ai == aLen || args.charCodeAt(ai) == 44) {
+                if (ai > aStart) {
+                    val argStr: String = HatParserUtils.safeSubstring(args, aStart, ai).trim()
+                    // 拆 `pred:vid`（无冒号 = 旧格式裸 vid）
+                    var predPart: String = ""
+                    var vidPart: String = argStr
+                    var ci: Int = 0
+                    val cl: Int = argStr.length
+                    while (ci < cl) {
+                        if ((argStr.charCodeAt(ci) as Int) == 58) {
+                            predPart = HatParserUtils.safeSubstring(argStr, 0, ci).trim()
+                            vidPart = HatParserUtils.safeSubstringFrom(argStr, ci + 1).trim()
+                            ci = cl
+                        }
+                        ci = ci + 1
+                    }
+                    val argId: Int = HatSerializerUtils.strToInt(vidPart)
+                    if (argId >= 0) {
+                        val arg: MirValue = mir.valueOf(argId)
+                        if (arg.op == "Const") {
+                            this.ensureConstDefined(mir, arg)
+                        }
+                        var piece: String = "@" + this.valueName(mir, arg)
+                        if (predPart != "" && predPart != "-1") {
+                            piece = "bb" + predPart + "=" + piece
+                        }
+                        if (first) {
+                            first = false
+                            result = piece
+                        } else {
+                            result = result + ", " + piece
+                        }
+                    }
+                }
+                aStart = ai + 1
+            }
+            ai = ai + 1
+        }
+        return result
     }
 
     // ── 普通指令序列化 ──

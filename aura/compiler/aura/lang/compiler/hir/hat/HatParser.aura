@@ -849,6 +849,28 @@ class HatParser {
         if (name == "") {
             return ""
         }
+        // ⚠️ P228：phi 入边 `bb<pred>=@t<vid>` 形态 → 解析为 `pred:vid`。
+        // 逐字符扫 '='（46+13=61）：禁带 from 的 indexOf（红线②）。
+        var eqPos: Int = -1
+        var qi: Int = 0
+        val qlen: Int = name.length
+        while (qi < qlen) {
+            if ((name.charCodeAt(qi) as Int) == 61) {
+                eqPos = qi
+                qi = qlen
+            }
+            qi = qi + 1
+        }
+        if (eqPos > 0) {
+            // ⚠️ P228b：`bb<pred>=@t<vid>` 暂解析为**裸 vid**（前驱信息暂不
+            // 下传——front 直通管线（SsaBuilder→LIR→ISel，不经 HatParser/
+            // Lowering）会把 `pred:vid` 原样带进 LirValue.args，strToInt 跨
+            // 冒号拼数字 ⇒ 入边全错。精确配边的激活留待下轮（需给 front
+            // 管线同款旁路表）。序列化/解析语法已就位，激活时只需恢复
+            // `lbl + ":" + rhs` 并给 front 管线接 phiPredMap。
+            val rhs: String = this.resolveOperand(HatParserUtils.safeSubstringFrom(name, eqPos + 1).trim())
+            return rhs
+        }
         if (name.startsWith("@")) {
             name = HatParserUtils.safeSubstringFrom(name, 1)
         }
@@ -887,6 +909,23 @@ class HatParser {
             if (pos == len || args.charCodeAt(pos) == 44) {
                 if (pos > start) {
                     var token: String = HatParserUtils.safeSubstring(args, start, pos).trim()
+                    // ⚠️ P228：`pred:?name` 形态（phi 入边带前驱块）——先回填
+                    // 值占位，保留 `pred:` 前缀。
+                    var tokPrefix: String = ""
+                    var colonPos: Int = -1
+                    var pi2: Int = 0
+                    val tlen: Int = token.length
+                    while (pi2 < tlen) {
+                        if ((token.charCodeAt(pi2) as Int) == 58) {
+                            colonPos = pi2
+                            pi2 = tlen
+                        }
+                        pi2 = pi2 + 1
+                    }
+                    if (colonPos > 0) {
+                        tokPrefix = HatParserUtils.safeSubstring(token, 0, colonPos + 1).trim()
+                        token = HatParserUtils.safeSubstringFrom(token, colonPos + 1)
+                    }
                     if (token.startsWith("?")) {
                         val name: String = HatParserUtils.safeSubstringFrom(token, 1)
                         val vid: Int = this.lookupVal(name)
@@ -896,6 +935,9 @@ class HatParser {
                             this.addWarning("unresolved value: " + name)
                             token = "-1"
                         }
+                    }
+                    if (tokPrefix != "") {
+                        token = tokPrefix + token
                     }
                     if (first) {
                         first = false

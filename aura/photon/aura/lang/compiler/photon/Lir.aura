@@ -256,6 +256,12 @@ class LirProgram {
     /// 类型注册表。
     var types: TypeRegistry = TypeRegistry()
 
+    /// ⚠️ P228：phi 入边的**前驱块旁路表**（`phiVid|p1:vid1,p2:vid2,...` 以 ';' 连接）。
+    /// MIR phi args 自 P228 起是 `pred:vid` 对（SsaBuilder 携带前驱块 ID），
+    /// LIR args 只保留裸 vid（parseArgs 兼容），pred 对在这里旁路给 ISel
+    /// 做**精确配边**（取代定义块/传递闭包/尾兜底启发式链）。
+    var phiPredMap: String = ""
+
     /// 值节点表（List<LirValue>）。
     var values: List<LirValue> = arrayListOf<LirValue>()
 

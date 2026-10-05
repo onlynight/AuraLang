@@ -813,6 +813,8 @@ object AucLoaderUtils {
             }
             // operandSize == 0：无操作数
 
+            // P227 探针：定位 NULL 串拼接源（解码崩点取证）
+            println("[d]" + toStr(opcode) + " n=[" + name + "] a0=[" + a0 + "] a1=[" + a1 + "]")
             mod.numOpNames.add(name)
             // 扁平化：a0/a1 逗号串（空段以空串占位，保序可索引）
             if (a1 != "") {

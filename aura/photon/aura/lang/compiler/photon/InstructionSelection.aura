@@ -1138,6 +1138,51 @@ class InstructionSelector {
                             pickOfPred.add(-1)
                             r0 = r0 + 1
                         }
+                        // (a0) ⚠️ P228 精确配边：Lowering 把 MIR 的 `pred:vid`
+                        // 入边旁路记入 `lir.phiPredMap`（`phiVid|p1:vid1,...`）。
+                        // 有旁路记录的入边**按前驱块精确命中**——取代下方
+                        // 定义块/传递闭包/尾兜底启发式链（该链在多分支汇合时
+                        // 错配：实测 decodeNumeric 的 name/a0/a1 串值互相串块，
+                        // 迭代 1 的 name 泄漏进迭代 2 → strcat(乱码)）。
+                        // ⚠️ 暂时禁用（P228b）：pmAdd 出现垃圾入边 vid，疑似
+                        // 本段在 AOT 下的列表/子串行为异常，待下轮二分修复后
+                        // 重新启用。格式贯穿层（SsaBuilder/Serializer/Parser/
+                        // Lowering 旁路表）保持就位。
+                        var predMapIdx: Int = -1
+                        if (predMapIdx >= 0 && incomingN == predN) {
+                            val pairs: List<String> = this.phiPredPairs(predMapIdx)
+                            var ai9: Int = 0
+                            while (ai9 < pairs.size && ai9 < incomingN) {
+                                val seg: String = pairs[ai9]
+                                var colon2: Int = -1
+                                var qi9: Int = 0
+                                while (qi9 < seg.length) {
+                                    if ((seg.charCodeAt(qi9) as Int) == 58) {
+                                        colon2 = qi9
+                                        qi9 = seg.length
+                                    }
+                                    qi9 = qi9 + 1
+                                }
+                                if (colon2 > 0) {
+                                    val predP: Int = LirUtils.strToInt(seg.substring(0, colon2))
+                                    val vidP: Int = LirUtils.strToInt(seg.substring(colon2 + 1, seg.length))
+                                    if (predP >= 0) {
+                                        var rk9: Int = 0
+                                        while (rk9 < predN) {
+                                            if (predFlat[pLo + rk9] == predP) {
+                                                if (pickOfPred[rk9] < 0) {
+                                                    pickOfPred[rk9] = ai9
+                                                    used[ai9] = 1
+                                                }
+                                                rk9 = predN
+                                            }
+                                            rk9 = rk9 + 1
+                                        }
+                                    }
+                                }
+                                ai9 = ai9 + 1
+                            }
+                        }
                         // (a1) 严格匹配：入边值**定义块 == 前驱块本身**。
                         // 必须先于 (a2) 对**所有**前驱整体跑一遍：传递闭包经
                         // 循环回边会把循环内**所有**块连成一家（closure(218)
@@ -1254,6 +1299,79 @@ class InstructionSelector {
             }
             bi = bi + 1
         }
+    }
+
+    /// 在 `lir.phiPredMap` 中找 phi 的旁路记录下标（记录序），无则 -1。
+    /// 逐字符扫描（禁带 from 的 indexOf，红线②）。
+    private fun phiPredFind(src: LirProgram, phiVid: Int): Int {
+        if (this.lir == null) { return -1 }
+        val map: String = this.lir.phiPredMap
+        if (map == "") { return -1 }
+        val want: String = LirUtils.toStr(phiVid)
+        var pos: Int = 0
+        var segStart: Int = 0
+        val len: Int = map.length
+        while (pos <= len) {
+            if (pos == len || (map.charCodeAt(pos) as Int) == 59) {
+                if (pos > segStart) {
+                    val rec: String = map.substring(segStart, pos)
+                    // rec = "phiVid|p1:vid1,..."
+                    var bar: Int = -1
+                    var qi: Int = 0
+                    while (qi < rec.length) {
+                        if ((rec.charCodeAt(qi) as Int) == 124) {
+                            bar = qi
+                            qi = rec.length
+                        }
+                        qi = qi + 1
+                    }
+                    if (bar > 0 && rec.substring(0, bar) == want) {
+                        return segStart
+                    }
+                }
+                segStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        return -1
+    }
+
+    /// 取 `phiPredFind` 命中记录的 `p:vid` 对列表。
+    private fun phiPredPairs(recStart: Int): List<String> {
+        val map: String = this.lir.phiPredMap
+        var bar: Int = -1
+        var qi: Int = recStart
+        val len: Int = map.length
+        while (qi < len) {
+            if ((map.charCodeAt(qi) as Int) == 124) {
+                bar = qi
+                qi = len
+            }
+            qi = qi + 1
+        }
+        var endPos: Int = len
+        var ej: Int = bar + 1
+        while (ej < len) {
+            if ((map.charCodeAt(ej) as Int) == 59) {
+                endPos = ej
+                ej = len
+            }
+            ej = ej + 1
+        }
+        val body: String = map.substring(bar + 1, endPos)
+        val out: List<String> = arrayListOf<String>()
+        var pos: Int = 0
+        var start: Int = 0
+        while (pos <= body.length) {
+            if (pos == body.length || (body.charCodeAt(pos) as Int) == 44) {
+                if (pos > start) {
+                    out.add(body.substring(start, pos))
+                }
+                start = pos + 1
+            }
+            pos = pos + 1
+        }
+        return out
     }
 
     /// 取块的终结指令对应的后继块列表。
@@ -1728,13 +1846,13 @@ class InstructionSelector {
         val typeId: Int = val.type
 
         // 字符串常量：分配 @str.N 符号，创建 LEA 指令加载地址。
-        // ⚠️ 2026-10-03：曾尝试 `|| constVal == ""` 让空串走本分支 —— 它能修
-        // 「streq(x, null)」，但同时改变代码布局，触发**布局敏感的潜在值模型
-        // 缺陷**（bench_loop 循环变量在多个构建下随机错乱，见 p43-p47 二分）。
-        // 空串比较的兜底改为 runtime streq 的 null 安全前置（null==x → 0），
-        // 语义近似且不触雷。布局问题的根治属 seed AOT 值模型专项。
-        // （注意：字符串字面量 "null" 也走本分支——内容映射只能在下面数值路径做。）
-        if (this.types.isString(typeId)) {
+        // ⚠️ 2026-10-06 P227：空串**必须**走本分支。旧实现（2026-10-03）刻意
+        // 只按 isString 判定、把空串留在数值路径（strToInt("")=0 ⇒ 物化为
+        // NULL），streq 另打 null 兜底——但任何其他空串用法全是雷：实测
+        // decodeNumeric 的 `var a1: String = ""` 初始化物化为 NULL ⇒
+        // `a0 + "," + a1` → strcat(s1, NULL) → strlen(0) 必崩（minimal.auc
+        // 第 2 条指令即触发）。物化为真实 @str.N（内容 1 字节 NUL）。
+        if (this.types.isString(typeId) || constVal0 == "") {
             val strName: String = "@str." + this.strConstCount
             this.strConstCount = this.strConstCount + 1
             // ⚠️ String 类型的 null 常量必须物化为**空串**——aux 原样入池会

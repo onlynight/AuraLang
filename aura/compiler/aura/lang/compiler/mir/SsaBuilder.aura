@@ -718,10 +718,15 @@ class SsaBuilder {
         //（`varMapBefore/AfterThen/AfterElse` 保留给将来需要时使用。）
 
         // 本表达式的值 = merge 块的 Phi（类型取 then 分支的实值类型，最准确）
+        // ⚠️ 2026-10-06 P228：phi 入边改为 **`前驱块:值`** 对——后端 ISel 按
+        // 前驱精确配边，取代「定义块/传递闭包/尾兜底」启发式链（该链在
+        // 多分支汇合时错配，实测 decodeNumeric 的 name/a0/a1 串值互相
+        // 串块：迭代 1 的 name 泄漏进迭代 2）。
         this.curBlock = mergeBlock
         val phiType: Int = this.program.valueOf(thenVal).type
         return this.makePhi(mergeBlock, phiType,
-            toStr(thenVal) + "," + toStr(elseVal), "")
+            toStr(thenBlock) + ":" + toStr(thenVal) + "," +
+            toStr(elseBlock) + ":" + toStr(elseVal), "")
     }
 
     /// 按 Aura 类型名生成零值常量（`Int` → `0`、`Float` → `0.0`、其余 → `null`）。
@@ -754,7 +759,9 @@ class SsaBuilder {
         val fv: Int = this.program.addValue("Const", strType, "", "false", this.curBlock)
         this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock), "")
         this.curBlock = mergeBlock
-        return this.makePhi(mergeBlock, strType, toStr(tv) + "," + toStr(fv), "")
+        return this.makePhi(mergeBlock, strType,
+            toStr(thenBlock) + ":" + toStr(tv) + "," +
+            toStr(elseBlock) + ":" + toStr(fv), "")
     }
 
     /// 该 HIR 表达式是否**静态类型为 Boolean**（判定 `toStr` 实参需不需要真值化）。
@@ -885,7 +892,8 @@ class SsaBuilder {
         // 在 merge 块插入 Phi 节点（合并两分支的变量定值）
         if (traceOn) println("      [if12] before insertPhisAtMerge")
         this.insertPhisAtMerge(mergeBlock, varMapBefore, varMapAfterThen,
-                               varMapAfterElse, kCount > 2)
+                               varMapAfterElse, kCount > 2,
+                               thenBlock, elseBlock)
         if (traceOn) println("      [if13] after insertPhisAtMerge")
 
         // varMap 回到入口状态：merge 后每个改动变量的最新值由
@@ -906,7 +914,8 @@ class SsaBuilder {
     /// varMap 格式：name|vid\nname|vid\n...
     private fun insertPhisAtMerge(mergeBlock: Int, before: String,
                                     afterThen: String, afterElse: String,
-                                    hasElse: Boolean): Unit {
+                                    hasElse: Boolean,
+                                    thenBlock: Int, elseBlock: Int): Unit {
         // 找出 then / else 中新增/修改的变量（无 else 时 else 改动集为空，
         // else 出值一律取 before 值）。
         val thenDefs: List<String> = this.findChangedVars(before, afterThen)
@@ -956,7 +965,9 @@ class SsaBuilder {
                 this.lookupVar(before, varName, before)
             }
             if (thenVid >= 0 && elseVid >= 0 && thenVid != elseVid) {
-                val incoming: String = toStr(thenVid) + "," + toStr(elseVid)
+                // ⚠️ P228：入边带前驱块（`then块:值,else块:值`），见 buildIfExpr
+                val incoming: String = toStr(thenBlock) + ":" + toStr(thenVid) + "," +
+                                       toStr(elseBlock) + ":" + toStr(elseVid)
                 // ⚠️ phi 类型必须继承**入边值**的类型——旧实现硬编码 0（Int），
                 // 与 buildWhile 的同名缺陷同族（该处 2026-10-06 已修）。String
                 // 变量经 if/else 合并后 phi 被定型 Int ⇒ ISel 的 strcat 判定
@@ -1392,7 +1403,10 @@ class SsaBuilder {
                 val beforeVid: Int = this.lookupVar("", nm, varMapBefore)
                 if (beforeVid >= 0) {
                     // 入边 1 先占位为 beforeVid，稍后回填。
-                    val incoming: String = toStr(beforeVid) + "," + toStr(beforeVid)
+                    // ⚠️ P228：入边带前驱块——pred0 = entryBlock（入循环块）；
+                    // pred1（循环回边 latch）此刻未知，占位 -1，回填时补。
+                    val incoming: String = toStr(entryBlock) + ":" + toStr(beforeVid) + "," +
+                                           toStr(-1) + ":" + toStr(beforeVid)
                     // ⚠️ phi 类型必须继承**入口入边值**的类型——旧实现硬编码
                     // 0（Int），String 循环变量（`result = result + …`）的 phi
                     // 被定型成 Int ⇒ ISel 的 emitStrcat 判定
@@ -1464,7 +1478,10 @@ class SsaBuilder {
                             //     （实测同一 ValueID 回写后读出 `args='i'`、
                             //     `op='??'`，PHI 与整个 SSA 变残骸）。
                             val pv: MirValue = this.program.valueOf(phiVid)
-                            pv.args = toStr(beforeVid) + "," + toStr(afterVid)
+                            // ⚠️ P228：回填时补上 latch（回边前驱块）——此刻
+                            // this.curBlock 仍是循环体末块（下一步才跳出）。
+                            pv.args = toStr(entryBlock) + ":" + toStr(beforeVid) + "," +
+                                      toStr(this.curBlock) + ":" + toStr(afterVid)
                             // continue 点值：追加为额外入边（纯 charCodeAt
                             // 扫描，禁 indexOf——seed AOT 下带 from 的 indexOf
                             // 失效导致死循环/错位）。

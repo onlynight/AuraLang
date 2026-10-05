@@ -211,7 +211,50 @@ class Lowering {
         // Phi 必须走 `addPhi`（登记到 `LirBlock.phis`），不能当成普通指令 ——
         // 否则它会出现在块指令列表里被指令选择当成可发射指令处理。
         if (op == "Phi") {
-            return dst.addPhi(dstBlockId, srcVal.type, srcVal.args, srcVal.aux)
+            // ⚠️ P228：MIR phi args 是 `pred:vid` 对——LIR args 剥成裸 vid
+            //（parseArgs 兼容），pred 对旁路记入 `dst.phiPredMap` 供 ISel
+            // 精确配边。
+            var plain: String = ""
+            var pairs: String = ""
+            var ci: Int = 0
+            var cStart: Int = 0
+            val clen: Int = srcVal.args.length
+            while (ci <= clen) {
+                if (ci == clen || srcVal.args.charCodeAt(ci) == 44) {
+                    if (ci > cStart) {
+                        val seg: String = srcVal.args.substring(cStart, ci).trim()
+                        var colon: Int = -1
+                        var qi: Int = 0
+                        while (qi < seg.length) {
+                            if ((seg.charCodeAt(qi) as Int) == 58) {
+                                colon = qi
+                                qi = seg.length
+                            }
+                            qi = qi + 1
+                        }
+                        if (colon > 0) {
+                            val predPart: String = seg.substring(0, colon).trim()
+                            val vidPart: String = seg.substring(colon + 1, seg.length).trim()
+                            if (plain == "") { plain = vidPart } else { plain = plain + "," + vidPart }
+                            if (pairs == "") { pairs = predPart + ":" + vidPart } else { pairs = pairs + "," + predPart + ":" + vidPart }
+                        } else {
+                            if (plain == "") { plain = seg } else { plain = plain + "," + seg }
+                        }
+                    }
+                    cStart = ci + 1
+                }
+                ci = ci + 1
+            }
+            val newVid: Int = dst.addPhi(dstBlockId, srcVal.type, plain, srcVal.aux)
+            if (pairs != "") {
+                val rec: String = LirUtils.toStr(newVid) + "|" + pairs
+                if (dst.phiPredMap == "") {
+                    dst.phiPredMap = rec
+                } else {
+                    dst.phiPredMap = dst.phiPredMap + ";" + rec
+                }
+            }
+            return newVid
         }
 
         // ── 整数算术运算 ──

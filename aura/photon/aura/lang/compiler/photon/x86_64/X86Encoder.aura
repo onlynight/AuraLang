@@ -1089,6 +1089,11 @@ class X86Encoder {
         this.writeByte(this.rexByte(true, 0, r))
         this.writeByte(0xC1)
         this.writeByte(0xC0 + (ext << 3) + (r & 7))
+        // ⚠️ 64 位模式下硬件按 **imm8 & 63** 取移位量——旧实现 `imm & 63`
+        // 把 16/20/24/32 全错成 0..15（实测移 32 变移 0：canary kind2 的
+        // 低 32 位提取退化为恒等 ⇒ 返回地址范围校验全体误报（obj3 的
+        // "1NAC" 刷屏）；guest 的 i32↔i64 装拆箱移位同样全体失真，
+        // 2026-10-06）。
         this.writeByte(imm & 15)
     }
 

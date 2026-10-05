@@ -1889,3 +1889,42 @@ Photon 后端，非单点修复可解。
 * **工具教训**：llvm-nm 的符号跨度不可靠（跨函数合并），帧回溯一律用
   gdb rbp 链 + 断点抓参，反汇编验证字节级匹配后才定论。
 
+
+### 10.32 P227-P228：空串物化 + strcat NULL 安全 + phi 前驱贯穿（2026-10-06 续XII）
+
+**进展**：
+1. **空串物化修复**（emitConst）：`""` 字面量此前走数值路径（strToInt("")=0）
+   ⇒ 物化为 NULL。2026-10-03 曾刻意为之（布局敏感），streq 打 null 兜底——
+   但其他空串用法全是雷：实测 decodeNumeric 的 `var a1: String = ""` →
+   `strcat(s1, NULL)` → strlen(0)。现 `isString(ty) || constVal0 == ""` 一律
+   物化为真实 @str.N（1 字节 NUL）。
+2. **strcat NULL 安全（防御性）**：s1/s2 为 0 时按空串处理。它把 phi 缺陷的
+   崩溃变成**可观测的错误串**——正是这一步让 phi 缺陷现形。
+3. **phi 前驱贯穿基础设施**（格式层就位，激活待下轮）：
+   * SsaBuilder 四处 makePhi 产出 `前驱块:值` 对（buildIfExpr/buildBoolToString/
+     buildIf（签名加 thenBlock/elseBlock）/buildWhile（entryBlock + 回填补 latch））；
+   * HatSerializer.serializePhi 输出 `@phi(bb3=@t12, ...)`；
+   * HatParser.resolveOperand 识别 `bbN=@tM`（**暂解析为裸 vid**，见下）；
+   * Lowering phi 分支剥对 + 旁路记 `LirProgram.phiPredMap`；
+   * ISel (a0) 精确配边**已写但禁用**（P228 实测 pmAdd 出现垃圾入边 vid +
+     驱动 segfault，二分定位为 front 直通管线缺同款旁路表：SsaBuilder→LIR→
+     ISel 不经 HatParser/Lowering，`pred:vid` 原样进 LirValue.args ⇒
+     strToInt 跨冒号拼数字 ⇒ 入边全错）。
+
+**实测（[d] 探针，null-safe strcat 使其可见）**：tiny4 的 main 三条指令，
+`name` 的值逐迭代串块：迭代 2 `n=[(乱码@]`（应为 STORE_LOCAL）、迭代 3
+`n=[CALL_NATIVE_ARGS]`（应为 LOAD_LOCAL）——**多分支汇合的 phi 值错乱**
+（emitPhi「取第一个入边值」/ phi-mov 配边启发式在 20+ 分支派发上失效）。
+这是当前解码链的最后一个已知阻塞。
+
+**下轮（优先级序）**：
+1. **激活 phi 精确配边**：给 front 直通管线接 phiPredMap（Lowering 在两条
+   管线都跑，需查 front 的 MIR→LIR 为何未走 Lowering.Phi 分支）；恢复
+   HatParser 的 `lbl + ":" + rhs`；重新启用 ISel (a0)，二分 pmAdd 垃圾源。
+2. [d] 探针全绿后：撤探针 → minimal.auc 全解码 → helloworld → fib 端到端。
+3. phi 正确性回归集：probe_break/probe_cont_min/bench_loop + 自举全量。
+
+**工具教训**：llvm-nm 符号跨度跨函数合并，帧回溯一律 gdb rbp 链 + 断点抓参；
+Aura 的 AOT 下 `s.charCodeAt(i)` 判 ':'/'=' 等可打印字符时直接写数字字面量
+（58/61），不要用 `':'`（seed AOT 对单字符字面量比较曾误判）。
+
