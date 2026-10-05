@@ -2501,3 +2501,26 @@ photon 后端存在**布局敏感的值损坏底层缺陷**（RA home 冲突 / p
 
 **基线保持**：LOADONLY valid=true funcs=7 consts=54；全部修复保持；
 探针（winA 概要/winB2/winC/winB/[cl]）暂留。
+
+### 10.55 P253：Long↔Int 截断转换不可靠实锤——readU32Int 修复解码截断（2026-10-06 续XXXIV）
+
+**根因（第四个系统性 emit 缺陷）**：**Long↔Int 截断/扩展转换在 photon
+AOT 下不可信**——`codeLenL as Int`（及 readU32 内 `as Long` 扩展）产出
+垃圾 ⇒ codeLens 全变 1-3 ⇒ **每函数只解 1 条指令**（解码量 1194→8 的
+真身；此前随布局漂移的表象 = 转换的值依赖/布局依赖双重性）。
+
+**修复**：AucReader.readU32Int()（纯 Int 算术组合 4 字节，无任何
+Long↔Int 转换）；loadModule 的 codeLen/constsCount/nExports/
+expFuncIdx/nImports 五处全部改直出 Int。
+
+**实测（helloworld）**：
+```
+winA  n=1194 onN=1194 ✓（满量解码恢复）
+winB2 n=1194 onN=1194 on0=[LOAD_CONST_S] ✓✓（跨函数传递后仍 1194！）
+hb@winA=944379（解码分配量也随之正常）
+```
+**解码截断家族修复**——1194 在 loadModule→loadAucAndRun 间保持稳定。
+
+**剩余**：get(0) 的值漂移（winA"0"→winB2"1"→winC/winB"4"）与
+loadArgsFlat 的 strlen 崩——列表**元素内容**的跨函数漂移仍存在
+（句柄/条目分离的第二层），下轮继续。§10.55。

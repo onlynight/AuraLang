@@ -193,6 +193,17 @@ class X86Emitter {
                 }
                 j = j + 1
             }
+            // ⚠️ P249：**output 节点也要扫**——Phi 强制溢出后其唯一出现位置
+            // 是边 MOV（pattern 7）的 instr.output；漏扫 ⇒ slotForNode 槽号
+            // 超出 funcExtraSlots 预算 ⇒ 写进 rsp 下方红区（P231 教训）。
+            if (instr.output >= 0) {
+                val oc: String = this.allocator.getColor(instr.output)
+                if (!(oc != "" && oc.startsWith("spill_slot_"))
+                        && (oc == "" || oc == "rax")
+                        && extraCsv.indexOf("|" + toStr(instr.output) + "|") < 0) {
+                    extraCsv = extraCsv + toStr(instr.output) + "|"
+                }
+            }
             // call 指令：把 Call 节点的实参节点也纳入扫描
             if (instr.nodes != "" && instr.output == -1) {
                 val cnid: Int = MachineDagUtils.strToInt(instr.nodes)

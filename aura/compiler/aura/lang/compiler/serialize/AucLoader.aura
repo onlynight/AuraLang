@@ -142,8 +142,9 @@ object AucLoaderUtils {
 
         // 5. 常量池（不含标签，VM 从操作码推断类型）
         // 用 `as Int` 而不是 `.toInt()`（Long.toInt() 在自举 AOT 下同 `Int.toLong()` 一样不可靠）
-        val constsCountL: Long = reader.readU32()
-        mod.constsCount = constsCountL as Int
+        // ⚠️ P253：Long↔Int 截断在 photon AOT 下不可信（readU32 的 `as Long`
+        // 扩展同样存疑），凡 Int 消费一律 readU32Int 直出。
+        mod.constsCount = reader.readU32Int()
         // 常量**类型标签**要单独记录：`.auc` 里 `LoadConst` 是类型无关的单操作码
         //（整数/字符串/布尔共用 0），而文本字节码的 `CONST_INT`/`CONST_STRING`
         // 是有类型的 —— 加载期按标签把它翻译成对应的类型化助记符。
@@ -225,10 +226,9 @@ object AucLoaderUtils {
             reader.readByte()             // is_native
             reader.readByte()             // aot_mode
             reader.readU32()              // aot_desc_idx（u32）
-            val codeLenL: Long = reader.readU32()
-            // P252 对照探针：`as Int` 在 photon AOT 下的可靠性核查
-            println("[cl] raw=" + toStr(codeLenL) + " as=" + toStr(codeLenL as Int))
-            val codeLen: Int = codeLenL as Int
+            // ⚠️ P253：readU32Int 直接产出 Int——`codeLenL as Int` 在 photon
+            // AOT 下产出垃圾（实测 codeLens 全变 1-3 ⇒ 每函数只解 1 条指令）。
+            val codeLen: Int = reader.readU32Int()
             funcNames.add(fname)
             funcParams.add(params)
             codeStarts.add(reader.pos)
@@ -245,8 +245,7 @@ object AucLoaderUtils {
         // 9. 导出符号表（CALL_EXPORT 解析需要）
         //    格式：u16 count, 每条: name(str) + kind(u8) + sig_id(str)
         //          + has_func_idx(u8) + func_idx(u16)? + type_table_idx(u16) + const_idx(u16)
-        val nExportsL: Long = reader.readU16()
-        val nExports: Int = nExportsL as Int
+        val nExports: Int = reader.readU16()
         var ei: Int = 0
         while (ei < nExports) {
             val expName: String = reader.readStr()
@@ -255,8 +254,7 @@ object AucLoaderUtils {
             val hasFunc: Int = reader.readByte()
             val expFuncIdx: Int = 0
             if (hasFunc != 0) {
-                val fiL: Long = reader.readU16()
-                expFuncIdx = fiL as Int
+                expFuncIdx = reader.readU16()
             }
             reader.readU16()              // type_table_idx
             reader.readU16()              // const_idx
@@ -267,8 +265,7 @@ object AucLoaderUtils {
         // 10. 导入符号表（CALL_EXTERNAL 解析需要）
         //     格式：u16 count, 每条: name(str) + kind(u8) + module(str)
         //           + symbol(str) + sig_id(str) + func_idx(u16)
-        val nImportsL: Long = reader.readU16()
-        val nImports: Int = nImportsL as Int
+        val nImports: Int = reader.readU16()
         var ii: Int = 0
         while (ii < nImports) {
             val impName: String = reader.readStr()
