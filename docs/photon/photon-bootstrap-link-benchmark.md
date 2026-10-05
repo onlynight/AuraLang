@@ -2818,3 +2818,18 @@ getInstance 调用 `__obj_slot_get(40)` / `Memory_alloc(512)` /
 2. `__obj_slot_get`/`__obj_slot_set`/`Memory_alloc` 的 runtime 汇编
    逐条审计 callee-saved push/pop 对称性；
 3. 修复（补 push/pop 或改用易失寄存器）后端到端。
+
+### 10.70 P274：rbx 覆写排除了 const 轮转与 obj_slot——待 gdb 逐指令断点（2026-10-06 续LI）
+
+**排除**：
+* constRegs 轮转：已确认为死代码（声明+初始化但从未用于分配）
+* __obj_slot_get/set：仅用 rax/rcx/rdx（易失）✓
+* Memory_alloc/emitObjectAlloc：用 r12/rsi（保存/恢复 ✓），不用 rbx
+
+**待查**：listSet 函数体内的 `mov rcx,rbx`（0x5bf5e）不是参数存栈
+（emitParam 的 pattern 7 应产生 `mov [rbp-N],rcx`），可能是其他路径
+的值移动。下轮 gdb 硬件断点（watch -l $rbx）精确捕获 rbx 覆写指令
+地址，再映射回 obj 偏移定位源码。
+
+**当前状态完整且可复现**：LOADONLY 绿 ✓ / 解码 n=1194 ✓（全栈槽）/
+崩在 listSet 内 rbx=1 的 read64 / 根因 = rbx 被覆写。
