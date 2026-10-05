@@ -2833,3 +2833,22 @@ getInstance 调用 `__obj_slot_get(40)` / `Memory_alloc(512)` /
 
 **当前状态完整且可复现**：LOADONLY 绿 ✓ / 解码 n=1194 ✓（全栈槽）/
 崩在 listSet 内 rbx=1 的 read64 / 根因 = rbx 被覆写。
+
+### 10.69 追加 P274：rbx 从未被覆写——发射器 rcx 装载错误（2026-10-06 续LII）
+
+**四点探针**（listSet 内 A/B/C/D 全程）：
+```
+A[after param store] rbx=0x14011b2e8 ✓
+B[before getInstance] rbx=0x14011b2e8 ✓
+C[after getInstance]  rbx=0x14011b2e8 ✓
+D[before read64]      rbx=0x14011b2e8 ✓
+```
+**rbx 从未被覆写**——列表参数全程正确。但 read64 调用时 rcx=1 ——
+发射器在 read64 调用前**把错误值（1 而非 rbx 的列表指针）加载进 rcx**。
+
+**根因重新定性**：不是 callee-saved 破坏，而是**发射器在为 read64
+装载参数时选择了错误的数据源**（装载了 Int 值 1 而非列表指针）——
+这是 ISel/发射器的参数装载选择错误，与 phi/RA/布局的交互产生。
+
+**下轮**：读 indexOf 函数在崩点前的完整反汇编（HAT 对照），
+找出 rcx=1 从哪条 mov 指令来。
