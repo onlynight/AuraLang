@@ -1406,17 +1406,22 @@ object PhotonRuntime {
         // 第 5 参 CreateDisposition：flags==0（读）→ OPEN_EXISTING；
         // 否则（写，O_CREAT|O_TRUNC）→ CREATE_ALWAYS —— .hat 首写必需
         //（旧值恒 3 ⇒ 写新文件必失败，实测 "Failed to read .hat file"）。
+        // ⚠️ 栈参定位（P232 勘误）：emitPrologue(0x40) **含 push rbp** ⇒
+        // rbp = 入口rsp−8，rsp = rbp−0x40 ⇒ arg5/6/7 = [rsp+0x20/28/30] =
+        // **rbp−0x20/−0x18/−0x10**（原始写法正确）。曾误按 rbp−0x48 改成
+        // −0x28/−0x20/−0x18 ⇒ disposition 落到 arg5 读到 0x80 ⇒ CreateFileA
+        // 报 ERROR 87（INVALID_PARAMETER），已回滚。
         enc.emitStackLoad("rax", -0x8)                 // flags
         enc.emitCmpRI("rax", 0)
         enc.emitMovRI32("eax", 3)                      // OPEN_EXISTING
         enc.emitJccLabel("eq", "open_disp")
         enc.emitMovRI32("eax", 2)                      // CREATE_ALWAYS
         enc.emitLabel("open_disp")
-        enc.emitStackStore(-0x20, "rax")
+        enc.emitStackStore(-0x20, "rax")               // arg5 @ [rsp+0x20]
         enc.emitMovRI32("eax", 128)                    // 第 6 参：FILE_ATTRIBUTE_NORMAL
-        enc.emitStackStore(-0x18, "rax")
+        enc.emitStackStore(-0x18, "rax")               // arg6 @ [rsp+0x28]
         enc.emitXorRR("eax", "eax")                    // 第 7 参：hTemplate = 0
-        enc.emitStackStore(-0x10, "rax")
+        enc.emitStackStore(-0x10, "rax")               // arg7 @ [rsp+0x30]
         enc.emitCallImport("CreateFileA")
         // 失败（INVALID_HANDLE_VALUE = -1）→ 返回 GetLastError 码（诊断期，
         // 2026-10-03：fd 恒 -1 需要真实失败原因；修通后改回 -1）
@@ -1443,7 +1448,7 @@ object PhotonRuntime {
         enc.emitXorRR("eax", "eax")
         enc.emitStoreMemDisp32("r9", 0, "rax")
         enc.emitXorRR("eax", "eax")                    // lpOverlapped = 0
-        enc.emitStackStore(-0x20, "rax")
+        enc.emitStackStore(-0x20, "rax")               // arg5 @ [rsp+0x20] = rbp−0x20
         enc.emitCallImport("ReadFile")
         enc.emitCmpRI("eax", 0)
         enc.emitJccLabel("eq", "read_fail")
@@ -1532,6 +1537,13 @@ object PhotonRuntime {
         //（实测 fs 探针 readText，2026-10-03；§8.4 只修了 mov 侧）。
         enc.emitCmpEaxImm32(-1)         // INVALID_FILE_SIZE → -1
         enc.emitJccLabel("ne", "lsk_ok")
+        // P232 诊断：INVALID 时返回 -(GetLastError)-1000，guest 端打印
+        // 即可读出 Win32 错误码（定位句柄无效的原因后移除）。
+        enc.emitCallImport("GetLastError")
+        enc.emitAddRI("rax", 1000)
+        enc.emitMovRI("rdx", -1)
+        enc.emitSubRR("rax", "rdx")
+        enc.emitEpilogue()
         enc.emitMovRI("rax", -1)        // 必须 64 位：eax 只写低 32 位，
         enc.emitEpilogue()              // 高位残留 ⇒ size 变 4294967295 ⇒
                                         // 调用方 malloc(4G) 段错误（fs 探针）

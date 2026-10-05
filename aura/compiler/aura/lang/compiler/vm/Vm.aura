@@ -265,6 +265,7 @@ class Vm {
     /// P2.2：加载器产出**数值化指令数组**（无文本中间层）时走 `loadPredecoded`
     /// 直读路径；类定义表自动注册进类继承注册表（继承/虚方法分派生效）。
     fun loadAucAndRun(path: String): Any {
+        println("[hop2] len=" + toStr(path.length))
         val mod: AucModule = AucLoaderUtils.loadModule(path)
         val loadOnly: String = Env.get("AURA_VM_LOADONLY", "")
         if (loadOnly == "1") {

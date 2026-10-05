@@ -2017,3 +2017,34 @@ pred/merge 块的值其槽可能被中间块的其他惰性分配复用）。专
 
 **下轮**：布局敏感专项（slotForNode 槽生命周期）→ name phi 复验 →
 minimal.auc 端到端 → helloworld → fib。
+
+### 10.36 P232：文件链打通（fd=108 size=21532）+ io 栈参勘误（2026-10-06 续XVI）
+
+**重要勘误**：emitOpen/emitRead 的栈参槽 **−0x20/−0x18/−0x10 原本就是正确
+的**（arg5/6/7）。P232 曾按「rsp = rbp−0x48」误改成 −0x28/−0x20/−0x18——
+但 emitPrologue(0x40) **含 push rbp** ⇒ rbp = 入口rsp−8、rsp = rbp−0x40 ⇒
+arg5/6/7 = [rsp+0x20/28/30] = **rbp−0x20/−0x18/−0x10**。误改后 disposition
+落到 arg5 槽读到 0x80 ⇒ CreateFileA 报 ERROR 87（INVALID_PARAMETER），
+已回滚并加勘误注释。**教训：栈参槽算术必须先核对 prologue 的实际
+push 结构**（同 §10.31 的 emitParam 教训同源）。
+
+**工具突破**：PE 布局解析（.text RVA 0x1000 vsize 0x5c7ad / .rdata 0x5e000 /
+.data 0x60000 vsize 0x2002218=heapArena）+ exe 内**字节模式搜函数真身**
+（llvm-nm 只对 obj 有效；exe 无符号）。io_open 真实地址 0x14005d097，
+gdb 断点实证：rcx=path ✓ rdx=GENERIC_READ ✓ arg5/6/7=3/128/0 ✓。
+C 探针（clang 最小 CreateFileA 程序）证明同参数同 CWD 成功——
+排除环境因素。
+
+**实测进度（minimal.auc 端到端）**：
+* path 串四跳（driver→VmRunner→Vm→loadModule→readFromFile）全程 len=20 ✓
+* stringToBuffer：len=21 buf=有效堆指针 ✓；pathBuf 前 8 字节
+  `pb0=build/vm` ✓
+* **open：fd=108 ✓；lseek(END)：size=21532 ✓** ——文件读取链全通！
+* 剩余崩点移入**解码阶段**：strlen(rcx=0)（P227 修过的空串家族残留，
+  栈帧里可见 .auc 位置值 0x53ee 与 listAppend 函数指针）——即 [d] 探针
+  时代的 name/a0/a1 值错乱的同源问题。
+
+**下轮**：
+1. 解码阶段 strlen(NULL)：用 [stb]/[rfb] 同款值探针定位空串来源分支；
+2. 已知嫌疑：decodeNumeric 的 name/a0/a1 多分支 phi（P230 二分结论）；
+3. 探针（hop/stb/rfb/pb0）暂留——全链绿后一并撤除。

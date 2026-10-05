@@ -265,6 +265,7 @@ class AucReader {
 
     /// 从文件读取整个文件到内存（按块 read + 按需扩容，跨平台走 FileOps）。
     fun readFromFile(path: String): Boolean {
+        println("[hop4] len=" + toStr(path.length))
         data = readFileToBuffer(path)
         if (data == 0) { return false }
         pos = 0
@@ -280,8 +281,10 @@ class AucReader {
         // P2.2 修复：打开标志用 O_RDONLY(0)。原 `0x8000`（_O_BINARY）在 Windows
         // 宿主 CRT 下 read 读出垃圾/0 字节（实测 bad magic）；二进制语义由
         // 平台默认（Linux open 无文本模式差异）与宿主映射保证。
+        println("[pb0]=" + toStr(Memory.read64(pathBuf)))
         val fd: Int = FileOps.open(pathBuf, 0)
         Allocator.free(pathBuf)
+        println("[rfb] fd=" + toStr(fd))
         if (fd < 0) { return 0 }
 
         // 一次性读取（2026-10-06）：lseek 尾探定大小 → 分配 → **单次** read。
@@ -290,6 +293,7 @@ class AucReader {
         // MOV 仍会错位（实测 runner 里 cap=0/buf=垃圾 ⇒ read(count=0) 恒空、
         // 装载即败）。.auc 是本地定长文件，尾探 + 一次读全即可，phi 环消失。
         val size: Long = FileOps.lseek(fd, 0, 2)
+        println("[rfb] size=" + toStr(size))
         if (size <= 0) {
             FileOps.close(fd)
             return 0
@@ -405,6 +409,7 @@ class AucReader {
     private fun stringToBuffer(s: String): Long {
         val len: Long = s.length + 1
         val buf: Long = Allocator.malloc(len)
+        println("[stb] len=" + toStr(len) + " buf=" + toStr(buf))
         if (buf == 0) { return 0 }
         var i: Int = 0
         while (i < s.length) {

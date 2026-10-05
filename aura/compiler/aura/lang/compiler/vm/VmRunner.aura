@@ -171,6 +171,7 @@ class VmRunner {
 
     /// 从二进制 .auc 文件加载并执行。
     fun loadAucAndRun(path: String): Any {
+        println("[hop1] len=" + toStr(path.length))
         this.returnValue = this.vm.loadAucAndRun(path)
         this.error = this.vm.getError()
         this.instructionCount = this.vm.getInstructionCount()
