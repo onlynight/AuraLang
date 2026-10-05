@@ -2548,3 +2548,21 @@ winB  get(0)="0" ✓ get(2)="1" ✓（loadArgsFlat 输入正确）
 
 **剩余**：loadArgsFlat 内部的下一个缺陷（vmSubstr 链 / argStrs add——
 输入已正确，崩在其处理段）。下轮 gdb 定位后收官端到端。§10.56。
+
+### 10.57 P255：崩点推进至 VM 准备构造段——indexOf(garbage-list)（2026-10-06 续XXXVI）
+
+**toStr 别名修复后的新崩点**（gdb 实证）：`Collections.indexOf(list, value)`
+的 `Memory.read64(items + i*8)`——**list 句柄为垃圾**。调用窗口 = winB
+（loadArgsFlat 前）之后的 **VM 准备构造段**：opCodes 构建（fromName 线性
+扫描 ✓ 无列表）、`globals/objectFields/objectClass/heapKinds/boxValues/
+closureCaptures = HashMap(...)` × 6 构造器、VmStack/VmFrameStack/VmStrStack
+构造。
+
+**输入已正确**（winB-0=[0] winB-2=[1] ✓ loadArgsFlat 输入无损）——
+本段崩溃与解码数据无关，是**容器构造自身**的缺陷（HashMap 构造器的
+桶初始化 / contains 误调用）。
+
+**下轮**：
+1. HashMap 构造器逐行复核（capacity/桶分配/hashKey 误调用）；
+2. 或直接在 6 个 HashMap 构造后插 winE 探针二分定位首个坏构造器；
+3. 修复后端到端。
