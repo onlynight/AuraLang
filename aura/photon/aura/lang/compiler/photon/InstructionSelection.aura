@@ -1144,11 +1144,10 @@ class InstructionSelector {
                         // 定义块/传递闭包/尾兜底启发式链（该链在多分支汇合时
                         // 错配：实测 decodeNumeric 的 name/a0/a1 串值互相串块，
                         // 迭代 1 的 name 泄漏进迭代 2 → strcat(乱码)）。
-                        // ⚠️ 暂时禁用（P228b）：pmAdd 出现垃圾入边 vid，疑似
-                        // 本段在 AOT 下的列表/子串行为异常，待下轮二分修复后
-                        // 重新启用。格式贯穿层（SsaBuilder/Serializer/Parser/
-                        // Lowering 旁路表）保持就位。
-                        var predMapIdx: Int = -1
+                        // ⚠️ P229 重新启用：P228 的垃圾入边根因是 lowerFunction
+                        // 178 行 Phi 拦截点漏剥（非本段缺陷）——剥对已补，见
+                        // Lowering.aura。pmAdd 值恢复纯净后本段生效。
+                        var predMapIdx: Int = this.phiPredFind(src, phiVid)
                         if (predMapIdx >= 0 && incomingN == predN) {
                             val pairs: List<String> = this.phiPredPairs(predMapIdx)
                             var ai9: Int = 0

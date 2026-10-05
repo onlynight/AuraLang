@@ -1928,3 +1928,33 @@ Photon 后端，非单点修复可解。
 Aura 的 AOT 下 `s.charCodeAt(i)` 判 ':'/'=' 等可打印字符时直接写数字字面量
 （58/61），不要用 `':'`（seed AOT 对单字符字面量比较曾误判）。
 
+
+### 10.33 P229：phi 精确配边激活成功——解码链首次完整走通（2026-10-06 续XIII）
+
+**三处修正后 (a0) 精确配边全链生效**（back log [a0] 命中 1702 次，pmAdd
+入边值全部纯净）：
+1. **lowerFunction 178 行 Phi 拦截点补剥对**（P228 的剥对误改在
+   lowerValue:214——phi 在进入 lowerValue 前就被 `v.op == "Phi"` 拦截，
+   那条分支是死路径。这就是 P228「pmAdd 垃圾 vid + 驱动 segfault」的根因：
+   `strToInt("2455:13635")` 跳过非数字累加 → 245513635）；
+2. **HatParser 标签→本管线块 id 翻译**：HAT 标签 `bb2988` 里的数字是前端
+   MIR 块 id，HatParser 的块 id 是预登记顺序号（declareBlock 顺序 addBlock）
+   ——必须经 blockMap（findBlockByName）翻译，否则 (a0) 与 predFlat 永远
+   失配、静默落入启发式兜底；
+3. LIR 块 id == MIR 块 id（lowerFunction 直接用 v.block），配对比较有效。
+
+**实测（minimal.auc = tiny4）**：
+* `AURA_VM_LOADONLY=1` → **`valid=true numeric=true err=[] funcs=1
+  consts=1`** ——装载+解码链路**首次完整走通**（此前 const 循环即崩）。
+* 遗留 ①：`name` 局部在多分支派发汇合处的值仍串块（[d] 探针可见，精确
+  配边生效后依旧）——嫌疑转向 phi home 的 RA 着色/常量物化层（边 MOV
+  写入了正确值但消费者读到错值），或 const 轮转覆写家族；
+* 遗留 ②：装载完成后（loadPredecoded/run 段）仍有崩，待 ① 解决后定位。
+
+**下轮**：
+1. gdb 断点抓 name phi 的边 MOV 写入值 vs 消费者读取值（二分「写错」
+   vs「读错」）；
+2. 若读错：查 phi 节点 home 的 RA 区间/干扰（Value/Phi 节点无自写指令，
+   RA 依赖 touchNode 登记边 MOV 触及）；
+3. [d] 全绿后撤探针 → minimal.auc 端到端 → helloworld → fib → 基准。
+

@@ -862,14 +862,24 @@ class HatParser {
             qi = qi + 1
         }
         if (eqPos > 0) {
-            // ⚠️ P228b：`bb<pred>=@t<vid>` 暂解析为**裸 vid**（前驱信息暂不
-            // 下传——front 直通管线（SsaBuilder→LIR→ISel，不经 HatParser/
-            // Lowering）会把 `pred:vid` 原样带进 LirValue.args，strToInt 跨
-            // 冒号拼数字 ⇒ 入边全错。精确配边的激活留待下轮（需给 front
-            // 管线同款旁路表）。序列化/解析语法已就位，激活时只需恢复
-            // `lbl + ":" + rhs` 并给 front 管线接 phiPredMap。
+            // ⚠️ P229：`bb<pred>=@t<vid>` → `本管线块id:vid` 下传。Lowering 的
+            // lowerFunction Phi 拦截点（唯一 phi 路径）剥对 + 记 phiPredMap，
+            // ISel (a0) 精确配边。
+            // ⚠️ 标签里的数字是**前端 MIR 块 id**；本管线（HatParser）的块 id
+            // 是预登记顺序号（declareBlock addBlock 顺序分配）——必须经
+            // blockMap 把 `bb2988` 翻译成本管线 id，否则 (a0) 与 predFlat
+            // 永远失配（实测 decodeNumeric 的 name phi 全部落入启发式兜底）。
+            var lbl: String = HatParserUtils.safeSubstring(name, 0, eqPos).trim()
             val rhs: String = this.resolveOperand(HatParserUtils.safeSubstringFrom(name, eqPos + 1).trim())
-            return rhs
+            val mapped: Int = this.findBlockByName(lbl)
+            if (mapped >= 0) {
+                return HatParserUtils.toStr(mapped) + ":" + rhs
+            }
+            // 兜底：entry 等无数字标签或未预登记——剥 bb 前缀尽力解析
+            if (lbl.length >= 2 && lbl.startsWith("bb")) {
+                lbl = HatParserUtils.safeSubstringFrom(lbl, 2)
+            }
+            return lbl + ":" + rhs
         }
         if (name.startsWith("@")) {
             name = HatParserUtils.safeSubstringFrom(name, 1)
