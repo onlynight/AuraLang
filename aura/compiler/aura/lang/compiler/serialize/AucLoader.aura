@@ -100,7 +100,6 @@ object AucLoaderUtils {
 
     /// 从文件加载 .auc 模块。
     fun loadModule(path: String): AucModule {
-        println("[hop3] len=" + toStr(path.length))
         val mod: AucModule = AucModule()
         println("A")   // AucModule created
 

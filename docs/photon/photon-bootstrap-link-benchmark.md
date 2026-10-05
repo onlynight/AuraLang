@@ -2048,3 +2048,34 @@ C 探针（clang 最小 CreateFileA 程序）证明同参数同 CWD 成功——
 1. 解码阶段 strlen(NULL)：用 [stb]/[rfb] 同款值探针定位空串来源分支；
 2. 已知嫌疑：decodeNumeric 的 name/a0/a1 多分支 phi（P230 二分结论）；
 3. 探针（hop/stb/rfb/pb0）暂留——全链绿后一并撤除。
+
+### 10.37 P233：崩点锁入 decodeNumeric fn0——控制流「跳转」进 runtime strlen（2026-10-06 续XVII）
+
+**阶段探针推进度**（minimal.auc）：
+```
+consts done ✓ → natives done ✓ → tables done ✓ → decode begins ✓
+→ [lm] decode fn0 ✓ →（[pre-dn]/[dn] 探针不执行）崩
+```
+崩点收窄到 **decodeNumeric fn0 的派发/合并头部**（first dispatch merge）。
+
+**决定性观测**：崩点 = runtime `strlen(rcx=NULL)`（0x14005c36f，本构建
+runtime base=0x14005B9A0），但其 **[rsp] 存的是栈地址（0x403fb1c8）而非
+返回地址**——控制流是**跳转转入** strlen 的，不是 call 调用进入。
+[rbp+8] 出现过 listAppend 首字节地址（函数指针残留）。
+
+**主嫌疑**：guest 跳转标签补丁错位（resolveLabels/labelOffset 把某个
+循环回边/派发跳转的位移补到了 runtime strlen 区）——与「崩点随构建
+漂移」家族一致。次嫌疑：phi-mov 边 MOV 落块时机。
+
+**状态**：LOADONLY valid=true numeric=true 保持绿；全量跑在 decodeNumeric
+fn0 派发头崩。临时探针（hop/stb/rfb/pb0/[lm]/[pre-dn]/[dn]）已全部撤除，
+代码回到干净基线。
+
+**下轮（跳转补丁专项）**：
+1. 在 resolveLabels 里加**边界断言探针**：补丁前校验 target 落在本函数
+   [funcStart, funcEnd) 区间内，越界即打印 (jmpFieldOff, labelName,
+   target, funcBounds)——一次构建即可抓出全部错位跳转清单；
+2. 若确认跨函数错位：查 labelNames 表的清理时机（每函数发射后未清？）
+   或 labelOffset 的同名首/尾匹配策略；
+3. 修复后 [pre-dn] 式值探针复验 name/a0/a1（P230 的 phi 值错乱可能与
+   跳转错位同根——边 MOV 落在错函数体内等于没落）。
