@@ -2902,3 +2902,38 @@ lld-link @rsp 文件（Git Bash 路径变形规避）、/DYNAMICBASE:NO noaslr �
 一律 x/gx；③ ASLR 每会话重设基址，跨会话 VA 不可比；④ seed VM 解释执行
 buildRuntimeObject 产物有微妙缺陷（import 调用 rax=0xC0000008），必须走
 seed AOT 原生驱动（PhotonP276.exe）。
+
+### 10.72 P277：野写引擎锁定——融合分支把列表句柄当行索引传参（2026-10-06 续LIV）
+
+**方法论修正**：上轮 ASLR 会话的跨会话 VA 全部作废（基址每 boot 重设）。
+本轮 /MAP 链接（delta=+0x1000 全表一致）+ fixed_noaslr noaslr 基址，
+全部地址 map 权威化。
+
+**勘误**：§10.71 残余的「loadArgsFlat 循环失控 / i,n 栈槽被野写」不成立——
+条件断点（n-slot≠0x473）全程未触发，loadArgsFlat 循环正常 1139 次退出。
+真正的失控循环在 **fuseHotPairs**。
+
+**精确病灶**（fixed_noaslr p277，map 权威地址）：
+- setArgsRow 入口断点（0x1400612a6，条件 rdx>1000）命中：
+  **rdx = 0x14016cdb0 = 一个 125 元素 core 布局列表对象**
+  {len=125, cap=128, items=0x14016d968}——**列表句柄被当作 `r: Int` 行索引
+  传入**；r8 = 0x140183e48 = {len=2, cap=4, items=...} = 真正的 `pair` ✓。
+- 调用点 ret=0x14005f37a（fuseHotPairs blob 内，NOP-fill 的
+  setArgsRow 调用）；rdx 装载自 -0x1730 槽。
+- 而 fuse 主循环头（0x14005aa23）的 r 槽 -0x148 全程 <100000（条件断点
+  未触发）——**融合分支读 `r` 用的槽 ≠ 循环头的 r 槽：发射器值选择
+  装载了持有列表句柄的槽**（「发射器参数装载选择错误」最终实锤，
+  与 Long↔Int 转换、toStr 别名同族）。
+- 源级重构绕避失败（kk/idx 改写后依旧）：RA 槽分配对同名变量的
+  影子槽选择错误，与源码形态无关。
+
+**崩溃级联全图**：融合分支 r=列表句柄 → setArgsRow → argStrs.set(句柄×3+k)
+→ listSet OOB → push 每调用 +1 → NOP-fill `kk < span` 与融合循环在堆耗尽前
+合计数百万次 → 列表 items 翻倍至 8M 元素 → 64MB arena 耗尽（heapBump
+=0x3ffe060 恰为限界）→ newList→NULL → push(list=0) → read64(0) 段错误。
+P274 的 read64(1) = 同一级联在 32MB arena+回绕时代的更早死亡点。
+
+**下轮首查**（单点修复，非盲扫）：HAT 对照 fuseHotPairs 融合分支
+（opCodes.set(r, fused) / setArgsRow(r, pair) 的 SSA 值 → 槽分配），
+找出「列表句柄槽」被选作 `r` 的值来源——ISel/RA 的 load-slot 选择。
+修复后 helloworld 端到端（前有 LOADONLY ✓ / 解码 1194 ✓ 双绿基线）。

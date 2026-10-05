@@ -3446,12 +3446,17 @@ class Vm {
                 this.opCodes.set(r, fused)
                 this.setArgsRow(r, pair)
                 this.ops.set(r, pairName)
-                var k: Int = r + 1
-                while (k < r + span) {
-                    this.opCodes.set(k, Opcodes.OP_NOP)
-                    this.setArgsRow(k, arrayListOf<String>())
-                    this.ops.set(k, "")
-                    k = k + 1
+                // ⚠️ P277 槽别名绕避：原形 `var k = r + 1; while (k < r + span)`
+                // 在 photon 编译下 k 的装载读到陈旧影子槽（被某次调用结果
+                // 临时值污染为堆指针）→ NOP-fill 边界=指针 → 数百万次越界
+                // set → 64MB 堆耗尽。改为索引自增式，改变槽位分配压力。
+                var kk: Int = 1
+                while (kk < span) {
+                    var idx: Int = r + kk
+                    this.opCodes.set(idx, Opcodes.OP_NOP)
+                    this.setArgsRow(idx, arrayListOf<String>())
+                    this.ops.set(idx, "")
+                    kk = kk + 1
                 }
                 r = r + span
             } else {
