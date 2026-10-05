@@ -2106,3 +2106,30 @@ fill）与 decodeNumeric 的派发头都有 NULL 串流动。
    绕开 name phi，先让端到端跑起来；
 2. name/a0/a1 phi 值错乱的根治（RA 跨块区间）继续作为 photon 成熟度
    的独立工作线。
+
+### 10.39 P235：派发链 PushHandler 化完成——phi 绕过不是充分条件（2026-10-06 续XIX）
+
+**过程事故与教训**：第一次改写用 `readByte` 行做锚点，命中的是**文本模式
+解码函数**（instrText 家族，第一个匹配点）而非 decodeNumeric——改写产物
+破坏该函数 ⇒ front 解析失败 ⇒ **整个 AucLoader 模块的函数从 .hat 掉落**
+（decodeNumeric 调用悬空，链接 undefined symbol）。git stash 二分 + hat
+函数普查（967 @fn）+ 逐版本 hat 检查定位。**教训：脚本化大改写必须用
+函数内唯一锚（如 `var name: String = opcodeName`）二次断言目标身份**。
+
+**正确落地的 PushHandler 化**：decodeNumeric 全派发链（0/23-25/26/27/78/
+30/32-33/40/71/70-77/72/80-81/82/默认路径）每分支内联 numOpNames/
+numArgsFlat 追加后 continue——**name/a0/a1 的 merge phi 全部消灭**
+（.hat 保留 ✓ 2391 个 bb= phi ✓ LOADONLY valid=true ✓）。
+
+**结果**：全量跑仍在 B 后 strlen(NULL) 崩——**phi 绕过不是充分条件**：
+NULL 串另有源头（readStr 逐字符 strcat 链 / fromCharCode / 常量池循环
+的某处——fromCharCode 实现已复核正确）。P230 的「direct= 正确」只证明
+opcodeName 路径健康，不证明 name phi 是唯一污染源。
+
+**下轮**：
+1. 崩点回溯：strlen 叶子帧的调用者（[rbp+8]）在**当前构建**的精确解析
+   （PE .text RVA 0x1000 + obj 偏移，P232 工具法）；
+2. 嫌疑复排：readStr 的 `result + fromCharCode(c)` 循环（result 跨迭代
+   phi！与 name 同族——readStr 也该 PushHandler 化：改为先收集字节到
+   局部数组/固定容量缓冲再一次性构建）；
+3. readStr 稳定后：decode fn0 → 全解码 → 端到端。
