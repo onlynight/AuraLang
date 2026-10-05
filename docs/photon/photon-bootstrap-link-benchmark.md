@@ -2584,3 +2584,23 @@ substringAt/Before/After）——`substring` 的符号解析/实现为下轮首�
 **下轮**：
 1. 查 `substring(start, end)` 的符号解析（readU32Int 同款直查法）；
 2. 修复后端到端 minimal.auc → helloworld → fib。
+
+### 10.59 P257：崩点病理精化——count>0 而 itemsPtr=NULL 的列表（2026-10-06 续XXXIX）
+
+**gdb 双探针**：
+* indexOf 入口探针（首次调用）：list=NULL，value=0x140062aa7（字符串
+  指针）——**null 守卫正确返回 -1**（无辜）；
+* 崩溃帧：`read64(items + i*8)` 其中 **items=NULL、len>0**——存在一个
+  「header.count=8 但 header.itemsPtr=NULL」的列表。
+
+**来源锁定**：core `newList(cap)` 的**items 分配失败路径**会写出这种
+状态（`if (items == 0) { write64(l+16, 0) }`——count 已写 0 但后继
+grow 又写 count>0？或 32MB 边界/对齐导致 alloc 返回 0）。另：崩溃时
+value*8 已非 0（i 已推进），说明循环已迭代若干次。
+
+**下轮**：
+1. guest 全列表头体检：在 decode 完成点遍历
+   mod.numOpNames/numArgsFlat/consts 相关列表，打印
+   count/cap/itemsPtr 三元组——找出 count>0 && itemsPtr==0 的列表；
+2. 或 HeapDiag 扩展 `hdr3(l: Long)` 返回打包三元组；
+3. 修复（alloc 失败不该静默写 0 itemsPtr——应连同 count 写 0）后端到端。
