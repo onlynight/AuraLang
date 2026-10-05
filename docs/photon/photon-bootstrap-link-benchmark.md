@@ -2212,3 +2212,29 @@ Vm_setArgsRow 区 strlen(0x1) 同属此家族（装载期还有别的 hashCode/
 2. 调用侧 demotion 限定补齐（解析期 demoted 调用的 receiver 类型查表
    限定）→ 移除 toUpperCase/LowerCase 排除；
 3. 端到端 minimal.auc → helloworld → fib。
+
+### 10.43 P238：崩点定格 numArgsFlat 列表堆覆写（2026-10-06 续XXII）
+
+**调用链实证**：`loadArgsFlat` 的 `ln.length` → `strlen(ln=0x1)`——
+`flat.get(i)`（numArgsFlat 的 getAt）返回了**整数 1** 而非字符串。
+loadArgsFlat 自身代码纯 charCodeAt/vmSubstr/add（无 strlen 触达）⇒
+**numArgsFlat 列表（句柄/items/count）在解码完成后、loadArgsFlat 消费前
+被第三方覆写**。
+
+**排除项**：PushHandler 化（分支内联 add 全为字符串字面量/局部串）✓、
+readStr 递归化 ✓、fromCharCode bump 算术（复核正确）✓、emitObjectAlloc
+边界算术（复核正确）✓。
+
+**嫌疑收窄（下轮实验设计）**：
+1. **窗口括号法**：decode 完成点 vs loadArgsFlat 入口各打
+   `size=`+`get(0)/get(1)/get(2)` 值探针——覆写发生在两探针之间；
+2. 若 decode 后即刻已坏 ⇒ 写手在 decode 循环内（const 池 escape 拼接 /
+   instrIndexAt / classNameAt 的某个野写）；
+3. 若 loadArgsFlat 前才坏 ⇒ 写手在 loadPredecoded 的前置段
+   （registerAucClasses / funcTable 解析）；
+4. 定位写手后预计为「某个 Long/Int 值写进了列表 items 区」——与
+   §10.35 布局敏感家族（值在物化点与消费点之间被覆写）同源。
+
+**本轮落地**：readStr 递归化（消 String phi）✓；decodeNumeric 派发链
+PushHandler 化 ✓；接收者注入 + Opcodes 平行表 ✓（前两轮）。LOADONLY
+valid=true 保持。
