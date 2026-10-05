@@ -437,6 +437,7 @@ object AucLoaderUtils {
         }
 
         reader.dispose()
+        println("[ret] n=" + toStr(mod.numArgsFlat.size()))
         return mod
     }
 

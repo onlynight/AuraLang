@@ -2604,3 +2604,23 @@ value*8 已非 0（i 已推进），说明循环已迭代若干次。
    count/cap/itemsPtr 三元组——找出 count>0 && itemsPtr==0 的列表；
 2. 或 HeapDiag 扩展 `hdr3(l: Long)` 返回打包三元组；
 3. 修复（alloc 失败不该静默写 0 itemsPtr——应连同 count 写 0）后端到端。
+
+### 10.60 P263：loadArgsFlat 通过！崩点收窄至泛型特化 HashMap 构造器（2026-10-06 续XL）
+
+**探针梯进展**（helloworld，PhotonP254 构建）：
+```
+winA/winB（解码+装载输入）✓ 1194 条全对
+loadArgsFlat ✓（此前崩点已过！）
+winE1 stack ✓ winE2 globals(HashMap<String,Any>) ✓
+winE3 callStack ✓ winE4 frames ✓
+✗ 崩：aucArgBase/aucMode 赋值后、6 个泛型特化 HashMap 构造器中
+```
+**此前所有崩点（decode/constPool/loadArgsFlat）全部通过**——修复组合
+持续生效。
+
+**剩余崩点**：`HashMap<String, HashMap<String, Any>>` 等新泛型实例化的
+构造器（`HashMap<String, Any>` 已通过 ⇒ 基础构造器无辜，是**特化实例
+的代码生成**问题——每特化一份独立 ctor）。
+
+**下轮**：winE 细分探针（6 ctor 逐个）→ 定位具体特化 → 查该特化的
+构造器代码生成（新特化的 gens/范围）。

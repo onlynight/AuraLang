@@ -231,6 +231,7 @@ class Vm {
     fun loadBytecode(code: String, consts: String, funcs: String): Unit {
         this.bytecode = code
         this.constPool = consts
+        println("[w] after constPool e0=[" + args.get(0) + "]")
         this.funcTable = funcs
         this.ip = 0
         this.running = true
@@ -243,8 +244,10 @@ class Vm {
         this.globals = HashMap<String, Any>()
         println("[winE2] globals ok")
         this.callStack.reset()
+        println("[winE3] callStack ok")
         this.savedLocals = VmFrameStack()
         this.handlerStack = VmStrStack()
+        println("[winE4] frames ok")
         this.instructionCount = 0
         this.currentFrame = 0
         this.currentFunc = ""
@@ -268,6 +271,7 @@ class Vm {
     /// 直读路径；类定义表自动注册进类继承注册表（继承/虚方法分派生效）。
     fun loadAucAndRun(path: String): Any {
         val mod: AucModule = AucLoaderUtils.loadModule(path)
+        println("[m0] n=" + toStr(mod.numArgsFlat.size()))
         val loadOnly: String = Env.get("AURA_VM_LOADONLY", "")
         if (loadOnly == "1") {
             this.error = "loadonly valid=" + toStr(mod.isValid()) + " numeric=" + toStr(mod.numericMode)
@@ -286,7 +290,9 @@ class Vm {
             println("[winB2-0]=[" + mod.numArgsFlat.get(0) + "]")
             println("[winB2-n]=" + toStr(mod.numArgsFlat.size()) + " onN=" + toStr(mod.numOpNames.size()) + " on0=[" + mod.numOpNames.get(0) + "] ftLen=" + toStr(mod.funcTable.length) + " cpN=" + toStr(mod.constsCount))
             // P2.2c：类表 → 类继承注册表（parent_id 0 = Any；防自环）
+            println("[m1] pre-regClasses n=" + toStr(mod.numArgsFlat.size()))
             this.registerAucClasses(mod.classNames, mod.classParentIds)
+            println("[m2] post-regClasses n=" + toStr(mod.numArgsFlat.size()))
             println("[winC-0]=[" + mod.numArgsFlat.get(0) + "]")
             println("[winC-1]=[" + mod.numArgsFlat.get(1) + "]")
             this.loadPredecoded(mod.numOpNames, mod.numArgsFlat, mod.constPool,
@@ -313,8 +319,10 @@ class Vm {
         this.globals = HashMap<String, Any>()
         println("[winE2] globals ok")
         this.callStack.reset()
+        println("[winE3] callStack ok")
         this.savedLocals = VmFrameStack()
         this.handlerStack = VmStrStack()
+        println("[winE4] frames ok")
         this.instructionCount = 0
         this.currentFrame = 0
         this.currentFunc = ""
@@ -329,8 +337,11 @@ class Vm {
         this.boxValues = HashMap<String, Any>()
         this.closureCaptures = HashMap<Int, List<Any>>()
         this.currentClosure = -1
+        println("[winE5] maps ok")
         this.buildLineCache()
+        println("[winE6] lineCache ok")
         this.buildLoadCaches()
+        println("[winE7] loadCaches ok")
         return this.run()
     }
 
@@ -343,10 +354,13 @@ class Vm {
         funcs: String, exports: String, imports: String): Unit {
         this.bytecode = ""
         this.constPool = consts
+        println("[w] after constPool e0=[" + args.get(0) + "]")
         this.funcTable = funcs
         this.exportsTable = exports
         this.importsTable = imports
         this.ops = opNames
+        // P260 逐赋值探针
+        println("[w] after ops e0=[" + args.get(0) + "]")
         // P239 括号探针 B：loadArgsFlat 消费点
         println("[winB] n=" + toStr(args.size()))
         println("[winB-0]=[" + args.get(0) + "]")
@@ -376,8 +390,10 @@ class Vm {
         this.globals = HashMap<String, Any>()
         println("[winE2] globals ok")
         this.callStack.reset()
+        println("[winE3] callStack ok")
         this.savedLocals = VmFrameStack()
         this.handlerStack = VmStrStack()
+        println("[winE4] frames ok")
         this.instructionCount = 0
         this.currentFrame = 0
         this.currentFunc = ""
