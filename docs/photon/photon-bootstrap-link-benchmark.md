@@ -2964,3 +2964,44 @@ substring 越界（NULL 修复后安全）。嫌疑集中：某列表的 items �
 DIFF 找被改槽；或 VirtualProtect 栈底 guard page 抓首个越界写。
 **工具教训追加**：条件断点 `if $rdx>1000` 命中时的 SIGSEGV 标签 =
 prologue 栈耗尽，非断点异常；[rsp]=0 = 野转移铁证。
+
+### 10.73 P278-282：崩溃清零——vmhost 首次完整运行（exit=0），余 flat 截断一处（2026-10-06 续LVI）
+
+**里程碑**：photon 编译的 VM 宿主首次**完整运行不崩溃**：
+```
+[winC2] post-loadPredecoded ✓（decode 首次走完）
+[M3] loadAucAndRun returned ✓
+err=[Unknown function: p]  instrs=11  exit=0 ✓（优雅错误，非段错误）
+```
+
+**本段修复**：
+1. **fuseGuard**（Vm.aura fuseHotPairs）：迭代护栏 n*4+100。实测 fuse 主
+   循环曾在 r=55 卡死不推进（141,466 次 head 经过 r 恒 55），每圈 body
+   分配（fresh pair + toStr concat）耗尽 64MB arena → newList→NULL →
+   push(list=0) → read64(0)。护栏放弃剩余融合（纯优化，语义不变）。
+2. **提取工作流修复**：build_fixed_from_driver.ps1 的 log 指针 sed 链断裂，
+   p279 起一直提取陈旧 p278 日志——「重建后行为不变」的假象来源。
+   已指向 p282 并逐次核对。
+
+**新发现（本轮两个 photon 前端缺陷实证）**：
+1. **链式 field-get 接收者的方法解析发射裸名**：`mod.numArgsFlat.size()`
+   → `call size`（undefined symbol）。绕避：先落局部变量再调方法。
+2. **后端静默丢弃直线代码**：loadPredecoded 中 loadArgsFlat 之后的
+   println 探针（HAT 有 [FLAT0] ✓）在二进制中不存在（winB-2 在 ✓）——
+   探针块被 SSA/DAG 链路丢弃。这与 fuse r-advance 失效同族：
+   **photon 后端会丢语句**。
+
+**残余（唯一拦路）**：`Unknown function: p`——p282 loader（photon 编译
+的 AucLoader.decodeNumeric）解析 flat 仅 219 条（seed 正确值 1194），
+CALL 的 funcName 截断为 "p"。解码循环 `while (offset < codeLen && pos <
+endPos)` 提前终止 = 循环推进/终止缺陷家族第二例（与 fuse r 不推进同族，
+P235 的分支内联加固未根治）。object dump：崩点 accessor 读 0x140069a6a
+（.rdata 尾/.data 前的未映射缝隙）= 野句柄字段读的精确签名。
+
+**下轮首查**：decodeNumeric 的 offset 推进（`offset = offset + 1 +
+operandSize`，×20 内联分支）与 codeLen/endPos 终止值——同一发射器
+循环推进缺陷的第二实例，修一处验证一类。funcNames 的 readStr 截断
+（"p"）同一根因的第二表现。
+
+**状态**：LOADONLY ✓ / 解码 1194 ✓ / 宿主完整运行 exit=0 ✓ /
+余 loader flat 截断一处。

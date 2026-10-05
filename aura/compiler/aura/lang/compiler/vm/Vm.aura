@@ -349,6 +349,10 @@ class Vm {
         println("[hbB2]=" + toStr(HeapDiag.heapbump()))
         println("[winB-2]=[" + args.get(2) + "]")
         this.loadArgsFlat(args)
+        // P279 flat 探针：loader 侧 args vs VM 侧 argStrs，定位 "p" 截断层
+        println("[FLAT0] [0]=[" + args.get(0) + "] [1]=[" + args.get(1) + "] [2]=[" + args.get(2) + "] [3]=[" + args.get(3) + "]")
+        println("[FLAT30] [30]=[" + args.get(30) + "] [31]=[" + args.get(31) + "] [32]=[" + args.get(32) + "]")
+        println("[AS] [30]=[" + this.argStrs.get(30) + "] [31]=[" + this.argStrs.get(31) + "] [32]=[" + this.argStrs.get(32) + "]")
         this.opCodes = arrayListOf<Int>()
         var i: Int = 0
         while (i < opNames.size()) {
@@ -3307,7 +3311,13 @@ class Vm {
         // 窗口内是否含跳转目标（首行 r 允许是目标——目标落在融合对首行=执行整对 ✓）
         // hasTarget(r+1, span-1)
         var r: Int = 0
+        // ⚠️ P277 迭代护栏：photon 编译下本循环曾出现 r 不推进（head 141,466
+        // 次经过 r 恒 55）→ 每圈 body 分配（pair/toStr）耗尽 64MB arena。
+        // 融合是纯优化，护栏触发时放弃剩余融合即可，解码语义不变。
+        var fuseGuard: Int = 0
         while (r < n - 1) {
+            fuseGuard = fuseGuard + 1
+            if (fuseGuard > n * 4 + 100) { break }
             val op: Int = this.opCodes.get(r)
             var fused: Int = 0
             var pairName: String = ""
