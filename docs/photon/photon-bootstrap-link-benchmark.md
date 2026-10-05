@@ -1958,3 +1958,33 @@ Aura 的 AOT 下 `s.charCodeAt(i)` 判 ':'/'=' 等可打印字符时直接写数
    RA 依赖 touchNode 登记边 MOV 触及）；
 3. [d] 全绿后撤探针 → minimal.auc 端到端 → helloworld → fib → 基准。
 
+
+### 10.34 P230：name 串值二分定位——phi 层实锤（2026-10-06 续XIV）
+
+**二分探针**（同一行打 `n=[name 经 phi]` 与 `direct=[opcodeName 直连]`）：
+```
+[d]0 n=[LOAD_CONST_I]     direct=[CONST_INT]    ← 迭代1 两边都对
+[d]2 n=[]                 direct=[STORE_LOCAL]  ← 迭代2 phi 值为空
+[d]1 n=[CALL_NATIVE_ARGS] direct=[LOAD_LOCAL]   ← 迭代3 phi 值泄漏它分支值
+```
+* **常量物化层排除**（direct 全对 ⇒ @str.N/lea/重定位链健康）；
+* **phi 层实锤**：迭代 1 正确、后续迭代错——嫌疑精确指向 **phi home 的
+  RA 着色/活跃区间**：phi 节点（kind=Value op=Phi）无自写指令，其唯一
+  写入是 pred 块末的边 MOV（pattern 7）。RA 的 touchNode 对「跨块 MOV
+  定义 + merge 块消费」的区间/干扰若失真（MOV 所在 pred 块里该寄存器
+  已被其他活值占用而干扰图不可见），即出现「边 MOV 写对了、消费者读到
+  被覆盖后的残值」——与观测吻合（迭代 1 对：首次 MOV 后未被覆盖；
+  后续迭代：pred 块内其他值把 home 覆写）。
+
+**下轮（RA 专项）**：
+1. gdb 断点：边 MOV 指令处打印写入值/地址 vs 消费者读取处——确认
+   「写对读错」（RA 覆写）vs「写错」（MOV 参数错）；
+2. 若 RA 覆写：查 buildIntervalInterference 对「Phi 节点 + 跨块边 MOV」
+   的区间合成（phi 的 def 应视为**所有 pred 块 MOV 点的并集**，live 一直到
+   merge 块最后一次消费）；或对 Phi 节点强制**溢出到栈槽**（绕开寄存器
+   着色，先保正确再谈优化）；
+3. 备选绕过：把 decodeNumeric 的 if-else 派发链提为独立函数（分支内
+   直接 ret，无 merge phi）。
+
+**状态**：LOADONLY valid=true（解码结构完整）；name 值错乱只影响
+numOpNames 助记符正确性（执行期 opcode 数值化）。
