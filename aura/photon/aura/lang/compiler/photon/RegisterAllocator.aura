@@ -223,8 +223,19 @@ class RegisterAllocator {
             // 回滚 phi 溢出，解码恢复 n=1194。phi 正确性靠 (a0) 精确配边
             // （P229）而非强制溢出。
             if (node.kind == "Value" || node.kind == "Reg" || node.kind == "Const") {
-                val interference: String = this.buildIntervalInterference(i)
-                this.assignColor(i, interference)
+                // ⚠️ P268：**长寿命值强制溢出**——活跃区间 > LONG_LIVE_THRESHOLD
+                // 条指令的值大概率跨块/跨调用，寄存器分配对这些值的干扰计算
+                // 在控制流汇合处不可靠（实测布局敏感家族的根因）。溢出到
+                // 专属栈槽后读写家一致（slotForNode 记忆 + getSpillOffset
+                // 恢复），彻底消除寄存器冲突的布局敏感性。
+                val f: Int = if (i < this.spanFirst.size) { this.spanFirst[i] } else { -1 }
+                var l: Int = if (i < this.spanLast.size) { this.spanLast[i] } else { -1 }
+                if (f >= 0 && l - f > 64) {
+                    this.spill(i)
+                } else {
+                    val interference: String = this.buildIntervalInterference(i)
+                    this.assignColor(i, interference)
+                }
             }
             // 每 4000 节点打一次点：OOM 时最后一行即「卡在第几个节点」。
             if (i % 4000 == 3999) {
