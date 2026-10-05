@@ -218,16 +218,19 @@ class RegisterAllocator {
             // 不得不再先根治布局敏感家族。phi 正确路线维持「启发式配边 +
             // P229 状态」，RA 专项（跨块 MOV 定义的区间合成）留待布局
             // 根治后重启。
-            // ⚠️ P249 实验：Phi 强制溢出导致解码截断（n=1194→8，P267 实测
-            // phi 溢出改变了 RA 布局进而影响 decodeNumeric 自身的代码生成）。
-            // 回滚 phi 溢出，解码恢复 n=1194。phi 正确性靠 (a0) 精确配边
-            // （P229）而非强制溢出。
-            // ⚠️ P269：长寿命强制溢出已回滚（n=1189 但仍崩于 loadArgsFlat），
-            // 保持 P244 布局（无强制溢出），仅依赖后续修复（Long↔Int/toStr 等）。
-            if (node.kind == "Value" || node.kind == "Reg" || node.kind == "Const") {
-                val interference: String = this.buildIntervalInterference(i)
-                this.assignColor(i, interference)
-            }
+            // ⚠️ P270 **全部值走栈槽**（禁用寄存器着色）——每值一个
+            // slotForNode 专属槽，读写家一致，彻底消除：
+            //   * 寄存器冲突的布局敏感性
+            //   * 跨块值被其他值覆写
+            //   * phi 合并值的 RA 区间不可靠
+            // 性能：全部经内存读写（比寄存器慢 ~2×），但**正确性优先**。
+            // 后续优化：只对跨块值溢出、短寿命值恢复着色（需正确 liveness）。
+            // if (node.kind == "Value" || node.kind == "Reg" || node.kind == "Const") {
+            //     val interference: String = this.buildIntervalInterference(i)
+            //     this.assignColor(i, interference)
+            // }
+            // P270: 着色禁用——所有节点颜色为空 ⇒ regOfNodeRaw ③ slotForNode
+            // 路径自动接管。funcExtraSlots 由 X86Emitter 扫描自动计数。
             // 每 4000 节点打一次点：OOM 时最后一行即「卡在第几个节点」。
             if (i % 4000 == 3999) {
                 this.raProbe("step2 i=" + toStr(i + 1) + "/" + toStr(d.nodeCount) +

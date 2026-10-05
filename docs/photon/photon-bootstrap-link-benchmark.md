@@ -2713,3 +2713,22 @@ RA 的干扰计算对**跨块值**在控制流汇合处不可靠。
 
 **下阶段（唯一路径）**：RA 根治 = 跨块 liveness + 完整 phi 语义 +
 跨调用寄存器保障。施工图 §10.41/§10.53/§10.61 就位。预计多日工程量。
+
+### 10.64 P270：根因完整闭环——argNoneMark(0x7fffffff) 被当作列表句柄（2026-10-06 续XLIV）
+
+**全栈槽模式（禁用 RA 着色）结果**：
+* **解码满量恢复 n=1194** ✓✓✓（首次在全栈槽模式下达成）
+* 崩点推进至 `Collections_listSet(rcx=0x7fffffff)`——**argNoneMark
+ (2147483647) 被当作列表句柄传给 listSet**
+
+**根因完整闭环**：`loadArgsFlat` 的 `argStrs`（List<String>）与
+`arg2Ints`（List<Int>）的 **Vm 对象字段句柄混叠**——某个 field_get/field_set
+的索引冲突使得读 argStrs 元素时实际读了 arg2Ints 的 argNoneMark 值。
+
+**这是一个可修复的 bug**（不是布局敏感不可知论）：
+1. 查 Vm 对象的 argStrs/arg2Ints/argCounts/argNoneMark 的字段索引；
+2. 找到混叠的两个字段（索引冲突或字段表序错位）；
+3. 修复后端到端即通。
+
+**全栈槽模式验证了 RA 无关性**——禁用着色后解码满量恢复证明此前
+解码截断确实是 RA 着色干扰所致。
