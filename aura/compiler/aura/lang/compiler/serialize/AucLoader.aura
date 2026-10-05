@@ -194,7 +194,6 @@ object AucLoaderUtils {
             ni = ni + 1
         }
 
-        println("[hb7]=" + toStr(HeapDiag.heapbump()))
         // 7. 函数（两遍扫描：P2.2 取消文本翻译）
         //
         // 第 1 遍：只读函数头（name/params/locals/aot 标记/codeLen），记录代码段
@@ -237,7 +236,6 @@ object AucLoaderUtils {
             fi = fi + 1
         }
 
-        println("[hb8]=" + toStr(HeapDiag.heapbump()))
         // 8. 入口点（可选解析；VM 走 `funcOffset("main")`，不依赖该字段）
         mod.entry = reader.readU16()
         mod.entryKind = reader.readStr()
@@ -399,7 +397,6 @@ object AucLoaderUtils {
             // 段数据区（剩余字节）不再消费——随 Photon 任务
         }
 
-        println("[hb2p]=" + toStr(HeapDiag.heapbump()))
         // ═══ 第 2 遍：数值化解码（P2.2b，取消文本翻译层）═══
         mod.numericMode = true
         var lineNo2: Int = 0
@@ -415,19 +412,10 @@ object AucLoaderUtils {
             fi3 = fi3 + 1
         }
         // P239 括号探针 A：decode 完成点的 numArgsFlat 健康度
-        println("[hbWinA]=" + toStr(HeapDiag.heapbump()))
-        println("[winA] n=" + toStr(mod.numArgsFlat.size()) + " onN=" + toStr(mod.numOpNames.size()))
-        var wi: Int = 0
-        while (wi < 8 && wi < mod.numArgsFlat.size()) {
-            println("[winA-e" + toStr(wi) + "]=[" + mod.numArgsFlat.get(wi) + "]")
-            wi = wi + 1
-        }
         // P239b 新建列表自读：分配器当下健康 vs numArgsFlat 早期被覆写
         val probeL: List<String> = arrayListOf<String>()
         probeL.add("AA")
         probeL.add("BB")
-        println("[winA3] fresh=[" + probeL.get(0) + probeL.get(1) + "]")
-        println("[hb@winA]=" + toStr(HeapDiag.heapbump()))
         // 函数表：起始行 = 指令下标（无数值注释占位行）
         var fi4: Int = 0
         while (fi4 < mod.funcsCount) {
@@ -437,9 +425,14 @@ object AucLoaderUtils {
         }
 
         reader.dispose()
-        println("[ret] n=" + toStr(mod.numArgsFlat.size()))
+        AucLoaderUtils.lastLoaded = mod
         return mod
     }
+
+    /// ⚠️ P266：返回值全局槽中转——绕开 RA 返回值通路（rax→调用方槽的
+    /// 句柄漂移，§10.50/P250）。loadModule 将结果写入此静态字段，
+    /// loadAucAndRun 从此字段读取（.data 槽不受 RA 区间/干扰影响）。
+    var lastLoaded: AucModule = AucModule()
 
     /// headerFlags 位检测（避免跨包位运算依赖：正整数用除法/取模实现）。
     private fun hasHeaderFlag(flags: Long, bit: Int): Boolean {
@@ -728,7 +721,6 @@ object AucLoaderUtils {
         var offset: Int = 0
         while (offset < codeLen && reader.pos < endPos) {
             val opcode: Int = reader.readByte()
-            println("[dn] off=" + toStr(offset) + " pos=" + toStr(reader.pos) + " op=" + toStr(opcode))
             if (opcode < 0) { break }
 
             val operandSize: Int = operandSizeLookup(opcode)

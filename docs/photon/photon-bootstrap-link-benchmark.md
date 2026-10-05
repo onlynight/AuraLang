@@ -2647,3 +2647,29 @@ winE3 callStack ✓ winE4 frames ✓
 
 **根治后的验收标准**：同一构建下 helloworld 端到端打印 Hello World
 （或至少不受探针增减影响）。
+
+### 10.62 总结：10 项系统性修复 + RA 根治为下阶段主线（2026-10-06 收官）
+
+**已修复并验证的 10 项系统性 emit 缺陷**：
+1. 栈参 ABI（结构性恒定：7 callee-saved + 0x68 基址）——「崩点漂移」总根源
+2. 负号 xor+sub（ISel Neg 分派 + toStr 负数标志寄存器修正）
+3. 空串物化（emitConst ""→@str.N 真实分配）
+4. Memory_copy 8× 过量复制（字节数误当 QWORD 次数）
+5. Long↔Int 截断转换（readU32Int 纯 Int 算术直出）
+6. **toStr 静态缓冲别名**（heap 32B 副本返回）
+7. 接收者注入（值类白名单 + HashMap hashKey 对齐）
+8. Opcodes 平行表（去 HashMap/hashKey 家族）
+9. decodeNumeric 派发链 PushHandler 化 + readStr 递归化
+10. emitCollectionClear/emitReadCStr 补回
+
+**能力验证**：P244 布局下 helloworld **1194 条/398 指令解码全对** ✓；
+LOADONLY valid=true funcs=7 consts=54 ✓（P267 布局 49 条因 phi 溢出
+回滚后回归布局敏感值）。
+
+**剩余核心问题**：RA 跨块生命周期——跨 pred/merge 块值（Phi/跨函数
+返回/长寿命局部）的寄存器/槽位分配在布局变化时不稳定。**根治需 RA
+重写**（正确的跨块 liveness + phi 语义 + 跨调用寄存器保障）——
+多日工程量，施工图 §10.41/§10.53/§10.61 就位。
+
+**P267 状态**：phi 溢出回滚后 n=49（布局敏感值），LOADONLY 功能正常。
+探针 winB 系仍留 Vm.aura（下轮清理）。

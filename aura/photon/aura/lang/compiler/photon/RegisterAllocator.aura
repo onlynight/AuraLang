@@ -218,14 +218,11 @@ class RegisterAllocator {
             // 不得不再先根治布局敏感家族。phi 正确路线维持「启发式配边 +
             // P229 状态」，RA 专项（跨块 MOV 定义的区间合成）留待布局
             // 根治后重启。
-            // ⚠️ P249 重启 P231 方向（前置条件已变）：Memory_copy 8× 过量
-            // 复制已修（§10.51）——P231 时代的「布局位移激活潜伏缺陷」中
-            // 至少一支已根治。Phi 强制溢出栈槽：slotForNode 专属槽 +
-            // emitMovRR isStackRef 写槽（机制已验证），配合 X86Emitter 的
-            // instr.output 扫描（帧预算含 phi 槽）。跨块边 MOV 定义的
-            // 着色区间失真是「值随布局漂移」家族的头号根因候选。
-            if ((node.kind == "Value" || node.kind == "Reg" || node.kind == "Const")
-                    && node.op != "Phi") {
+            // ⚠️ P249 实验：Phi 强制溢出导致解码截断（n=1194→8，P267 实测
+            // phi 溢出改变了 RA 布局进而影响 decodeNumeric 自身的代码生成）。
+            // 回滚 phi 溢出，解码恢复 n=1194。phi 正确性靠 (a0) 精确配边
+            // （P229）而非强制溢出。
+            if (node.kind == "Value" || node.kind == "Reg" || node.kind == "Const") {
                 val interference: String = this.buildIntervalInterference(i)
                 this.assignColor(i, interference)
             }
