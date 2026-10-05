@@ -417,18 +417,7 @@ object AucLoaderUtils {
         }
         // P239 括号探针 A：decode 完成点的 numArgsFlat 健康度
         println("[hbWinA]=" + toStr(HeapDiag.heapbump()))
-        println("[winA] n=" + toStr(mod.numArgsFlat.size()))
-        var wi: Int = 0
-        while (wi < mod.numArgsFlat.size()) {
-            println("[winA-e" + toStr(wi) + "]=[" + mod.numArgsFlat.get(wi) + "]")
-            wi = wi + 1
-        }
-        println("[winA-on] n=" + toStr(mod.numOpNames.size()))
-        var wi2: Int = 0
-        while (wi2 < mod.numOpNames.size()) {
-            println("[winA-on" + toStr(wi2) + "]=[" + mod.numOpNames.get(wi2) + "]")
-            wi2 = wi2 + 1
-        }
+        println("[winA] n=" + toStr(mod.numArgsFlat.size()) + " onN=" + toStr(mod.numOpNames.size()))
         // P239b 新建列表自读：分配器当下健康 vs numArgsFlat 早期被覆写
         val probeL: List<String> = arrayListOf<String>()
         probeL.add("AA")

@@ -2447,3 +2447,33 @@ mod 字段内容真实变化）。
 **状态**：LOADONLY 绿；修复清单（栈参/负号/空串/Memory_copy/接收者
 注入/Opcodes 平行表/PushHandler 化/readStr 递归）全部保持；探针
 （winA/winA3/hb/winB2/winC/winB/HeapDiag）暂留供下轮继续。
+
+### 10.53 P250：解码量随布局连续变化——1194→8→49 实测（2026-10-06 续XXXII）
+
+**实验**：删除 winA 逐元素 dump 循环（helloworld 时 1600 次 println，
+海量临时串分配的布局扰动源）后重跑 helloworld：
+```
+P244 布局（无 dump 循环）：n=1194 ✓
+P248 布局（有 dump 循环）：n=8
+P250 布局（删 dump 循环）：n=49
+```
+**解码量随探针布局连续变化**——get(0) 的返回值恰为列表内其他元素
+（e1/e4/e9），即 **get 的 items 基址/索引随布局偏移**。
+
+**新定性**：这不是「列表被第三方覆写」，而是 **field 20 读到的列表
+对象本身随布局切换**（winA 读的 A 与 winB2 读的 B self-consistent：
+B 的 n=49 且 get(0)="1" 在 B 内自洽）——**同一个 field 20 槽在
+winA 与 winB2 读到不同的列表句柄**——两处读的是不同函数中的
+`mod.numArgsFlat`：winA 在 loadModule 内（mod=局部），winB2 在
+loadAucAndRun 内（mod=**返回值接收变量**）——**返回值传递链
+（emitRetValue rax → 调用方槽）存在句柄漂移**，与 P231 self-view
+实验的 RA home 冲突家族同源。
+
+**下轮（RA 返回值通路专项）**：
+1. HeapDiag 扩展 `itemsOf(l: Long): Long`（read64(l+16)），winA/winB2
+   各打 numArgsFlat 的 items 指针——量化句柄漂移；
+2. 查 loadModule 返回值：emitRetValue 的 rax → loadAucAndRun 接收槽
+   的 RA 区间是否被中间调用破坏（loadAucAndRun 前导的
+   mod.isValid()/Env.get 调用）；
+3. 或最务实：loadAucAndRun 改为从**堆槽**取 mod（loadModule 返回后
+   立即经显式局部中转，禁用寄存器直传——绕开 RA 返回值通路）。
