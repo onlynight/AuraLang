@@ -337,6 +337,9 @@ class Vm {
         this.exportsTable = exports
         this.importsTable = imports
         this.ops = opNames
+        // P239 括号探针 B：loadArgsFlat 消费点
+        println("[winB] n=" + toStr(args.size()) +
+                " e0=[" + args.get(0) + "] e1=[" + args.get(1) + "]")
         this.loadArgsFlat(args)
         this.opCodes = arrayListOf<Int>()
         var i: Int = 0

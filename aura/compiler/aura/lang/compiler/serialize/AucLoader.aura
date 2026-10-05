@@ -412,6 +412,15 @@ object AucLoaderUtils {
             lineNo2 = lineNo2 + decoded
             fi3 = fi3 + 1
         }
+        // P239 括号探针 A：decode 完成点的 numArgsFlat 健康度
+        println("[winA] n=" + toStr(mod.numArgsFlat.size()) +
+                " e0=[" + mod.numArgsFlat.get(0) + "] e1=[" + mod.numArgsFlat.get(1) +
+                "] e2=[" + mod.numArgsFlat.get(2) + "] e3=[" + mod.numArgsFlat.get(3) + "]")
+        // P239b 新建列表自读：分配器当下健康 vs numArgsFlat 早期被覆写
+        val probeL: List<String> = arrayListOf<String>()
+        probeL.add("AA")
+        probeL.add("BB")
+        println("[winA3] fresh=[" + probeL.get(0) + probeL.get(1) + "]")
         // 函数表：起始行 = 指令下标（无数值注释占位行）
         var fi4: Int = 0
         while (fi4 < mod.funcsCount) {

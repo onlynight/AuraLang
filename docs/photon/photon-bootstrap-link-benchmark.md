@@ -2238,3 +2238,26 @@ readStr 递归化 ✓、fromCharCode bump 算术（复核正确）✓、emitObje
 **本轮落地**：readStr 递归化（消 String phi）✓；decodeNumeric 派发链
 PushHandler 化 ✓；接收者注入 + Opcodes 平行表 ✓（前两轮）。LOADONLY
 valid=true 保持。
+
+### 10.44 P239：分配器状态在解码循环期间被破坏实锤（2026-10-06 续XXIII）
+
+**窗口括号法结果**：
+* `[winA]`（decode 完成）：numArgsFlat n=6 ✓ 但 **e0/e1/e2 全 = "6"**
+ （读到的像是列表自身 count/cap——items 指针自指或地址被重用）；
+* `[winB]`（loadArgsFlat 入口）：同 winA（一致，非传输期损坏）；
+* **`[winA3]` 新建列表自读（arrayListOf + add + get）直接段错误** ——
+  **分配器（heapBump 域）状态在解码循环期间已被破坏**，winA 时任何新
+  分配即崩。
+
+**已复核正确**：emitFromCharCode / emitStrcat / emitObjectAlloc 的
+heapBump 算术（逐条反汇编）。
+
+**下轮（heapBump 追踪）**：
+1. `aura_mem_used_mb()`（读 heapBump）在 decode 前后/每 N 条指令打点——
+   bump 值应单调递增；骤降/归零即抓到写手；
+2. 或 heapBump 槽的硬件断点（DR1，VEH 已有基建）；
+3. 写手锁定后预计为「某段代码把值写进了 heapBump 槽（.data+0x2000020）」
+   ——布局敏感家族的最深一层。
+
+**本轮落地**：窗口括号法实证 + readStr 递归化 + PushHandler 化维持。
+探针（winA/winB/winA3）暂留。
