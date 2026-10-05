@@ -238,8 +238,10 @@ class Vm {
         this.returnValue = null
         this.exitCode = 0
         this.stack = VmStack()
+        println("[winE1] stack ok")
         this.locals.reset()
         this.globals = HashMap<String, Any>()
+        println("[winE2] globals ok")
         this.callStack.reset()
         this.savedLocals = VmFrameStack()
         this.handlerStack = VmStrStack()
@@ -306,8 +308,10 @@ class Vm {
         this.error = ""
         this.returnValue = null
         this.stack = VmStack()
+        println("[winE1] stack ok")
         this.locals.reset()
         this.globals = HashMap<String, Any>()
+        println("[winE2] globals ok")
         this.callStack.reset()
         this.savedLocals = VmFrameStack()
         this.handlerStack = VmStrStack()
@@ -367,8 +371,10 @@ class Vm {
         this.returnValue = null
         this.exitCode = 0
         this.stack = VmStack()
+        println("[winE1] stack ok")
         this.locals.reset()
         this.globals = HashMap<String, Any>()
+        println("[winE2] globals ok")
         this.callStack.reset()
         this.savedLocals = VmFrameStack()
         this.handlerStack = VmStrStack()

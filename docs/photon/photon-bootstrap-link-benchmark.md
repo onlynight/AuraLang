@@ -2566,3 +2566,21 @@ closureCaptures = HashMap(...)` × 6 构造器、VmStack/VmFrameStack/VmStrStack
 1. HashMap 构造器逐行复核（capacity/桶分配/hashKey 误调用）；
 2. 或直接在 6 个 HashMap 构造后插 winE 探针二分定位首个坏构造器；
 3. 修复后端到端。
+
+### 10.58 P256：崩点最终锁定 loadArgsFlat 内部——vmSubstr/substring 链（2026-10-06 续XXXVII）
+
+**winE 探针结果**：winE1（VmStack 构造后）**未达**——崩在
+`this.loadArgsFlat(args)` 内部（[winB-2] 为最后输出）。
+
+**loadArgsFlat 循环体**：charCodeAt 逗号扫描 + `VmOps.vmSubstr(ln, 0, c0)`
++ argStrs/argCounts/arg2-4Ints 的 add——**vmSubstr → text.substring(start, end)**
+——而值类 String 的 HAT 中**没有 `substring(start, end)` 定义**（只有
+substringAt/Before/After）——`substring` 的符号解析/实现为下轮首要疑点。
+
+**本轮累计状态**：toStr 别名根治后解码→装载输入全程正确
+（winB-0=[0] ✓ winB-2=[1] ✓ 1194 条稳定）；LOADONLY 绿；探针
+（winA 概要/winA3/hb/winB2-n/winC/winB 系/winE）暂留。
+
+**下轮**：
+1. 查 `substring(start, end)` 的符号解析（readU32Int 同款直查法）；
+2. 修复后端到端 minimal.auc → helloworld → fib。
