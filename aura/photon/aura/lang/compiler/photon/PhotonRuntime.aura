@@ -1821,11 +1821,19 @@ object PhotonRuntime {
     /// 自举 `Main.aura` 里 `Memory.copy` 属 stdlib 的常用操作，缺它就是
     /// `lld-link: error: undefined symbol: Memory_copy`。
     fun emitMemoryCopy(enc: X86Encoder): Unit {
+        // ⚠️ P247 终审修复：n 是**字节数**（memcpy 语义），循环必须按
+        // **QWORD 次数 = ceil(n/8)** 迭代。旧实现拿字节数当 QWORD 次数
+        // ⇒ **8 倍过量复制**——每次 listAppend grow / 任何 Memory.copy
+        // 都把 dst 之后 7n 字节的相邻堆块刷成源数据（实测 numArgsFlat
+        // items 被grow 的旧元素成批覆盖、§10.47 渐进覆写模式的真身）。
         enc.emitPrologue(0)
+        enc.emitMovRR("r10", "r8")             // r10 = qword 次数 = ceil(n/8)
+        enc.emitAddRI("r10", 7)
+        enc.emitShrRI("r10", 3)
         enc.emitXorRR("rax", "rax")            // rax = 下标
         enc.emitLabel("mc_loop")
-        enc.emitCmpRR("rax", "r8")             // cmp rax, r8（0x39：r/m=dst）
-        enc.emitJccLabel("ge", "mc_done")      // rax >= count → 结束
+        enc.emitCmpRR("rax", "r10")
+        enc.emitJccLabel("ge", "mc_done")      // rax >= 次数 → 结束
         enc.emitLoadIndexed8("r9", "rdx", "rax", 0)
         enc.emitStoreIndexed8("rcx", "rax", 0, "r9")
         enc.emitIncRR("rax")

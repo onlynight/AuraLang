@@ -2403,3 +2403,23 @@ winB2 之间**被真实改写**（bump 单调排除地址重用，§10.48）。
    `HeapDiag.itemsOf(l: Long): Long` = read64(l+16)），winB2 处比对
    items 指针是否漂移 + 旧地址内容 dump；
 2. 顺带排查 listAppend grow 的旧 items 泄漏写。
+
+### 10.51 P247：Memory_copy 8 倍过量复制修复（真 bug）——self-view 假说回归（2026-10-06 续XXX）
+
+**修复（真 bug）**：runtime `Memory_copy` 以**字节数当 QWORD 次数**——
+`copy(dst, src, n)` 循环 n 次 × 8 字节步进 = **8n 字节过量复制**。每次
+listAppend grow / 任何 Memory.copy 都把 dst 后 7n 字节的相邻堆块刷成
+源数据。已修为 qword 次数 = ceil(n/8)。
+
+**结果**：helloworld 仍在 winB 崩，但 [winB-0/1/2]=[8]×3——**8 = 列表
+grow 后的 capacity**——「items 指针 == 列表 header 地址」的 self-view
+形态回归（读 items[0] = header[0] = count…8）。newList 的 header alloc
+（24B）与 items alloc（cap×8）之间 bump 未推进/同址 ⇒ 分配器双调用
+同址——嫌疑集中在 emitObjectAlloc 的 align/推进算术对**连续两次紧邻
+调用**的处理。
+
+**下轮**：
+1. newList 两连 alloc 的地址追踪（HeapDiag 扩展 alloc2 探针或
+   aura_heapbump 在两次 alloc 间打点）；
+2. emitObjectAlloc 的 align 与 store 时序逐指令复核；
+3. 修复后端到端。
