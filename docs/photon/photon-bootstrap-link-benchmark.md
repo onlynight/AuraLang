@@ -2307,3 +2307,26 @@ registerAucClasses + loadPredecoded 的字段赋值/容器构造段
 
 **里程碑保持**：解码 6 指令全对（§10.45）；探针 winA/winA3/hb/winB/winC
 暂留。
+
+### 10.47 P242：渐进覆写模式实锤——分配器地址重用（bump 回退）（2026-10-06 续XXVI）
+
+**窗口二分**（minimal.auc，正确元素应为 ["0","1","2","","4",""]）：
+```
+winA   e=[0,1,2,'',4,''] ✓（decode 完成）
+winB2  e=[0,0,...]        ✗ e1 已变（registerAucClasses 之前的 loadModule 尾段）
+winC   e=[0,0,...]        （registerAucClasses 无辜）
+winB   e=[6,6,...]        （loadPredecoded 构造段进一步覆写）
+```
+**模式**：items 区被**渐进覆写**——先 [0,0,...]（疑似 parentIds 类注册表
+内容），后 [6,6,...]（疑似 6 元素列表内容）——**新列表分配到与
+numArgsFlat.items 相同的地址** ⇒ 分配器 bump 在两次分配之间**回退**。
+
+**排除**：emitObjectAlloc/emitStrcat/emitFromCharCode/__list_alloc 的
+bump 算术（逐条反汇编单调 ✓）。
+
+**下轮（抓回退现行）**：
+1. aura_heapbump 在 loadModule 尾段的每个 readStr/list 操作后打点——
+   bump 序列必须严格递增，回退点即写手；
+2. 头号嫌疑：某条分配路径读了**陈旧的 bump 副本**（寄存器缓存跨调用）
+   或 emitListAlloc 的 +8KB slack 与元素区错位；
+3. 抓到后修 bump 算术 ⇒ numArgsFlat 不再被覆写 ⇒ 端到端通路。
