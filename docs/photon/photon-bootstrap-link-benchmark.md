@@ -2376,3 +2376,30 @@ println 调用（含参数个数）、局部声明、字面量——**helloworld
 **下轮**：§10.43 的写手定位（escapeConstValue/readConstValue NUL 越界
 逐字复核 + loadPredecoded 容器构造段逐构造器 hb 打点）。
 修复后 helloworld 端到端即通。
+
+### 10.50 P245：探针自证清白——列表内容在 winA↔winB2 间真实变化（2026-10-06 续XXIX）
+
+**单行探针复核**（消除多段拼接疑虑）：
+```
+winB2-0/1/2 = [1] [1] [1]   （三行独立 println，索引无关同值）
+winB-0/1/2  = [8] [8] [8]
+```
+**HAT 逐行核查**：探针 = `__field_get(@mod, 20)` + `Collections.getAt(list, 0)` —
+field 20 = numArgsFlat ✓（AucModule 声明序第 20 个字段，构造器 29 个
+field_set 对齐 ✓）；getAt 为 guest core 真实现（read64(list)/read64(items+idx*8)）
+✓。**探针与读取路径全部无辜** ⇒ numArgsFlat 的 items 块内容在 winA 与
+winB2 之间**被真实改写**（bump 单调排除地址重用，§10.48）。
+
+**矛盾聚焦**：改写者必然「知道」numArgsFlat.items 的地址——非随机野写
+（单字符/单元素精准变化）——嫌疑：
+1. 某处仍持有**旧 grow 前的 items 指针**并往里写（listAppend grow 后
+   遗留的旧 dst——emitStrcat 的 r12/emitObjectAlloc 的 r12 未被后继
+   覆盖时的延迟写）；
+2. 或 decode 循环内某列表的 add 在 decode 后仍有**残留迭代**。
+
+**下轮**：
+1. 直接路径：AucModule 加 `var argsItemsDbg: Long` 字段，decode 完成时
+   `argsItemsDbg = <items 指针>`（需 List→Long 通路：新 extern
+   `HeapDiag.itemsOf(l: Long): Long` = read64(l+16)），winB2 处比对
+   items 指针是否漂移 + 旧地址内容 dump；
+2. 顺带排查 listAppend grow 的旧 items 泄漏写。
