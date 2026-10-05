@@ -2806,3 +2806,15 @@ rbx 是 Win64 callee-saved 寄存器，**被调函数必须保存/恢复**。
 **修复路径**：查 X86Emitter 的 savedRegs 固定与 emitPrologue/epilogue
 的 push/pop 对称性——特别是 P270 禁用着色后 `collectSavedRegs` 的
 行为。
+
+### 10.69 P273 追加：rbx 覆写链定位——getInstance→Memory_alloc/obj_slot 路径（2026-10-06 续L）
+
+**精确链**：listSet 入口 rbx=list ✓ → `call Collections_getInstance` →
+getInstance 调用 `__obj_slot_get(40)` / `Memory_alloc(512)` /
+`__obj_slot_set(40, obj)` → **rbx 被覆写为 1** → `read64(rbx=1)` 崩。
+
+**下轮（寄存器审计）**：
+1. gdb 在 getInstance 返回后打印 rbx——确认覆写发生在此调用内；
+2. `__obj_slot_get`/`__obj_slot_set`/`Memory_alloc` 的 runtime 汇编
+   逐条审计 callee-saved push/pop 对称性；
+3. 修复（补 push/pop 或改用易失寄存器）后端到端。
