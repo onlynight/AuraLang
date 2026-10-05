@@ -951,7 +951,29 @@ object PhotonRuntime {
         enc.emitMovByteMemReg("rsi", "rax")  // [rsi] = '-'
 
         enc.emitLabel("tos_return")
-        enc.emitMovRR("rax", "rsi")  // 返回字符串指
+        // ⚠️ P254 根治：toStrBuffer 是**静态共享缓冲**——旧实现返回其指针
+        // ⇒ 所有 toStr 结果互为别名（下一次 toStr 覆盖上一次的内容）。
+        // 实测 decodeNumeric 的 `add(toStr(idx))` 全部元素在消费时变成
+        // 最后一次 toStr 的内容（§10.50 get(0) 随布局漂移的真身）。
+        // 改为：把 32 字节缓冲**拷贝到 heap 新块**返回（与 strcat 同堆）。
+        enc.emitMovRR("rbx", "rsi")            // rbx = 源（toStrBuffer 内）
+        enc.emitMovRIP("rax", "heapBump")      // old = bump
+        enc.emitLeaRIP("rdx", "heapArena")
+        enc.emitAddRR("rdx", "rax")            // rdx = dst = arena + old
+        enc.emitAddRI("rax", 32)               // 新偏移 = old + 32
+        enc.emitAddRI("rax", 7)
+        enc.emitAndRI("rax", -8)
+        enc.emitStoreRIP("heapBump", "rax")
+        enc.emitXorRR("r10", "r10")
+        enc.emitLabel("tos_ccopy")
+        enc.emitCmpRI("r10", 32)               // 拷 4 QWORD = 32B 整块
+        enc.emitJccLabel("ge", "tos_ccopy_done")
+        enc.emitLoadIndexed8("r8", "rbx", "r10", 0)
+        enc.emitStoreIndexed8("rdx", "r10", 0, "r8")
+        enc.emitIncRR("r10")
+        enc.emitJmpLabel("tos_ccopy")
+        enc.emitLabel("tos_ccopy_done")
+        enc.emitMovRR("rax", "rdx")            // 返回新块指针
         // 恢复非易失寄存器（rax 已持有返回值，不受影响
         enc.emitStackLoad("rsi", -0x38)
         enc.emitStackLoad("rbx", -0x30)

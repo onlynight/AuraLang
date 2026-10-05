@@ -2524,3 +2524,27 @@ hb@winA=944379（解码分配量也随之正常）
 **剩余**：get(0) 的值漂移（winA"0"→winB2"1"→winC/winB"4"）与
 loadArgsFlat 的 strlen 崩——列表**元素内容**的跨函数漂移仍存在
 （句柄/条目分离的第二层），下轮继续。§10.55。
+
+### 10.56 P254：toStr 静态缓冲别名根治——跨函数数据流首次全程无损（2026-10-06 续XXXV）
+
+**第五个系统性缺陷确认并根治**：`toStr` 返回**静态 toStrBuffer 指针**
+——所有 toStr 结果互为别名（下次 toStr 覆盖上一次内容）。实测影响链：
+decodeNumeric 的 `add(toStr(idx))` 元素在消费时全变成最后一次 toStr
+的内容（§10.50 的 get(0) 漂移真身）；执行期 VM 栈上的 toStr 结果同理。
+
+**修复**：emitToStr 的返回路径改为——32 字节缓冲**拷贝到 heap 新块**
+（heapBump 分配 + 4 QWORD 拷贝）返回新指针（与 strcat 同堆约定）。
+过程事故：python 替换的 new 块误带完整函数收尾 ⇒ 重复 epilogue/`}`
+⇒ seed 解析反常（emitEnvOffsetProbe %self 未定义）——已删重复块
+（教训：脚本化替换的 new 必须与 old 的边界严格对齐）。
+
+**实测（helloworld，跨函数数据流首次全程无损）**：
+```
+winA  get(0)="0" n=1194 ✓
+winB2 get(0)="0" n=1194 on0=[LOAD_CONST_S] ✓（此前漂移 "1"）
+winC  get(0)="0" ✓
+winB  get(0)="0" ✓ get(2)="1" ✓（loadArgsFlat 输入正确）
+```
+
+**剩余**：loadArgsFlat 内部的下一个缺陷（vmSubstr 链 / argStrs add——
+输入已正确，崩在其处理段）。下轮 gdb 定位后收官端到端。§10.56。
