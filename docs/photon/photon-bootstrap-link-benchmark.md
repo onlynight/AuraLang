@@ -2330,3 +2330,24 @@ bump 算术（逐条反汇编单调 ✓）。
 2. 头号嫌疑：某条分配路径读了**陈旧的 bump 副本**（寄存器缓存跨调用）
    或 emitListAlloc 的 +8KB slack 与元素区错位；
 3. 抓到后修 bump 算术 ⇒ numArgsFlat 不再被覆写 ⇒ 端到端通路。
+
+### 10.48 P243：bump 回退证伪——相邻分配越界写字（单字符覆写）（2026-10-06 续XXVII）
+
+**heapBump 逐段打点**：hb7=650328 → hb8=650614 → hb2p=650756 →
+hbWinA=650960 → hb@winA=651811——**全程严格单调** ⇒ bump 回退假说证伪。
+
+**修正后的定位**：numArgsFlat.items 区被**相邻（下方）分配的越界写**
+侵入——观测到的损坏是**单字符级**（e1 的 '1' 被写成 '0'、winB 时的
+'6'）——即某段代码把字节写过了自己缓冲区的末尾，落在紧邻上方分配的
+numArgsFlat items 区。NUL 终止符越界（off-by-one）是首选形态。
+
+**嫌疑面（按分配时序）**：numArgsFlat.items 之前最后一个分配 = 解码期
+最后的串/列表操作——strcat 链（len1+len2+1 精确写 ✓ 复核）、
+fromCharCode（8 字节写 8 字节槽 ✓）、**escapeConstValue / readConstValue
+的常量池拼接**（尚未逐字复核）、instrIndexAt。
+
+**下轮**：
+1. winA 探针扩展：dump items 区前后 32 字节的 RAW 内容（需句柄——
+   经 __field_get 前端通路或临时 StrPrims extern 读 Long）；
+2. 或 escapeConstValue/readConstValue 加 NUL 越界探针；
+3. 修复后端到端。

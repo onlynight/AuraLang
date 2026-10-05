@@ -193,6 +193,7 @@ object AucLoaderUtils {
             ni = ni + 1
         }
 
+        println("[hb7]=" + toStr(HeapDiag.heapbump()))
         // 7. 函数（两遍扫描：P2.2 取消文本翻译）
         //
         // 第 1 遍：只读函数头（name/params/locals/aot 标记/codeLen），记录代码段
@@ -234,6 +235,7 @@ object AucLoaderUtils {
             fi = fi + 1
         }
 
+        println("[hb8]=" + toStr(HeapDiag.heapbump()))
         // 8. 入口点（可选解析；VM 走 `funcOffset("main")`，不依赖该字段）
         mod.entry = reader.readU16()
         mod.entryKind = reader.readStr()
@@ -398,6 +400,7 @@ object AucLoaderUtils {
             // 段数据区（剩余字节）不再消费——随 Photon 任务
         }
 
+        println("[hb2p]=" + toStr(HeapDiag.heapbump()))
         // ═══ 第 2 遍：数值化解码（P2.2b，取消文本翻译层）═══
         mod.numericMode = true
         var lineNo2: Int = 0
@@ -413,6 +416,7 @@ object AucLoaderUtils {
             fi3 = fi3 + 1
         }
         // P239 括号探针 A：decode 完成点的 numArgsFlat 健康度
+        println("[hbWinA]=" + toStr(HeapDiag.heapbump()))
         println("[winA] n=" + toStr(mod.numArgsFlat.size()))
         var wi: Int = 0
         while (wi < mod.numArgsFlat.size()) {
