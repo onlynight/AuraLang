@@ -45,6 +45,10 @@ class X86Emitter {
     /// 预扫结果：每个函数实际用到的**最大溢出槽号**（`-1` = 未用任何槽）。
     private var funcMaxSlots: List<Int> = arrayListOf<Int>()
 
+    /// 每函数的「发射器兜底槽」数（无色节点经 regOfNodeRaw ③ 分配的
+    /// slotForNode 槽），供帧大小计算使用（见 scanFunctionMaxSlots）。
+    private var funcExtraSlots: List<Int> = arrayListOf<Int>()
+
     /// 主循环用的下标（对应 `funcNames` / `funcMaxSlots`）。
     private var fnIdx: Int = 0
 
@@ -135,11 +139,13 @@ class X86Emitter {
     private fun scanFunctionMaxSlots(dag: MachineDag): Unit {
         this.funcNames = arrayListOf<String>()
         this.funcMaxSlots = arrayListOf<Int>()
+        this.funcExtraSlots = arrayListOf<Int>()
         if (this.allocator == null) {
             return
         }
         var curFn: String = ""
         var curMax: Int = -1
+        var extraCsv: String = "|"
         var i: Int = 0
         while (i < dag.instrCount) {
             val instr: DagInstruction = dag.instrOf(i)
@@ -148,11 +154,27 @@ class X86Emitter {
                 if (curFn != "") {
                     this.funcNames.add(curFn)
                     this.funcMaxSlots.add(curMax)
+                    // 额外槽 = 该函数内所有「无色/rax 且未 spill」节点的去重数
+                    // ——这些节点发射时会经 regOfNodeRaw ③ 分配 slotForNode 兜底
+                    // 槽（基址在 RA 溢出区下方）。旧实现只数 RA spill 槽，额外
+                    // 槽完全没算 ⇒ 帧少 2KB 余量一旦被超出就写进 rsp 下方红区
+                    //（实测 Opcodes.buildNameMap：100 个 put ⇒ 493 个额外槽
+                    // 超出 2048B 余量 ⇒ 野写踩栈 + 返回地址全毁，2026-10-06）。
+                    var en: Int = 0
+                    var cp: Int = 0
+                    while (cp < extraCsv.length) {
+                        if (extraCsv.charCodeAt(cp) == 124) { en = en + 1 }
+                        cp = cp + 1
+                    }
+                    this.funcExtraSlots.add(en)
+                    extraCsv = "|"
                 }
                 curFn = fn
                 curMax = -1
+                extraCsv = "|"
             }
-            // 该指令用到的节点里取最大溢出槽
+            // 该指令用到的节点：nodes + call 节点的实参（emitCallArgs 会
+            // 解析它们的槽位——旧扫描漏掉 ⇒ 少算）
             val ns: List<String> = MachineDagUtils.splitArgs(instr.nodes)
             var j: Int = 0
             while (j < ns.size) {
@@ -164,15 +186,48 @@ class X86Emitter {
                         if (slot > curMax) {
                             curMax = slot
                         }
+                    } else if ((c == "" || c == "rax")
+                               && extraCsv.indexOf("|" + toStr(nid) + "|") < 0) {
+                        extraCsv = extraCsv + toStr(nid) + "|"
                     }
                 }
                 j = j + 1
+            }
+            // call 指令：把 Call 节点的实参节点也纳入扫描
+            if (instr.nodes != "" && instr.output == -1) {
+                val cnid: Int = MachineDagUtils.strToInt(instr.nodes)
+                if (cnid >= 0) {
+                    val cn: DagNode = dag.nodeOf(cnid)
+                    if (cn.op == "Call") {
+                        val cargs: List<String> = MachineDagUtils.splitArgs(cn.args)
+                        var cj: Int = 0
+                        while (cj < cargs.size) {
+                            val anid: Int = MachineDagUtils.strToInt(cargs[cj])
+                            if (anid >= 0) {
+                                val ac: String = this.allocator.getColor(anid)
+                                if (!(ac != "" && ac.startsWith("spill_slot_"))
+                                        && (ac == "" || ac == "rax")
+                                        && extraCsv.indexOf("|" + toStr(anid) + "|") < 0) {
+                                    extraCsv = extraCsv + toStr(anid) + "|"
+                                }
+                            }
+                            cj = cj + 1
+                        }
+                    }
+                }
             }
             i = i + 1
         }
         if (curFn != "") {
             this.funcNames.add(curFn)
             this.funcMaxSlots.add(curMax)
+            var enL: Int = 0
+            var cpL: Int = 0
+            while (cpL < extraCsv.length) {
+                if (extraCsv.charCodeAt(cpL) == 124) { enL = enL + 1 }
+                cpL = cpL + 1
+            }
+            this.funcExtraSlots.add(enL)
         }
     }
 
@@ -237,14 +292,25 @@ class X86Emitter {
                 if (this.fnIdx < this.funcNames.size
                     && this.funcNames[this.fnIdx] == instrFunc) {
                     val ms: Int = this.funcMaxSlots[this.fnIdx]
-                    if (ms >= 0) {
-                        var fsz: Int = 32 + (ms + 1) * 8
+                    // 发射器兜底槽数（无色节点），与 RA 溢出槽并列计入帧
+                    var ex: Int = 0
+                    if (this.fnIdx < this.funcExtraSlots.size) {
+                        ex = this.funcExtraSlots[this.fnIdx]
+                    }
+                    if (ms >= 0 || ex > 0) {
+                        // 帧布局（2026-10-06 勘误）：
+                        //   [rbp-32 .. rbp-fsz)         = RA 溢出槽区
+                        //   [rbp-fsz-8 .. rbp-fsz-8-ex*8) = 发射器兜底槽区
+                        // spillBase 必须是 **RA 区底（不含兜底区）**——slotForNode
+                        // 以 `-(spillBase + 8 + k*8)` 落点，若把兜底区算进
+                        // spillBase，所有兜底槽都会落到 frame 之下（rsp 红区）
+                        // ⇒ 每次 call 都被踩（实测上一版正是因此全面崩坏）。
+                        var fsz: Int = 32 + (ms + 1) * 8            // RA 区底
+                        var baseLocal: Int = fsz                    // 兜底槽基址
+                        fsz = fsz + 16 + ex * 8                     // + 兜底槽区
                         if (fsz % 16 != 0) { fsz = fsz + (16 - fsz % 16) }
                         frame = fsz
-                        // ⚠️ 额外槽（发射器给调用结果分配的槽）**必须**避开 RA 溢出区：
-                        // RA 的溢出槽是 `getSpillOffset = 32 + slot*8` → 落在 `[rbp-32]` 起
-                        // 向下的区间；而额外槽旧实现从 `-16` 起 ⇒ 与 RA 首槽 `-32` 重叠。
-                        spillBase = fsz
+                        spillBase = baseLocal
                     } else {
                         // 该函数没有溢出槽 → 不需要为溢出区留空间
                         frame = 0x50
@@ -260,6 +326,25 @@ class X86Emitter {
                 // 调用结果数量，又不至于让帧过大（配合逐页下探是安全的）。
                 frame = frame + 2048
                 this.enc.emitPrologue(frame)
+                // ── 栈帧 canary 插桩（P0-2 首次越界写定位，2026-10-06）──
+                // 槽位全部落在帧尾 2048B 兜底区，且在调用方影子空间**之上**
+                //（Win64 第 5+ 参走 [rsp+0x20..0x48)，故从 +0x80 起布置哨兵）：
+                //   [rbp-fs+0x30 .. +0x68) = 保存寄存器影子（每寄存器 8B）
+                //   [rbp-fs+0x80]          = 哨兵 A
+                //   [rbp-fs+0xC0]          = 哨兵 B
+                // epilogue 校验：哨兵完整性（帧内越界写）、[rbp+8] 返回地址
+                // 镜像范围、保存寄存器 vs 影子（正偏移野写的直接信号）。
+                this.canaryFrameSize = frame
+                this.canaryFuncIdx = this.canaryFuncIdx + 1
+                println("[FUNCLIST] " + toStr(this.canaryFuncIdx) + "|" + instrFunc)
+                val canarySentinel: Int = 1550766684   // 0x5C5C5C5C（正数 ⇒ C7 imm32 符号扩展同值）
+                this.enc.emitStoreImm32Stack(0x80 - frame, canarySentinel)
+                this.enc.emitStoreImm32Stack(0xC0 - frame, canarySentinel)
+                var cp: Int = 0
+                while (cp < srParts.size) {
+                    this.enc.emitStackStore(0x30 + cp * 8 - frame, srParts[cp])
+                    cp = cp + 1
+                }
                 currentFunc = instrFunc
                 needPrologue = false
                 // 函数级重定位探针：区分「发射时就没进表」与「进表后被
@@ -361,6 +446,7 @@ class X86Emitter {
 
     /// 发射 epilogue：`leave` → 恢复非易失寄存器 → `ret`。
     private fun emitEpilogueWithRestore(): Unit {
+        this.emitCanaryChecks()
         this.enc.emitLeave()
         val parts: List<String> = MachineDagUtils.splitArgs(this.savedRegs)
         var i: Int = parts.size - 1
@@ -369,6 +455,46 @@ class X86Emitter {
             i = i - 1
         }
         this.enc.emitRet()
+    }
+
+    /// 发射本函数 epilogue 前的 canary 校验：三类检查**无条件**调用
+    /// `canary_report(kind, funcIdx, value)`，违例判定在 runtime 侧
+    ///（客户端免编码跳转链）。覆盖：
+    ///   kind1 = 帧尾哨兵（帧内越界写，含兜底槽溢出）
+    ///   kind2 = [rbp+8] 返回地址（no-ASLR 镜像范围）
+    ///   kind3 = 保存寄存器 vs 影子（**正偏移野写的直接信号**——文档记载的
+    ///           emitStackStore 正偏移会精确打中这一区）
+    /// ⚠️ `emitRet` 已把返回值放入 rax，紧随其后的本检查必须 push/pop rax
+    /// 保护；其余只用易失寄存器（rcx/rdx/r8），epilogue 在即无副作用。
+    private fun emitCanaryChecks(): Unit {
+        if (this.canaryFrameSize <= 0) { return }
+        val fs: Int = this.canaryFrameSize
+        val fidx: Int = this.canaryFuncIdx
+        this.enc.emitPush("rax")
+        this.enc.emitMovRI("rcx", 1)
+        this.enc.emitMovRI("rdx", fidx)
+        this.enc.emitMovMemDisp32("r8", "rbp", 0x80 - fs)
+        this.enc.emitCallRel("canary_report")
+        this.enc.emitMovRI("rcx", 1)
+        this.enc.emitMovRI("rdx", fidx)
+        this.enc.emitMovMemDisp32("r8", "rbp", 0xC0 - fs)
+        this.enc.emitCallRel("canary_report")
+        this.enc.emitMovRI("rcx", 2)
+        this.enc.emitMovRI("rdx", fidx)
+        this.enc.emitStackLoad("r8", 8)
+        this.enc.emitCallRel("canary_report")
+        val parts: List<String> = MachineDagUtils.splitArgs(this.savedRegs)
+        var ci: Int = 0
+        while (ci < parts.size) {
+            this.enc.emitStackLoad("rax", 0x30 + ci * 8 - fs)
+            this.enc.emitXorRR("rax", parts[ci])
+            this.enc.emitMovRI("rcx", 3)
+            this.enc.emitMovRI("rdx", fidx)
+            this.enc.emitMovRR("r8", "rax")
+            this.enc.emitCallRel("canary_report")
+            ci = ci + 1
+        }
+        this.enc.emitPop("rax")
     }
 
     // ── 单指令发射 ──
@@ -606,6 +732,13 @@ class X86Emitter {
 
     private fun emitMovStore(instr: DagInstruction, dag: MachineDag): Unit {
         val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+        // ⚠️ mem 操作数为空 ⇒ 没有真实目标地址。旧实现经
+        // parseStackOffset("") 落到 -8 —— 把值写进**共享兜底槽**，踩掉恰好
+        // 住在该槽的活值（随布局漂移的写入踩踏源之一，2026-10-06）。没有
+        // 地址的 Store 语义上无从落地，直接不发射。
+        if (instr.mem == "") {
+            return
+        }
         if (nodes.size >= 1) {
             val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
             val srcNode: DagNode = dag.nodeOf(srcNodeId)
@@ -800,6 +933,37 @@ class X86Emitter {
         }
         val argParts: List<String> = MachineDagUtils.splitArgs(callNode.args)
         val argRegs: List<String> = listOf("rcx", "rdx", "r8", "r9")
+        // ── 第 5+ 参：栈传递（Win64：arg5+i 在 [rsp+0x20+i*8]，call 前写）──
+        //
+        // ⚠️ 旧实现只装 4 个寄存器参——栈参**从来没人写**，被调方读到的是
+        // 残留垃圾（实测 decodeNumeric 11 参的 `mod` = 打包字节码 →
+        // listAppend 野指针，2026-10-06）。必须**先写栈参、后装寄存器参**：
+        // 栈参的值可能暂存在后续寄存器参装载会覆写的寄存器里。
+        // 上限 24 个栈参（0x20+24*8=0xC0，远离帧尾 canary 区 [rsp+fs-0x80]）。
+        var si: Int = 4
+        while (si < argParts.size && si < 28) {
+            val sNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[si]))
+            val sDisp: Int = 0x20 + (si - 4) * 8
+            // 整数常量：mov r11, imm
+            if (sNode.kind == "Const" && !sNode.aux.startsWith("@str.")) {
+                this.enc.emitMovRI("r11", MachineDagUtils.strToInt(sNode.aux))
+                this.enc.emitStoreMemDisp32("rsp", sDisp, "r11")
+                si = si + 1
+                continue
+            }
+            // 字符串常量：leaq r11, @str.N（重物化，不依赖颜色寄存器）
+            if (sNode.kind == "Const" && sNode.aux.startsWith("@str.")) {
+                this.enc.emitLeaRIP("r11", sNode.aux)
+                this.enc.emitStoreMemDisp32("rsp", sDisp, "r11")
+                si = si + 1
+                continue
+            }
+            // 普通值：先取进 r11（栈引用由 resolveToReg 装载），再落栈参区
+            val sReg: String = this.regOfNode(sNode)
+            val sReal: String = this.resolveToReg(sReg, "r11")
+            this.enc.emitStoreMemDisp32("rsp", sDisp, sReal)
+            si = si + 1
+        }
         // **逆序装载**：若后面的实参来源寄存器恰好是前面某个实参的目标寄存器
         // （典型：`strcat(toStr(x), y)` 中 toStr 的返回值被分配到 rcx），
         // 正序装载会先覆写 rcx 再读它 → 两个实参变成同一个值。
@@ -873,6 +1037,7 @@ class X86Emitter {
         // P2：无 CRT 时，main 必须显式调用 exit（NtTerminateProcess syscall）。
         // 否则 `ret` 会返回到未定义的地址（OS 未推送返回地址）。
         if (this.isMainFunc) {
+            this.emitCanaryChecks()           // main 走 exit 不 ret，帧检查补上
             this.enc.emitMovRR("rcx", "rax")  // exit code = rax
             this.enc.emitCallRel("exit")      // 调用 runtime 的 exit 函数（不返回）
         } else {
@@ -941,6 +1106,15 @@ class X86Emitter {
     /// 当前函数 RA 溢出区的字节数；额外槽从它下方开始分配（见 `slotForNode`）。
     /// 在函数 prologue 处设置（见 `emitFunction`）。
     private var curSpillBase: Int = 32
+
+    /// 栈帧 canary：本函数实际 `sub rsp` 的帧大小（含 2048B 兜底与奇数寄存器
+    /// 对齐），canary 槽按 `rbp - canaryFrameSize + 常量` 定位。0 = 未插桩。
+    /// epilogue 校验见 `emitCanaryChecks`（P0-2 首次越界写定位，2026-10-06）。
+    private var canaryFrameSize: Int = 0
+
+    /// 栈帧 canary 的函数序号（按 prologue 发射顺序递增；idx→名字映射随
+    /// 编译打印为构建日志中的 `[FUNCLIST] idx|name` 行）。
+    private var canaryFuncIdx: Int = -1
 
     /// **临时诊断**：标记栈访问的发出路径（限次、纯观测、不改行为）。
     ///
@@ -1101,8 +1275,20 @@ class X86Emitter {
     }
 
     private fun regOfNodeRaw(node: DagNode): String {
-        if (node != null && this.nodeSlot(node.id) != 0) {
-            return "stack:" + toStr(this.nodeSlot(node.id))
+        // ① 有效 RA 颜色优先（2026-10-04）：颜色寄存器是值的权威所在地。
+        //    旧实现 nodeSlot 表**先于**颜色判定 —— 某节点只要被任何早期
+        //    兜底物化占过一个槽（③ slotForNode），此后即便 RA 给它着了
+        //    寄存器色，读侧也回落到那个**从未被颜色写侧用过的槽** ⇒
+        //    同一节点读写两个家（实测 probe_obj3 的 `ok` 标志：入口 MOV
+        //    写入颜色寄存器、循环体读旧槽 ⇒ ok 恒 false ⇒ COPY-BAD）。
+        //    spill 节点（色 = spill_slot_* 或 RA isSpilled）走 ②。
+        if (node != null && node.reg != "" && node.reg != "rax"
+                && !node.reg.startsWith("spill_slot")) {
+            val spilled: Boolean = this.allocator != null
+                    && this.allocator.isSpilled(node.id)
+            if (!spilled) {
+                return node.reg
+            }
         }
         if (this.allocator != null && node != null && this.allocator.isSpilled(node.id)) {
             // ② RA 的溢出槽：`getSpillOffset` 返回「自 rbp 向下的**距离**」正值，

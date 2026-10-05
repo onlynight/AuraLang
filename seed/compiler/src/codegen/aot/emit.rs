@@ -4459,6 +4459,11 @@ fn emit_bool_convert(
 ///   * `substringAt(from, len)` 此前不在表内，调用点发射裸名
 ///     `@substringAt` → `llc: use of undefined value`。
 fn string_method_symbol(name: &str, arg_count: usize) -> Option<String> {
+    // ⚠️ 1 参 `substring(start)` → substringFrom 的分派已实证会触发新 seed
+    // 宿主的漂移型内存踩踏（P121 驱动：isBoolExpr/splitStr 路径 String 收到
+    // 装箱 1 → strlen/indexOf 崩，2026-10-06），暂缓启用——Aura 侧调用点
+    // 一律显式 2 参规避（SsaBuilder 回填处已改）。根因待「ra1+canary 定位
+    // 首次越界写」主线解决后再放开。
     let _ = arg_count;
     match name {
         "contains" | "startsWith" | "endsWith" | "toUpperCase" | "toLowerCase" | "trim"
@@ -7178,6 +7183,14 @@ fn resolve_member_field_owner(
                 candidates.push(cls.clone());
                 obj_type_resolved = true;
             }
+        } else if ctx.singleton_structs.contains(var) {
+            // `object X` 单例的字段访问（`PhotonRuntime.RUNTIME_SYMBOLS`）：
+            // emit_variable_load 把单例名发射成 i8*（不透明指针），具体类型
+            // 在这里已丢失；若不补回单例类名，下面的 i8* 守卫直接返回 None，
+            // 调用方兜底成「i32 @ 偏移 0」并按 int→ptr 装箱 —— 实测
+            // RUNTIME_SYMBOLS 被读成装箱整数 0x171 → strlen 崩（2026-10-03）。
+            candidates.push(var.clone());
+            obj_type_resolved = true;
         } else if let Some(cls) = ctx
             .var_scope
             .iter()

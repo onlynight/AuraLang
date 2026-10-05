@@ -47,6 +47,7 @@ class Vm {
     private var arg0Ints: List<Int> = arrayListOf<Int>()
     private var arg1Ints: List<Int> = arrayListOf<Int>()
     private var argNoneMark: Int = 2147483647
+    private var dbgLcCount: Int = 0
     // locals 帧池：调用帧局部表复用（retire 重置 / pop 取用），热身后零分配。
     private var localsPool: List<VmLocals> = arrayListOf<VmLocals>()
 
@@ -251,6 +252,14 @@ class Vm {
     /// 直读路径；类定义表自动注册进类继承注册表（继承/虚方法分派生效）。
     fun loadAucAndRun(path: String): Any {
         val mod: AucModule = AucLoaderUtils.loadModule(path)
+        val loadOnly: String = Env.get("AURA_VM_LOADONLY", "")
+        if (loadOnly == "1") {
+            this.error = "loadonly valid=" + toStr(mod.isValid()) + " numeric=" + toStr(mod.numericMode)
+                + " err=[" + mod.error + "] funcs=" + toStr(mod.funcsCount)
+                + " consts=" + toStr(mod.constsCount) + " name=" + mod.name
+            this.running = false
+            return null
+        }
         if (!mod.isValid()) {
             this.error = "loadAucAndRun: " + mod.error
             this.running = false
@@ -261,7 +270,8 @@ class Vm {
             this.registerAucClasses(mod.classNames, mod.classParentIds)
             this.loadPredecoded(mod.numOpNames, mod.numArgs, mod.constPool,
                 mod.funcTable, mod.exports, mod.imports)
-            return this.run()
+            val r: Any = this.run()
+            return r
         }
         // 遗留文本路径（数值模式失败时的回退）
         this.bytecode = mod.bytecode
@@ -465,6 +475,13 @@ class Vm {
         } else if (op == Opcodes.STORE_LOCAL) {
             this.locals.putSlot(this.arg0IntOf(), this.stack.pop())
         } else if (op == Opcodes.LOAD_CONST_I) {
+            // 诊断（前 3 次）：常量池行是否完好（2026-10-06 装载链追踪）
+            if (this.dbgLcCount < 3) {
+                this.dbgLcCount = this.dbgLcCount + 1
+                val lcIdx: String = args.get(0)
+                println("[LC] n=" + toStr(this.dbgLcCount) + " idxArg=[" + lcIdx
+                        + "] poolLine=[" + this.getConst(lcIdx) + "]")
+            }
             this.stack.push(toAny(VmOps.toI32(toStr(this.getConst(args.get(0))))))
         } else if (op == Opcodes.JUMP_IF_FALSE) {
             val cond: Any = this.stack.pop()
@@ -1374,6 +1391,163 @@ class Vm {
             || funcName == "aura.lang.std.Process.arg") {
             val idx: Any = this.stack.pop()
             this.stack.push(Process.arg(VmOps.toI32(toStr(idx))))
+            return
+        } else if (funcName == "ProcessOps.aura_process_argCount") {
+            // ⚠️ 种子编译器把 `Process.argCount()` 直接降级为 extern 原生调用
+            //（.auc 原生名 = 全限定接口名），不经 Aura 包装器。自举 Stage-2 的
+            // 编译器 .acu 一进 main 就撞在这里（实测 VM-ERROR=Unknown function:
+            // ProcessOps.aura_process_argCount，2026-10-05）。AOT 载体
+            //（auc_vm_runner.exe）里 Process.argCount() 走同一 C 访问器，
+            // 拿到的就是宿主 argv ✓。
+            this.stack.push(Process.argCount())
+            return
+        } else if (funcName == "ProcessOps.aura_process_args") {
+            // 全量 argv 以 '\n' 连接（与 C 侧 aura_process_args 语义一致；
+            // ProcessNative.arg(i) 即按 '\n' 切分）。
+            val cnt: Int = Process.argCount()
+            var all: String = ""
+            var ai: Int = 0
+            while (ai < cnt) {
+                if (ai > 0) { all = all + "\n" }
+                all = all + Process.arg(ai)
+                ai = ai + 1
+            }
+            this.stack.push(all)
+            return
+        } else if (funcName == "Memory.alloc") {
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.alloc(VmOps.toI64(toStr(n))))
+            return
+        } else if (funcName == "Memory.free") {
+            val n: Any = this.stack.pop()
+            Memory.free(VmOps.toI64(toStr(n)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.read") {
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.read(VmOps.toI64(toStr(n))) as Int)
+            return
+        } else if (funcName == "Memory.read16") {
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.read16(VmOps.toI64(toStr(n))) as Int)
+            return
+        } else if (funcName == "Memory.read32") {
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.read32(VmOps.toI64(toStr(n))))
+            return
+        } else if (funcName == "Memory.read64") {
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.read64(VmOps.toI64(toStr(n))))
+            return
+        } else if (funcName == "Memory.write") {
+            val v: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            Memory.write(VmOps.toI64(toStr(n)), VmOps.toI32(toStr(v)) as Byte)
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.write16") {
+            val v: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            Memory.write16(VmOps.toI64(toStr(n)), VmOps.toI32(toStr(v)) as Short)
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.write32") {
+            val v: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            Memory.write32(VmOps.toI64(toStr(n)), VmOps.toI32(toStr(v)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.write64") {
+            val v: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            Memory.write64(VmOps.toI64(toStr(n)), VmOps.toI64(toStr(v)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.copy") {
+            val ln: Any = this.stack.pop()
+            val src: Any = this.stack.pop()
+            val dst: Any = this.stack.pop()
+            Memory.copy(VmOps.toI64(toStr(dst)), VmOps.toI64(toStr(src)),
+                        VmOps.toI64(toStr(ln)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.set") {
+            val ln: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            Memory.set(VmOps.toI64(toStr(n)), VmOps.toI32(toStr(v)) as Byte,
+                       VmOps.toI64(toStr(ln)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.arcIncrement") {
+            val n: Any = this.stack.pop()
+            Memory.arcIncrement(VmOps.toI64(toStr(n)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.arcDecrement") {
+            val n: Any = this.stack.pop()
+            Memory.arcDecrement(VmOps.toI64(toStr(n)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.atomicAdd") {
+            val delta: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.atomicAdd(VmOps.toI64(toStr(n)),
+                                             VmOps.toI64(toStr(delta))))
+            return
+        } else if (funcName == "Memory.mprotect") {
+            val prot: Any = this.stack.pop()
+            val ln: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.mprotect(VmOps.toI64(toStr(n)),
+                                            VmOps.toI64(toStr(ln)),
+                                            VmOps.toI32(toStr(prot))))
+            return
+        } else if (funcName == "charCodeAt") {
+            // 字符串原语族：种子 .auc 的裸名原生（自举 Stage-2 的编译器
+            // 代码大量使用，2026-10-05 补齐）。⚠️ 越界返回 -1（与
+            // VmOps/AucLoader 的防御语义一致）：编译器对残缺行存在
+            // idx==len 的探测读，直接透传会在 AOT 载体下段错误
+            //（实测 CEA-1 后崩，2026-10-05）。
+            val idx: Any = this.stack.pop()
+            val s: Any = this.stack.pop()
+            val sv: String = toStr(s)
+            val ii: Int = VmOps.toI32(toStr(idx))
+            if (ii < 0 || ii >= sv.length) {
+                this.stack.push(-1)
+            } else {
+                this.stack.push(sv.charCodeAt(ii))
+            }
+            return
+        } else if (funcName == "strcat") {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(toStr(a) + toStr(b))
+            return
+        } else if (funcName == "puts") {
+            val s: Any = this.stack.pop()
+            println(toStr(s))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "String.fromCharCode" || funcName == "String_fromCharCode") {
+            val c: Any = this.stack.pop()
+            this.stack.push(String.fromCharCode(VmOps.toI32(toStr(c))))
+            return
+        } else if (funcName == "substring" || funcName == "String_substring"
+            || funcName == "String.substring") {
+            val end: Any = this.stack.pop()
+            val start: Any = this.stack.pop()
+            val s: Any = this.stack.pop()
+            val sv: String = toStr(s)
+            var st: Int = VmOps.toI32(toStr(start))
+            var en: Int = VmOps.toI32(toStr(end))
+            if (st < 0) { st = 0 }
+            if (en > sv.length) { en = sv.length }
+            if (st >= en) {
+                this.stack.push("")
+            } else {
+                this.stack.push(sv.substring(st, en))
+            }
             return
         } else if (funcName == "Process.exit" || funcName == "aura.lang.std.Process.exit") {
             val code: Any = this.stack.pop()

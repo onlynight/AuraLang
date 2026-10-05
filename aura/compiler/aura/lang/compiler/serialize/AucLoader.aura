@@ -112,6 +112,7 @@ object AucLoaderUtils {
             reader.dispose()
             return mod
         }
+        println("[LB] magic ok")
 
         // 2. 版本
         //
@@ -143,11 +144,18 @@ object AucLoaderUtils {
         //（整数/字符串/布尔共用 0），而文本字节码的 `CONST_INT`/`CONST_STRING`
         // 是有类型的 —— 加载期按标签把它翻译成对应的类型化助记符。
         val constTags: List<Int> = arrayListOf<Int>()
+        println("[LC0] n=" + toStr(mod.constsCount))
         var ci: Int = 0
         while (ci < mod.constsCount) {
             val tag: Int = reader.readByte()
             constTags.add(tag)
             val value: String = readConstValue(reader, tag)
+            println("[P1]")
+            println(toStr(ci))
+            println("[P2]")
+            println("[P3] len=" + toStr(value.length))
+            println("[LCV] i=" + toStr(ci) + " v=" + value)
+            println("[LC] i=" + toStr(ci) + " tag=" + toStr(tag))
             if (mod.constsCount <= 12) {
             }
             if (mod.constPool != "") {
@@ -162,6 +170,7 @@ object AucLoaderUtils {
         //    + u8 has_ffi_lib (+ write_str(lib) 当且仅当 1)
         //    + u16 param_types_len + param_types(u8 each) + u8 ret_type
         mod.nativesCount = reader.readU16()
+        println("[LN0] n=" + toStr(mod.nativesCount))
         // 原生函数名/参数个数（下标与 `CALL_NATIVE(_ARGS)` 的操作数一致）：
         // 字节码里的操作数是**下标**，但 VM 的内建分派按**名字**调用
         //（`callOrBuiltin(name, argc)`），故加载期先把名字解析出来。
@@ -170,6 +179,7 @@ object AucLoaderUtils {
         var ni: Int = 0
         while (ni < mod.nativesCount) {
             val nname: String = reader.readStr()              // name
+            println("[LN] i=" + toStr(ni) + " " + nname)
             val nparams: Int = reader.readU16()               // param_count
             nativeNames.add(nname)
             nativeParams.add(nparams)
@@ -213,6 +223,7 @@ object AucLoaderUtils {
         var fi: Int = 0
         while (fi < mod.funcsCount) {
             val fname: String = reader.readStr()
+            println("[LF] i=" + toStr(fi) + " " + fname)
             val params: Int = reader.readU16()
             val locals: Int = reader.readU16()
             // Rust `to_bytes`：u8 is_native + u8 aot_mode + **u32** aot_desc_idx
@@ -232,15 +243,18 @@ object AucLoaderUtils {
         // 8. 入口点（可选解析；VM 走 `funcOffset("main")`，不依赖该字段）
         mod.entry = reader.readU16()
         mod.entryKind = reader.readStr()
+        println("[LE0] entry ok")
 
         // 9. 导出符号表（CALL_EXPORT 解析需要）
         //    格式：u16 count, 每条: name(str) + kind(u8) + sig_id(str)
         //          + has_func_idx(u8) + func_idx(u16)? + type_table_idx(u16) + const_idx(u16)
         val nExportsL: Long = reader.readU16()
         val nExports: Int = nExportsL as Int
+        println("[LE1] n=" + toStr(nExports))
         var ei: Int = 0
         while (ei < nExports) {
             val expName: String = reader.readStr()
+            println("[LEX] i=" + toStr(ei) + " " + expName)
             reader.readByte()             // kind
             reader.readStr()              // sig_id
             val hasFunc: Int = reader.readByte()
@@ -260,9 +274,11 @@ object AucLoaderUtils {
         //           + symbol(str) + sig_id(str) + func_idx(u16)
         val nImportsL: Long = reader.readU16()
         val nImports: Int = nImportsL as Int
+        println("[LI1] n=" + toStr(nImports))
         var ii: Int = 0
         while (ii < nImports) {
             val impName: String = reader.readStr()
+            println("[LIX] i=" + toStr(ii) + " " + impName)
             reader.readByte()             // kind
             val impModule: String = reader.readStr()
             val impSymbol: String = reader.readStr()
@@ -274,9 +290,11 @@ object AucLoaderUtils {
             ii = ii + 1
         }
 
+        println("[LI] imports ok")
         // 11. 显式依赖表（P2.2a：此前跳过）
         //     u16 count, 每条: module(str) + uuid(16) + version(str)
         val nDepsL: Long = reader.readU16()
+        println("[LD1] n=" + toStr(nDepsL as Int))
         var di: Int = 0
         while (di < (nDepsL as Int)) {
             val depModule: String = reader.readStr()
@@ -286,22 +304,27 @@ object AucLoaderUtils {
             di = di + 1
         }
 
+        println("[LD] deps ok")
         // 12. 外部模块签名 ID（P2.2a）
         val nSigsL: Long = reader.readU16()
+        println("[LS1] n=" + toStr(nSigsL as Int))
         var si2: Int = 0
         while (si2 < (nSigsL as Int)) {
             mod.sigIds = mod.sigIds + reader.readStr() + "\n"
             si2 = si2 + 1
         }
 
+        println("[LS] sigs ok")
         // 13. 启用的 std 模块（P2.2a）
         val nModsL: Long = reader.readU16()
+        println("[LM1] n=" + toStr(nModsL as Int))
         var mi2: Int = 0
         while (mi2 < (nModsL as Int)) {
             mod.enabledModules = mod.enabledModules + reader.readStr() + "\n"
             mi2 = mi2 + 1
         }
 
+        println("[LM] mods ok")
         // 14. v5: 虚方法表（P2.2a/P2.2c）
         //     u16 count, 每表: type_tag(u16) + u16 nslots + nslots × u16(func_idx)
         //     槽位 → 方法名的解析表：取任一非空槽的函数名（"Class.method"）
@@ -334,6 +357,7 @@ object AucLoaderUtils {
                 vi = vi + 1
             }
         }
+        println("[LV] vtables ok")
         mod.slotMethodNames = slotNames
 
         // 15. v6: 类定义表（P2.2a/P2.2c）
@@ -371,6 +395,7 @@ object AucLoaderUtils {
             }
         }
 
+        println("[LX] classes ok")
         // 16. v6: 源码索引段（LSP 专用，跳过其字节）
         val hasSourceIndex: Boolean = hasHeaderFlag(mod.headerFlags, 32)
         if (version >= 6 && hasSourceIndex && reader.pos < reader.dataLen) {
@@ -393,7 +418,9 @@ object AucLoaderUtils {
             // 段数据区（剩余字节）不再消费——随 Photon 任务
         }
 
+        println("[LT] sourceIndex+aot ok")
         // ═══ 第 2 遍：数值化解码（P2.2b，取消文本翻译层）═══
+        println("[P2] decode pass begin")
         mod.numericMode = true
         var lineNo2: Int = 0
         var startLines: List<Int> = arrayListOf<Int>()
@@ -401,12 +428,14 @@ object AucLoaderUtils {
         while (fi3 < mod.funcsCount) {
             startLines.add(lineNo2)
             reader.pos = codeStarts.get(fi3)
+            println("[P2f] i=" + toStr(fi3) + " " + funcNames.get(fi3))
             val decoded: Int = decodeNumeric(reader, codeLens.get(fi3), nativeNames,
                 nativeParams, constTags, funcNames, funcParams, mod.slotMethodNames,
                 mod.classNames, lineNo2, mod)
             lineNo2 = lineNo2 + decoded
             fi3 = fi3 + 1
         }
+        println("[P2] decode pass done")
         // 函数表：起始行 = 指令下标（无数值注释占位行）
         var fi4: Int = 0
         while (fi4 < mod.funcsCount) {
@@ -512,6 +541,7 @@ object AucLoaderUtils {
 
     /// 读取常量值。
     private fun readConstValue(reader: AucReader, tag: Int): String {
+        println("[RCV] tag=" + toStr(tag))
         // 常量标签用字面量（同版本号：object 的 const val 在自举 AOT 下不可靠）
         if (tag == 0) {  // CONST_INT（i64）
             // 逐 32 位读取：写端是 `i64`，但字节码语义是 32 位 Int。
@@ -568,12 +598,14 @@ object AucLoaderUtils {
             var i: Int = 0
             val len: Int = lenLo + lenHi * 65536
             var result: String = ""
+            println("[TS0] len=" + toStr(len))
             while (i < len) {
                 val c: Int = reader.readByte()
                 if (c < 0) { break }
                 result = result + String.fromCharCode(c)
                 i = i + 1
             }
+            println("[TS1] done")
             return result
         } else if (tag == 3) {  // CONST_BOOL
             val v: Int = reader.readByte()

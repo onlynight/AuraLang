@@ -251,6 +251,17 @@ class X86Encoder {
         this.writeByte(rex)
         this.writeByte(0x89)
         // mod=10 (disp32)，rm = base（base=101 即 rbp/r13 在 mod=10 下合法）
+        // ⚠️ base = rsp/r12（rm=100）时**必须**补 SIB 字节 0x24
+        //（scale=0, index=100=无, base=100=rsp）——旧实现直接写 disp32，
+        // 首字节被当 SIB 解码（index/disp 全部错位）⇒ 野生地址写入
+        //（实测 VEH handler 的 [rsp+48] 存储变成 0x4c000000(%rax,%rsi)，
+        // handler 自身即崩、崩溃转储永不落地，2026-10-06）。
+        if ((b & 7) == 4) {
+            this.writeByte(0x84 + ((s & 7) << 3))
+            this.writeByte(0x24)   // SIB: scale=0, index=100(无), base=100(rsp)
+            this.writeInt(disp)
+            return
+        }
         this.writeByte(0x80 + ((s & 7) << 3) + (b & 7))
         this.writeInt(disp)
     }
@@ -304,6 +315,11 @@ class X86Encoder {
         this.emitGroup1Imm(dst, 0, imm)
     }
 
+    /// 编码 AND reg, imm32（REX.W 81 /4 id，group1 扩展 4 = AND）。
+    fun emitAndRI(dst: String, imm: Int): Unit {
+        this.emitGroup1Imm(dst, 4, imm)
+    }
+
     /// 编码 SUB reg, imm32（REX.W 81 /5 id）。
     fun emitSubRI(dst: String, imm: Int): Unit {
         this.emitGroup1Imm(dst, 5, imm)
@@ -312,6 +328,17 @@ class X86Encoder {
     /// 编码 CMP reg, imm32（REX.W 81 /7 id）。
     fun emitCmpRI(reg: String, imm: Int): Unit {
         this.emitGroup1Imm(reg, 7, imm)
+    }
+
+    /// 编码 CMP EAX, imm32（3D id，**32 位**、无 REX.W）。
+    ///
+    /// ⚠️ Win64 API 只写 eax、rax 高 32 位零扩展：`cmp rax, -1` 永远撞不上
+    /// 64 位 -1 ⇒ INVALID_FILE_SIZE 哨兵失效，返回 +4294967295 骗过调用方
+    /// 的 `size <= 0` 守卫 ⇒ malloc(4G) 段错误（实测 fs 探针 readText，
+    /// 2026-10-03 —— §8.4 修复只换了 mov 侧，cmp 侧漏了）。
+    fun emitCmpEaxImm32(imm: Int): Unit {
+        this.writeByte(0x3D)
+        this.writeInt(imm)
     }
 
     /// 编码 MUL rax, reg（有符号乘法，REX.W 0F AF /r）。
@@ -656,11 +683,20 @@ class X86Encoder {
         this.writeInt(offset)
     }
 
+    /// 编码 MOV qword [rbp + disp32], imm32（REX.W C7 /0，mod=10 rm=101）。
+    ///
+    /// imm32 按符号扩展成 64 位落栈——正数 imm 得到零扩展后的同值 64 位常量
+    ///（canary 哨兵用），负数 imm 得到高 32 位全 1 的常量。
+    fun emitStoreImm32Stack(offset: Int, imm: Int): Unit {
+        this.writeByte(this.rexByte(true, 0, 5))
+        this.writeByte(0xC7)
+        this.writeByte(0x85)   // mod=10, reg=000(/0), rm=101(rbp)
+        this.writeInt(offset)
+        this.writeInt(imm)
+    }
+
     /// 编码 MOV reg, [rbp + disp32]（栈加载）。
     fun emitStackLoad(reg: String, offset: Int): Unit {
-        if (offset == 0) {
-            println("[stkload0] reg=" + reg)
-        }
         val r: Int = this.regNum(reg)
         this.writeByte(this.rexByte(true, r, 5))
         this.writeByte(0x8B)
@@ -727,6 +763,18 @@ class X86Encoder {
         if ((r & 7) == 5) {
             this.writeByte(0x78 + 5)   // mod=01, reg=111(/7), rm=101
             this.writeByte(0)
+        } else if ((r & 7) == 4) {
+            // ⚠️ base = rsp/r12（rm=100）必须补 SIB=0x24（scale0 无 index，
+            // base=100=rsp）——旧实现直接落 imm8，首字节被当 SIB 解码成
+            // [rax+rax]（实测 emitPrologue 栈页探测读野地址崩溃，
+            // 2026-10-06，与 emitStoreMemDisp32 同族）。注意 imm 在本分支
+            // 内已写，**不能**再落到尾部共用 writeByte（双写会多出一个
+            // 0x00 字节挤进指令流，实测 prologue 第二个 subq 前多出 0x00
+            // ⇒ CPU 从半截指令走飞，2026-10-06 二次修）。
+            this.writeByte(0x3c)   // mod=00, reg=111(/7), rm=100(SIB)
+            this.writeByte(0x24)
+            this.writeByte(imm & 255)
+            return
         } else {
             this.writeByte(0x38 + (r & 7))   // mod=00, reg=111(/7), rm=baseReg
         }
@@ -944,6 +992,13 @@ class X86Encoder {
         val b: Int = this.regNum(base)
         this.writeByte(this.rexByte(true, d, b))   // REX.W + REX.R/B as needed
         this.writeByte(0x8B)                        // MOV r/m64, r64
+        // ⚠️ base = rsp/r12（rm=100）时必须补 SIB=0x24（同 emitStoreMemDisp32）
+        if ((b & 7) == 4) {
+            this.writeByte(0x84 + ((d & 7) << 3))
+            this.writeByte(0x24)   // SIB: scale=0, index=100(无), base=100(rsp)
+            this.writeInt(disp32)
+            return
+        }
         this.writeByte(0x80 + ((d & 7) << 3) + (b & 7))  // mod=10, reg=dst, rm=base
         this.writeInt(disp32)                       // disp32 (little-endian, signed extend)
     }

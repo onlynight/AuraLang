@@ -58,6 +58,17 @@ class SsaBuilder {
     private var dbgExprs: Int = 0
     private var dbgBlocks: Int = 0
     private var dbgCalls: Int = 0
+
+    /// 最近一次 resolveMethodSymbol 是否走了「隐式 this」规则（规则 2）。
+    /// buildCall 据此把 this 值前置到实参首位：被调的类实例方法形参表首项
+    /// 是 this，隐式调用（readFileToBuffer(path)）的 HIR kids 只有实参、
+    /// 无接收者 kid，不前置则被调方整体错位一位（this=首实参、首实参=
+    /// memtoken；实测 Photon 版 VM runner：readFileToBuffer(path) 的 path
+    /// 在被调方读成 memtoken/垃圾，stringToBuffer 对 NULL 写循环崩。
+    /// 种子 AOT 的 emit.rs 有对应处理，photon 后端漏了，2026-10-04）。
+    /// 单例方法（无 this 形参）不前置。
+    private var lastResolveImplicitThis: Boolean = false
+
     private var dbgHasType: Int = 0
 
     /// 内存链当前值（memory chain head）。
@@ -74,6 +85,18 @@ class SsaBuilder {
 
     /// 循环退出块栈（逗号分隔 BlockID，用于 break/continue 的退出目标查找）。
     private var loopStack: String = ""
+
+    /// continue 目标栈（condBlock），与 loopStack 平行维护。
+    private var loopContStack: String = ""
+
+    /// 每层循环的 Phi 变量条目（phiVarEntries 快照），与 loopContStack 平行。
+    private var loopPhiVarsStack: String = ""
+
+    /// continue 点值登记，行格式 condId|phiVid|curVid。buildWhile 回填时把
+    /// 同 condId 的记录追加为对应 Phi 的**额外入边**（pass② 精确匹配按
+    /// def 块分配；continue 值通常定义于更早块，落到 (b) 兜底——单 continue
+    /// 点场景正确，多 continue 点退化为共享一个值，见文档）。
+    private var loopContRecs: String = ""
 
     /// Phase A S2: 变量版本号映射（扁平字符串：name|version\n）。
     ///
@@ -234,6 +257,9 @@ class SsaBuilder {
         this.varMap = ""
         this.varVersion = ""
         this.loopStack = ""
+        this.loopContStack = ""
+        this.loopPhiVarsStack = ""
+        this.loopContRecs = ""
         this.classNamesCsv = ""
         this.classList = arrayListOf<String>()
         this.classParents = ""
@@ -272,6 +298,11 @@ class SsaBuilder {
 
         // 类元数据必须在建函数之前就绪：方法与调用点都要用它解析字段/构造器。
         this.buildClassIndex(src)
+        // 溶解对象的 getter 缺口由 `ensureSingletonGetter` 在 buildCall 发射点
+        // 自愈（HirLowerer 对部分 `object X` 采用「方法限定名 + 体提升」的输出
+        // 形态，对象声明节点不进降级 HIR，buildClassIndex 捕不到；方法体里被
+        // 注入的 `X_getInstance()` 调用若没有 getter，链接期即 undefined
+        // symbol——实测 VM runner 的 MirUtils：10 处调用 0 定义，2026-10-06）。
         // `init` 重载元数（决定 `<Class>_init<N>` 后缀与要生成哪些 `__new<N>`）。
         this.scanInitArities(src)
         // 构造器 `<Class>__new<N>`：每个类每个元数一份，必须早于用户函数。
@@ -281,7 +312,14 @@ class SsaBuilder {
         this.synthesizeSingletons(src)
 
         this.buildAllFunctions(src)
-
+        // 溶解对象 getter 收尾（MirUtils 缺口，2026-10-06）：HirLowerer 对部分
+        // `object X` 采用「方法限定名 + 体提升」形态输出，对象声明节点不进降级
+        // HIR，buildClassIndex 捕不到 ⇒ 方法体里被注入的 `X_getInstance()` 调用
+        // 没有对应 getter ⇒ 链接期 `undefined symbol`（实测 VM runner 的
+        // MirUtils：方法体 10 处调用 0 定义）。此处扫**建好的 SSA 函数名表**：
+        // 「大写前缀_」且前缀未登记为类/单例/extern ⇒ 补登记 + 补合成 getter。
+        // 在全部函数建完后跑 ⇒ 对 csv 的增补不再影响任何调用点解析，纯增益。
+        this.synthesizeDissolvedGetters(src)
 
         return this.program
     }
@@ -409,7 +447,7 @@ class SsaBuilder {
         // HIR 的成员调用把接收者作为**第一个实参**传下来（Hat 里形如
         // `@call @method(@recv, @mem)`），而方法自身此前声明 0 个形参 —— 形参表
         // 与调用约定整体错位一位。补上 self 后，方法体里的字段访问才有基址。
-        this.curClass = ""
+            this.curClass = ""
         this.localTypes = ""
         if (ownerCls != "") {
             this.curClass = ownerCls
@@ -525,10 +563,20 @@ class SsaBuilder {
             this.buildVarDecl(src, id)
         } else if (kind == "HirIf") {
             this.buildIf(src, id)
+        } else if (kind == "HirIfExpr") {
+            // ⚠️ 裸 if 表达式落语句位置（旧缺陷路径：else-if 链经 lowerExpr
+            // 产出裸 HirIfExpr，见 Hir.lowerBranch 的说明）。此前无此用例 ⇒
+            // 整条分支**静默丢弃**（实测 readConstValue 的 else-if 链坍缩）。
+            // 表达式值在此处无消费者，丢弃返回值即可。
+            this.buildIfExpr(src, id)
         } else if (kind == "HirWhile") {
             this.buildWhile(src, id)
         } else if (kind == "HirBlock") {
             this.buildBlock(src, id)
+        } else if (kind == "HirBreak") {
+            this.buildBreak()
+        } else if (kind == "HirContinue") {
+            this.buildContinue()
         } else if (kind == "HirReturn") {
             this.buildReturn(src, id)
         } else if (kind == "HirExprStmt") {
@@ -834,13 +882,18 @@ class SsaBuilder {
         val varMapAfterElse: String = this.varMap
         if (traceOn) println("      [if11] varMapAfterElse saved")
 
-        // 在 merge 块插入 Phi 节点（for variables defined in both branches）
+        // 在 merge 块插入 Phi 节点（合并两分支的变量定值）
         if (traceOn) println("      [if12] before insertPhisAtMerge")
-        this.insertPhisAtMerge(mergeBlock, varMapBefore, varMapAfterThen, varMapAfterElse)
+        this.insertPhisAtMerge(mergeBlock, varMapBefore, varMapAfterThen,
+                               varMapAfterElse, kCount > 2)
         if (traceOn) println("      [if13] after insertPhisAtMerge")
 
-        // 恢复 varMap 到 merge 块的状态（合并 then/else 的定义）
-        this.varMap = varMapAfterElse  // else 块的定义优先
+        // varMap 回到入口状态：merge 后每个改动变量的最新值由
+        // insertPhisAtMerge 以 **Phi 节点 id** 重新登记（见其说明）。
+        // ⚠️ 旧实现 `this.varMap = varMapAfterElse`（else 优先）——对无 else
+        // 的 if，afterElse 就是 then 的 varMap ⇒ `if (c) { ok = false }` 之后
+        // varMap["ok"] **永久指向 false 常量**（分支执行与否无关）⇒ 该变量
+        // 在 SSA 层恒为 false（实测 probe_obj3 的 COPY-BAD，2026-10-04）。
 
         // 继续构建 merge 块
         this.curBlock = mergeBlock
@@ -852,39 +905,140 @@ class SsaBuilder {
     /// 比较 then/else 分支中定义的变量，为两分支都定义的变量插入 Phi。
     /// varMap 格式：name|vid\nname|vid\n...
     private fun insertPhisAtMerge(mergeBlock: Int, before: String,
-                                    afterThen: String, afterElse: String): Unit {
-        // 找出 then 中新增/修改的变量
+                                    afterThen: String, afterElse: String,
+                                    hasElse: Boolean): Unit {
+        // 找出 then / else 中新增/修改的变量（无 else 时 else 改动集为空，
+        // else 出值一律取 before 值）。
         val thenDefs: List<String> = this.findChangedVars(before, afterThen)
-        // 找出 else 中新增/修改的变量
-        val elseDefs: List<String> = this.findChangedVars(before, afterElse)
+        val elseDefs: List<String> = if (hasElse) {
+            this.findChangedVars(before, afterElse)
+        } else {
+            arrayListOf<String>()
+        }
 
-        // 对 then 中定义的变量，检查是否在 else 中也定义
+        // 合并名单：then ∪ else（去重，then 序优先，else 追加）。
+        // ⚠️ 用扁平 CSV + indexOf 去重，禁止 arrayListOf+add（种子 AOT 下
+        // add 后 get 返回 null ⇒ 段错误，见 findChangedVars 的说明）。
+        var unionCsv: String = ""
         var i: Int = 0
         while (i < thenDefs.size) {
-            val varName: String = thenDefs[i]
-            // 检查 else 是否也定义了这个变量
-            var foundInElse: Boolean = false
-            var j: Int = 0
-            while (j < elseDefs.size) {
-                if (elseDefs[j] == varName) {
-                    foundInElse = true
-                    break
-                }
-                j = j + 1
-            }
-            if (foundInElse) {
-                // 获取 then 和 else 中的 ValueID
-                val thenVid: Int = this.lookupVar(before, varName, afterThen)
-                val elseVid: Int = this.lookupVar(before, varName, afterElse)
-                if (thenVid >= 0 && elseVid >= 0) {
-                    // 插入 Phi 节点（返回 ValueID，但不更新 varMap）
-                    val typeId: Int = 0  // 默认 Int 类型
-                    val incoming: String = toStr(thenVid) + "," + toStr(elseVid)
-                    this.makePhi(mergeBlock, typeId, incoming, "")
-                }
+            val v: String = thenDefs[i]
+            if (this.unionCsvContains(unionCsv, v) == false) {
+                if (unionCsv == "") { unionCsv = v } else { unionCsv = unionCsv + "," + v }
             }
             i = i + 1
         }
+        i = 0
+        while (i < elseDefs.size) {
+            val v: String = elseDefs[i]
+            if (this.unionCsvContains(unionCsv, v) == false) {
+                if (unionCsv == "") { unionCsv = v } else { unionCsv = unionCsv + "," + v }
+            }
+            i = i + 1
+        }
+
+        // 为每个改动变量建 merge Phi，并**把 varMap 更新到 Phi id**。
+        //
+        // ⚠️ 旧实现只为「两分支都赋值」的变量建 Phi（单分支赋值不建），
+        // 且从不更新 varMap（buildIf 里 `varMap = varMapAfterElse`）——
+        // 无 else 的 `if (c) { x = v }` 之后 x 的 SSA 值**恒为 v**（分支
+        // 执行与否无关）⇒ 条件赋值全部失效（实测 probe_obj3 的 ok 标志
+        // COPY-BAD、本轮 runner 读循环，2026-10-04）。
+        // 出值规则：then 出值 = lookupVar(afterThen)（未改 = before 值）；
+        // else 出值 = hasElse ? lookupVar(afterElse) : before 值。
+        var i2: Int = 0
+        while (i2 < this.unionCsvCount(unionCsv)) {
+            val varName: String = this.unionCsvName(unionCsv, i2)
+            val thenVid: Int = this.lookupVar(before, varName, afterThen)
+            val elseVid: Int = if (hasElse) {
+                this.lookupVar(before, varName, afterElse)
+            } else {
+                this.lookupVar(before, varName, before)
+            }
+            if (thenVid >= 0 && elseVid >= 0 && thenVid != elseVid) {
+                val incoming: String = toStr(thenVid) + "," + toStr(elseVid)
+                // ⚠️ phi 类型必须继承**入边值**的类型——旧实现硬编码 0（Int），
+                // 与 buildWhile 的同名缺陷同族（该处 2026-10-06 已修）。String
+                // 变量经 if/else 合并后 phi 被定型 Int ⇒ ISel 的 strcat 判定
+                // 失败 ⇒ concat 编成**整数指针加法**（实测 loadModule 类定义段
+                // fnLine = fnLine + readStr 变 addq → 堆指针 + 垃圾 →
+                // streq 野指针崩溃，2026-10-06）。
+                val phiTy: Int = this.program.valueOf(thenVid).type
+                val phiId: Int = this.makePhi(mergeBlock, phiTy, incoming, "")
+                this.varMapAdd(varName, phiId)
+            } else {
+                val v: Int = if (thenVid >= 0) { thenVid } else { elseVid }
+                if (v >= 0) {
+                    this.varMapAdd(varName, v)
+                }
+            }
+            i2 = i2 + 1
+        }
+    }
+
+    /// CSV 名单去重包含判定（精确 token 匹配，逗号分隔）。
+    /// ⚠️ 禁用 String.indexOf（带 from 的 indexOf 在 seed AOT 下失效——
+    /// from 参数被忽略/返回错位下标 ⇒ 扫描不前进 ⇒ 死循环），一律
+    /// 纯 charCodeAt 逐字符扫描（与 localTypeOf/mapVidOf 同一纪律）。
+    private fun unionCsvContains(csv: String, name: String): Boolean {
+        if (csv == "" || name == "") { return false }
+        var i: Int = 0
+        while (i < csv.length) {
+            var end: Int = i
+            while (end < csv.length) {
+                if ((csv.charCodeAt(end) as Int) == 44) { break }
+                end = end + 1
+            }
+            // token = [i, end)
+            if (end - i == name.length) {
+                var k: Int = 0
+                var same: Boolean = true
+                while (k < name.length) {
+                    if ((csv.charCodeAt(i + k) as Int) != (name.charCodeAt(k) as Int)) {
+                        same = false
+                        break
+                    }
+                    k = k + 1
+                }
+                if (same) { return true }
+            }
+            if (end >= csv.length) { break }
+            i = end + 1
+        }
+        return false
+    }
+
+    /// CSV 名单条目数。
+    /// ⚠️ 禁用 indexOf（同上），纯 charCodeAt 扫描。
+    private fun unionCsvCount(csv: String): Int {
+        if (csv == "") { return 0 }
+        var n: Int = 1
+        var i: Int = 0
+        while (i < csv.length) {
+            if ((csv.charCodeAt(i) as Int) == 44) { n = n + 1 }
+            i = i + 1
+        }
+        return n
+    }
+
+    /// CSV 名单第 idx 个名字（0 基；越界返回 ""）。
+    /// ⚠️ 禁用 indexOf（同 unionCsvContains 说明），纯 charCodeAt 扫描。
+    private fun unionCsvName(csv: String, idx: Int): String {
+        var start: Int = 0
+        var seen: Int = 0
+        var i: Int = 0
+        while (i <= csv.length) {
+            if (i == csv.length || (csv.charCodeAt(i) as Int) == 44) {
+                if (seen == idx) {
+                    if (i > start) { return csv.substring(start, i) }
+                    return ""
+                }
+                seen = seen + 1
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return ""
     }
 
     /// 找出两个 varMap 快照之间新增/修改的变量。
@@ -1201,8 +1355,21 @@ class SsaBuilder {
         val bodyBlock: Int = this.program.addBlock()
         val endBlock: Int = this.program.addBlock()
 
-        // 将结束块推入循环栈
+        // 循环栈压入「condBlock,endBlock」成对项：break 取栈顶(endBlock)、
+        // continue 取第二项(condBlock)。⚠️ 旧实现只压 endBlock 一项，
+        // loopStackContinueTarget 找不到逗号就退回 endBlock ⇒ continue 变成
+        // break（实测 probe_break：cont 后整个循环提前退出，2026-10-05）。
         this.loopStackPush(endBlock)
+        if (this.loopStack == "") {
+            this.loopStack = toStr(condBlock)
+        } else {
+            this.loopStack = toStr(condBlock) + "," + this.loopStack
+        }
+        if (this.loopContStack == "") {
+            this.loopContStack = toStr(condBlock)
+        } else {
+            this.loopContStack = toStr(condBlock) + "," + this.loopContStack
+        }
 
         // 入口块跳转到条件块（如果尚未设置终结指令）
         val entryBlockObj: MirBlock = this.program.blockOf(entryBlock)
@@ -1226,13 +1393,28 @@ class SsaBuilder {
                 if (beforeVid >= 0) {
                     // 入边 1 先占位为 beforeVid，稍后回填。
                     val incoming: String = toStr(beforeVid) + "," + toStr(beforeVid)
-                    val phiVid: Int = this.makePhi(condBlock, 0, incoming, "")
+                    // ⚠️ phi 类型必须继承**入口入边值**的类型——旧实现硬编码
+                    // 0（Int），String 循环变量（`result = result + …`）的 phi
+                    // 被定型成 Int ⇒ ISel 的 emitStrcat 判定
+                    // isString(Add.type) 失败 ⇒ 字符串 concat 被编译成
+                    // **整数指针加法** ⇒ 循环退出后读到 0x200 垃圾（实测
+                    // VM runner 的 AucReader.readMagic strlen(0x200) 崩，
+                    // 2026-10-06）。
+                    val phiTy: Int = this.program.valueOf(beforeVid).type
+                    val phiVid: Int = this.makePhi(condBlock, phiTy, incoming, "")
                     this.varMap = this.varMap + nm + "|" + toStr(phiVid) + "\n"
                     phiVarEntries = phiVarEntries + nm + "|" + toStr(phiVid) + "\n"
                     phiRecs = phiRecs + nm + "|" + toStr(phiVid) + "|" + toStr(beforeVid) + "\n"
                 }
                 ni = ni + 1
             }
+        }
+
+        // Phi 变量条目入 continue 栈（buildContinue 读取以登记 continue 值）
+        if (this.loopPhiVarsStack == "") {
+            this.loopPhiVarsStack = phiVarEntries
+        } else {
+            this.loopPhiVarsStack = phiVarEntries + "\n" + this.loopPhiVarsStack
         }
 
         // ── 步骤 3：构建循环体（varMap 已指向 Phi）──
@@ -1283,6 +1465,46 @@ class SsaBuilder {
                             //     `op='??'`，PHI 与整个 SSA 变残骸）。
                             val pv: MirValue = this.program.valueOf(phiVid)
                             pv.args = toStr(beforeVid) + "," + toStr(afterVid)
+                            // continue 点值：追加为额外入边（纯 charCodeAt
+                            // 扫描，禁 indexOf——seed AOT 下带 from 的 indexOf
+                            // 失效导致死循环/错位）。
+                            var ci: Int = 0
+                            val recsLen: Int = this.loopContRecs.length
+                            while (ci < recsLen) {
+                                var eEnd: Int = ci
+                                while (eEnd < recsLen) {
+                                    if ((this.loopContRecs.charCodeAt(eEnd) as Int) == 10) { break }
+                                    eEnd = eEnd + 1
+                                }
+                                val rec: String = this.loopContRecs.substring(ci, eEnd)
+                                if (rec != "") {
+                                    var p1: Int = -1
+                                    var p2: Int = -1
+                                    var k: Int = 0
+                                    while (k < rec.length) {
+                                        if ((rec.charCodeAt(k) as Int) == 124) {
+                                            if (p1 < 0) { p1 = k } else { if (p2 < 0) { p2 = k; break } }
+                                        }
+                                        k = k + 1
+                                    }
+                                    if (p1 > 0 && p2 > p1) {
+                                        val recCond: String = rec.substring(0, p1)
+                                        val recPhi: String = rec.substring(p1 + 1, p2)
+                                        // ⚠️ 必须显式 2 参 substring：1 参
+                                        // `rec.substring(p2 + 1)` 在 seed AOT 下
+                                        // 落到双参 C 符号、`to` 为垃圾 ⇒ 返回
+                                        // 空串 ⇒ phi 额外入边静默丢失（实测
+                                        // [contAPPEND] args=…, 尾部空，
+                                        // 2026-10-06）。
+                                        val recVid: String = rec.substring(p2 + 1, rec.length)
+                                        if (recCond == toStr(condBlock) && recPhi == toStr(phiVid)) {
+                                            pv.args = pv.args + "," + recVid
+                                        }
+                                    }
+                                }
+                                if (eEnd >= recsLen) { break }
+                                ci = eEnd + 1
+                            }
                         }
                     }
                 }
@@ -1309,6 +1531,27 @@ class SsaBuilder {
 
         // 将结束块弹出循环栈
         this.loopStackPop()
+        this.loopStackPop()
+        if (this.loopContStack == "") {
+            // 空
+        } else {
+            val cIdx: Int = this.loopContStack.indexOf(",")
+            if (cIdx < 0) {
+                this.loopContStack = ""
+            } else {
+                this.loopContStack = this.loopContStack.substring(cIdx + 1)
+            }
+        }
+        if (this.loopPhiVarsStack == "") {
+            // 空
+        } else {
+            val pIdx: Int = this.loopPhiVarsStack.indexOf("\n")
+            if (pIdx < 0) {
+                this.loopPhiVarsStack = ""
+            } else {
+                this.loopPhiVarsStack = this.loopPhiVarsStack.substring(pIdx + 1)
+            }
+        }
 
         // ⚠️ 循环之后的变量值必须是 **Phi**，不能是循环体末尾的值。
         // 理由：`end` 块可以从条件块直接到达（循环一次都没进），此时循环体里的
@@ -1433,7 +1676,38 @@ class SsaBuilder {
             }
         }
 
+        // ── 裸名字段写入（隐式 `this.data = v` 形态）──
+        //
+        // ⚠️ 旧实现：裸名赋值一律 `Store + varMapAdd(varName, val)` —— 对
+        // **类字段**这是静默语义破坏：varMap 从此屏蔽字段名（本方法内读
+        // varMap 一切正常），但字段本体**从未写入** ⇒ 跨方法读到 0（实测
+        // AucReader.readFromFile 的 `data = readFileToBuffer(path)` /
+        // `pos = 0` 降级成裸 `@store(值, memtoken)`，函数体里一条
+        // `__field_set` 都没有（hat 实证，2026-10-06）⇒ readByte 读
+        // data=0 ⇒ .auc 装载通道整个报废）。buildVar 的读侧早有对称的
+        // 裸字段读取（见其「类体内裸字段名」段），这里补齐写侧。
+        // 判定顺序：varMap 已有（局部/形参）→ 走原路径（局部遮蔽字段）；
+        // varMap 无 + curClass 字段 → emitFieldSet(this, idx, val)。
+        if (this.curClass != "" && this.mapVidOf(this.varMap, varName) < 0) {
+            val bareFIdx: Int = this.classFieldIndex(this.curClass, varName)
+            if (bareFIdx >= 0) {
+                val bareSelf: Int = this.mapVidOf(this.varMap, "this")
+                if (bareSelf >= 0) {
+                    this.emitFieldSet(bareSelf, bareFIdx, val)
+                    return
+                }
+            }
+        }
+
         // Phase A S2: 内存链 — 赋值是内存写入操作
+        //
+        // ⚠️ 2026-10-06 复盘：裸名局部赋值的这个 Store(值, memtoken) 在
+        // ISel 侧 emitMovStore 会以空 mem ⇒ [rbp-8] 共享槽写入（踩踏源）。
+        // 局部变量的真实存储是 varMap（SSA 值），Store 本无语义——但**直接
+        // 删除**会让部分探针崩坏（cont_min 现场实测），说明仍有消费方依赖
+        // 该形态。折中：保留发射，但 **emitMovStore 对空 mem 已改为不落地**
+        //（见 X86Emitter），既不再踩踏任何槽位，也维持既有 SSA 形态。
+        // 下轮确认全部消费方后再彻底移除。
         if (this.memHead >= 0) {
             val varTy: String = src.tyOf(id)
             val varTypeId: Int = this.types.fromTypeName(varTy)
@@ -1579,9 +1853,27 @@ class SsaBuilder {
         return this.varMapLookup(name)
     }
 
+    /// 该 SSA 值是否为 **null 语义的常量**（`Const`/`*const` 且值文本为
+    /// `null` 或 `0`）。未初始化的 `var s: String` 经 `zeroValueOf` 落成
+    /// `Const 0`（i64），与字面量 null 在 SSA 层不可区分 —— 对 String 比较
+    /// 两者都必须走指针相等。
+    /// ⚠️ 类型必须是 `MirValue`：`valueOf` 返回的是 MIR 值；标成 LIR 层的
+    /// `LirValue` 会静默得到未初始化对象（种子编译器类型松弛不报错），
+    /// `op` 恒为空串 ⇒ 判定恒 false（实测 2026-10-03）。
+    private fun isNullValue(v: Int): Boolean {
+        if (v < 0) {
+            return false
+        }
+        val mv: MirValue = this.program.valueOf(v)
+        if (mv.op != "Const" && mv.op.indexOf("const") < 0) {
+            return false
+        }
+        return mv.args == "null" || mv.aux == "null"
+                || mv.args == "0" || mv.aux == "0"
+    }
+
     /// 构建二元运算。
-    fun buildBinary(src: Hir, id: Int): Int {
-        val op: String = src.textOf(id)
+    fun buildBinary(src: Hir, id: Int): Int {        val op: String = src.textOf(id)
         val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount < 2) {
@@ -1607,7 +1899,14 @@ class SsaBuilder {
         if (op == "==" || op == "!=") {
             val lt: Int = this.program.valueOf(left).type
             val rt: Int = this.program.valueOf(right).type
-            if (this.types.isString(lt) || this.types.isString(rt)) {
+            // ⚠️ null 字面量比较必须走**指针相等**（整数 Eq/Ne），绝不进 streq：
+            // `if (s == null)` 编成 `streq(s, null)` ⇒ 对地址 0 做内容比较
+            // ⇒ 0xC0000005（实测 fs 探针 `Stdio.stringToBuffer` 的判空分支，
+            // 2026-10-03；与种子轨 §五 #4 同族缺陷）。
+            val leftNull: Boolean = this.isNullValue(left)
+            val rightNull: Boolean = this.isNullValue(right)
+            if (!leftNull && !rightNull
+                    && (this.types.isString(lt) || this.types.isString(rt))) {
                 val i64: Int = this.types.intType(64)
                 val eqVal: Int = this.program.addValue("Call", i64,
                     toStr(left) + "," + toStr(right), "streq", this.curBlock)
@@ -1680,6 +1979,26 @@ class SsaBuilder {
         // 靠「接收者是单例模块名」这一可靠信号来判定。
         val skipFirst: Boolean =
             (kCount >= 1) && this.recvIsSingleton(src, HirUtils.hirKidsAt(kids, 0))
+        // 诊断（SsaBuilder 在 link() 之后运行，println 安全）：extern/单例
+        // 限定名的接收者丢弃判定。2026-10-03 fs/io 探针 ABI 排查用。
+        if (funcName.indexOf("_") > 0 && (funcName.startsWith("Memory_") || funcName.startsWith("Cpu_")
+                || funcName.startsWith("FileOps_") || funcName.startsWith("Clock_"))) {
+            val k0: Int = if (kCount >= 1) { HirUtils.hirKidsAt(kids, 0) } else { -1 }
+            var csvHas: Int = -2
+            var singHas: Int = -2
+            if (k0 >= 0 && src.kindOf(k0) == "HirVar") {
+                val k0n: String = src.textOf(k0)
+                csvHas = this.externCsv.indexOf("\n" + k0n + "\n")
+                singHas = this.singletonCsv.indexOf("\n" + k0n + "\n")
+            }
+            println("[skip1] " + funcName + " kCount=" + toStr(kCount)
+                    + " skip=" + toStr(if (skipFirst) { 1 } else { 0 })
+                    + " k0kind=" + (if (k0 >= 0) { src.kindOf(k0) } else { "-" })
+                    + " k0txt=" + (if (k0 >= 0) { src.textOf(k0) } else { "-" })
+                    + " csvHas=" + toStr(csvHas) + " singHas=" + toStr(singHas)
+                    + " extLen=" + toStr(this.externCsv.length)
+                    + " ext=[" + this.externCsv + "]")
+        }
 
         // 构建参数列表
         var args: String = ""
@@ -1751,6 +2070,27 @@ class SsaBuilder {
         } else {
             // 成员方法调用：把裸方法名解析为声明类的限定符号（A-2）。
             funcName = this.resolveMethodSymbol(src, kids, kCount, funcName)
+            // ── 隐式 this 调用：把接收者前置到实参首位 ──
+            // 显式接收者（reader.readFromFile(p)）经 lowerCall 把接收者
+            // 降级成 kids[0]，实参循环已把它作为 arg0 传出。隐式调用（类内
+            // 裸调 readFileToBuffer(p)）的 kids 只有实参，而被调类实例方法
+            // 形参表首项是 this，必须补当前 this 到 arg0（见字段说明）。
+            // 单例方法无 this 形参，skipFirst（单例接收者丢弃）形态不补。
+            if (this.lastResolveImplicitThis && !skipFirst
+                    && !this.isSingletonObj(this.curClass)) {
+                // ⚠️ 用 mapVidOf 严格判存：varMapLookup 未命中会**创建 const-0
+                // 并返回其 id**（永不返回 -1），把无 this 的上下文（自由函数/
+                // 单例方法体）也塞一个 this=0 进实参（实测 this 探针 main 的
+                // toStr/println 全被前置 this=0，println(NULL) 崩。2026-10-04）。
+                val selfVal: Int = this.mapVidOf(this.varMap, "this")
+                if (selfVal >= 0) {
+                    if (args == "") {
+                        args = toStr(selfVal)
+                    } else {
+                        args = toStr(selfVal) + "," + args
+                    }
+                }
+            }
         }
 
         // `toStr(<Boolean>)` / `toString(<Boolean>)` → `"true"` / `"false"`。
@@ -1805,6 +2145,11 @@ class SsaBuilder {
         if (src.tyOf(id) == "" && this.isBoolExpr(src, id)) {
             typeId = this.types.fromTypeName("Boolean")
         }
+        // 溶解对象 getter 自愈（见 `ensureSingletonGetter`）：调用点解析出
+        // `X_getInstance` 而 X 未登记时，就地补登记 + 合成 getter —— 漏了就是
+        // 链接期 `undefined symbol: X_getInstance`（实测 VM runner 的
+        // MirUtils：方法体 10 处调用 0 定义，2026-10-06）。
+        this.ensureSingletonGetter(src, funcName)
         val callVal: Int = this.program.addValue("Call", typeId, args, funcName, this.curBlock)
 
         // Phase A: 更新内存链 — Call 后创建新的 mem token
@@ -1877,9 +2222,34 @@ class SsaBuilder {
         // 这里直接降级为运行库 `strlen(s)`（按 NUL 结尾计算，与 AOT 侧一致）。
         if (fieldName == "length" || fieldName == "size") {
             val recvTy: String = this.receiverTypeNameOf(src, recvNode)
-            if (recvTy == "String") {
+            val ownerCls: String = this.receiverClassOf(src, recvNode)
+            // 接收者类型确凿、且该类**真有同名字段** → 保留字段读（下方 owner
+            // 分支）。判据是字段表，不是 recvTy 字符串——簿记污染（§9.1 的
+            // `t|FileUtils_readText`）时 ownerCls 判不出类名，自然回落下面的
+            // 运行库路由。
+            val realField: Boolean = ownerCls != ""
+                    && this.classFieldIndex(ownerCls, fieldName) >= 0
+            if (!realField) {
                 val i64: Int = this.types.intType(64)
                 val sv: Int = this.buildExpr(src, recvNode)
+                // 集合/数组接收者 → Collections.count(obj)（读 [obj+0]，null 安全）。
+                // ⚠️ 属性式 `.size` 是集合的**主流写法**（`paths.size`、`bytes.size`，
+                // 全仓库 40+ 处），recvTy 判定失败（HIR 参数 ty 列为空）时按 strlen
+                // 会把 List 指针当字符串扫出垃圾长度（上一轮兜底的回归面）。
+                val isColl: Boolean = this.isCollectionTypeName(recvTy)
+                        || this.isCollectionTypeName(ownerCls)
+                        || recvTy.startsWith("Array") || ownerCls.startsWith("Array")
+                if (isColl || (fieldName == "size" && recvTy != "String")) {
+                    // count 是纯读：不推进内存链（与 strlen 一致不带 memtoken）
+                    return this.program.addValue("Call", i64, toStr(sv),
+                            "Collections.count", this.curBlock)
+                }
+                // 其余（String / 未定型 / 簿记垃圾）→ strlen。
+                // ⚠️ recvTy 为垃圾非空时旧条件 `recvTy=="String"||recvTy==""`
+                // 不命中 ⇒ 落到通用 GetField 把字符串前 8 字节当长度（实测
+                // fs 探针 main 的 `t.length` ⇒ `@field(@t1623,…)`，2026-10-03
+                // 全量转储 v1626）。Aura 里属性式 `.length` 接收者实际只有字符串，
+                // strlen 压倒性正确。
                 val lenVal: Int = this.program.addValue("Call", i64, toStr(sv),
                                                         "strlen", this.curBlock)
                 if (this.memHead >= 0) {
@@ -2233,11 +2603,28 @@ class SsaBuilder {
         if (node < 0 || src.kindOf(node) != "HirVar") {
             return false
         }
-        if (this.isSingletonObj(src.textOf(node))) {
+        val n: String = src.textOf(node)
+        if (n == "" || n == "this") {
+            return false
+        }
+        // 局部实例（`val vm: VmRunner` → 大写局部变量）是真实值，绝不丢弃
+        if (this.localTypeOf(n) != "") {
+            return false
+        }
+        if (this.isSingletonObj(n)) {
             return true
         }
         // extern interface (Memory/Cpu/ThreadOps) 也没有接收者形参
-        return this.isExternObj(src.textOf(node))
+        if (this.isExternObj(n)) {
+            return true
+        }
+        // 形状兜底（2026-10-03）：大写 + 非局部 + 两本登记簿都没有 ⇒ 模块名
+        // 引用。Aura 没有「类静态方法」形态 —— `X.m()` 里大写 X 只能是
+        // 单例/extern，接收者恒无值。登记簿可能不完整（实测 Cpu/Memory 的
+        // extern 接口缺席 externCsv ⇒ self 占位进实参，ABI 错位一格），
+        // 这里不依赖登记完整性。
+        val fc: Int = n.substring(0, 1).charCodeAt(0)
+        return fc >= 65 && fc <= 90
     }
 
     /// 接收者是否是**裸单例模块引用**（`HirVar` 且名字本身就是单例模块名）。
@@ -2326,7 +2713,6 @@ class SsaBuilder {
         return this.fwInt(this.clsLayoutTotal[ci], 0, 0)
     }
 
-    /// 对象分配大小（字节）：头 16B + 每个字段 8B。
     private fun classSizeOf(cls: String): Int {
         val ci: Int = this.nameToIdx(cls)
         if (ci < 0) {
@@ -2465,7 +2851,11 @@ class SsaBuilder {
         if (ci < 0) {
             return ""
         }
-        return this.flatPart(this.clsLayoutTys[ci], idx)
+        // ⚠️ 行首有**前导 `|`**（`|t0|t1|…`），flatPart 的段 0 是空串 ⇒
+        // 槽 k 的类型在段 k+1。旧实现直接 flatPart(row, idx) ⇒ 类型整体
+        // **-1 错位**（slot0 恒空、slot1 拿到 name 的 String……实测
+        // AucModule 全部字段类型错位一格，2026-10-06）。
+        return this.flatPart(this.clsLayoutTys[ci], idx + 1)
     }
 
     /// 按布局序号取字段默认值表达式节点（无默认值返回 -1）。
@@ -2577,6 +2967,15 @@ class SsaBuilder {
         if (norm == "") {
             return
         }
+        // ⚠️ 空表必须先垫一个前导 `\n`：`localTypeOf` 的 needle 是
+        // `"\n" + name + "|"`，而首条目直接从串首开始、没有前导换行 ⇒
+        // **函数内第一个登记的局部量永远查不中** ⇒ 接收者定型失败 →
+        // 属性访问落到通用 GetField（实测 R12 探针 main 的第一个局部
+        // `a`：`a.pathBuf` 定型失败 → ISel 丢基址 → 值错 + 活跃区间
+        // 断裂 → 寄存器被后续构造覆写。2026-10-03）。
+        if (this.localTypes == "") {
+            this.localTypes = "\n"
+        }
         this.localTypes = this.localTypes + name + "|" + norm + "\n"
     }
 
@@ -2673,6 +3072,19 @@ class SsaBuilder {
                         return fty
                     }
                 }
+            }
+            return ""
+        }
+        if (kind == "HirCall") {
+            // `File(path).exists()`：接收者是**构造器调用结果**，静态类型 =
+            // 被构造的类。旧实现返回 ""，调用点落到「隐式 this」兜底 ——
+            // 外层类恰声明同名方法时（FileUtils.exists / FileUtils.readText）
+            // 限定成 `FileUtils_exists` **自递归**：每层再 alloc + 调自己，
+            // 直至爆栈（实测 fs 探针崩入 runtime_emitObjectAlloc，
+            // 2026-10-03）。
+            val cn: String = src.textOf(recvNode)
+            if (cn != "" && this.isClassName(cn) && !this.isSingletonObj(cn)) {
+                return cn
             }
             return ""
         }
@@ -2920,16 +3332,18 @@ class SsaBuilder {
                 if (j > recStart) {
                     val rec: String = text.substring(recStart, j)
                     recs.add(rec)
-                    // 行格式实际是 `Class|field|index|vis|auraTy|defNodeId`：
-                    // `addField` 写 `toStr(index) + "|" + fty + "|" + defId`，而
-                    // `fty = src.tyOf()` 自带 `#<vis>|` 前缀（如 `#Private|List<T>`），
-                    // `recPart` 按 `|` 切分，于是可见性**独占一段**（第 3 段）。
-                    // 类型取第 4 段、默认值节点取第 5 段 —— 取第 3/4 段会得到
-                    // 可见性串与类型串（实测 `recTys[0]=#Private`），缓存整体错位。
+                    // 行格式（2026-10-06 起）：`Class|field|index|auraTy|defNodeId`。
+                    // `addField` 现在**归一化**可见性前缀（`#public|String` →
+                    // `String`）后落盘——旧行格式 `Class|field|index|vis|auraTy|def`
+                    // 是为绕开前缀错位而设的（ty 取第 4 段、def 取第 5 段），
+                    // 归一化后多余段消失；若这里仍按旧段位取值，ty 会取到
+                    // defNodeId、def 取到空串 ⇒ 所有字段默认值 -1（实例字段
+                    // 全 NULL，实测 AucModule.constPool 未初始化 →
+                    // strcat(NULL) 崩溃）。两端必须同步改。
                     recNames.add(this.recPart(rec, 0))
                     recIdxs.add(this.recPart(rec, 2))
-                    recTys.add(this.recPart(rec, 4))
-                    recDefs.add(this.recPart(rec, 5))
+                    recTys.add(this.recPart(rec, 3))
+                    recDefs.add(this.recPart(rec, 4))
                 }
                 if (i == textLen) {
                     break
@@ -2970,8 +3384,12 @@ class SsaBuilder {
         while (c < nc) {
             this.clsLayoutTys.add("|")
             this.clsLayoutDefaults.add("|")
-            this.clsLayoutTotal.add(this.fw("0"))
-            this.clsLayoutSize.add(this.fw("16"))
+            // ⚠️ 行格式要求**前导 `|` 分隔符**（fwGet 从偏移 1 + idx*9 读）。
+            // 旧实现裸 fw(...) 无管道符 ⇒ fwGet 恒返回 "" ⇒ classSizeOf 恒落
+            // 默认 16、classFieldTotal 恒 0 ⇒ 所有类实例分配不含字段区
+            //（2026-10-04 缺陷 B 的最后一段：回填数值正确但读不出来）。
+            this.clsLayoutTotal.add("|" + this.fw("0"))
+            this.clsLayoutSize.add("|" + this.fw("16"))
             // 槽 0 留空占位（定宽 `8` 字符宽），字段数在第三遍末尾统一回填。
             this.clsOwnCount.add("|" + this.fw(""))
             c = c + 1
@@ -2988,35 +3406,54 @@ class SsaBuilder {
                 r = r + 1
                 continue
             }
-            // ⚠️ 必须按**最大序号**扩槽，而非按到达顺序追加：单例的字段与方法
-            // 登记交错，布局序号由祖先字段数决定，类内到达顺序不保证升序。
+            // ⚠️ 布局序号在类内**连续且按声明序递增**（registerClass 用
+            // classBaseIndex 递推、addField 按声明序 +1，CSV 行序 = 扫描序），
+            // 故**无条件追加**即落在正确位置。
             //
-            // ⚠️ 扩槽时**只能**追加空白槽，**绝不能**改写已有槽的值。
-            // `clsOwnCount` 的槽 0 由 `clsOwnCountOf` 当作用途字段读，若在这里
-            // 每次登记都 `clsOwnCount[ci] + fw(rows+1)` 覆写，槽 0 会退化成
-            // 「本条记录的到达序号」（实测 ArrayList 得到 `1` 而非真实字段数 2），
-            // 整类布局随之丢失、构造器退化为 `Memory_alloc(16)`。
-            // 用法：类型/默认值两张表按布局序号原位存放；`clsOwnCount` 只用来
-            // 记录「每类字段数」这一个整数值（占槽 0），其余槽留空。
-            var rows: Int = this.fwSlotCount(this.clsOwnCount[ci])
-            if (idx >= rows) {
-                var gap: Int = idx - rows
-                while (gap > 0) {
-                    this.clsLayoutTys[ci] = this.clsLayoutTys[ci] + "|"
-                    this.clsLayoutDefaults[ci] = this.clsLayoutDefaults[ci] + this.fw("")
-                    this.clsOwnCount[ci] = this.clsOwnCount[ci] + this.fw("")
-                    gap = gap - 1
-                }
-            }
+            // ⚠️ 旧实现按 `fwSlotCount(clsOwnCount[ci])` 判「需否扩槽」——但
+            // clsOwnCount 在循环中**从不增长**（恒 1 槽），于是 idx ≥ 2 的记录
+            // 全部触发 gap 填充 ⇒ 插入 idx−1 个**空槽**：实测 fs 闭包
+            // Allocator 11 字段被插成 21 槽（10 空）、FileUtils 3 字段 4 槽、
+            // Syscalls 119 槽 ⇒ 类型整体错位 ⇒ fieldTypeOfIndex/默认值取错 ⇒
+            // 单例 getter 的字段默认值表达式引用到无关调用（Console_writeStdout
+            // undefined symbol），实例字段初值也全错（2026-10-04）。
+            // `clsOwnCount` 的字段数由第三遍半按分隔符计数回填，与槽数脱钩。
             this.clsLayoutTys[ci] = this.clsLayoutTys[ci] + this.normAuraType(recTys[r]) + "|"
-            this.clsLayoutDefaults[ci] = this.clsLayoutDefaults[ci] + this.fw(recDefs[r])
+            // ⚠️ 每槽必须带**尾部分隔符**：fwGet 按 `1 + idx*9` 定位（每槽
+            // 8 值 + 1 分隔），旧实现追加裸 `fw(def)`（stride 8、无分隔）⇒
+            // 读写步长失配，读到的是**漂移后的别的槽**（实测 AucModule 的
+            // 默认值整列错位：deps 拿到 slotMethodNames 的 arrayListOf、
+            // 字符串字段成片 NULL → strcat(NULL) 崩溃，2026-10-06）。
+            this.clsLayoutDefaults[ci] = this.clsLayoutDefaults[ci] + this.fw(recDefs[r]) + "|"
             r = r + 1
         }
 
         // ── 第三遍半：回填每类**自有**字段数（= 该类布局槽位数）──
+        //
+        // ⚠️ 字段数必须从 `clsLayoutTys` 行里的**分隔符个数**推导（fields =
+        // '|' 数 − 1，行首尾各有一个装饰分隔符）。旧实现用
+        // `fwSlotCount(clsLayoutTys[c]) - 1` —— 但 `clsLayoutTys` 是**变长类型
+        // 名行**（如单字段类 `|Long|` 全长 7 字符），`length / 9` 的定宽槽数
+        // 推导对它无意义：`|Long|` → 0 槽 → n = −1 → 0 ⇒ **所有类字段数恒
+        // 0** ⇒ `classSizeOf` 恒 16 ⇒ `<Class>__new` 分配不含字段区，
+        // `__field_set/get` 的 `[obj+0x10+idx*8]` 全部落在分配区之外、踩进
+        // 相邻分配（实测 2026-10-04：std File 2 字段 alloc 16、路径串被
+        // field_set 覆盖 ⇒ open 收到 ERROR_INVALID_NAME(123)；R13 第二次
+        // 构造 stringToBuffer 内容坏；fs 探针 READLEN 截断——缺陷 B 根因）。
+        // 类型名不含 `|`（泛型用 `<>`），分隔符计数可靠。
         c = 0
         while (c < nc) {
-            val n: Int = this.fwSlotCount(this.clsLayoutTys[c]) - 1
+            val row: String = this.clsLayoutTys[c]
+            var seps: Int = 0
+            var si: Int = 0
+            val slen: Int = row.length
+            while (si < slen) {
+                if (row.charCodeAt(si) == 124) {
+                    seps = seps + 1
+                }
+                si = si + 1
+            }
+            val n: Int = seps - 1
             this.clsOwnCount[c] = "|" + this.fw(toStr(if (n < 0) 0 else n))
             c = c + 1
         }
@@ -3036,8 +3473,8 @@ class SsaBuilder {
                 cur = this.parentOfClass(cur)
                 depth = depth + 1
             }
-            this.clsLayoutTotal[c] = this.fw(toStr(total))
-            this.clsLayoutSize[c] = this.fw(toStr(16 + total * 8))
+            this.clsLayoutTotal[c] = "|" + this.fw(toStr(total))
+            this.clsLayoutSize[c] = "|" + this.fw(toStr(16 + total * 8))
             c = c + 1
         }
     }
@@ -3214,7 +3651,17 @@ class SsaBuilder {
         if (fname == "" || this.rawFieldIndex(cls, fname) >= 0) {
             return
         }
-        val fty: String = src.tyOf(declNode)
+        // ⚠️ 记录是 `|` 分隔的，而 `tyOf` 带 `#<vis>|` 前缀（`#public|String`，
+        // sealed 还会是 `#public|sealed|String`）——不归一化的话
+        // `classFieldTypeByName`（flatPart 按 `|` 切）只取到 `#public` ⇒
+        // 字段读取的类型全变可见性名 ⇒ `mod.constPool + escape(...)` 的
+        // 拼接判不出 String → 编成**整数指针加法**（实测 .auc 装载链
+        // constPool = 两个 .rdata 指针之和 → streq 野指针，2026-10-06；
+        // 同族：局部量表 localTypeAdd 早已归一化，唯独字段表漏了）。
+        var fty: String = this.normAuraType(src.tyOf(declNode))
+        while (fty.startsWith("sealed|")) {
+            fty = fty.substring(7, fty.length)
+        }
         val defId: Int = this.fieldDefaultNode(src, declNode)
         this.classFields = this.classFields + "\n" + cls + "|" + fname + "|"
             + toStr(index) + "|" + fty + "|" + toStr(defId) + "\n"
@@ -3401,6 +3848,14 @@ class SsaBuilder {
             }
             return ""
         }
+        if (kind == "HirCall") {
+            // 与 `receiverClassOf` 同源：构造器调用结果的接收者类型 = 被构造的类
+            val cn: String = src.textOf(recvNode)
+            if (cn != "" && this.isClassName(cn) && !this.isSingletonObj(cn)) {
+                return cn
+            }
+            return ""
+        }
         if (kind != "HirVar") {
             return ""
         }
@@ -3522,6 +3977,7 @@ class SsaBuilder {
 
     /// 调用点的被调名解析：裸名 → `Class_method`（无法判定时原样返回）。
     private fun resolveMethodSymbol(src: Hir, kids: List<Int>, kCount: Int, bare: String): String {
+        this.lastResolveImplicitThis = false
         if (bare == "") {
             return bare
         }
@@ -3607,6 +4063,7 @@ class SsaBuilder {
         //    回落到裸名 → lld-link `undefined symbol: hexDigit`。
         if (this.curClass != "" && !this.isFreeFunc(bare)
             && this.classDeclaresMethod(this.curClass, bare)) {
+            this.lastResolveImplicitThis = true
             return this.curClass + "_" + bare
         }
         // 3) 全局唯一属主（且与 runtime 符号、顶层自由函数都不冲突）
@@ -3984,9 +4441,30 @@ class SsaBuilder {
 
         val lty: Int = this.types.fromTypeName("Long")
         val CHUNK_SIZE: Int = 32
+        // ⚠️ 单例名单必须遍历 **singletonCsv**（串表），不能遍历
+        // `singletonList`（ArrayList）：红线①——`List.add` 在 seed AOT 载体下
+        // 会**静默丢元素**（实测 MirUtils 的 add 丢失 ⇒ getter 未合成 ⇒
+        // VM runner 链接失败 `undefined symbol: MirUtils_getInstance`，
+        // 2026-10-06）。singletonCsv 与 singletonList 在 registerClass
+        // 同步登记，串表无丢失。
+        val csv: String = this.singletonCsv
+        // 数非空行（条目以 \n 分隔；registerClass 的 `\n + name + \n` 追加
+        // 会在条目间产生空行，必须跳过）。
+        var total: Int = 0
+        var p0: Int = 0
+        while (p0 < csv.length) {
+            var e0: Int = p0
+            while (e0 < csv.length) {
+                if ((csv.charCodeAt(e0) as Int) == 10) { break }
+                e0 = e0 + 1
+            }
+            if (e0 > p0) { total = total + 1 }
+            if (e0 >= csv.length) { break }
+            p0 = e0 + 1
+        }
         var ci: Int = 0
-        while (ci < this.singletonList.size) {
-            val chunkEnd: Int = min(ci + CHUNK_SIZE, this.singletonList.size)
+        while (ci < total) {
+            val chunkEnd: Int = min(ci + CHUNK_SIZE, total)
             // 每个 chunk 开始前保存状态
             val chunkMem: Int = this.memHead
             val chunkBlock: Int = this.curBlock
@@ -3996,13 +4474,15 @@ class SsaBuilder {
             val chunkLocalTypes: String = this.localTypes
 
             while (ci < chunkEnd) {
-                val sname: String = this.singletonList[ci]
+                val sname: String = this.singletonCsvLineAt(csv, ci)
                 // 纯静态单例（`Mutex` / `Thread` / `Cpu`，无字段）也要生成：
                 // `buildFunction` 对**所有**单例方法都把 `this` 解析成
                 // `<Owner>_getInstance()` 的一次调用（见下），不生成就会在链接期
                 // `undefined symbol: Mutex_getInstance`。无字段时它只分配 16 字节
                 // 空壳，代价可忽略。
-                this.synthesizeSingletonGetter(src, sname, lty, ci)
+                if (sname != "") {
+                    this.synthesizeSingletonGetter(src, sname, lty, ci)
+                }
                 ci = ci + 1
             }
 
@@ -4021,6 +4501,155 @@ class SsaBuilder {
         this.varMap = savedVarMap
         this.curParams = savedParams
         this.localTypes = savedLocalTypes
+    }
+
+    /// 溶解对象 getter 收尾（见 `build` 内调用点说明）。
+    ///
+    /// 两段式：先扫函数名表把缺失前缀收进 CSV 串（禁 ArrayList.add——红线①），
+    /// 再按行补合成，槽位接在已注册单例之后（runtime `objSlots` 512 槽，充裕）。
+    private fun synthesizeDissolvedGetters(src: Hir) {
+        var missingCsv: String = ""
+        var vi: Int = 0
+        val vn: Int = this.program.valueCount
+        while (vi < vn) {
+            // ⚠️ 红线⑤：链式临时值（valueOf(...).aux）必须先落**局部变量**
+            // 再读字段 —— seed AOT 下链式读取会失真。
+            val vv: MirValue = this.program.valueOf(vi)
+            val aux: String = vv.aux
+            // 精确后缀 `_getInstance`（`"_getInstance".length == 12`）。
+            val us: Int = aux.indexOf("_getInstance")
+            if (us > 0 && aux.length == us + 12) {
+                val prefix: String = aux.substring(0, us)
+                if (prefix != "") {
+                    val c0: Int = prefix.charCodeAt(0) as Int
+                    // ⚠️ 只查 singletonCsv：被溶解对象的漏登记恰恰是「进了
+                    // classNamesCsv（以类形态）却没进 singletonCsv」——若这里
+                    // 还查 isClassName，MirUtils 会被挡住（实测 P130）。
+                    if (c0 >= 65 && c0 <= 90 && !this.isSingletonObj(prefix)
+                            && missingCsv.indexOf("\n" + prefix + "\n") < 0) {
+                        missingCsv = missingCsv + "\n" + prefix + "\n"
+                    }
+                }
+            }
+            vi = vi + 1
+        }
+        if (missingCsv == "") {
+            return
+        }
+        val savedMem: Int = this.memHead
+        val savedBlock: Int = this.curBlock
+        val savedClass: String = this.curClass
+        val savedVarMap: String = this.varMap
+        val savedParams: String = this.curParams
+        val savedLocalTypes: String = this.localTypes
+        val lty: Int = this.types.fromTypeName("Long")
+        // 槽位起点 = singletonCsv 现有非空行数
+        var slot: Int = 0
+        var p0: Int = 0
+        while (p0 < this.singletonCsv.length) {
+            var e0: Int = p0
+            while (e0 < this.singletonCsv.length) {
+                if ((this.singletonCsv.charCodeAt(e0) as Int) == 10) { break }
+                e0 = e0 + 1
+            }
+            if (e0 > p0) { slot = slot + 1 }
+            if (e0 >= this.singletonCsv.length) { break }
+            p0 = e0 + 1
+        }
+        // 补登记 + 逐个合成
+        var p: Int = 0
+        while (p < missingCsv.length) {
+            var e: Int = p
+            while (e < missingCsv.length) {
+                if ((missingCsv.charCodeAt(e) as Int) == 10) { break }
+                e = e + 1
+            }
+            if (e > p) {
+                val nm: String = missingCsv.substring(p, e)
+                this.singletonCsv = this.singletonCsv + nm + "\n"
+                this.synthesizeSingletonGetter(src, nm, lty, slot)
+                slot = slot + 1
+            }
+            if (e >= missingCsv.length) { break }
+            p = e + 1
+        }
+        this.memHead = savedMem
+        this.curBlock = savedBlock
+        this.curClass = savedClass
+        this.varMap = savedVarMap
+        this.curParams = savedParams
+        this.localTypes = savedLocalTypes
+    }
+
+    /// buildCall 发射点的 getter 自愈（挂在最终 `Call` 发射之前，见其注释）。
+    ///
+    /// `funcName` 此刻已终定（`resolveMethodSymbol` / 构造器改写之后），
+    /// 命中 `X_getInstance` 且 X 未登记 ⇒ X 是被 HirLowerer「溶解」的对象：
+    /// 补登记进 singletonCsv 并**就地**合成 getter（完整保存/恢复构建现场，
+    /// 与 synthesizeSingletons 的 chunk 逻辑一致）。槽位取当前非空行数 ——
+    /// runtime 侧 `objSlots` 固定 4096 字节 = 512 槽，迟到的槽位远不会越界。
+    private fun ensureSingletonGetter(src: Hir, callee: String) {
+        val us: Int = callee.indexOf("_getInstance")
+        if (us <= 0 || callee.length != us + 12) {
+            return
+        }
+        val nm: String = callee.substring(0, us)
+        if (nm == "" || this.isClassName(nm) || this.isSingletonObj(nm)
+                || this.isExternObj(nm)) {
+            return
+        }
+        // 诊断探针（按需打开）：println("[singFIX] " + nm)
+        this.singletonCsv = this.singletonCsv + "\n" + nm + "\n"
+        this.classNamesCsv = this.classNamesCsv + "\n" + nm + "\n"
+        val savedMem: Int = this.memHead
+        val savedBlock: Int = this.curBlock
+        val savedClass: String = this.curClass
+        val savedVarMap: String = this.varMap
+        val savedParams: String = this.curParams
+        val savedLocalTypes: String = this.localTypes
+        // slot = 当前非空行数（补登记条目在 csv 末尾）
+        val csv: String = this.singletonCsv
+        var slot: Int = 0
+        var p: Int = 0
+        while (p < csv.length) {
+            var e: Int = p
+            while (e < csv.length) {
+                if ((csv.charCodeAt(e) as Int) == 10) { break }
+                e = e + 1
+            }
+            if (e > p) { slot = slot + 1 }
+            if (e >= csv.length) { break }
+            p = e + 1
+        }
+        this.synthesizeSingletonGetter(src, nm, this.types.fromTypeName("Long"),
+                                       slot - 1)
+        this.memHead = savedMem
+        this.curBlock = savedBlock
+        this.curClass = savedClass
+        this.varMap = savedVarMap
+        this.curParams = savedParams
+        this.localTypes = savedLocalTypes
+    }
+
+    /// 取 CSV 串的第 idx 个**非空**行（纯 charCodeAt 扫描；越界返回 ""）。
+    /// 与 `synthesizeSingletons` 的行计数口径一致（空行不计入下标）。
+    private fun singletonCsvLineAt(csv: String, idx: Int): String {
+        var p: Int = 0
+        var k: Int = 0
+        while (p < csv.length) {
+            var e: Int = p
+            while (e < csv.length) {
+                if ((csv.charCodeAt(e) as Int) == 10) { break }
+                e = e + 1
+            }
+            if (e > p) {
+                if (k == idx) { return csv.substring(p, e) }
+                k = k + 1
+            }
+            if (e >= csv.length) { break }
+            p = e + 1
+        }
+        return ""
     }
 
     /// 合成单个单例的惰性实例访问器（见 `synthesizeSingletons`）。
@@ -4055,8 +4684,16 @@ class SsaBuilder {
 
         // 未分配：`Memory_alloc(size)` + 逐字段写默认值 + 回填槽
         this.curBlock = elseBlock
+        // ⚠️ 尺寸下限 128：字段索引簿记（const 占位等）与尺寸表可能不一致，
+        // 欠量分配会被字段写越界、踩相邻分配（实测 Allocator 字段写 [inst+0x50]
+        // 而分配仅 16B ⇒ 后续字符串缓冲区内容随机损坏，2026-10-03 fs/io 探针）。
+        // 单例每进程至多一份，过量分配无害。
+        var singletonSize: Int = this.classSizeOf(sname)
+        if (singletonSize < 512) {
+            singletonSize = 512
+        }
         val sizeVal: Int = this.program.addValue("Const", i64, "",
-                toStr(this.classSizeOf(sname)), this.curBlock)
+                toStr(singletonSize), this.curBlock)
         val obj: Int = this.program.addValue("Call", lty, toStr(sizeVal),
                                              "Memory_alloc", this.curBlock)
         val total: Int = this.classFieldTotal(sname)
@@ -4102,6 +4739,127 @@ class SsaBuilder {
             this.loopStack = ""
         } else {
             this.loopStack = this.loopStack.substring(commaIdx + 1)
+        }
+    }
+
+    /// break 目标 = 循环栈顶（endBlock）。
+    /// 首个逗号下标（纯 charCodeAt；带参 indexOf 在 seed AOT 下失效）。
+    private fun csvFirstComma(text: String): Int {
+        var i: Int = 0
+        while (i < text.length) {
+            if ((text.charCodeAt(i) as Int) == 44) { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// break 目标 = 循环栈**第二项**（endBlock）。栈格式「condId,endId,…」
+    /// 成对压入（2026-10-05）——⚠️ 栈顶是 continue 目标(condBlock)，
+    /// break 取错项会变成 continue 死循环。
+    private fun loopStackBreakTarget(): Int {
+        if (this.loopStack == "") { return -1 }
+        val c1: Int = this.csvFirstComma(this.loopStack)
+        if (c1 < 0) { return MachineDagUtils.strToInt(this.loopStack) }
+        val rest: String = this.loopStack.substring(c1 + 1)
+        val c2: Int = this.csvFirstComma(rest)
+        if (c2 < 0) { return MachineDagUtils.strToInt(rest) }
+        return MachineDagUtils.strToInt(rest.substring(0, c2))
+    }
+
+    /// continue 目标 = 循环栈**栈顶**（condBlock）。
+    private fun loopStackContinueTarget(): Int {
+        if (this.loopStack == "") { return -1 }
+        val c1: Int = this.csvFirstComma(this.loopStack)
+        if (c1 < 0) {
+            return MachineDagUtils.strToInt(this.loopStack)
+        }
+        return MachineDagUtils.strToInt(this.loopStack.substring(0, c1))
+    }
+
+    /// `break` 语句：Br 到当前循环的 endBlock。
+    ///
+    /// ⚠️ 旧实现完全没有 HirBreak/HirContinue 的分派——`break` 语句被
+    /// **静默丢弃**：`while (true) { ... if (n <= 0) { break } ... }` 的
+    /// 循环永不退出（实测 Photon 版 VM runner 装载 .auc 的读循环：
+    /// ReadFile 因 count=0 恒返 n=0，break 又不存在 ⇒ 100% CPU 挂死，
+    /// 2026-10-04）。
+    private fun buildBreak(): Unit {
+        val target: Int = this.loopStackBreakTarget()
+        if (target < 0) { return }
+        val blockObj: MirBlock = this.program.blockOf(this.curBlock)
+        if (blockObj.term < 0) {
+            this.program.setTerminator(this.curBlock, "Br", 0, toStr(target), "")
+        }
+    }
+
+    /// `continue` 语句：Br 到当前循环的 condBlock（phi 回边值取循环体
+    /// 末值——continue 点与体末值不一致时为已知不精确，见文档）。
+    private fun buildContinue(): Unit {
+        val target: Int = this.loopStackContinueTarget()
+        if (target < 0) { return }
+        // 取栈顶 phiVarEntries 的**整段**（到首个空行为止——层级间以空行
+        // 分隔：buildWhile 压栈为 `phiVarEntries + "\n" + 旧栈`，而
+        // phiVarEntries 每条目自带行尾换行 ⇒ 层间呈「\n\n」）。
+        // ⚠️ 旧实现只取到**首个换行**——多循环变量时只有第一个变量拿到
+        // continue Mov，其余变量的 continue 边无专属入边值（实测
+        // probe_cont_min：i 有 Mov、total 没有 ⇒ total 的 continue 边
+        // 被兜底乱配，2026-10-06）。
+        val stackStr: String = this.loopPhiVarsStack
+        var segEnd: Int = stackStr.length
+        var si: Int = 0
+        var prevNl: Boolean = false
+        while (si < stackStr.length) {
+            val cch: Int = stackStr.charCodeAt(si) as Int
+            if (cch == 10) {
+                if (prevNl) {
+                    segEnd = si - 1
+                    break
+                }
+                prevNl = true
+            } else {
+                prevNl = false
+            }
+            si = si + 1
+        }
+        var top: String = stackStr.substring(0, segEnd)
+        // 逐条目扫描（条目以真实换行分隔；字段以 | 分隔），纯 charCodeAt
+        var i: Int = 0
+        while (i < top.length) {
+            var eEnd: Int = i
+            while (eEnd < top.length) {
+                if ((top.charCodeAt(eEnd) as Int) == 10) { break }
+                eEnd = eEnd + 1
+            }
+            val entry: String = top.substring(i, eEnd)
+            if (entry != "") {
+                var bar: Int = -1
+                var k: Int = 0
+                while (k < entry.length) {
+                    if ((entry.charCodeAt(k) as Int) == 124) { bar = k; break }
+                    k = k + 1
+                }
+                if (bar > 0) {
+                    val nm: String = entry.substring(0, bar)
+                    val curVid: Int = this.mapVidOf(this.varMap, nm)
+                    if (curVid >= 0) {
+                        // Mov 值定义于本块：phi 入边匹配（ISel pass2）按
+                        // 「入边值定义块 == 前驱块」精确配对；curVid 的定义
+                        // 块是 continue 前驱的支配者，精确匹配永远轮不到
+                        // continue 边（2026-10-05 probe_break/runner 实证）。
+                        val mvVid: Int = this.program.addValue("Mov",
+                                this.program.valueOf(curVid).type, toStr(curVid),
+                                "", this.curBlock)
+                        this.loopContRecs = this.loopContRecs + toStr(target) + "|" +
+                                entry.substring(bar + 1) + "|" + toStr(mvVid) + "\n"
+                    }
+                }
+            }
+            if (eEnd >= top.length) { break }
+            i = eEnd + 1
+        }
+        val blockObj: MirBlock = this.program.blockOf(this.curBlock)
+        if (blockObj.term < 0) {
+            this.program.setTerminator(this.curBlock, "Br", 0, toStr(target), "")
         }
     }
 

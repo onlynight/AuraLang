@@ -2054,7 +2054,7 @@ class LlvmEmitter {
             if (name != "main") {
                 var dotPos: Int = name.lastIndexOf(".")
                 if (dotPos >= 0) {
-                    name = name.substring(dotPos + 1)
+                    name = name.substring(dotPos + 1, name.length())
                 }
             }
         }

@@ -321,6 +321,10 @@ class PhotonPipeline {
         this.vprintln("[Phase D] Register Allocation + Peephole")
         val allocator = RegisterAllocatorUtils.emptyAllocator()
         allocator.allocate(dag)
+        // mergePhiHomesAfterRA 已停用（2026-10-06）：把 phi home 改写到入边 home
+        // 会把循环携带变量钉在易失寄存器上（实测 VM runner 读循环 buf/cap
+        // 双双读成垃圾：buf=装箱奇数、cap=0 ⇒ FileOps.read(count=0)）。P115
+        // 全绿基线本就不依赖它。//*selector.mergePhiHomesAfterRA()*/
         this.vprintln("  spillSlots=" + allocator.getSpillSlots() +
                 " dag=" + dag.nodeCount + "/" + dag.instrCount)
         if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
@@ -449,7 +453,9 @@ class PhotonPipeline {
             // 旧 obj 被继续链接，链接期全是 undefined symbol（实测自举 Main.aura）。
             // sidecar 记录构建时的符号表，不一致即重建。
             if (runtimeResult) {
-                val wantSyms: String = PhotonRuntime.RUNTIME_SYMBOLS
+                // 缓存键含 BUILD_ID：runtime 发射器变更必须递增它（见
+                // PhotonRuntime.BUILD_ID 说明），否则陈旧 obj 被复用。
+                val wantSyms: String = PhotonRuntime.RUNTIME_SYMBOLS + "|#build=" + PhotonRuntime.BUILD_ID
                 val gotSyms: String = FileUtils.readText(runtimeObjPath + ".syms")
                 if (gotSyms != wantSyms) {
                     this.vprintln("    runtime obj 缓存失效（RUNTIME_SYMBOLS 变更）→ 重建")
@@ -633,6 +639,10 @@ class PhotonPipeline {
         this.vprintln("[Phase D] Register Allocation + Peephole")
         val allocator = RegisterAllocatorUtils.emptyAllocator()
         allocator.allocate(dag)
+        // mergePhiHomesAfterRA 已停用（2026-10-06）：把 phi home 改写到入边 home
+        // 会把循环携带变量钉在易失寄存器上（实测 VM runner 读循环 buf/cap
+        // 双双读成垃圾：buf=装箱奇数、cap=0 ⇒ FileOps.read(count=0)）。P115
+        // 全绿基线本就不依赖它。//*selector.mergePhiHomesAfterRA()*/
         this.vprintln("  spillSlots=" + allocator.getSpillSlots() +
                 " dag=" + dag.nodeCount + "/" + dag.instrCount)
         if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
@@ -759,10 +769,15 @@ class PhotonPipeline {
             // 旧 obj 被继续链接，链接期全是 undefined symbol（实测自举 Main.aura）。
             // sidecar 记录构建时的符号表，不一致即重建。
             if (runtimeResult) {
-                val wantSyms: String = PhotonRuntime.RUNTIME_SYMBOLS
+                // ⚠️ 缓存键必须含 **BUILD_ID**（与下方第一路径一致）：runtime
+                // 的发射体（emitListAlloc/listAppend/veh 等函数体）改动**不改变**
+                // RUNTIME_SYMBOLS，只看符号表会让发射器修复被陈旧 obj 吞掉
+                //（实测 listAppend 的 r9 未初始化 / listAlloc 不留余量两项修复
+                // 三轮构建全被 08:45 的旧 obj 吞掉，2026-10-06）。
+                val wantSyms: String = PhotonRuntime.RUNTIME_SYMBOLS + "|#build=" + PhotonRuntime.BUILD_ID
                 val gotSyms: String = FileUtils.readText(runtimeObjPath + ".syms")
                 if (gotSyms != wantSyms) {
-                    this.vprintln("    runtime obj 缓存失效（RUNTIME_SYMBOLS 变更）→ 重建")
+                    this.vprintln("    runtime obj 缓存失效（RUNTIME_SYMBOLS/BUILD_ID 变更）→ 重建")
                     runtimeResult = false
                 }
             }
@@ -775,7 +790,8 @@ class PhotonPipeline {
                 if (!runtimeResult) {
                     runtimeResult = PhotonRuntimeUtils.writeRuntimeObjectHexFile(runtimeObjPath)
                 }
-                FileUtils.writeText(runtimeObjPath + ".syms", PhotonRuntime.RUNTIME_SYMBOLS)
+                FileUtils.writeText(runtimeObjPath + ".syms",
+                    PhotonRuntime.RUNTIME_SYMBOLS + "|#build=" + PhotonRuntime.BUILD_ID)
             }
             this.peProbe("writeRuntimeObj ok=" + this.toStr(runtimeResult) +
                     (if (runtimeResult) " (cached)" else ""))

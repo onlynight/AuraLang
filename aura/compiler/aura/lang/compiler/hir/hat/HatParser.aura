@@ -626,7 +626,7 @@ class HatParser {
         // @ret @val : Type  或  @ret () : Unit
         //
         // ⚠️ 必须用**显式 2 参 substring** 并拆成两步赋值：
-        //   - `line.substring(4)`（1 参，走默认 `to`）在 rust AOT 下，当接收者是
+        //   - `line.substring(4, line.length())`（1 参，走默认 `to`）在 rust AOT 下，当接收者是
         //     类方法形参且绑定到 `val` 时会得到空串（VM 正常），导致 `@ret @t3`
         //     被解析成空操作数 → 函数永远返回 0。
         //   - `line.substring(4, line.length).trim()` 链式 + `var` 亦复现。
@@ -723,6 +723,17 @@ class HatParser {
         // 字符串常量：反转义 HAT 字面量（与 `HatSerializer.escapeHatText` 对称）
         if (opRaw == "const_str") {
             aux = this.unescapeHatConst(aux)
+        }
+
+        // null 常量：HAT 侧 `@t = @null : T`。序列化端（HatSerializer.constOp）
+        // 把前端 `Const aux="null"`（`zeroValueOf` / null 字面量）编码成 @null 时
+        // **不带值文本**，旧解析在这里留下 aux="" ⇒ 下游所有「按 aux 判 null」
+        // 的逻辑全部失效：SsaBuilder.buildBinary 的 null 守卫在**前端**已消费过
+        // aux（前端 OK），但 ISA Case-2 的 nullish 判定消费的是**重解析后**的
+        // aux ⇒ `if (s == null)` 被当成普通字符串比较发 streq + 反极性 setcc
+        //（实测 fs 探针 strlen(NULL) 0xC0000005，2026-10-03）。
+        if (opRaw == "null") {
+            aux = "null"
         }
 
         // 谓词内嵌：HAT 的 `@icmp @i32_sle` 需要还原成下游期望的 `ICmpSle`
@@ -1335,7 +1346,7 @@ object HatParserUtils {
         var len: Int = s.length
         if (start < 0) { start = 0 }
         if (start >= len) { return "" }
-        return s.substring(start)
+        return s.substring(start, s.length())
     }
 
     /// 把 0-9 的数字转换为单字符字符串。

@@ -1112,6 +1112,23 @@ class HirLowerer {
         if (kind == "Block") {
             return this.lowerBlock(ast, id)
         }
+        // ⚠️ `else if` 的 else 是 **If 节点**：必须按语句降级并**包成 HirBlock**。
+        // 旧实现无此分支 → 落到 lowerExpr → lowerIfExpr 产出**裸 HirIfExpr**
+        //（无 HirBlock 包裹）→ SsaBuilder.buildIf 的 else 路径调 buildBlock
+        // 把 HirIfExpr 的子节点当语句迭代：条件（HirBinary）与嵌套
+        // HirIfExpr 链被 buildStmt 静默跳过（无 HirIfExpr 用例），只有第一个
+        // else-if 的 then 体被**无条件**发射 ⇒ 所有 else-if 链坍缩成
+        // `if (c0) A else { B }`（实测 readConstValue 的 tag==1/2/3 分支全部
+        // 丢失 ⇒ 装载链读出垃圾常量 → streq 野指针崩溃，2026-10-06）。
+        // seed Rust 前端无此缺陷，故只有 photon / 纯 Aura 自举链受影响。
+        if (kind == "If") {
+            val s: Int = this.lowerStmt(ast, id)
+            if (s < 0) {
+                return -1
+            }
+            var bk: List<Int> = HirUtils.hirKidsAdd(HirUtils.hirNoKids(), s)
+            return this.hir.add("HirBlock", "", "", ast.spanOf(id), bk)
+        }
         if (kind == "Assign" || kind == "ExprStmt" || kind == "Return"
             || kind == "ValDecl" || kind == "VarDecl" || kind == "While"
             || kind == "For" || kind == "CFor" || kind == "Break"
@@ -2185,7 +2202,28 @@ class HirLowerer {
                     } else {
                         calleeName = ast.textOf(calleeId)
                     }
-                    val recvHir: Int = this.lowerExpr(ast, recvId)
+                    // 大写 Ident 接收者 = 单例/extern 模块名（`Memory.write(...)`）：
+                    // **保留 HirVar(name) 原样**，不降级。旧实现走 lowerExpr ⇒
+                    // 模块名不是局部变量 ⇒ 降成 `@i32_const 0`，self 占位进实参
+                    // ⇒ SsaBuilder.buildCall 的 skipFirst（要求 kids[0] 是 HirVar）
+                    // 失效 ⇒ `Memory_write(0, buf, val, mem)` 实参整体错位。
+                    // HirVar(name) 交给 buildCall 的 recvIsSingleton 判定：
+                    // 单例/extern 都会丢掉接收者、对齐普通函数 ABI（rcx=首实参）。
+                    var recvHir: Int = -1
+                    var keepRawRecv: Boolean = false
+                    if (ast.kindOf(recvId) == "Ident") {
+                        val rn: String = ast.textOf(recvId)
+                        if (rn.length() > 0) {
+                            val fc3: Int = rn.substring(0, 1).charCodeAt(0)
+                            if (fc3 >= 65 && fc3 <= 90) {
+                                recvHir = this.hir.leaf("HirVar", rn, ast.spanOf(recvId))
+                                keepRawRecv = true
+                            }
+                        }
+                    }
+                    if (!keepRawRecv) {
+                        recvHir = this.lowerExpr(ast, recvId)
+                    }
                     if (recvHir >= 0) {
                         hirKids = HirUtils.hirKidsAdd(hirKids, recvHir)
                     }

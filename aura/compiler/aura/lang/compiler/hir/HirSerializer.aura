@@ -195,7 +195,7 @@ class HirSerializer {
                 val valStart: Int = pos + searchKey.length
                 val valEnd: Int = fields.indexOf(";", valStart)
                 if (valEnd < 0) {
-                    return fields.substring(valStart)
+                    return fields.substring(valStart, fields.length())
                 }
                 return fields.substring(valStart, valEnd)
             }

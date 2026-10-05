@@ -41,6 +41,7 @@
 //   ===ERR===<message>
 import aura.lang.std.String
 import aura.lang.std.fs.FileUtils
+import aura.lang.std.Env
 import aura.lang.native.time.Clock
 
 
@@ -111,21 +112,40 @@ fun main(): Int {
 
     FileUtils.mkdirP(outDir)
 
-    // ── 前端：源码（含递归 import）→ 合并 HIR → SSA → HAT 文本 ──
-    val tAll0: Long = tNs()
-    val tLink0: Long = tNs()
-    val linker = AotModuleLinker()
-    val hir: Hir = linker.link(srcPath)
-    if (linker.missing != "") {
-        println("[hat-front] missing imports: " + linker.missing)
+    // ── AURA_HAT_SKIP_FRONT=1：跳过前端，直接复用现成 .hat ──
+    //（文档承诺过此开关但一直没实现；「bash 侧补桩 .hat + SKIP_FRONT 重编」
+    // 两段式工作流必需它，2026-10-06。跳过段不调 link()，Env.get 安全。）
+    val skipFront: Boolean = Env.get("AURA_HAT_SKIP_FRONT", "") == "1"
+    if (!skipFront) {
+        // ── 前端：源码（含递归 import）→ 合并 HIR → SSA → HAT 文本 ──
+        val tAll0: Long = tNs()
+        val tLink0: Long = tNs()
+        val linker = AotModuleLinker()
+        val hir: Hir = linker.link(srcPath)
+        if (linker.missing != "") {
+            println("[hat-front] missing imports: " + linker.missing)
+        }
+
+        val tSsa0: Long = tNs()
+        val ssa: MirSsaProgram = SsaBuilderUtils.build(hir)
+
+        val tHat0: Long = tNs()
+        val hatText: String = HatSerializerUtils.serializeHat(ssa, moduleName)
+        // ── 溶解对象 getter 桩补写（2026-10-06）──
+        //
+        // 前端对部分 `object X`（实测 MirUtils，aura/lang/compiler/mir/Mir.aura）
+        // 采用「方法限定名 + 体提升」的降级形态：方法以 `X_m` 顶层函数进入 HIR、
+        // 方法体被注入 `X_getInstance()` 调用，但对象声明节点不进 HIR ⇒
+        // SsaBuilder 的单例登记（buildClassIndex 只认四类声明节点）捕不到 X ⇒
+        // getter 未合成 ⇒ 链接期 `undefined symbol: X_getInstance`。
+        // 前端根因（Hir.aura 为何溶解、为何四类扫描看不到）留待下轮；此处按
+        // 「.hat 文本后处理」兜底：引用了 `@call @X_getInstance(` 却没有
+        // `@fn X_getInstance` 定义 ⇒ 追加一个 Memory_alloc 桩 getter
+        //（每次调用分配 64 字节零块；被溶解对象当前都是无字段纯静态单例，
+        // 实例值实际不被使用，泄漏可忽略）。
+        val hatFixed: String = HatGetPatchUtils.patchMissingGetters(hatText)
+        FileUtils.writeText(hatPath, hatFixed)
     }
-
-    val tSsa0: Long = tNs()
-    val ssa: MirSsaProgram = SsaBuilderUtils.build(hir)
-
-    val tHat0: Long = tNs()
-    val hatText: String = HatSerializerUtils.serializeHat(ssa, moduleName)
-    FileUtils.writeText(hatPath, hatText)
 
     // ── HAT 文本 → SSA MIR → LIR → DAG → RegAlloc → X86 → COFF ──
     val tBack0: Long = tNs()
@@ -151,4 +171,82 @@ fun main(): Int {
         return 1
     }
     return 0
+}
+
+// ─────────────────────────────────────────────────────────────
+// HatGetPatchUtils — 溶解对象 getter 的 .hat 文本桩补写
+// （背景与动机见 main 内「getter 桩补写」注释，2026-10-06）
+// ─────────────────────────────────────────────────────────────
+object HatGetPatchUtils {
+
+    /// 扫描 .hat 文本：引用了 `@call @X_getInstance(` 却没有 `@fn X_getInstance`
+    /// 定义 ⇒ 为每个缺失的 X 追加一个 Memory_alloc 桩 getter。
+    fun patchMissingGetters(hat: String): String {
+        // 1) 收集被调的 X（去重 CSV；禁 ArrayList.add——红线①）。
+        var calledCsv: String = ""
+        var i: Int = 0
+        val n: Int = hat.length
+        // 诊断探针（按需打开）：println("[getPatch0] len=" + toStr(n))
+        while (i + 7 <= n) {
+            // 手工匹配 "@call @"（7 字符）：禁带 from 的 indexOf（红线②）。
+            // ⚠️ charCodeAt 必须 `as Int` 再比较（裸比较在 seed AOT 下恒假，
+            // 实测 P136 桩补写静默不触发，2026-10-06）。
+            if ((hat.charCodeAt(i) as Int) == 64 && (hat.charCodeAt(i + 1) as Int) == 99 &&
+                (hat.charCodeAt(i + 2) as Int) == 97 && (hat.charCodeAt(i + 3) as Int) == 108 &&
+                (hat.charCodeAt(i + 4) as Int) == 108 && (hat.charCodeAt(i + 5) as Int) == 32 &&
+                (hat.charCodeAt(i + 6) as Int) == 64) {
+                // 提取名字到 '('
+                var j: Int = i + 7
+                var name: String = ""
+                while (j < n) {
+                    val c: Int = hat.charCodeAt(j) as Int
+                    if (c == 40) { break }
+                    if (c == 10 || c == 32) { name = ""; break }
+                    name = name + hat.substring(j, j + 1)
+                    j = j + 1
+                }
+                // 精确后缀 `_getInstance`（12 字符）
+                if (name.length > 12) {
+                    val cut: Int = name.length - 12
+                    if (name.substring(cut, name.length) == "_getInstance") {
+                        val x: String = name.substring(0, cut)
+                        if (x != "" && calledCsv.indexOf("\n" + x + "\n") < 0) {
+                            // 有定义则跳过（`@fn X_getInstance(` 全文检索）
+                            val defNeedle: String = "@fn " + x + "_getInstance("
+                            if (hat.indexOf(defNeedle) < 0) {
+                                println("[getPatch] " + x)
+                                calledCsv = calledCsv + "\n" + x + "\n"
+                            }
+                        }
+                    }
+                }
+                i = j
+            }
+            i = i + 1
+        }
+        if (calledCsv == "") {
+            return hat
+        }
+        // 2) 逐个追加桩 getter（每次调用分配 64 字节零块）。
+        var out: String = hat
+        var p: Int = 0
+        while (p < calledCsv.length) {
+            var e: Int = p
+            while (e < calledCsv.length) {
+                if ((calledCsv.charCodeAt(e) as Int) == 10) { break }
+                e = e + 1
+            }
+            if (e > p) {
+                val x: String = calledCsv.substring(p, e)
+                out = out + "\n@fn " + x + "_getInstance() -> Long" +
+                      "\n  bb entry:" +
+                      "\n    @s0 = @i32_const 64 : Int" +
+                      "\n    @s1 = @call @Memory_alloc(@s0) : Long" +
+                      "\n    @ret @s1 : Long\n"
+            }
+            if (e >= calledCsv.length) { break }
+            p = e + 1
+        }
+        return out
+    }
 }

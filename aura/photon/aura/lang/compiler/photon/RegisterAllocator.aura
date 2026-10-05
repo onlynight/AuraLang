@@ -447,8 +447,14 @@ class RegisterAllocator {
     /// live-out[i] = ∪ { live-in[k] | k ∈ succ(i) } - def(i) ∪ use(i)
     /// 使用控制流感知的前驱/后继关系，正确处理分支和合并。
     private fun computeLiveAtEnd(): List<String> {
-        val instrs: List<DagInstruction> = this.dag.instrs
-        val n: Int = instrs.size
+        // ⚠️ 跨对象字段读禁用：`this.dag.instrs`（RegisterAllocator 读 MachineDag
+        // 的 List 字段）在 seed-AOT 驱动下元素失真（instrs[0].template 读出 "0"，
+        // 而同一索引经 dag.instrOf() 读出 "label"）——种子 AOT 值模型已知的
+        // 「跨对象字段绑定失真」家族（与 HirLowerer this 失真同族）。这曾令
+        // buildBackEdges/buildNodeSpans/liveness **整体静默失效**（labels=0、
+        // edges=0），RA 的区间/回边机制自引入以来从未真正工作过。
+        // 一律走 dag.instrOf(i) 方法访问（自对象读，实测正确）。
+        val n: Int = this.dag.instrCount
         val liveAtEnd: List<String> = arrayListOf<String>()
 
         // 初始化：所有指令的 live-out 为空
@@ -459,7 +465,7 @@ class RegisterAllocator {
         }
 
         // 构建标签 → 指令索引映射
-        this.buildLabelIndexMap(instrs)
+        this.buildLabelIndexMap()
 
         // 反向定点迭代
         var changed: Boolean = true
@@ -470,7 +476,7 @@ class RegisterAllocator {
 
             var j: Int = n - 1
             while (j >= 0) {
-                val instr: DagInstruction = instrs[j]
+                val instr: DagInstruction = this.dag.instrOf(j)
 
                 // 计算 use 集合（指令使用的节点）
                 val useSet: String = this.getInstrUseSet(instr)
@@ -482,7 +488,7 @@ class RegisterAllocator {
                 }
 
                 // 获取后继指令的 live-in 并集
-                val succIndices: List<Int> = this.getSuccIndices(j, instrs)
+                val succIndices: List<Int> = this.getSuccIndices(j)
                 val succLiveIn: String = this.unionLiveIn(succIndices, liveAtEnd)
 
                 // live-out[j] = succLiveIn - def ∪ use
@@ -510,9 +516,9 @@ class RegisterAllocator {
     ///
     /// 扫描指令序列，找到每个基本块的入口点（第一条指令和每条终止指令后的下一条指令），
     /// 按顺序映射为 "bb0", "bb1", "bb2", ...
-    private fun buildLabelIndexMap(instrs: List<DagInstruction>): Unit {
+    private fun buildLabelIndexMap(): Unit {
         this.labelIndexIdxs = arrayListOf<Int>()
-        val n: Int = instrs.size
+        val n: Int = this.dag.instrCount
 
         // 收集基本块入口点
         val entryPoints: List<Int> = arrayListOf<Int>()
@@ -520,7 +526,7 @@ class RegisterAllocator {
 
         var i: Int = 0
         while (i < n - 1) {
-            val instr: DagInstruction = instrs[i]
+            val instr: DagInstruction = this.dag.instrOf(i)
             if (this.isTerminatorTemplate(instr.template)) {
                 entryPoints.add(i + 1)
             }
@@ -544,10 +550,10 @@ class RegisterAllocator {
     /// - jmp/br: 仅跳转到目标
     /// - jcc: 目标 + fall-through
     /// - 普通指令: fall-through
-    private fun getSuccIndices(index: Int, instrs: List<DagInstruction>): List<Int> {
+    private fun getSuccIndices(index: Int): List<Int> {
         val succs: List<Int> = arrayListOf<Int>()
-        val n: Int = instrs.size
-        val instr: DagInstruction = instrs[index]
+        val n: Int = this.dag.instrCount
+        val instr: DagInstruction = this.dag.instrOf(index)
         val template: String = instr.template
 
         if (template == "ret") {
@@ -872,11 +878,10 @@ class RegisterAllocator {
         this.backEdges = arrayListOf<String>()
         this.labelNames = arrayListOf<String>()
         this.labelInstrIdxs = arrayListOf<Int>()
-        val instrs: List<DagInstruction> = this.dag.instrs
         var i: Int = 0
-        while (i < instrs.size) {
-            if (instrs[i].template == "label") {
-                val parts: List<String> = this.splitPipe(instrs[i].nodes)
+        while (i < this.dag.instrCount) {
+            if (this.dag.instrOf(i).template == "label") {
+                val parts: List<String> = this.splitPipe(this.dag.instrOf(i).nodes)
                 if (parts.size >= 1 && parts[0] != "") {
                     this.labelNames.add(parts[0])
                     this.labelInstrIdxs.add(i)
@@ -885,10 +890,10 @@ class RegisterAllocator {
             i = i + 1
         }
         i = 0
-        while (i < instrs.size) {
-            val tpl: String = instrs[i].template
+        while (i < this.dag.instrCount) {
+            val tpl: String = this.dag.instrOf(i).template
             if (tpl == "jmp @target" || tpl == "jcc @target") {
-                val parts: List<String> = this.splitPipe(instrs[i].nodes)
+                val parts: List<String> = this.splitPipe(this.dag.instrOf(i).nodes)
                 if (parts.size >= 1 && parts[0] != "") {
                     val tgt: Int = this.labelInstrIndexOf(parts[0])
                     if (tgt >= 0 && tgt < i) {
@@ -935,10 +940,9 @@ class RegisterAllocator {
         // 旧实现是「每个节点各扫一遍全部指令」（`rawFirstIdx` / `rawLastIdx`），
         // 且每次判定都要 `splitComma` 分配 —— O(节点数 × 指令数) 次循环叠加
         // 同量级字符串分配。这里改成对指令流只扫一遍：O(指令数 × 操作数)。
-        val instrs: List<DagInstruction> = this.dag.instrs
         var j: Int = 0
-        while (j < instrs.size) {
-            this.touchInstr(instrs[j], j)
+        while (j < this.dag.instrCount) {
+            this.touchInstr(this.dag.instrOf(j), j)
             j = j + 1
         }
 

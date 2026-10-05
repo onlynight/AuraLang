@@ -234,6 +234,37 @@ class InstructionSelector {
     /// 每槽记录容量上限（超出者丢弃；PHI 前驱数超过 32 的块在实际代码里未出现）。
     private var phiMovCap: Int = 32
 
+    /// 临时诊断（2026-10-05）：PHI-MOV 发射计数。AURA_PHI_DIAG=1 时输出。
+    private var phiDiagOn: Boolean = false
+    private var phiDiagEmitted: Int = 0
+    private var phiDiagMissing: Int = 0
+
+    /// 每块的传递前驱闭包（位集，wordsPer * slots 个 Int；见 pass1.5）。
+    private var predClosure: List<Int> = arrayListOf<Int>()
+    private var predClosureWords: Int = 0
+
+    /// Phi 入口边配对（phiLirId -> entryIncomingLirId），供 RA 后 home 合并。
+    private var phiEntryMapIds: List<Int> = arrayListOf<Int>()
+    private var phiEntryMapHomes: List<Int> = arrayListOf<Int>()
+    private var phiEntryMapCnt: Int = 0
+
+    /// 判定「fromBlock 是 toBlock 的传递前驱」（含直接前驱）。
+    private fun isTransitivePred(fromBlock: Int, toBlock: Int): Boolean {
+        if (this.predClosureWords <= 0) { return false }
+        if (fromBlock < this.phiMovBase) { return false }
+        if (toBlock < this.phiMovBase) { return false }
+        val ti: Int = toBlock - this.phiMovBase
+        val fi: Int = fromBlock - this.phiMovBase
+        if (ti >= this.predClosure.size / this.predClosureWords) { return false }
+        if (fi >= this.predClosure.size / this.predClosureWords) { return false }
+        val w: Int = fi / 32
+        if (w >= this.predClosureWords) { return false }
+        val bit: Int = 1 << (fi % 32)
+        val rowBase: Int = ti * this.predClosureWords
+        if (rowBase + w >= this.predClosure.size) { return false }
+        return (this.predClosure[rowBase + w] and bit) != 0
+    }
+
     /// 全函数 PHI-MOV 记录总数（探针/诊断用）。
     private var phiMovTotal: Int = 0
 
@@ -278,6 +309,9 @@ class InstructionSelector {
     fun select(src: LirProgram): MachineDag {
         this.dag = MachineDag()
         this.traceOn = this.traceFlag()
+        this.phiDiagOn = Env.get("AURA_PHI_DIAG", "") == "1"
+        this.phiDiagEmitted = 0
+        this.phiDiagMissing = 0
         this.dag.setTraceOn(this.traceOn)
         this.nodeMapIds = arrayListOf<Int>()
         this.curChain = -1
@@ -384,6 +418,10 @@ class InstructionSelector {
         this.selProbe("after joinChunks strConsts=" +
                 MachineDagUtils.toStr(this.stringConstants.length))
 
+        if (this.phiDiagOn && (this.phiDiagEmitted > 0 || this.phiDiagMissing > 0)) {
+            println("[phi-diag] fn=" + this.funcName + " emitted=" + toStr(this.phiDiagEmitted)
+                    + " missing=" + toStr(this.phiDiagMissing))
+        }
         return this.dag
     }
 
@@ -847,6 +885,15 @@ class InstructionSelector {
         // PHI-MOV 表：扁平布局（见字段说明）。
         this.phiMovBase = base
         this.phiMovTotal = 0
+        this.phiEntryMapIds = arrayListOf<Int>()
+        this.phiEntryMapHomes = arrayListOf<Int>()
+        this.phiEntryMapCnt = 0
+        var emInit: Int = 0
+        while (emInit < 512) {
+            this.phiEntryMapIds.add(-1)
+            this.phiEntryMapHomes.add(-1)
+            emInit = emInit + 1
+        }
         this.phiMovFlat = arrayListOf<String>()
         this.phiMovCnt = arrayListOf<Int>()
         this.slotInit(this.phiMovCnt, slots)
@@ -921,6 +968,84 @@ class InstructionSelector {
             }
             bi = bi + 1
         }
+        // ── pass1.5：计算每个块的**传递前驱闭包**（位集，按 slots/64 字打包）。
+        //
+        // ⚠️ 2026-10-05：phi 入边值的定义块往往是目标的**间接**前驱
+        //（如 if/循环汇流：值定义于 bb2597，phi 在 bb2601，中间隔
+        // bb2599/bb2600 两个纯跳转块）。pass② 的「定义块 == 直接前驱」
+        // 精确匹配因此永远失配 ⇒ 全部落 (b) 兜底乱配 ⇒ 入口 MOV 装错值
+        //（实测 runner 读循环 buf=0/count=0 ⇒ ReadFile 读 0 字节）。
+        // 闭包 = 反复沿直接前驱边扩张到不动点（迭代法，位集用 Int 数组，
+        // 每 32 块一个 Int）。
+        val wordsPer: Int = (slots + 31) / 32
+        if (wordsPer > 0) {
+            var closeArr: List<Int> = arrayListOf<Int>()
+            var wInit: Int = 0
+            var totalWords: Int = wordsPer * slots
+            while (wInit < totalWords) {
+                closeArr.add(0)
+                wInit = wInit + 1
+            }
+            // 初始化：直接前驱边
+            var bi1: Int = 0
+            while (bi1 < blockCount) {
+                val b1: Int = func.blocks[bi1]
+                if (b1 >= base && b1 <= top) {
+                    val sLo: Int = predOff[b1 - base]
+                    val sHi: Int = predOff[b1 - base + 1]
+                    var si1: Int = sLo
+                    while (si1 < sHi) {
+                        val p1: Int = predFlat[si1]
+                        if (p1 >= base && p1 <= top) {
+                            val slotP: Int = p1 - base
+                            closeArr[b1 * wordsPer + slotP / 32] =
+                                closeArr[b1 * wordsPer + slotP / 32] or (1 << (slotP % 32))
+                        }
+                        si1 = si1 + 1
+                    }
+                }
+                bi1 = bi1 + 1
+            }
+            // 不动点迭代：pred 的闭包并入 succ 的闭包（沿直接前驱边反向传播）
+            var changed: Boolean = true
+            var rounds: Int = 0
+            while (changed && rounds < 64) {
+                changed = false
+                rounds = rounds + 1
+                var bi2: Int = 0
+                while (bi2 < blockCount) {
+                    val b2: Int = func.blocks[bi2]
+                    if (b2 >= base && b2 <= top) {
+                        val sLo2: Int = predOff[b2 - base]
+                        val sHi2: Int = predOff[b2 - base + 1]
+                        var si2: Int = sLo2
+                        while (si2 < sHi2) {
+                            val p2: Int = predFlat[si2]
+                            if (p2 >= base && p2 <= top) {
+                                // close[b2] |= close[p2]
+                                var w: Int = 0
+                                while (w < wordsPer) {
+                                    val oldW: Int = closeArr[b2 * wordsPer + w]
+                                    val newW: Int = oldW or closeArr[p2 * wordsPer + w]
+                                    if (newW != oldW) {
+                                        closeArr[b2 * wordsPer + w] = newW
+                                        changed = true
+                                    }
+                                    w = w + 1
+                                }
+                            }
+                            si2 = si2 + 1
+                        }
+                    }
+                    bi2 = bi2 + 1
+                }
+            }
+            this.predClosure = closeArr
+            this.predClosureWords = wordsPer
+        } else {
+            this.predClosure = arrayListOf<Int>()
+            this.predClosureWords = 0
+        }
         if (traceBig) {
             println("[isel-phi] " + func.name + " pass1 done base=" + LirUtils.toStr(base) +
                     " top=" + LirUtils.toStr(top))
@@ -969,52 +1094,140 @@ class InstructionSelector {
                         // 于是这一步单独就产生千万次小串分配（Phase C 的
                         // `<=64B` 桶 1190 万次 / 119MB 主要来源）。改成标记表后
                         // 两侧都是 O(1) 且零分配。
+                        // ⚠️ 两段式匹配（2026-10-04）：先对**所有**前驱做
+                        // 「定义块精确匹配」(a)，全部完成后才对未命中的前驱做
+                        // 「首个未使用」兜底 (b)。旧实现单遍逐前驱贪心：兜底会
+                        // 把**后面前驱的精确匹配入边提前抢走**——当 PHI 入边的
+                        // 记录顺序与前驱顺序不一致时（SSA 构建序 ≠ 前驱序，常态），
+                        // 两个前驱双双错配 ⇒ 循环携带变量（cap/ok 等）初值 MOV
+                        // 落到错误入口（实测 VM runner readFileToBuffer 的 cap：
+                        // 65536 分到回边 ⇒ cap=0 ⇒ ReadFile(count=0) 无限循环；
+                        // probe_obj3 的 ok 标志 COPY-BAD，2026-10-04）。
+                        // ⚠️ `used[ai]` 必须先取出到 Int 局部再比较（rust AOT 下
+                        // 下标表达式直写比较被判假，见旧注释）。
+                        val incomingN: Int = incoming.size
+                        val predN: Int = pHi - pLo
                         val used: List<Int> = arrayListOf<Int>()
+                        val pickOfPred: List<Int> = arrayListOf<Int>()
                         var u0: Int = 0
-                        while (u0 < incoming.size) {
+                        while (u0 < incomingN) {
                             used.add(0)
                             u0 = u0 + 1
                         }
-                        var ri: Int = pLo
-                        while (ri < pHi) {
-                            val predB: Int = predFlat[ri]
-                            var pick: Int = -1
-                            // (a) 精确定义块匹配
-                            //
-                            // ⚠️ `used[ai]` 必须先取出到 Int 局部再比较：rust AOT 下
-                            // 直接把「List<Int> 下标表达式」写进比较（`used[ai] == 0`）
-                            // 会被判为假（VM 正常），导致 PHI 入边一条都匹配不上 →
-                            // 前驱块末尾的 phi-MOV 全部丢失 → 循环变量永不更新（死循环）。
+                        var r0: Int = 0
+                        while (r0 < predN) {
+                            pickOfPred.add(-1)
+                            r0 = r0 + 1
+                        }
+                        // (a1) 严格匹配：入边值**定义块 == 前驱块本身**。
+                        // 必须先于 (a2) 对**所有**前驱整体跑一遍：传递闭包经
+                        // 循环回边会把循环内**所有**块连成一家（closure(218)
+                        // ⊇ {211,212,213,217,…}），若直接按闭包匹配，continue
+                        // 前驱会按 args 顺序抢走 before(入口值)（实测
+                        // probe_cont_min：218 ← before ⇒ i/total 恒 0）。
+                        // continue Mov（def=continue 块）与 bodyEnd（def=latch）
+                        // 在严格层必然命中，轮不到闭包层。
+                        var ri: Int = 0
+                        while (ri < predN) {
+                            val predB: Int = predFlat[pLo + ri]
                             var ai: Int = 0
-                            while (ai < incoming.size) {
+                            while (ai < incomingN) {
                                 val usedAi: Int = used[ai]
                                 if (usedAi == 0) {
                                     val iv: Int = incoming[ai]
                                     if (iv >= 0 && src.valueOf(iv).block == predB) {
-                                        pick = ai
+                                        pickOfPred[ri] = ai
+                                        used[ai] = 1
+                                        // 记录 (phi → 入口边值) 配对（首个命中的边）
+                                        var seen: Boolean = false
+                                        var si3: Int = 0
+                                        while (si3 < this.phiEntryMapCnt) {
+                                            if (this.phiEntryMapIds[si3] == phiVid) {
+                                                seen = true
+                                            }
+                                            si3 = si3 + 1
+                                        }
+                                        if (seen == false && this.phiEntryMapIds.size > this.phiEntryMapCnt) {
+                                            this.phiEntryMapIds[this.phiEntryMapCnt] = phiVid
+                                            this.phiEntryMapHomes[this.phiEntryMapCnt] = iv
+                                            this.phiEntryMapCnt = this.phiEntryMapCnt + 1
+                                        }
                                         break
                                     }
                                 }
                                 ai = ai + 1
                             }
-                            // (b) 兜底：取第一个未使用的入边值
-                            if (pick < 0) {
-                                var aj: Int = 0
-                                while (aj < incoming.size) {
-                                    val usedAj: Int = used[aj]
-                                    if (usedAj == 0) {
-                                        pick = aj
-                                        break
+                            ri = ri + 1
+                        }
+                        // (a2) 传递闭包匹配：仍未命中的前驱，入边值定义块 ∈
+                        // 其传递前驱闭包（if/汇流块分隔的间接定义者）。
+                        var ri2: Int = 0
+                        while (ri2 < predN) {
+                            if (pickOfPred[ri2] < 0) {
+                                val predB2: Int = predFlat[pLo + ri2]
+                                var ai2: Int = 0
+                                while (ai2 < incomingN) {
+                                    val usedAi2: Int = used[ai2]
+                                    if (usedAi2 == 0) {
+                                        val iv2: Int = incoming[ai2]
+                                        if (iv2 >= 0 && this.isTransitivePred(
+                                                src.valueOf(iv2).block, predB2)) {
+                                            pickOfPred[ri2] = ai2
+                                            used[ai2] = 1
+                                            var seen2: Boolean = false
+                                            var si4: Int = 0
+                                            while (si4 < this.phiEntryMapCnt) {
+                                                if (this.phiEntryMapIds[si4] == phiVid) {
+                                                    seen2 = true
+                                                }
+                                                si4 = si4 + 1
+                                            }
+                                            if (seen2 == false && this.phiEntryMapIds.size > this.phiEntryMapCnt) {
+                                                this.phiEntryMapIds[this.phiEntryMapCnt] = phiVid
+                                                this.phiEntryMapHomes[this.phiEntryMapCnt] = iv2
+                                                this.phiEntryMapCnt = this.phiEntryMapCnt + 1
+                                            }
+                                            break
+                                        }
                                     }
-                                    aj = aj + 1
+                                    ai2 = ai2 + 1
                                 }
                             }
-                            if (pick >= 0) {
-                                used[pick] = 1
-                                val pickVid: Int = incoming[pick]
-                                this.phiMovAdd(predB, phiVid, pickVid)
+                            ri2 = ri2 + 1
+                        }
+                        // (b) 兜底：仍未命中的前驱，**从尾部（追加条）向前**
+                        // 选首个未使用的入边值。phi.args = [before, bodyEnd,
+                        // cont1, …]——追加条是 buildContinue 登记的 continue
+                        // 点值；无法精确匹配的前驱恰是 continue 前驱，应优先
+                        // 拿追加条。旧实现从头部选 ⇒ continue 前驱抢走
+                        // before(0)、latch 抢走 contVid ⇒ 循环变量恒 0
+                        //（实测 probe_break total=1 死循环，2026-10-05）。
+                        var rj: Int = 0
+                        while (rj < predN) {
+                            if (pickOfPred[rj] < 0) {
+                                var aj: Int = incomingN - 1
+                                while (aj >= 0) {
+                                    val usedAj: Int = used[aj]
+                                    if (usedAj == 0) {
+                                        pickOfPred[rj] = aj
+                                        used[aj] = 1
+                                        break
+                                    }
+                                    aj = aj - 1
+                                }
                             }
-                            ri = ri + 1
+                            rj = rj + 1
+                        }
+                        // 登记 PHI-MOV
+                        var rk: Int = 0
+                        while (rk < predN) {
+                            val pk: Int = pickOfPred[rk]
+                            if (pk >= 0) {
+                                val predB2: Int = predFlat[pLo + rk]
+                                val pickVid: Int = incoming[pk]
+                                this.phiMovAdd(predB2, phiVid, pickVid)
+                            }
+                            rk = rk + 1
                         }
                     }
                     pi = pi + 1
@@ -1049,6 +1262,41 @@ class InstructionSelector {
             }
         }
         return emptyList()
+    }
+
+    /// RA 之后的 phi-home 合并（2026-10-05）：
+    /// phi 节点被 RA 分到独立 home（寄存器/槽），但其 MOV 只在**前驱块末尾**
+    /// 发射——入口边 MOV 在循环头前执行 ✓；问题在于【其它路径读取 phi 时
+    /// 读到 phi 自己的 home（未写入）】。合并方案：把 phi 节点的 home 改写为
+    /// 「入口边 incoming 节点」的 home —— 两者共享寄存器/槽后，MOV 仍维护
+    /// 值的正确流动，而其它读取也命中同一 home。
+    /// 由 Pipeline 在 allocate(dag) 之后调用。
+    fun mergePhiHomesAfterRA(): Unit {
+        var i: Int = 0
+        while (i < this.phiEntryMapCnt) {
+            val phiLir: Int = this.phiEntryMapIds[i]
+            val incLir: Int = this.phiEntryMapHomes[i]
+            if (phiLir >= 0 && incLir >= 0) {
+                val phiDag: Int = this.lookupNode(phiLir)
+                val incDag: Int = this.lookupNode(incLir)
+                if (phiDag >= 0 && incDag >= 0) {
+                    val phiNode: DagNode = this.dag.nodeOf(phiDag)
+                    val incNode: DagNode = this.dag.nodeOf(incDag)
+                    // ⚠️ 只合并「真实存储 home」的入边：**Const 入边必须跳过**。
+                    // 大常量（如 65536）经 emitConst 物化成「mov-abs 进寄存器」
+                    // 节点、带 reg；把 phi 的 home 改写到该寄存器 = 把循环携带
+                    // 变量钉在**易失寄存器**上 —— 入口 MOV 写的是 phi 原有
+                    // home，读取却走寄存器 ⇒ 任何 call 后读到残渣（实测 VM
+                    // runner 读循环 cap=65536 初值变 0：FileOps.read 的
+                    // count=cap-total=0，2026-10-06）。小常量（0-3）作为内联
+                    // 立即数无 reg，本就不触发合并——所以探针矩阵全绿。
+                    if (incNode.reg != "" && incNode.kind != "Const") {
+                        phiNode.reg = incNode.reg
+                    }
+                }
+            }
+            i = i + 1
+        }
     }
 
     /// 扁平逗号串是否包含指定 token。
@@ -1133,9 +1381,35 @@ class InstructionSelector {
         val idx: Int = blockId - this.phiMovBase
         if (idx < 0 || idx >= this.phiMovCnt.size) { return }
         val cnt: Int = this.phiMovCnt[idx]
-        if (cnt >= this.phiMovCap) { return }
+        // ⚠️ 2026-10-04：超容（≥32 条 PHI-MOV）旧实现**静默丢弃** ⇒ 该块的
+        // 循环携带变量（cap/ok 等）初值 MOV 丢失 ⇒ 读到 0/垃圾（实测 VM
+        // runner 的 readFileToBuffer：cap=65536 丢失 → ReadFile(count=0)
+        // 无限循环；probe_obj3 的 ok 标志同理）。改为：超容时**翻倍扩容**
+        // 重建扁平表（保留全部已有记录）。
+        if (cnt >= this.phiMovCap) {
+            val newCap: Int = this.phiMovCap * 2
+            val newFlat: List<String> = arrayListOf<String>()
+            var bi2: Int = 0
+            while (bi2 < this.phiMovCnt.size) {
+                var k2: Int = 0
+                while (k2 < this.phiMovCap) {
+                    newFlat.add(this.phiMovFlat[bi2 * this.phiMovCap + k2])
+                    k2 = k2 + 1
+                }
+                var pad: Int = this.phiMovCap
+                while (pad < newCap) {
+                    newFlat.add("")
+                    pad = pad + 1
+                }
+                bi2 = bi2 + 1
+            }
+            this.phiMovFlat = newFlat
+            this.phiMovCap = newCap
+        }
         this.phiMovFlat[idx * this.phiMovCap + cnt] =
             MachineDagUtils.toStr(phiVid) + "," + MachineDagUtils.toStr(incomingVid)
+        println("[pmAdd] blk=" + toStr(blockId) + " phi=" + toStr(phiVid)
+                + " <- in=" + toStr(incomingVid))
         this.phiMovCnt[idx] = cnt + 1
         this.phiMovTotal = this.phiMovTotal + 1
     }
@@ -1155,8 +1429,27 @@ class InstructionSelector {
                 if (parts.size >= 2) {
                     val phiVid: Int = LirUtils.strToInt(parts[0])
                     val incomingVid: Int = LirUtils.strToInt(parts[1])
-                    val phiNode: Int = this.lookupNode(phiVid)
-                    val incomingNode: Int = this.lookupNode(incomingVid)
+                    var phiNode: Int = this.lookupNode(phiVid)
+                    var incomingNode: Int = this.lookupNode(incomingVid)
+                    // ⚠️ 2026-10-05：节点未注册（-1）时旧实现**静默跳过**该 MOV
+                    // ⇒ 循环携带变量的入口值丢失（实测 runner 读循环 cap=0/
+                    // buf=0：`cap = 65536` 的入口 MOV 整条蒸发，[FR] buf=0
+                    // count=0 ⇒ ReadFile 读 0 字节 ⇒ cannot read file）。
+                    // 修复：缺失的 phi/incoming **就地发射**（selectValue 幂等，
+                    // 注册后不会重复发射）——MOV 到达顺序不再依赖第二遍。
+                    if (phiNode < 0) {
+                        phiNode = this.selectValue(phiVid, blockId, this.lir)
+                    }
+                    if (incomingNode < 0) {
+                        incomingNode = this.selectValue(incomingVid, blockId, this.lir)
+                    }
+                    if (this.phiDiagOn) {
+                        if (phiNode < 0 || incomingNode < 0) {
+                            this.phiDiagMissing = this.phiDiagMissing + 1
+                        } else {
+                            this.phiDiagEmitted = this.phiDiagEmitted + 1
+                        }
+                    }
                     if (phiNode >= 0 && incomingNode >= 0) {
                         // MOV phi_node, incoming_node（pattern 7）。
                         //
@@ -1265,6 +1558,29 @@ class InstructionSelector {
             return this.emitMovValue(val, vid)
         }
 
+        // ── 逻辑非：!x ≡ (x == 0) ──
+        //
+        // ⚠️ 旧实现 Not 不在**任何**分派里：节点照常登记 home（CondBr/后续
+        // 读取都按 home 取），但没有任何指令写它 ⇒ 读到的是未初始化槽。
+        // 实测（2026-10-06，反汇编实证）：runner 装载 .auc 的
+        // `!reader.readFromFile(path)` —— call 后返回值存 -0x50(%rbp)，
+        // 紧随其后的分支却 `cmpq $0x0, -0x58(%rbp)` 读**另一个槽**的残渣
+        // ⇒ 恒走 error 分支，.auc 装载通道整个被它封死。
+        // 修复：cmp src, 0 + sete（ZeroFlag = (x==0)），与 emitCmpSetcc
+        // Case-1 的「streq 结果与 0 比较」同一发射形态。
+        if (op == "Not") {
+            val notSrc: Int = this.resolveNode(val.args[0])
+            this.dag.selectPattern(20, MachineDagUtils.toStr(notSrc) + ",0", -1)
+            val notNode: Int = this.dag.addNode("Value", "ICmpEq", val.type,
+                                                "", "", "", this.curChain, "ICmpEq")
+            this.registerNode(vid, notNode)
+            val notSetcc: Int = this.dag.selectPattern(40,
+                              MachineDagUtils.toStr(notNode), notNode)
+            val notInstr: DagInstruction = this.dag.instrOf(notSetcc)
+            notInstr.cond = "e"
+            return notNode
+        }
+
         // ── 比较运算 → CMP + SETcc ──
         //
         // ⚠️ SsaBuilder.mapBinaryOp 产出的是 **ICmp\* 系列**（`ICmpEq` /
@@ -1311,6 +1627,38 @@ class InstructionSelector {
             return this.emitMovValue(val, vid)
         }
 
+        // ── GetField：字段读取 ──
+        //
+        // ⚠️ 旧实现落到最下面的「默认 Value 节点」，**args 被整体丢弃**：
+        // 基址操作数不进 DAG ⇒ ① 发射阶段无源可读（读残留寄存器 = 垃圾）；
+        // ② 基址的活跃区间终止于其定义点 ⇒ RA 把它的寄存器分配给后续值
+        // ⇒ 跨调用存活的对象句柄被静默覆写（实测 R12 探针：`a.pathBuf`
+        // 读出 0，且实例 a 的寄存器被第二次构造复写。2026-10-03）。
+        // 字段索引在 .hat 序列化中随 aux 丢失（HatSerializer 的 @field 不带
+        // 名字），这里按 index 0 降级为 `__field_get(obj, 0)` —— 语义近似
+        // （单字段对象恒正确）且保住区间/干扰的完整性；正式路径是前端
+        // emitFieldGet 的 `Call __field_get(obj, idx)`（带真索引）。
+        if (op == "GetField") {
+            var baseNode: Int = -1
+            var baseTy: Int = 0
+            if (val.args.size > 0) {
+                baseNode = this.resolveNode(val.args[0])
+                baseTy = this.lir.valueOf(val.args[0]).type
+            }
+            val zeroNode: Int = this.dag.addNode("Const", "ConstImm", baseTy,
+                                                 "", "", "", this.curChain, "0")
+            var fldArgs: String = ""
+            if (baseNode >= 0) {
+                fldArgs = MachineDagUtils.toStr(baseNode)
+            }
+            fldArgs = fldArgs + "," + MachineDagUtils.toStr(zeroNode)
+            val gfNode: Int = this.dag.addNode("Value", "Call", val.type,
+                                               fldArgs, "", "", this.curChain, "__field_get")
+            this.registerNode(vid, gfNode)
+            this.dag.selectPattern(50, MachineDagUtils.toStr(gfNode), -1)
+            return gfNode
+        }
+
         // ── 默认：创建一个 Value 节点 ──
         val nodeId: Int = this.dag.addNode("Value", op, val.type,
                                            "", "", "", this.curChain, val.aux)
@@ -1330,14 +1678,26 @@ class InstructionSelector {
     /// 到 `rax`，而 rax 会被 `call` 的返回值覆写。实测 04_control_flow 的
     /// while 循环变量 Phi 因此被 `println` 的返回值覆盖，`i` 永远是 1 → 死循环。
     private fun emitConst(val: LirValue, vid: Int): Int {
-        val constVal: String = val.aux
+        val constVal0: String = val.aux
         val typeId: Int = val.type
 
         // 字符串常量：分配 @str.N 符号，创建 LEA 指令加载地址。
+        // ⚠️ 2026-10-03：曾尝试 `|| constVal == ""` 让空串走本分支 —— 它能修
+        // 「streq(x, null)」，但同时改变代码布局，触发**布局敏感的潜在值模型
+        // 缺陷**（bench_loop 循环变量在多个构建下随机错乱，见 p43-p47 二分）。
+        // 空串比较的兜底改为 runtime streq 的 null 安全前置（null==x → 0），
+        // 语义近似且不触雷。布局问题的根治属 seed AOT 值模型专项。
+        // （注意：字符串字面量 "null" 也走本分支——内容映射只能在下面数值路径做。）
         if (this.types.isString(typeId)) {
             val strName: String = "@str." + this.strConstCount
             this.strConstCount = this.strConstCount + 1
-            this.stringConstAdd(constVal)
+            // ⚠️ String 类型的 null 常量必须物化为**空串**——aux 原样入池会
+            // 把字面文本 "null" 当字符串内容（实测 readMagic 的 result 初值
+            // （源码 ""，自举前端降级成 null 常量）拼接出 "nullAURA" 魔数，
+            // 2026-10-06）。
+            var strLit: String = constVal0
+            if (strLit == "null") { strLit = "" }
+            this.stringConstAdd(strLit)
 
             // Const 节点（aux = @str.N 符号名），寄存器由分配器决定。
             val nodeId: Int = this.dag.addNode("Const", val.op, val.type,
@@ -1352,6 +1712,14 @@ class InstructionSelector {
 
         // 数值常量：**保留符号**（旧实现把 '-' 剥掉后仅用 `isNeg` 标记却从不使用，
         // 负数常量被实体化成正数）。
+        // null 常量（SsaBuilder zeroValueOf / 字面量 null 的 aux="null"，经
+        // HatParser 修复后 .hat 往返保留）按 0 物化——与修复前「aux 被序列化
+        // 丢成空串→strToInt=0」的机器码一致，只是不再丢信息（ISA Case-2 的
+        // nullish 判定依赖 aux=="null"，见 emitStreqSetcc 上方说明）。
+        var constVal: String = constVal0
+        if (constVal == "null") {
+            constVal = "0"
+        }
         val nodeId: Int = this.dag.addNode("Const", val.op, val.type,
                                            "", "", "", this.curChain, constVal)
         this.registerNode(vid, nodeId)
@@ -1420,7 +1788,18 @@ class InstructionSelector {
         val rhsNode: Int = this.resolveNode(rhs)
 
         // ── 字符串拼接：String + String → 调用 runtime strcat ──
-        if (val.op == "Add" && this.types.isString(val.type)) {
+        //
+        // ⚠️ 类型判定必须**兜底看操作数**：循环携带 String 变量的 phi 可能
+        // 被定型成 Int（SsaBuilder.buildWhile 旧实现硬编码 phi 类型 0）、
+        // 自举前端的 concat 节点类型可能是 Basic——只看 Add 本身类型会把
+        // 字符串 concat 编成**整数指针加法**（实测 readMagic 的
+        // `result = result + fromCharCode(c)`：循环退出后读到 0x200 垃圾、
+        // strlen(0x200) 段错误，2026-10-06）。
+        val addIsStr: Boolean = this.types.isString(val.type)
+                || (this.lir != null && val.args.size >= 2
+                    && (this.types.isString(this.lir.valueOf(lhs).type)
+                        || this.types.isString(this.lir.valueOf(rhs).type)))
+        if (val.op == "Add" && addIsStr) {
             return this.emitStrcat(val, vid, lhsNode, rhsNode)
         }
 
@@ -1492,10 +1871,21 @@ class InstructionSelector {
     ///     （rbx/rsi/rdi/r12-r15），因此参数值可以安全跨 `call` 存活。
     private fun emitParam(val: LirValue, vid: Int): Int {
         // 确定 ABI 寄存器。
+        //
+        // ⚠️ 第 5+ 参数走**栈传递**（Win64：arg5+i 在调用方 [rsp+0x20+i*8]，
+        // 进入被调方后位于 [rbp+16+i*8]——rbp+8 是返回地址、+0x10..0x20 是
+        // 影子空间）。旧实现 `else "rcx"` 让所有栈参**全读 rcx**（且调用方
+        // 也从没写过栈参区，见 `emitCallArgs` 的配套修复）⇒ 参数 ≥5 的函数
+        // 收到的全是垃圾（实测 decodeNumeric 11 参的 `mod` 读成打包字节码 →
+        // listAppend 野指针崩溃，2026-10-06）。
+        // Param 源节点的 `reg` 直接填 `stack:+24` 形态：`regOfNode` ①会原样
+        // 返回，`resolveToReg` 对栈引用发 `mov r10, [rbp+24]` 按需加载——
+        // 调用方写进栈参区的字节本就在那里，无需入口拷贝。
         val abiRegs: List<String> = listOf("rcx", "rdx", "r8", "r9")
         val idx: Int = this.paramIndex
         this.paramIndex = this.paramIndex + 1
-        val abiReg: String = if (idx < abiRegs.size) abiRegs[idx] else "rcx"
+        val abiReg: String = if (idx < abiRegs.size) abiRegs[idx]
+                             else "stack:" + toStr(16 + (idx - 4) * 8)
 
         // 源节点：固定 ABI 寄存器（易失寄存器，不参与着色）。
         val srcNode: Int = this.dag.addNode("Param", "Param", val.type,
@@ -1606,11 +1996,19 @@ class InstructionSelector {
         // 所以这里还需要处理"streq 结果与 0 比较"的情况。
         if ((val.op == "ICmpEq" || val.op == "ICmpNe")
             && this.lir != null) {
-            // Case 1: rhs 是常量 0 → streq 结果比较
+            // Case 1: rhs 是常量 **0** → streq 结果比较
+            // ⚠️ 零值判定只能看 aux：Const 节点的 args 恒为空，旧实现的
+            // `|| rhsVal.args.size == 0` 子句让**任意值**的常量都命中 Case-1
+            // ⇒ `x != 104` 被编成 `x != 0`（实测 probe_cmp：got=104 时
+            // `got != 104` 恒真）。所有「整数 ==/!= 非零常量」比较在 photon
+            // 产物里全部错判（`<`/`<=` 不走本路径，fib/bench_loop 幸免）。
+            // Case-1 的真实用户是 `ICmpNe(streq结果, Const 0)`（aux="0"）与
+            // null 常量（HatParser 修复后 aux="null"，strToInt 同样 = 0），
+            // 两者语义都是「与 0 比较」，本分支保持正确。
             val rhsVal: LirValue = this.lir.valueOf(rhs)
             if (this.types.isInt(rhsVal.type)
                 && rhsVal.isConst()
-                && (LirUtils.strToInt(rhsVal.aux) == 0 || rhsVal.args.size == 0)) {
+                && LirUtils.strToInt(rhsVal.aux) == 0) {
                 // streq 已经返回 1/0，直接 cmp 0 + setcc
                 this.dag.selectPattern(20, MachineDagUtils.toStr(lhsNode) + ",0", -1)
                 val setccNode: Int = this.dag.addNode("Value", val.op, val.type,
@@ -1624,7 +2022,22 @@ class InstructionSelector {
             }
             // Case 2: lhs 是 String 类型 → 原始字符串比较
             if (this.types.isString(this.lir.valueOf(lhs).type)) {
-                return this.emitStreqSetcc(val, vid, lhsNode, rhsNode)
+                // ⚠️ null/0 常量比较必须走**指针相等**：`if (s == null)` /
+                // 未初始化 String（`Const 0`）与字符串比较若也发 streq，
+                // 就是对地址 0 做内容比较 ⇒ 0xC0000005（实测 fs 探针，
+                // 2026-10-03；与 SsaBuilder.buildBinary 的同族守卫配套 ——
+                // buildBinary 让 null 比较落回整数 ICmp 后，会在这里被
+                // 重新改写成 streq，所以本层也要豁免）。
+                val lhsV: LirValue = this.lir.valueOf(lhs)
+                val rhsV: LirValue = this.lir.valueOf(rhs)
+                val lhsNullish: Boolean = lhsV.isConst()
+                        && (lhsV.aux == "null" || lhsV.aux == "0")
+                val rhsNullish: Boolean = rhsV.isConst()
+                        && (rhsV.aux == "null" || rhsV.aux == "0")
+                if (!lhsNullish && !rhsNullish) {
+                    return this.emitStreqSetcc(val, vid, lhsNode, rhsNode)
+                }
+                // null 比较：落到末尾的通用 CMP+SETcc（指针比较）
             }
         }
 
@@ -1726,6 +2139,14 @@ class InstructionSelector {
         // 2026-10-02：String.substring → runtime 的 String_substring
         //（heapArena bump 副本，越界钳位；薄 VM 宿主链接修复）
         if (name == "substring" || name == "String.substring") { return "String_substring" }
+        // ── else-if 链修复（Hir.lowerBranch 补 If 用例）后暴露的裸名 ──
+        // （2026-10-06，P0-2）先前这些调用随被丢弃的分支一起消失；分支活了
+        // 之后第一次到达链接期。映射目标见 PhotonRuntime 各桩的说明。
+        if (name == "typeof" || name == "Builtin_typeof") { return "aura_typeof" }
+        if (name == "__is_tagged_int") { return "aura_is_tagged_int" }
+        if (name == "removeAt") { return "Collections.listRemove" }
+        // Clock_clockGettime / ThreadOps_create / IO_readFile / IO_writeFile
+        // 的 .hat 裸名即最终符号名，runtime 同名导出，无需映射。
         if (name == "Any.toString") { return "toString" }
         if (name == "Any.equals") { return "streq" }
         // 裸名 + 接收者类型：`s.length()` / `s.size()` / `a.equals(b)`。
@@ -1930,11 +2351,17 @@ class InstructionSelector {
         val setccId: Int = this.dag.selectPattern(40,
                               MachineDagUtils.toStr(setccNode), setccNode)
         val instr: DagInstruction = this.dag.instrOf(setccId)
-        // streq 返回 1 表示相等。
+        // streq 返回 1 表示相等：本 setcc 物化的是「streq 结果」这个布尔值。
+        //   ICmpEq 的值 = (streq 结果 != 0) ⇒ setne；
+        //   ICmpNe 的值 = (streq 结果 == 0) ⇒ sete。
+        // ⚠️ 旧实现按比较符字面映射（Eq→"e" / Ne→"ne"），与 setcc 语义正好
+        // 相反 ⇒ 所有走到本路径的判等**整体取反**：实测 fs 探针
+        // `if (s == null)` 变成「非空才进 null 分支」⇒ strlen(NULL)
+        // 0xC0000005（2026-10-03，与 HatParser 的 @null aux 丢失叠加）。
         if (val.op == "ICmpNe") {
-            instr.cond = "ne"
-        } else {
             instr.cond = "e"
+        } else {
+            instr.cond = "ne"
         }
         return setccNode
     }

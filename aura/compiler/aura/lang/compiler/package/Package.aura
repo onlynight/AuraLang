@@ -49,7 +49,7 @@ class Version {
                 val patchNum: String = patchPart.substring(0, plusIdx)
                 v.patch = PackageUtils.parseInt(patchNum)
                 // Parse build metadata
-                val buildStr: String = patchPart.substring(plusIdx + 1)
+                val buildStr: String = patchPart.substring(plusIdx + 1, patchPart.length())
                 val buildParts: Array = buildStr.split(".")
                 for (bp in buildParts) {
                     v.build.add(bp)
@@ -149,22 +149,22 @@ class VersionConstraint {
         var verStr: String = s
         if (s.startsWith("==")) {
             c.kind = "exact"
-            verStr = s.substring(2).trim()
+            verStr = s.substring(2, s.length()).trim()
         } else if (s.startsWith(">=")) {
             c.kind = "gte"
-            verStr = s.substring(2).trim()
+            verStr = s.substring(2, s.length()).trim()
         } else if (s.startsWith(">")) {
             c.kind = "gt"
-            verStr = s.substring(1).trim()
+            verStr = s.substring(1, s.length()).trim()
         } else if (s.startsWith("<")) {
             c.kind = "lt"
-            verStr = s.substring(1).trim()
+            verStr = s.substring(1, s.length()).trim()
         } else if (s.startsWith("~>")) {
             c.kind = "tilde"
-            verStr = s.substring(2).trim()
+            verStr = s.substring(2, s.length()).trim()
         } else if (s.startsWith("^")) {
             c.kind = "compatible"
-            verStr = s.substring(1).trim()
+            verStr = s.substring(1, s.length()).trim()
         } else {
             // No operator: exact match
             c.kind = "exact"
@@ -248,18 +248,18 @@ class Dependency {
         if (dependsIdx < 0) {
             return null
         }
-        val rest: String = line.substring(dependsIdx + 8).trim()
+        val rest: String = line.substring(dependsIdx + 8, line.length()).trim()
 
         // Split by "from"
         val fromIdx: Int = rest.indexOf(" from ")
         if (fromIdx >= 0) {
             val nameVer: String = rest.substring(0, fromIdx).trim()
-            d.source = rest.substring(fromIdx + 6).trim()
+            d.source = rest.substring(fromIdx + 6, rest.length()).trim()
             // Parse name and version
             val spaceIdx: Int = nameVer.indexOf(" ")
             if (spaceIdx >= 0) {
                 d.name = nameVer.substring(0, spaceIdx)
-                d.version = VersionConstraint.parse(nameVer.substring(spaceIdx + 1).trim())
+                d.version = VersionConstraint.parse(nameVer.substring(spaceIdx + 1, VersionConstraint.parse(nameVer.length()).trim())
             } else {
                 d.name = nameVer
             }
@@ -268,7 +268,7 @@ class Dependency {
             val spaceIdx: Int = rest.indexOf(" ")
             if (spaceIdx >= 0) {
                 d.name = rest.substring(0, spaceIdx)
-                d.version = VersionConstraint.parse(rest.substring(spaceIdx + 1).trim())
+                d.version = VersionConstraint.parse(rest.substring(spaceIdx + 1, VersionConstraint.parse(rest.length()).trim())
             } else {
                 d.name = rest
             }
@@ -323,7 +323,7 @@ class PackageManifest {
                 continue
             }
             val key: String = trimmed.substring(0, eqIdx).trim()
-            val value: String = trimmed.substring(eqIdx + 1).trim()
+            val value: String = trimmed.substring(eqIdx + 1, trimmed.length()).trim()
             // Remove quotes
             val cleanVal: String = value.trim()
             if (cleanVal.startsWith("\"") || cleanVal.startsWith("'")) {
@@ -430,7 +430,7 @@ class LockFile {
                 continue
             }
             val key: String = trimmed.substring(0, eqIdx).trim()
-            val value: String = trimmed.substring(eqIdx + 1).trim().replace("\"", "")
+            val value: String = trimmed.substring(eqIdx + 1, trimmed.length()).trim().replace("\"", "")
             if (key == "name") {
                 currentEntry.name = value
             } else if (key == "version") {
