@@ -3005,3 +3005,33 @@ operandSize`，×20 内联分支）与 codeLen/endPos 终止值——同一发�
 
 **状态**：LOADONLY ✓ / 解码 1194 ✓ / 宿主完整运行 exit=0 ✓ /
 余 loader flat 截断一处。
+
+### 10.74 P291：黄金捕获——vmSubstr 恒返 "p"，receiver 槽选择错误实锤（2026-10-06 续LVII）
+
+**黄金捕获**（P291，loadPredecoded 内三探针同回合全触发）：
+```
+loader flat:  entry 30=[9]  entry 31=[println,1]   ✓ 正确
+VM argStrs:   slot 30=[p]  slot 31=[p]              ✗ 全变 "p"
+```
+**loadArgsFlat 的 vmSubstr 对一切输入返回常量 "p"**（"9"→"p"，
+"println,1"→"p"——连首字符截断都不是！"p" = 内置表 "print" 首字符）。
+机理：vmSubstr 内 `text.substring(start, end)` 的 **receiver `text`
+从错误槽装载**（读到内置表 "print" 指针），substring(0,1) → "p"。
+这就是 P274 以来「发射器参数装载选择错误」的最终实锤形态。
+
+**本段另证**：
+- loadArgsFlat 循环干净（n-slot 全程 1139 ✓ 条件断点验证）——
+  §10.71 的「循环失控」勘误维持。
+- probe 丢失（FLAT0 不入二进制）为**布局相关**：P291 同代码探针全部
+  正常打印——「后端丢语句」亦是布局敏感，非无条件。
+- 顺序交换实验（registerAucClasses ↔ loadPredecoded）：损坏点随布局
+  前移（flat 1194→49）——覆写源与帧/ arena 布局相关，已回退原序。
+- FileUtils.writeText（photon 编译）恒失败（write failed at 0/N）——
+  诊断输出一律走 println。
+
+**当前状态**：LOADONLY ✓ / 解码 ✓ / 宿主完整运行 exit=0 ✓ /
+卡在 funcName="p"（vmSubstr receiver 槽选择）。
+
+**下轮首查**（单点）：vmSubstr 内 `text.substring(start, end)` 调用点
+的 text 装载指令（记下槽位）——对照 HAT 该处 SSA 值来源，找 RA 的
+receiver 槽分配错误。次选：String.substring 原生包装的 rcx 装载。
