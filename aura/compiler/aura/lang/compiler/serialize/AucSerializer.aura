@@ -384,16 +384,20 @@ class AucReader {
     /// 读取字符串（带长度前缀）。
     fun readStr(): String {
         val len: Int = readU16()
-        if (len < 0) { return "" }
-        var result: String = ""
-        var i: Int = 0
-        while (i < len) {
-            val c: Int = readByte()
-            if (c < 0) { break }
-            result = result + String.fromCharCode(c)
-            i = i + 1
-        }
-        return result
+        if (len <= 0) { return "" }
+        // P236：逐字符 while 循环的 result 是**跨迭代 String phi**——phi 缺陷
+        // 下 strcat 读到残值（§10.39）。改为**递归传参**：每帧的拼接结果是
+        // 单赋值局部，值经实参传递（实参不经过 merge phi），只用已验证
+        // 原语（fromCharCode/strcat）。深度 = 串长（名称类 ≤ 数百，1GB 栈）。
+        return readStrFrom("", len)
+    }
+
+    /// readStr 的递归体：已拼 result + 剩余 remaining 个字符。
+    private fun readStrFrom(result: String, remaining: Int): String {
+        if (remaining <= 0) { return result }
+        val c: Int = readByte()
+        if (c < 0) { return result }
+        return readStrFrom(result + String.fromCharCode(c), remaining - 1)
     }
 
     /// 跳过字节。

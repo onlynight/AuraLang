@@ -2133,3 +2133,30 @@ opcodeName 路径健康，不证明 name phi 是唯一污染源。
    phi！与 name 同族——readStr 也该 PushHandler 化：改为先收集字节到
    局部数组/固定容量缓冲再一次性构建）；
 3. readStr 稳定后：decode fn0 → 全解码 → 端到端。
+
+### 10.40 P236：opcode 名表 HashMap 化平——String.hashCode 无 this 展平缺陷实锤（2026-10-06 续XX）
+
+**根因实锤（gdb 断点 + 调用点反汇编）**：装载崩溃链 =
+`loadPredecoded → Opcodes.buildNameMap → HashMap.put → hashKey(key) →
+@hashCode(key) → **String.hashCode（前端展平成无 this 的裸 `@fn hashCode()`，
+接收者物化成 @i32_const 0）** → strlen(0)`。HAT 证据：两个无参
+`@fn hashCode()`（两个类的 override 展平后裸名冲突）+ 函数体
+`@call @strlen(@i32_const 0)`。
+
+**修复（真实落地）**：`Opcodes` 的 nameToCode HashMap → **平行列表
+（flatNames/flatCodes）+ 线性扫描**（装载期 ~125 项，性能无碍）。125 个
+put 全部转换。这是「前端 virtual 方法展平丢 this」缺陷的**首个工程绕过**。
+
+**结果**：LOADONLY 保持绿；全量跑的崩点**再次前移**——现在是
+`Vm_setArgsRow` 区的 `strlen(rcx=0x1)`（参数扁平槽的串处理读到非串值
+0x1）。同族问题（前端方法展平丢 this / phi 值错乱）的下一个调用点。
+
+**已确认的缺陷链（供前端专项）**：
+1. `override fun hashCode()` 等虚方法展平成裸名无参 @fn（丢接收者）
+2. 多个类的同名虚方法展平后裸名冲突（两个 `@fn hashCode()`）
+3. String phi 跨迭代值错乱（P230）
+**绕过清单（已落地）**：Opcodes 平行表 ✓、decodeNumeric PushHandler 化 ✓、
+readStr 递归化 ✓。
+
+**下轮**：对 Vm_setArgsRow/loadArgsFlat 区做同款去 HashMap/去 phi 改写；
+或直接攻前端虚方法展平（`Class_method` 命名 + @this 形参保留）。
