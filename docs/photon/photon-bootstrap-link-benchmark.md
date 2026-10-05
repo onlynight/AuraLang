@@ -2852,3 +2852,53 @@ D[before read64]      rbx=0x14011b2e8 ✓
 
 **下轮**：读 indexOf 函数在崩点前的完整反汇编（HAT 对照），
 找出 rcx=1 从哪条 mov 指令来。
+
+### 10.71 P275-276：堆损坏级联三连根因——bump 回绕 + listGet 内联布局 + 竞技场 64MB（2026-10-06 续LIII）
+
+**方法升级**：本轮放弃盲扫，改用「死指令位 int3 探针补丁 + objdump 符号映射 +
+hardware-watchpoint（实测 Win gdb 静默失效，弃用）+ 原生驱动重链 noaslr」
+组合，五次逼近收敛。
+
+**勘误**：上一节「发射器 rcx 装载错误」的定性**不成立**。入口探针
+（cmp rcx,1 @listSet+0x27 位于 getInstance 之后，rcx 已被覆写为 0x140）
+与 rbx 探针（cmp rbx,1，**未触发**）联合证明：listSet 入口 rcx=rbx=合法
+列表；崩溃帧是**正常调用**（rbp 链/返回地址 setArgsRow+0x41a 完全吻合），
+`list=1` 是**字段槽内容已损坏**后的读取结果——见下。
+
+**根因一：bump 分配器溢出「回绕」（emitObjectAlloc/strcat/__list_alloc）**。
+溢出路径 `xor r12,r12; bump=size` → 分配从 heapArena+0 重叠继续，早期对象
+（Vm 实例 @arena offset ~121KB）被后续分配逐字节覆写。修复：溢出返回 NULL、
+游标不动（三处发射器，注释含实测链）。
+
+**根因二：`__list_get` 内联布局读 core 列表**（17 处 `.get` 绑定）。
+旧实现读 [list+8+idx*8]：对 core 布局 [len][cap][items]，idx=0 读到 cap、
+**idx=1 读到 items 指针**——指针作为「元素」流入 strlen/下标成为野读/野写
+喷泉。修复：emitListGet/emitListSetAt 改 core 布局（len 越界检查 + items
+间接寻址）。__list_alloc 在 vmhost 中 0 引用，修复无歧义安全。
+
+**根因三：竞技场 32MB 不足**。loadArgsFlat 搅动（海量小分配、无 free）把
+32MB 耗尽触发根因一。修复：heapArena 33554432→67108864（64MB），限界
+33546336→67100768（×3 变体 + ×6 处 cmp 常量）。BUILD_ID→
+p276-listget-core-layout（缓存键）。
+
+**实证链**（fixed_noaslr2.exe，崩点已从 read64(1) 推进至 push(list=0)）：
+- listSet 入口探针：合法调用全程 rcx=rbx=list ✓，崩溃调用 rcx=0x140（非 1）
+- setArgsRow+0x415 call listSet(list=rdi=[e660(this,21,21) 返回值])，
+  槽 21 = arg4Ints（字段序核实：18=argStrs…22=argCounts），内容 1=野写产物
+- loadArgsFlat 入口：flat count=0x473 ✓、argStrs 槽=合法句柄 ✓——
+  **但循环仍失控**（87317=0x15555 次迭代，argStrs len→262144）：
+  i/n 槽（-0xc8/-0xc0）静态审计干净（各 2-3 次访问、无别名），
+  崩点推进为 newList→NULL（native 堆耗尽）→push(list=0)→read64(0)
+
+**残余**（下轮首查）：n=1139 正确入槽后循环仍 8.7 万次——**运行期野生写
+仍在踩 i/n 栈槽**。野写引擎待定位：HAT 对照 loadArgsFlat 循环体（obj
+0x5f254 条件 / 0x5fccb 递增已静态审计干净），嫌疑集中于 charCodeAt/strlen
+族 native 对损坏句柄的越界读引发的连锁（push items 野写路径）。
+
+**工具资产**（复用）：死指令位 int3 探针法（7 字节 cmp/jne/CC 原位替换）、
+`build_fixed_from_driver.ps1`（===COFF-MAIN/RUNTIME=== 提取+链接）、
+lld-link @rsp 文件（Git Bash 路径变形规避）、/DYNAMICBASE:NO noaslr 链接。
+**教训**：① gdb watchpoint 在此环境静默失效；② printf %lx 截断高位，
+一律 x/gx；③ ASLR 每会话重设基址，跨会话 VA 不可比；④ seed VM 解释执行
+buildRuntimeObject 产物有微妙缺陷（import 调用 rax=0xC0000008），必须走
+seed AOT 原生驱动（PhotonP276.exe）。

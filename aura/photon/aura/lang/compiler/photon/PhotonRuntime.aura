@@ -561,7 +561,7 @@ object PhotonRuntime {
         enc.emitMovRR("r9", "rax")      // r9 = ptr（保存）
         enc.emitAddRI("rax", 8)
         enc.emitSubRR("rax", "rdx")     // rax = base + 8（新 bump 偏移）
-        enc.emitCmpRI("rax", 33546336)
+        enc.emitCmpRI("rax", 67100768)
         enc.emitJccLabel("g", "fcc_ovf")
         enc.emitStoreRIP("heapBump", "rax")
         enc.emitLabel("fcc_ovf")
@@ -652,7 +652,7 @@ object PhotonRuntime {
         enc.emitAddRR("rax", "r8")
         enc.emitIncRR("rax")
         enc.emitSubRR("rax", "r9")          // rax = base + len + 1
-        enc.emitCmpRI("rax", 33546336)
+        enc.emitCmpRI("rax", 67100768)
         enc.emitJccLabel("g", "ss_ovf")
         enc.emitStoreRIP("heapBump", "rax")
         // 逐字节拷贝（源遇 NUL 提前停，剩余补 0）
@@ -699,7 +699,7 @@ object PhotonRuntime {
         enc.emitMovRR("r9", "rax")
         enc.emitAddRI("rax", 8)
         enc.emitSubRR("rax", "rdx")
-        enc.emitCmpRI("rax", 33546336)
+        enc.emitCmpRI("rax", 67100768)
         enc.emitJccLabel("g", "pargs_ovf")
         enc.emitStoreRIP("heapBump", "rax")
         enc.emitLabel("pargs_ovf")
@@ -1075,12 +1075,12 @@ object PhotonRuntime {
         enc.emitMovRR("rbx", "rax")
         enc.emitAddRR("rbx", "rcx")
           // rbx = new
-        enc.emitCmpRI("rbx", 33546336)
+        enc.emitCmpRI("rbx", 67100768)
         enc.emitJccLabel("le", "strcat_alloc_ok")
-        enc.emitXorRR("rax", "rax")
-          // base = 0
-        enc.emitMovRR("rbx", "rcx")
-          // new = need
+        // 溢出：返回 NULL（heapBump 不动）。旧「回绕0 重新开」会把后续
+        // 字符串分配叠到早期对象上（堆自踩家族根因，同 emitObjectAlloc）。
+        enc.emitXorRR("eax", "eax")
+        enc.emitJmpLabel("strcat_fail")
         enc.emitLabel("strcat_alloc_ok")
         enc.emitStoreRIP("heapBump", "rbx")
 
@@ -1125,6 +1125,7 @@ object PhotonRuntime {
 
         enc.emitLabel("strcat_done")
         enc.emitMovRR("rax", "r12")  // 返回新分配的字符串指
+        enc.emitLabel("strcat_fail")
         // 恢复 callee-saved r12 / rbx / rsi / rdi（rax 已持有返回值）
         enc.emitStackLoad("rdi", -0xB0)
         enc.emitStackLoad("rsi", -0xA8)
@@ -1161,15 +1162,17 @@ object PhotonRuntime {
         enc.emitMovRIP("rax", "heapBump")
         enc.emitMovRR("rdx", "rax")
         enc.emitAddRR("rdx", "rcx")
-        enc.emitCmpRI("rdx", 33546336)
+        enc.emitCmpRI("rdx", 67100768)
         enc.emitJccLabel("le", "list_alloc_ok")
-        enc.emitXorRR("rax", "rax")
-        enc.emitMovRR("rdx", "rcx")
+        // 溢出：返回 NULL（heapBump 不动）——旧回绕会从 arena 起点重叠分配。
+        enc.emitXorRR("eax", "eax")
+        enc.emitJmpLabel("list_alloc_fail")
         enc.emitLabel("list_alloc_ok")
         enc.emitStoreRIP("heapBump", "rdx")
         enc.emitLeaRIP("r9", "heapArena")
         enc.emitAddRR("rax", "r9")
         enc.emitStoreMemDisp32("rax", 0, "r8")
+        enc.emitLabel("list_alloc_fail")
         enc.emitEpilogue()
     }
 
@@ -1177,9 +1180,20 @@ object PhotonRuntime {
     /// 编码 `__list_setat(rcx = list, rdx = idx, r8 = val) rax = list`
     /// 添加 null 检查防止崩溃
     fun emitListSetAt(enc: X86Encoder): Unit {
+        // ⚠️ core 布局（同 emitListGet，2026-10-06）：旧内联写 [list+8+idx*8]
+        // 会从 cap 槽开始踩穿相邻堆。idx 越界时不动列表、原样返回 list。
         enc.emitCmpRI("rcx", 0)
         enc.emitJccLabel("eq", "list_set_null")
-        enc.emitStoreIndexed8("rcx", "rdx", 8, "r8")
+        enc.emitMovMemDisp32("rax", "rcx", 0)        // rax = len
+        enc.emitCmpRR("rdx", "rax")
+        enc.emitJccLabel("ge", "list_set_oob")       // idx >= len → 不写
+        enc.emitMovMemDisp32("r9", "rcx", 16)        // r9 = items
+        enc.emitCmpRI("r9", 0)
+        enc.emitJccLabel("eq", "list_set_oob")
+        enc.emitStoreIndexed8("r9", "rdx", 0, "r8")  // [items + idx*8] = val
+        enc.emitMovRR("rax", "rcx")
+        enc.emitRet()
+        enc.emitLabel("list_set_oob")
         enc.emitMovRR("rax", "rcx")
         enc.emitRet()
         enc.emitLabel("list_set_null")
@@ -1190,9 +1204,21 @@ object PhotonRuntime {
     /// 编码 `__list_get(rcx = list, rdx = idx) rax = value`
     /// 添加 null 检查防止崩溃（对象模型未完全实现时 list 可能null）
     fun emitListGet(enc: X86Encoder): Unit {
+        // ⚠️ core 布局 [len@0][cap@8][items@16]（2026-10-06）：旧实现按内联
+        // 布局读 [list+8+idx*8]，对 core 列表 idx=0 读到 cap、idx=1 读到
+        // **items 指针**——指针作为「元素」流入 strlen/下标运算后成为野读/
+        // 野写引擎（实测 helloworld：17 处 `.get` 绑定此符号，args.count 被
+        // 下游野写踩成 0x15555 → loadArgsFlat 循环失控 8.7 万次 → 64MB
+        // arena 耗尽 → listSet(list=1) 段错误）。
         enc.emitCmpRI("rcx", 0)
         enc.emitJccLabel("eq", "list_get_null")
-        enc.emitLoadIndexed8("rax", "rcx", "rdx", 8)
+        enc.emitMovMemDisp32("rax", "rcx", 0)        // rax = len
+        enc.emitCmpRR("rdx", "rax")
+        enc.emitJccLabel("ge", "list_get_null")      // idx >= len → 0
+        enc.emitMovMemDisp32("r9", "rcx", 16)        // r9 = items
+        enc.emitCmpRI("r9", 0)
+        enc.emitJccLabel("eq", "list_get_null")
+        enc.emitLoadIndexed8("rax", "r9", "rdx", 0)  // rax = [items + idx*8]
         enc.emitRet()
         enc.emitLabel("list_get_null")
         enc.emitMovRI("eax", 0)
@@ -1310,12 +1336,17 @@ object PhotonRuntime {
         enc.emitAddRR("rdx", "r12")
 
         // 边界检
-        enc.emitCmpRI("rdx", 33546336)
+        enc.emitCmpRI("rdx", 67100768)
         enc.emitJccLabel("le", "oa_alloc_ok")
 
-        // 回绕
-        enc.emitXorRR("r12", "r12")
-        enc.emitStackLoad("rdx", -0x10)
+        // 溢出：干净失败（返回 NULL，heapBump 不动）。
+        // ⚠️ 旧实现「回绕：base=0, bump=size」= 后续分配从 heapArena+0
+        // 重新叠加——早期对象（Vm 实例、各单例）被新分配逐字节覆写：
+        // 实测 helloworld（2026-10-06）Vm.arg4Ints 槽被一块新列表的
+        // 长度字段写成 1 → listSet(list=1,…) → read64(1) 段错误，
+        // 且崩点随分配时序漂移（「崩点随构建漂移」家族的另一根因）。
+        enc.emitXorRR("rax", "rax")
+        enc.emitJmpLabel("oa_fail")
 
         enc.emitLabel("oa_alloc_ok")
 
@@ -1353,6 +1384,7 @@ object PhotonRuntime {
         // 返回原始地址
         enc.emitStackLoad("rax", -0x20)
 
+        enc.emitLabel("oa_fail")
         // 恢复 callee-saved
         enc.emitStackLoad("rsi", -0x38)
         enc.emitStackLoad("r12", -0x30)
@@ -2772,7 +2804,7 @@ object PhotonRuntime {
     /// Pipeline 以 `RUNTIME_SYMBOLS + BUILD_ID` 作为 aura_runtime.obj 的缓存
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
-    val BUILD_ID: String = "p223-listcore-neg"
+    val BUILD_ID: String = "p276-listget-core-layout"
     val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
@@ -3364,7 +3396,7 @@ object PhotonRuntime {
 
         // .data 段：toStrBuffer(32B) + arena(1MB) + bump 游标(8B) + 对象 bump(8B)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,heapArena:33554432,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,heapArena:67108864,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
         println("[rt] dataSection set, dataChars=" + writer.dataSection.length + " textChars=" + writer.textSection.length)
 
         // 构建符号表（包含所有函数和 .data 符号        println("[rt] before buildSymbols")
@@ -3777,7 +3809,7 @@ object PhotonRuntime {
         writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,heapArena:33554432,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,heapArena:67108864,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
@@ -4190,7 +4222,7 @@ object PhotonRuntimeUtils {
         writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,heapArena:33554432,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,heapArena:67108864,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
