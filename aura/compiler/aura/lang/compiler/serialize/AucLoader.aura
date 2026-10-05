@@ -226,6 +226,8 @@ object AucLoaderUtils {
             reader.readByte()             // aot_mode
             reader.readU32()              // aot_desc_idx（u32）
             val codeLenL: Long = reader.readU32()
+            // P252 对照探针：`as Int` 在 photon AOT 下的可靠性核查
+            println("[cl] raw=" + toStr(codeLenL) + " as=" + toStr(codeLenL as Int))
             val codeLen: Int = codeLenL as Int
             funcNames.add(fname)
             funcParams.add(params)
@@ -418,6 +420,11 @@ object AucLoaderUtils {
         // P239 括号探针 A：decode 完成点的 numArgsFlat 健康度
         println("[hbWinA]=" + toStr(HeapDiag.heapbump()))
         println("[winA] n=" + toStr(mod.numArgsFlat.size()) + " onN=" + toStr(mod.numOpNames.size()))
+        var wi: Int = 0
+        while (wi < 8 && wi < mod.numArgsFlat.size()) {
+            println("[winA-e" + toStr(wi) + "]=[" + mod.numArgsFlat.get(wi) + "]")
+            wi = wi + 1
+        }
         // P239b 新建列表自读：分配器当下健康 vs numArgsFlat 早期被覆写
         val probeL: List<String> = arrayListOf<String>()
         probeL.add("AA")
@@ -723,6 +730,7 @@ object AucLoaderUtils {
         var offset: Int = 0
         while (offset < codeLen && reader.pos < endPos) {
             val opcode: Int = reader.readByte()
+            println("[dn] off=" + toStr(offset) + " pos=" + toStr(reader.pos) + " op=" + toStr(opcode))
             if (opcode < 0) { break }
 
             val operandSize: Int = operandSizeLookup(opcode)
