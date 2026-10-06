@@ -113,6 +113,11 @@ class Vm {
     // 调用栈：每帧为 "returnIp|frameId|funcName"
     private var callStack: VmCallStack = VmCallStack()
 
+    /// P391：CALL 目标单槽缓存（按函数名记忆 offset/参数个数，见 callOrBuiltin）。
+    private var cfName: String = ""
+    private var cfTarget: Int = 0
+    private var cfPc: Int = 0
+
     // 保存的局部变量帧（帧切换用）
     private var savedLocals: VmFrameStack = VmFrameStack()
 
@@ -508,6 +513,8 @@ class Vm {
         this.arg3Ints = arrayListOf<Int>()
         this.arg4Ints = arrayListOf<Int>()
         this.argCounts = arrayListOf<Int>()
+        this.arg0Ints = arrayListOf<Int>()
+        this.arg1Ints = arrayListOf<Int>()
         var i: Int = 0
         while (i < this.lines.size()) {
             val ln: String = this.lines[i]
@@ -1732,7 +1739,23 @@ class Vm {
         }
 
         // 用户函数：压栈返回地址，跳转到函数入口
-        var target: Int = this.funcOffset(funcName)
+        //
+        // P391：**单槽目标缓存**——funcOffset/funcParamCount 各自对 funcTable
+        // 做 O(表长) 纯字符扫描（P388），递归/循环调用（fib28 = 63 万次 CALL）
+        // 每次重复扫两遍。按名记忆 (target, pc)，命中即零扫描；名字失配回退
+        // 全解析并回填。递归/热点调用场景命中率 ~100%。
+        var target: Int = 0
+        var pc: Int = 0
+        if (this.cfName == funcName) {
+            target = this.cfTarget
+            pc = this.cfPc
+        } else {
+            target = this.funcOffset(funcName)
+            pc = this.funcParamCount(funcName)
+            this.cfName = funcName
+            this.cfTarget = target
+            this.cfPc = pc
+        }
         // P0.8 加速派发钩子（可插拔，默认关闭）：直呼表命中时以表内入口
         // 覆盖函数表查找结果。本阶段不做任何加速，仅为 JIT/Photon 预留
         // 稳定对接点（VM-PA-00 §2.3 契约；接口见 enableAccelDispatch 等）。
@@ -1742,7 +1765,7 @@ class Vm {
                 target = accel
             }
         }
-        if (target == 0 && this.funcParamCount(funcName) < 0) {
+        if (target == 0 && pc < 0) {
             this.error = "Unknown function: " + funcName
             this.running = false
             return
@@ -1754,7 +1777,6 @@ class Vm {
         this.locals = this.popLocalsPool()
 
         // 绑定参数到槽位（槽基址随调用约定不同，见 `aucArgBase`）
-        val pc: Int = this.funcParamCount(funcName)
         var k: Int = pc - 1
         while (k >= 0 && k < argc) {
             this.locals.putSlot(k + this.aucArgBase, this.stack.pop())
@@ -3347,13 +3369,13 @@ class Vm {
         println("[BLC-ft] names=" + toStr(this.funcNamesL.size()))
         // P359：constLines 构建移至 loadPredecoded（消费解码端就地切分的
         // mod.constLines；本函数作用域无 constLinesIn，曾误置于此）。
-        // ⚠️ P271：arg0Ints/arg1Ints 构建**暂时跳过**——这些 Int 值经
-        // Collections_listAppend 写入列表，如果 arg0Ints/arg1Ints 的句柄
-        // 与 argStrs 混叠（Vm 对象字段索引冲突），Int 写入会破坏 argStrs
-        // 的串数据（实测 strlen(0x7fffffff) 即 argNoneMark 泄漏）。
-        // 跳过构建 = 性能回退（每次从串解析）但保证正确性。
-        this.arg0Ints = arrayListOf<Int>()
-        this.arg1Ints = arrayListOf<Int>()
+        // P391：arg0Ints/arg1Ints **不再在此清空**——P271 跳过已解除：
+        // 预解析现由 loadArgsFlat/writeArgsRow 装载期就地构建（纯数字落值、
+        // 否则哨兵），fuseHotPairs 的 setArgsRow 同步更新改写行。当年的
+        // 「句柄与 argStrs 混叠」观察属 Vm 对象字段布局家族，P368-375 已
+        // 根治；本优化经 banner/fib28/loop1M 三程序输出精确校验。
+        // ⚠️ 顺序契约：loadArgsFlat → fuseHotPairs → buildLoadCaches，
+        // 本函数不得触碰 arg0/1Ints。
     }
 
     /// 装载期超级指令融合（方案 D）：对预解码流做一次线性窥孔改写。
@@ -3617,6 +3639,8 @@ class Vm {
         this.arg3Ints = arrayListOf<Int>()
         this.arg4Ints = arrayListOf<Int>()
         this.argCounts = arrayListOf<Int>()
+        this.arg0Ints = arrayListOf<Int>()
+        this.arg1Ints = arrayListOf<Int>()
         var i: Int = 0
         val n: Int = flat.size()
         while (i < n) {
@@ -3664,6 +3688,19 @@ class Vm {
             this.arg2Ints.add(this.argNoneMark)
             this.arg3Ints.add(this.argNoneMark)
             this.arg4Ints.add(this.argNoneMark)
+            // P391：arg0/arg1 整数预解析（P271 重新启用）——执行期每条指令
+            // 的 arg0IntOf/arg1IntOf 免一次字符串 toI32。纯数字才落值，
+            // 否则哨兵（执行期回退现场解析，语义与 P352 表长守卫一致）。
+            if (VmOps.isAllDigits(s0)) {
+                this.arg0Ints.add(VmOps.toI32(s0))
+            } else {
+                this.arg0Ints.add(this.argNoneMark)
+            }
+            if (VmOps.isAllDigits(s1)) {
+                this.arg1Ints.add(VmOps.toI32(s1))
+            } else {
+                this.arg1Ints.add(this.argNoneMark)
+            }
             i = i + 1
         }
     }
@@ -3675,6 +3712,20 @@ class Vm {
         while (k < 3) {
             val v: String = if (k < temp.size()) { temp.get(k) } else { "" }
             this.argStrs.add(v)
+            if (k == 0) {
+                // P391：arg0/arg1 整数预解析（文本路径与预解码路径同构）。
+                if (VmOps.isAllDigits(v)) {
+                    this.arg0Ints.add(VmOps.toI32(v))
+                } else {
+                    this.arg0Ints.add(this.argNoneMark)
+                }
+            } else if (k == 1) {
+                if (VmOps.isAllDigits(v)) {
+                    this.arg1Ints.add(VmOps.toI32(v))
+                } else {
+                    this.arg1Ints.add(this.argNoneMark)
+                }
+            }
             if (VmOps.isAllDigits(v)) {
                 val n: Int = VmOps.toI32(v)
                 if (k == 2) {
@@ -3700,7 +3751,21 @@ class Vm {
         while (k < 3) {
             val v: String = if (k < pair.size()) { pair.get(k) } else { "" }
             this.argStrs.set(r * 3 + k, v)
-            if (k == 2) {
+            if (k == 0) {
+                // P391：融合改写行同步更新 arg0/1Ints（P271 重新启用后
+                // arg0/1Ints 不再由 buildLoadCaches 事后重建）。
+                if (VmOps.isAllDigits(v)) {
+                    this.arg0Ints.set(r, VmOps.toI32(v))
+                } else {
+                    this.arg0Ints.set(r, this.argNoneMark)
+                }
+            } else if (k == 1) {
+                if (VmOps.isAllDigits(v)) {
+                    this.arg1Ints.set(r, VmOps.toI32(v))
+                } else {
+                    this.arg1Ints.set(r, this.argNoneMark)
+                }
+            } else if (k == 2) {
                 if (VmOps.isAllDigits(v)) {
                     this.arg2Ints.set(r, VmOps.toI32(v))
                 } else {

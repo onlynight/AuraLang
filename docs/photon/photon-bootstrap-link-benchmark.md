@@ -4117,3 +4117,40 @@ rc=0）。Photon Aura VM 宿主 = PhotonHatCompile 当前驱动构建
    装载缓存/超算符融合是后续优化抓手（现 fusion 被 P277 护栏截断）。
 3. 光子自举宿主稳定性备注：seed CLI 的 `--vm=aura` 回放通道自身存在
    偶发 lex error / 段错误（rc=1/139，产出不受影响），与 photon 链无关。
+
+### 10.106 会话 XXI：Photon Aura VM 性能优化第一轮——arg 预解析 + CALL 目标缓存，fib28 3.85×（2026-10-07 续）
+
+**两个明确的优化抓手落地**（§10.105 入档的遗留项，基线 = §10.105 表）：
+
+1. **arg0Ints/arg1Ints 预解析重新启用（P271 遗留解除）**：装载期就地构建
+   ——loadArgsFlat（.auc 预解码主路径）与 writeArgsRow（文本路径）逐行
+   纯数字落值、否则 argNoneMark 哨兵；fuseHotPairs 的 setArgsRow 同步更新
+   改写行；buildLoadCaches **不再清空**（顺序契约 loadArgsFlat → fuse →
+   buildLoadCaches）。执行期 arg0IntOf/arg1IntOf 命中表项即免一次字符串
+   toI32（P352 表长守卫保留，哨兵回退现场解析语义不变）。P271 当年的
+   「句柄与 argStrs 混叠」属 Vm 对象字段布局家族，P368-375 已根治。
+2. **CALL 目标单槽缓存（P338 家族回避）**：funcOffset/funcParamCount 各自
+   O(表长) 纯字符扫描，递归场景（fib28 = 63 万次 CALL）每次重复两遍。
+   callOrBuiltin 按函数名记忆 (target, pc) 单槽，命中零扫描、失配回退
+   全解析并回填（比恢复全表 List<String> 构建稳——避开 P388 实测的
+   String 列表 add/get 失常家族）。
+
+**效果（5 轮中位，correct 逐轮校验）**：
+
+| 基准 | 优化前 | 优化后 | 加速 |
+|---|---|---|---|
+| fib28（CALL 密集递归） | 95424.8 ms | **24782.3 ms** | **3.85×** |
+| loop 1M（纯算术循环） | 23020.9 ms | **19722.0 ms** | 1.17× |
+
+正确性：banner（33 行）与 seed 参考输出逐行一致、全流程 PASS；
+fib28 = 317811 / loop acc = 499999500000 精确。
+
+**四方对比表更新（Photon Aura VM 行，相对 LLVM 7.9ms）**：fib28
+24782ms（3137×，vs Seed VM **26×**——原 102×）；loop1M 19722ms
+（2497×，vs Seed VM **30×**——原 35×）。CALL 密集负载的解释差距缩至
+26×，纯解释器的实现语言开销边界初现。
+
+**下一轮候选**（按预期收益排序）：①超算符融合 P277 护栏根因（循环
+计数器陈旧读）——融合恢复后指令数直接下降；②argStrOf 的 CALL 函数名
+走哈希/序号直引；③locals 槽池与 VmStack 的复用路径（popLocalsPool/
+retireLocals 的 List 摘挂开销）。

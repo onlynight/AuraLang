@@ -241,7 +241,6 @@ class X86Emitter {
     /// 发射整个 MachineDag 为机器码（支持多函数：每个函数独立 prologue/epilogue）。
     fun emitFunction(dag: MachineDag, funcName: String): Unit {
         this.probePath = this.readProbePath()
-        this.xeDiagOn = Env.get("AURA_XE_DIAG", "") == "1"
         this.xeProbe("emitFunction enter instrs=" + toStr(dag.instrCount))
         this.enc.reset()
         this.outputHex = ""
@@ -955,14 +954,6 @@ class X86Emitter {
         }
         val argParts: List<String> = MachineDagUtils.splitArgs(callNode.args)
         val argRegs: List<String> = listOf("rcx", "rdx", "r8", "r9")
-        // P390-b 诊断：field_get 装载现场——**立即落盘**（stdout 全缓冲会在
-        // 崩溃时丢输出）。⚠️ 计数字段读本身是 field_get（会被本缺陷毒化，
-        // 实测 cdCount2 读出堆指针 ⇒ 文件名随机）——用固定文件名追加语义
-        //（writeText 覆盖写，仅保留最后一次；计数失真可接受）。
-        if (callNode.aux == "__field_get" && this.xeDiagOn) {
-            FileUtils.writeText("build/hat-vmhost/fget_last.txt",
-                    "args=[" + callNode.args + "] n=" + toStr(argParts.size))
-        }
         // ── 第 5+ 参：栈传递（Win64：arg5+i 在 [rsp+0x20+i*8]，call 前写）──
         //
         // ⚠️ 旧实现只装 4 个寄存器参——栈参**从来没人写**，被调方读到的是
