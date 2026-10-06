@@ -1177,13 +1177,18 @@ object PhotonRuntime {
     // `LirBlock.instrs`，DAG 里根本没有加存储指令）
     /// 编码 `__list_alloc(rcx = count) rax = list`
     fun emitListAlloc(enc: X86Encoder): Unit {
-        // 内联布局 [count@0][elems@8...]+8KB slack（回退到 p199b 已验证形态）。
+        // 内联布局 [count@0][elems@8...]+slack（回退到 p199b 已验证形态）。
+        // P374：slack 8192→65536——8KB = 1024 元素上限，而 VM 宿主的
+        // numOpNames/numArgsFlat/numOpCodes/constLines 各 1194 条、argStrs
+        // 3582 条——**全部越界写穿相邻堆块**（append 无 grow 逻辑、布局无
+        // 容量字段无法检测；实测 opCodes[0]=2048、[1]=堆指针——相邻列表
+        // 的数据）。64KB = 8192 元素，arena 64MB 容纳 ~百列表绰绰有余。
         // core 布局统一尝试（§10.22-10.25）因深层槽别名暂缓。
         enc.emitPrologue(0x20)
         enc.emitMovRR("r8", "rcx")
         enc.emitShlRI("rcx", 3)
         enc.emitAddRI("rcx", 8)
-        enc.emitAddRI("rcx", 8192)
+        enc.emitAddRI("rcx", 65536)
         enc.emitMovRIP("rax", "heapBump")
         enc.emitMovRR("rdx", "rax")
         enc.emitAddRR("rdx", "rcx")
@@ -1205,39 +1210,45 @@ object PhotonRuntime {
     /// 编码 `__list_setat(rcx = list, rdx = idx, r8 = val) rax = list`
     /// 添加 null 检查防止崩溃
     fun emitListSetAt(enc: X86Encoder): Unit {
-        // P368：回退内联布局 [len@0][elems@8]——emitListAlloc 为内联形态
-        //（[count@0][elems@8]+slack，core 尝试已回退），get/set 曾被切到
-        // core（[len@0][cap@8][items@16]）——items 槽读到的是**第一个元素
-        // 的值**被当指针 ⇒ 元素读=串内容当 qword、写=野写串内容（实测
-        // println 弹出串字节 qword、交替性值错）。
-        // idx 越界时不动列表、原样返回 list。
+        // core 布局（同 emitListGet）：items 指针在 [list+16]，元素写
+        // [items + idx*8]。idx ≥ len 时不写、原样返回 list。
+        // （P368 曾误回退内联——该布局只适用 VmCollections 裸句柄列表。）
         enc.emitCmpRI("rcx", 0)
         enc.emitJccLabel("eq", "list_set_null")
         enc.emitMovMemDisp32("rax", "rcx", 0)        // rax = len
         enc.emitCmpRR("rdx", "rax")
         enc.emitJccLabel("ge", "list_set_oob")       // idx >= len → 不写
-        enc.emitStoreIndexed8("rcx", "rdx", 8, "r8") // [list + 8 + idx*8] = val
+        enc.emitMovMemDisp32("r9", "rcx", 16)        // r9 = items
+        enc.emitCmpRI("r9", 0)
+        enc.emitJccLabel("eq", "list_set_null")
+        enc.emitStoreIndexed8("r9", "rdx", 0, "r8")  // [items + idx*8] = val
         enc.emitMovRR("rax", "rcx")
         enc.emitRet()
         enc.emitLabel("list_set_oob")
         enc.emitMovRR("rax", "rcx")
         enc.emitRet()
         enc.emitLabel("list_set_null")
-        enc.emitMovRI("eax", 0)
+        enc.emitXorRR("eax", "eax")
         enc.emitRet()
     }
 
     /// 编码 `__list_get(rcx = list, rdx = idx) rax = value`
     /// 添加 null 检查防止崩溃（对象模型未完全实现时 list 可能null）
     fun emitListGet(enc: X86Encoder): Unit {
-        // P368：回退内联布局 [len@0][elems@8]——与 emitListAlloc 一致
-        //（core 尝试已回退，见 emitListSetAt 同款说明）。idx >= len → 0。
+        // core 布局 [len@0][cap@8][items@16]（2026-10-06）：VM 宿主的列表 =
+        // std ArrayList 对象，[i] 索引路径经 Collections.getAt 到本桩——
+        // items 指针在 [list+16]，元素在 [items + idx*8]。
+        // （P368 曾误回退内联 [list+8+idx*8]——该布局只适用 VmCollections
+        // 的裸句柄列表，二者并存、不可混用。）
         enc.emitCmpRI("rcx", 0)
         enc.emitJccLabel("eq", "list_get_null")
         enc.emitMovMemDisp32("rax", "rcx", 0)        // rax = len
         enc.emitCmpRR("rdx", "rax")
         enc.emitJccLabel("ge", "list_get_null")      // idx >= len → 0
-        enc.emitLoadIndexed8("rax", "rcx", "rdx", 8) // rax = [list + 8 + idx*8]
+        enc.emitMovMemDisp32("r9", "rcx", 16)        // r9 = items
+        enc.emitCmpRI("r9", 0)
+        enc.emitJccLabel("eq", "list_get_null")
+        enc.emitLoadIndexed8("rax", "r9", "rdx", 0)  // rax = [items + idx*8]
         enc.emitRet()
         enc.emitLabel("list_get_null")
         enc.emitMovRI("eax", 0)
@@ -2433,24 +2444,61 @@ object PhotonRuntime {
     /// 布局不匹配导致读取野值、`realloc` 段错误（0xC0000005）。
     /// 现在 `add` 映射到此函数，直接操作裸句柄布局，语义正确。
     fun emitCollectionListAppend(enc: X86Encoder): Unit {
-        enc.emitPrologue(0)
-        enc.emitTestRR("rcx", "rcx")
-        enc.emitJccLabel("z", "@listAppend_null")
-        enc.writeByte(0x48); enc.writeByte(0x8B); enc.writeByte(0x01)  // MOV rax, [rcx]
-        enc.emitMovRR("r8", "rax")
-        enc.emitShlRI("r8", 3)
-        // r9 = rcx + 8 + r8（⚠️ r9 必须先 mov rcx 再加——旧实现 r9 未初始化）
-        enc.emitMovRR("r9", "rcx")
-        enc.emitAddRI("r9", 8)
-        enc.emitAddRR("r9", "r8")
-        // [r9] = rdx（⚠️ REX.B 0x49）
-        enc.writeByte(0x49); enc.writeByte(0x89); enc.writeByte(0x11)
-        enc.emitIncRR("rax")
-        enc.writeByte(0x48); enc.writeByte(0x89); enc.writeByte(0x01)
-        enc.emitMovRR("rax", "rcx")
+        // P374：**core 布局 + 增长**——[len@0][cap@8][items@16]。旧实现按内联
+        // 布局写 [rcx+8+count*8]：对 core 列表 count=0 写穿 cap、count≥1
+        // **覆盖 items 指针为 value** ⇒ 之后所有 get 从 value（串内容）处
+        // 取元素（实测 println 弹出串字节 qword / heapPtr|1）。
+        // 增长：len ≥ cap 时 newCap = max(cap*2, 4)，Memory_alloc 新块并
+        // 搬运旧元素（arena 无 free，旧块泄漏 = 既有语义）。
+        // 寄存器约定：rdi = list、rbx = newCap、rsi = items（callee-saved，
+        // 跨 Memory_alloc 调用存活；rsi 兼作搬运目的基址）。
+        enc.emitPrologue(0x40)
+        enc.emitMovRR("rdi", "rcx")                  // rdi = list
+        enc.emitStackStore(-0x10, "rdx")             // value
+        enc.emitMovMemDisp32("rax", "rdi", 0)        // len
+        enc.emitStackStore(-0x20, "rax")
+        enc.emitMovMemDisp32("rbx", "rdi", 8)        // cap
+        enc.emitMovMemDisp32("rsi", "rdi", 16)       // rsi = items
+        enc.emitMovRR("rcx", "rbx")
+        enc.emitCmpRR("rax", "rcx")
+        enc.emitJccLabel("l", "la_write")
+        // ── 增长：newCap = max(cap*2, 4)；new = Memory_alloc(newCap*8) ──
+        enc.emitShlRI("rbx", 1)
+        enc.emitCmpRI("rbx", 4)
+        enc.emitJccLabel("ge", "la_cap_ok")
+        enc.emitMovRI("rbx", 4)
+        enc.emitLabel("la_cap_ok")
+        enc.emitMovRR("rcx", "rbx")
+        enc.emitShlRI("rcx", 3)                      // rcx = newCap*8
+        enc.emitCallRel("Memory_alloc")
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("z", "la_fail")
+        // 搬运旧元素：rcx = 0 .. len-1
+        enc.emitStackLoad("rdx", -0x20)              // rdx = len
+        enc.emitXorRR("rcx", "rcx")
+        enc.emitLabel("la_copy")
+        enc.emitCmpRR("rcx", "rdx")
+        enc.emitJccLabel("ge", "la_copy_done")
+        enc.emitLoadIndexed8("r9", "rsi", "rcx", 0)
+        enc.emitStoreIndexed8("rax", "rcx", 0, "r9")
+        enc.emitIncRR("rcx")
+        enc.emitJmpLabel("la_copy")
+        enc.emitLabel("la_copy_done")
+        enc.emitMovRR("rsi", "rax")                  // rsi = 新 items
+        enc.emitStoreMemDisp32("rdi", 8, "rbx")      // [list+8] = newCap
+        enc.emitJmpLabel("la_after")
+        // ── 写入：[items + len*8] = value；[list+0] = len + 1 ──
+        enc.emitLabel("la_write")
+        enc.emitLabel("la_after")
+        enc.emitStackLoad("rdx", -0x10)              // value
+        enc.emitStackLoad("rcx", -0x20)              // len
+        enc.emitStoreIndexed8("rsi", "rcx", 0, "rdx") // [items + len*8] = value
+        enc.emitIncRR("rcx")
+        enc.emitStoreMemDisp32("rdi", 0, "rcx")      // [list+0] = len + 1
+        enc.emitMovRR("rax", "rdi")
         enc.emitEpilogue()
-        enc.emitLabel("@listAppend_null")
-        enc.emitXorRR("rax", "rax")
+        enc.emitLabel("la_fail")
+        enc.emitXorRR("eax", "eax")
         enc.emitEpilogue()
     }
 

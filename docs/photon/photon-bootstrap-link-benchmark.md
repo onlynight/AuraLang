@@ -3673,3 +3673,26 @@ photon 编译的 VmRunner 宿主。
 4. **Photon Aura VM**：执行期仍有 phi-web 残留崩点（本轮最后状态：
    constLines 逐位正确 ✓、横幅完整 ✓，LoadConst `5+t0` 调用窗误读随布局
    交替发作）——完成 phi-web 本体修复后加入对比。
+
+### 10.95 会话 X：列表双表示定性与 listAppend core+grow 重写（2026-10-06 续LXXVI）
+
+**定性（P374-P375）**：VM 宿主存在**两套并存列表表示**——
+1. **std ArrayList 对象**（arrayListOf 创建；[vtable][len][cap][items@16...]，
+   类方法 get/add/set 读写）——VM 宿主自身的列表全在此形态；
+2. **裸句柄列表**（[count@0][elems@8]+slack，VmCollections.newList）——
+   .auc 程序运行期列表。
+**__list_get/setat 的 core 切换（2026-10-06）服务表示 1，是正确的**；
+本轮 P368 的「回退内联」误判已再回退（get/set 恢复 core）。
+
+**真修复（P374）：emitCollectionListAppend 重写为 core 布局 + 增长**——
+旧桩按内联写 [rcx+8+count*8]：count=0 写穿 cap、count≥1 **覆盖 items
+指针为 value** ⇒ 之后全部 get 从 value 处取元素（[CA] bits = 串字节
+qword / heapPtr|1 的直接来源）。新桩：len ≥ cap 时 newCap = max(cap*2,4)、
+Memory_alloc 新块、搬运旧元素（rdi=list、rsi=items、rbx=newCap 均 callee-
+saved，跨 Memory_alloc 调用存活）。
+
+**余**：opCodes 拷贝循环（loadPredecoded 的 `opCodes.add(opCodesNum[i])`
+——listAppend+__list_get 混用）仍读出垃圾（[OC] [0]=2048 [1]=堆指针）——
+双表示的精确归属（哪个调用点走哪个表示）需逐点清点后统一。
+**状态（p393）**：constLines ✓（[9]="Aura" [10]="42"）、横幅+段落打印保持、
+err=[Unknown opcode] instrs=1 不变。
