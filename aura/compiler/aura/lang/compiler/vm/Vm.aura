@@ -114,9 +114,11 @@ class Vm {
     private var callStack: VmCallStack = VmCallStack()
 
     /// P391：CALL 目标单槽缓存（按函数名记忆 offset/参数个数，见 callOrBuiltin）。
+    /// P393：cfIsUser=1 表示该名是用户函数（快速路径跳过内建 if-else 链）。
     private var cfName: String = ""
     private var cfTarget: Int = 0
     private var cfPc: Int = 0
+    private var cfIsUser: Int = 0
 
     /// P392：执行期热数组 Memory 裸缓冲（read64/write64 = runtime 单条 mov，
     /// 替代 List 下标的 Collections_getAt 函数调用——每条指令 3 次 List 调用
@@ -1145,6 +1147,30 @@ class Vm {
             this.caDiag = this.caDiag + 1
             println("[CB] fn=[" + funcName + "] argc=" + toStr(argc))
         }
+        // ── P393：用户函数快速路径（缓存命中时跳过内建名 if-else 链）──
+        //
+        // 内建分派是一条数十臂的 `funcName == "…"` 链（每臂一次 streq
+        // runtime 调用），用户函数名（fibonacci/add/…）排在链尾——递归
+        // 负载（fib28 = 63 万次 CALL）每次都要全链扫到底，估算占解释时间
+        // 一半以上。cfName 单槽（P391）命中且为用户函数时，直接执行调用
+        // 序列；首次/内建/未知名走下方原链（内建臂执行后早退不经过回填，
+        // cfName 只会是用户函数名或未知名，语义自洽）。
+        if (this.cfName == funcName && this.cfIsUser == 1) {
+            val target: Int = this.cfTarget
+            val pc: Int = this.cfPc
+            this.callStack.push(this.ip, this.currentFrame, this.currentFunc, this.currentClosure)
+            this.savedLocals.push(this.locals)
+            this.locals = this.popLocalsPool()
+            var k: Int = pc - 1
+            while (k >= 0 && k < argc) {
+                this.locals.putSlot(k + this.aucArgBase, this.stack.pop())
+                k = k - 1
+            }
+            this.currentFunc = funcName
+            this.currentFrame = this.currentFrame + 1
+            this.ip = target
+            return
+        }
         // 内置函数
         if (funcName == "println" || funcName == "print") {
             val text: String = this.collectArgs(argc)
@@ -1766,6 +1792,7 @@ class Vm {
             this.cfName = funcName
             this.cfTarget = target
             this.cfPc = pc
+            this.cfIsUser = 1
         }
         // P0.8 加速派发钩子（可插拔，默认关闭）：直呼表命中时以表内入口
         // 覆盖函数表查找结果。本阶段不做任何加速，仅为 JIT/Photon 预留
