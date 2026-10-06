@@ -833,22 +833,13 @@ class X86Emitter {
             // 实测 VmStack 的 sp/d 字段读坏 → push 全落 d[0]、LOAD_LOCAL 空。
             // 指令序列与 PhotonRuntime.emitFieldGet/Set 逐条一致。
             if (funcName == "__field_get") {
-                this.enc.emitCmpRI("rcx", 0)
-                this.enc.emitJccLabel("eq", "fget_null_" + toStr(nodeId))
+                // P362：去掉 null 守卫分支——`this` 恒非 null，纯 mov 无标签。
+                // 旧三段式（jcc/jmp/label）的 jmp 位移若解析失败会落入 null
+                // 分支 → 每次字段写 rax=0（实测 push 的 sp 归零 → pop-lag）。
                 this.enc.emitLoadIndexed8("rax", "rcx", "rdx", 16)
-                this.enc.emitJmpLabel("fget_end_" + toStr(nodeId))
-                this.enc.emitLabel("fget_null_" + toStr(nodeId))
-                this.enc.emitMovRI("rax", 0)
-                this.enc.emitLabel("fget_end_" + toStr(nodeId))
             } else if (funcName == "__field_set") {
-                this.enc.emitCmpRI("rcx", 0)
-                this.enc.emitJccLabel("eq", "fset_null_" + toStr(nodeId))
                 this.enc.emitStoreIndexed8("rcx", "rdx", 16, "r8")
                 this.enc.emitMovRR("rax", "rcx")
-                this.enc.emitJmpLabel("fset_end_" + toStr(nodeId))
-                this.enc.emitLabel("fset_null_" + toStr(nodeId))
-                this.enc.emitMovRI("rax", 0)
-                this.enc.emitLabel("fset_end_" + toStr(nodeId))
             } else if (funcName == "Memory_read") {
                 // P357：movzx eax, byte [rcx]——readByte 是全二进制最热调用
                 // （每个字符/字节读取一层调用窗），布局敏感腐坏的头号源。

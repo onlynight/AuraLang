@@ -3576,3 +3576,9 @@ poolLine=[42] 首次逐位正确。
 
 **状态（p373）**：解码 ✓ / 数值 opcode ✓ / constLines 逐位正确 ✓ /
 push-pop 平衡 ✓ / 段落头+横幅真实打印 ✓ / 余：部分常量 print 的值层。
+
+**§10.91 追记（P362）**：field 内联的 null 守卫三段式（jcc/jmp/label）改为
+纯 mov 无标签（`this` 恒非 null；jmp 位移解析失败落入 null 分支 → 字段写
+rax=0 的怀疑）——症状无变化，非本层。label-free 版本语义等价更简，保留。
+**剩余单一症状**：交替性 const print 打印未初始化栈槽内容（API 返回地址等
+垃圾 = push 的 sp 推进隔次失效），待新布局再攻。
