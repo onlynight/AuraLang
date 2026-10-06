@@ -3164,3 +3164,26 @@ MachineDag 构建处（selectPattern/addNode）对 Value-引用-Value 链的
 
 **状态**：LOADONLY ✓ / 解码部分 ✓ / 宿主运行 exit=0 ✓（fuseGuard）/
 helloworld 被 loader flat 截断拦截（帧布局系统性缺陷）。
+
+### 10.79 P302：基址 144 + RA 权威槽数落地；腐坏随布局移动确认，转 RA 专项（2026-10-06 续LXII）
+
+**已落地**：getSpillOffset 基址 32→144（0x90，越过 11 参函数参数局部槽
+-0x30..-0x80）四点一致（getSpillOffset/computeFrameLayout/getFrameLayout/
+X86Emitter fsz）；X86Emitter 帧计算加 RA 权威溢出槽数下限
+（ms2 = max(扫描ms, allocator.getSpillSlots())，封扫描盲区）。
+
+**实测**：decoded 从 1 → 33（计数推进生效但值仍错）、flat 8 → 46、
+腐坏点再次移动（[AS] 转空、尾部 VEH 崩）——**确认腐坏随布局移动，
+逐点修症状不可收敛**。
+
+**终局结论**：拦截项 = photon 后端帧槽分配的布局敏感腐坏（溢出槽/
+参数局部/slotForNode 三区重叠 + 嵌套 Basic @add 链降级丢操作数）。
+修复 = RA/帧布局专项：五区隔离（参数局部/影子/RA 溢出/slotForNode/
+调用栈参）+ 嵌套加链 DAG 降级保真 + 跨块 liveness 含回边传播——
+即 §10.41/§10.53/§10.61 立项的 RA 工程，非会话级可完成。
+
+**累计已修（本两会话 10 提交）**：substring 发射器三缺陷重写、
+ss_ovf/tf_zero 标签、loadPredecoded constPool/funcs 赋值、ISel 整数
+Const 守卫、fuseGuard、解码探针、标签审计脚本、提取工作流。
+宿主状态：完整运行 exit=0 无段错误；helloworld 打印待 RA 专项后
+回归（LOADONLY ✓ / 解码探针全绿基线已备）。

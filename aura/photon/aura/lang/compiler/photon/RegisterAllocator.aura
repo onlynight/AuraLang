@@ -1073,7 +1073,7 @@ class RegisterAllocator {
         }
 
         // 帧大小 = 影子空间 (32) + 溢出槽 × 8 + 对齐填充
-        val shadowSpace: Int = 32
+        val shadowSpace: Int = 144  // P301: 同基址
         val spillAreaSize: Int = this.spillSlots * 8
         var frameSize: Int = shadowSpace + spillAreaSize
         // 对齐到 16 字节
@@ -1116,7 +1116,7 @@ class RegisterAllocator {
         var s: String = "frameSize|" + toStr(this.frameSizeValue)
         var slot: Int = 0
         while (slot < this.spillSlots) {
-            s = s + "\nslot" + toStr(slot) + "|-0x" + this.toHexString(32 + slot * 8)
+            s = s + "\nslot" + toStr(slot) + "|-0x" + this.toHexString(144 + slot * 8)
             slot = slot + 1
         }
         return s
@@ -1151,7 +1151,7 @@ class RegisterAllocator {
         if (this.spillSlots == 0) { return 0 }
         // 从 color 中提取 slot 编号
         val slotNum: Int = strToInt(color.substring(11))
-        return 32 + slotNum * 8
+        return 144 + slotNum * 8  // P301: 基址 0x90=144，越过 decodeNumeric 等 11 参函数的参数局部槽 -0x30..-0x80
     }
 
     // ── 字符串工具（`String.split` 可用；`arrayListOf + add` 会丢元素）──
