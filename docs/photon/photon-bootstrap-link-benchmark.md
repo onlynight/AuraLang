@@ -3787,3 +3787,26 @@ Photon AOT Long 循环回归验收。
 
 **基准已存档（§10.94）**：fib28 LLVM 23ms / Photon 30ms (1.3×) / Seed VM
 1069ms (46×)；loop25M LLVM 74ms / Seed VM 13959ms (189×)。
+
+### 10.99 会话 XIV：支配集替代可达闭包——phi MOV 匹配健全化（P382）（2026-10-06 续LXXX）
+
+**ISel 修复（P382）**：analyzePhiPreds 内新增**支配集计算**（与 predClosure
+同构位集；dom[b] = {b} ∪ ⋂ dom[直接前驱]，入口 = 首块，迭代至不动点）。
+(a2) 匹配从 `isTransitivePred`（可达 ≠ 存活——def 可达 pred 只说明存在
+路径，其他路径上值未定义 ⇒ MOV 写陈旧值）改为 **isDominating**（def ∈
+dom[pred] ⇒ 值在该边必然存活，MOV 健全）。
+
+**实测（p403）**：banner ╔╗、║║、╚╝ 四行 + [1]/[2] 段头 + Hello World /
+Aura Compiler 行**全部真实打印**（相较 §10.92 的 5/10 失败 → 本轮仅
+2/10 失败，失败集中 = 两个 `println("")` 空串）。
+
+**新发现（P383）**：①photon **Int = 64 位**（`as Int` 不截断——intOf 的
+截断假设不成立，已改用 (raw-1)/2 精确拆箱适配）；②失败 println 的弹出值 =
+**toStrBuffer 内容指针**（15 位十进制数字节 = 历史某次 `toStr(指针值)` 的
+残留）——即 `count` 槽被指针污染家族：count 槽的值 = 前次串操作的指针，
+`toStr(count)` 打印其十进制 = 槽位复用腐坏（phi-web 家族在 VmStack 上的
+表现）。③[CA] 探针曾被 [P7v] 共享计数器饿死（专用计数器 caDiag 修复）。
+
+**状态（p403）**：装载链全绿 ✓ / banner 完整 ✓ / Hello World ✓ /
+`println("")` 空串 ×2 + 尾部 SIGSEGV = 剩余（槽位复用/指针污染家族，
+phi-web 本体修复的验收项）。

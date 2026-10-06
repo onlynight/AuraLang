@@ -254,11 +254,58 @@ class InstructionSelector {
     /// 每块的传递前驱闭包（位集，wordsPer * slots 个 Int；见 pass1.5）。
     private var predClosure: List<Int> = arrayListOf<Int>()
     private var predClosureWords: Int = 0
+    /// P382：支配集（dom[b] 位集）与基址——def ∈ dom[pred] ⇔ def 支配 pred。
+    private var domSet: List<Int> = arrayListOf<Int>()
+    private var domWords: Int = 0
+    private var domBase: Int = 0
 
     /// Phi 入口边配对（phiLirId -> entryIncomingLirId），供 RA 后 home 合并。
     private var phiEntryMapIds: List<Int> = arrayListOf<Int>()
     private var phiEntryMapHomes: List<Int> = arrayListOf<Int>()
     private var phiEntryMapCnt: Int = 0
+
+    /// P372：Phi 入边值认领表（槽合并核心）。emitPhi 为每个非 Const/Phi
+    /// 入边值登记 `vid → phi 的 DAG 节点`；pass3 定义侧 registerNode 时
+    /// 查表，把定义节点的栈槽**别名到 phi 节点的栈槽**——定义写与 phi 读
+    /// 落同一槽，phi MOV 退化为自拷贝，边匹配/前驱标签错误不再可能
+    /// 影响正确性（§10.89 总根的治本修复）。
+    private var phiClaimFrom: List<Int> = arrayListOf<Int>()
+    private var phiClaimNode: List<Int> = arrayListOf<Int>()
+    /// 定义节点 → phi 节点的槽别名（registerNode 时记录，发射器消费）。
+    private var slotAliasFrom: List<Int> = arrayListOf<Int>()
+    private var slotAliasTo: List<Int> = arrayListOf<Int>()
+
+    /// 查询 vid 被哪个 phi 认领（返回 phi 的 DAG 节点 id；−1 = 无）。
+    private fun phiClaimTarget(vid: Int): Int {
+        var i: Int = this.phiClaimFrom.size - 1
+        while (i >= 0) {
+            if (this.phiClaimFrom[i] == vid) { return this.phiClaimNode[i] }
+            i = i - 1
+        }
+        return -1
+    }
+
+    /// 槽别名链解析（dagNode → … → phi 节点；无别名原样返回）。
+    fun slotAliasResolve(nodeId: Int): Int {
+        var n: Int = nodeId
+        var guard: Int = 0
+        while (guard < 64) {
+            var found: Int = -1
+            var i: Int = this.slotAliasFrom.size - 1
+            while (i >= 0) {
+                if (this.slotAliasFrom[i] == n) { found = this.slotAliasTo[i]; break }
+                i = i - 1
+            }
+            if (found < 0) { break }
+            n = found
+            guard = guard + 1
+        }
+        return n
+    }
+
+    /// 槽别名表（Phase C 结束后定型，发射器经管线消费）。
+    fun getSlotAliasFrom(): List<Int> { return this.slotAliasFrom }
+    fun getSlotAliasTo(): List<Int> { return this.slotAliasTo }
 
     /// 判定「fromBlock 是 toBlock 的传递前驱」（含直接前驱）。
     private fun isTransitivePred(fromBlock: Int, toBlock: Int): Boolean {
@@ -275,6 +322,24 @@ class InstructionSelector {
         val rowBase: Int = ti * this.predClosureWords
         if (rowBase + w >= this.predClosure.size) { return false }
         return (this.predClosure[rowBase + w] and bit) != 0
+    }
+
+    /// P382：def ∈ dom[pred] ⇔ def 支配 pred（每条到 pred 的路径都经过
+    /// def ⇒ 入边值在该边必然存活）。支配集在 analyzePhiPreds 内计算。
+    private fun isDominating(defBlock: Int, ofBlock: Int): Boolean {
+        if (this.domWords <= 0) { return false }
+        if (defBlock < this.domBase) { return false }
+        if (ofBlock < this.domBase) { return false }
+        val oi: Int = ofBlock - this.domBase
+        val di: Int = defBlock - this.domBase
+        if (oi >= this.domSet.size / this.domWords) { return false }
+        if (di >= this.domSet.size / this.domWords) { return false }
+        val w: Int = di / 32
+        if (w >= this.domWords) { return false }
+        val bit: Int = 1 << (di % 32)
+        val rowBase: Int = oi * this.domWords
+        if (rowBase + w >= this.domSet.size) { return false }
+        return (this.domSet[rowBase + w] and bit) != 0
     }
 
     /// 全函数 PHI-MOV 记录总数（探针/诊断用）。
@@ -1065,6 +1130,83 @@ class InstructionSelector {
             this.predClosure = arrayListOf<Int>()
             this.predClosureWords = 0
         }
+        // P382：支配集（与 predClosure 同构位集，**交集**语义）。
+        // dom[b] = {b} ∪ ⋂_{p ∈ 直接前驱} dom[p]；def ∈ dom[pred] ⇔ def
+        // 支配 pred ⇒ 入边值在该边必然存活，PHI-MOV 才健全。
+        // （旧 (a2) 用可达闭包：def 可达 pred 只说明**存在**路径经过 def，
+        // 其他路径上值未定义 ⇒ MOV 写陈旧值 = 逐调用点值腐坏的机制之一。）
+        if (wordsPer > 0 && blockCount > 0) {
+            var dArr: List<Int> = arrayListOf<Int>()
+            var dInit: Int = 0
+            val dTotal: Int = wordsPer * slots
+            while (dInit < dTotal) {
+                dArr.add(-1)
+                dInit = dInit + 1
+            }
+            // 入口 = 首块：dom = {自身}
+            val entryB: Int = func.blocks[0]
+            if (entryB >= base && entryB <= top) {
+                val slotE: Int = entryB - base
+                dArr[entryB * wordsPer + slotE / 32] =
+                    dArr[entryB * wordsPer + slotE / 32] or (1 << (slotE % 32))
+            }
+            // 不动点：对非入口块，dom[b] = {b} ∪ ⋂ dom[直接前驱]
+            var dChanged: Boolean = true
+            var dRounds: Int = 0
+            while (dChanged && dRounds < 64) {
+                dChanged = false
+                dRounds = dRounds + 1
+                var bi4: Int = 0
+                while (bi4 < blockCount) {
+                    val b4: Int = func.blocks[bi4]
+                    if (b4 >= base && b4 <= top && b4 != entryB) {
+                        val sLo4: Int = predOff[b4 - base]
+                        val sHi4: Int = predOff[b4 - base + 1]
+                        if (sHi4 > sLo4) {
+                            // acc = ⋂ dom[直接前驱]（首前驱起全 1 初值）
+                            var acc: List<Int> = arrayListOf<Int>()
+                            var wA: Int = 0
+                            while (wA < wordsPer) { acc.add(-1); wA = wA + 1 }
+                            var si4: Int = sLo4
+                            var pCount: Int = 0
+                            while (si4 < sHi4) {
+                                val p4: Int = predFlat[si4]
+                                if (p4 >= base && p4 <= top) {
+                                    var w4: Int = 0
+                                    while (w4 < wordsPer) {
+                                        acc[w4] = acc[w4] and domArr[p4 * wordsPer + w4]
+                                        w4 = w4 + 1
+                                    }
+                                    pCount = pCount + 1
+                                }
+                                si4 = si4 + 1
+                            }
+                            if (pCount > 0) {
+                                var w5: Int = 0
+                                var dBl: Boolean = false
+                                while (w5 < wordsPer) {
+                                    val newW: Int = acc[w5] or (1 << ((b4 - base) % 32))
+                                    if (domArr[b4 * wordsPer + w5] != newW) {
+                                        domArr[b4 * wordsPer + w5] = newW
+                                        dBl = true
+                                    }
+                                    w5 = w5 + 1
+                                }
+                                if (dBl) { dChanged = true }
+                            }
+                        }
+                    }
+                    bi4 = bi4 + 1
+                }
+            }
+            this.domSet = dArr
+            this.domWords = wordsPer
+            this.domBase = base
+        } else {
+            this.domSet = arrayListOf<Int>()
+            this.domWords = 0
+            this.domBase = 0
+        }
         if (traceBig) {
             println("[isel-phi] " + func.name + " pass1 done base=" + LirUtils.toStr(base) +
                     " top=" + LirUtils.toStr(top))
@@ -1233,8 +1375,8 @@ class InstructionSelector {
                                     val usedAi2: Int = used[ai2]
                                     if (usedAi2 == 0) {
                                         val iv2: Int = incoming[ai2]
-                                        if (iv2 >= 0 && this.isTransitivePred(
-                                                src.valueOf(iv2).block, predB2)) {
+                                    if (iv2 >= 0 && this.isDominating(
+                                            src.valueOf(iv2).block, predB2)) {
                                             pickOfPred[ri2] = ai2
                                             used[ai2] = 1
                                             var seen2: Boolean = false
@@ -1925,6 +2067,23 @@ class InstructionSelector {
         val nodeId: Int = this.dag.addNode("Value", "Phi", val.type,
                                             "", "", "", this.curChain, this.argsJoin(val.args))
         this.registerNode(vid, nodeId)
+        // P372：入边值认领（槽合并核心）——非 Const/Phi 入边的**定义槽**
+        // 别名到本 phi 的槽：定义写与 phi 读落同一槽，phi MOV 退化为自拷贝，
+        // 边匹配/前驱标签错误不再可能影响正确性。Const 入边排除（每次使用
+        // 重物化，槽合并无意义且会吞掉入口初始化）；Phi 入边排除（嵌套
+        // phi 保持既有 MOV 机制）。
+        var ai: Int = 0
+        while (ai < val.args.size) {
+            val iv: Int = val.args[ai]
+            if (iv >= 0) {
+                val op0: String = this.lir.valueOf(iv).op
+                if (op0 != "Const" && op0 != "Phi") {
+                    this.phiClaimFrom.add(iv)
+                    this.phiClaimNode.add(nodeId)
+                }
+            }
+            ai = ai + 1
+        }
         // MOV 由 emitPhiMovsForBlock 在前驱块末尾发射，此处不发射。
         return nodeId
     }
@@ -2918,6 +3077,13 @@ class InstructionSelector {
         while (this.nodeMapIds.size <= lirId) { this.nodeMapIds.add(-1) }
         if (this.nodeMapIds[lirId] < 0) {
             this.nodeMapIds[lirId] = dagId
+            // P372：该 vid 若被某 phi 认领，其**定义节点**的栈槽别名到
+            // phi 节点的槽（定义写 = phi 写；MOV 退化为自拷贝）。
+            val phiNode: Int = this.phiClaimTarget(lirId)
+            if (phiNode >= 0 && dagId != phiNode) {
+                this.slotAliasFrom.add(dagId)
+                this.slotAliasTo.add(phiNode)
+            }
         }
     }
 
