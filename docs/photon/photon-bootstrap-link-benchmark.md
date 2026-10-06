@@ -3252,3 +3252,29 @@ flat 截断（帧槽分配布局敏感腐坏）在 loadArgsFlat 崩溃。两份�
 槽重叠（getSpillOffset 32 基址 vs prologue -0x30/-0x38/-0x48）、
 funcExtraSlots 传递闭包扫描（P301 已重写）覆盖完整性、嵌套 Basic @add
 链 DAG 降级保真。修复后以本节双列对比表回归验收。
+
+### 10.83 P310 终局铁证：AucReader 对象被路径字符串覆写（2026-10-06 续LXV）
+
+**决定性 dump**（decodeNumeric 入口，reader = 参数 1）：
+```
+reader = 0x14006ab37
+[reader+0x00] = 0x6c697562  = "buil"
+[reader+0x08] = 0x7275632f  = "/cur"
+[reader+0x10] = 0x6375612e  = ".eua"（即 "build/vm/current.auc" 分段）
+```
+**AucReader 对象的 data/dataLen/pos 字段被路径字符串字节覆盖**——
+decode 循环按 [data+pos] 读"opcode"读出的是路径字符（'b'=0x62、'/'=0x2f…
+均非合法 opcode → 分派全 fall-through → flat 几乎不增长；偶合字符
+（数字段）碰中合法 opcode → 少量条目混入 → 解码 8~1194 随布局）。
+
+**覆写源**：stringToBuffer(path)/readFromFile 的缓冲分配地址与
+AucReader 对象地址冲突（分配器返回了同一地址，或寻址计算错位）。
+此前所有观测（count=strcat、opcode 不识别、flat 截断、mod 字段读 0、
+"Unknown function: p"）全部 = 这一覆写的下游表现。
+
+**下轮首查（真正的最后一修）**：stringToBuffer + readFileToBuffer 的
+分配地址 vs AucReader() 构造地址——gdb 在 AucReader 构造返回时打印
+对象地址，在 stringToBuffer 返回时打印缓冲地址，两者若相等即实证；
+修复 = 分配器寻址（Allocator.malloc 与 emitObjectAlloc 游标的一致性）
+或 AucReader 对象改入 RA 溢出区。修复后跑 LOADONLY → 解码 1194 →
+Phase A-E PASS → helloworld 全链回归。
