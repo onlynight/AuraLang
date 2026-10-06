@@ -4154,3 +4154,47 @@ fib28 = 317811 / loop acc = 499999500000 精确。
 计数器陈旧读）——融合恢复后指令数直接下降；②argStrOf 的 CALL 函数名
 走哈希/序号直引；③locals 槽池与 VmStack 的复用路径（popLocalsPool/
 retireLocals 的 List 摘挂开销）。
+
+### 10.107 会话 XXII：解释器热路径 Memory 化——fib28 累计 7.14×（2026-10-07 续）
+
+**26× 差距的主项剖析**：Photon 编译的解释器里**所有热数据访问都是
+Collections runtime 调用**——opCodes/argStrs/locals/栈的每次下标读写 =
+一次 getAt/listSet 函数调用（含边界检查与返回值搬运）。fib28 ≈ 1000 万
+条指令 × 每条 4-8 次 List 调用 ≈ 2.5µs/指令，与实测吻合。Seed VM（Rust）
+的对应访问是原生索引——这就是实现语言差距的物理构成。
+
+**修复：热路径数据结构 Memory 裸缓冲化**（Memory.read64/write64 在
+photon runtime 是单条 mov 内联，emitMemoryRead64 = `mov rax,[rcx]`）：
+
+1. **run() 循环**：opCodes/arg0Ints/arg1Ints 装载末尾一次性拷入 Memory
+   裸缓冲（mcOpCodes/mcA0/mcA1，mcValid 门控）；执行期 opCode 读取与
+   arg0/1IntOf 快路径改 `Memory.read64(base + ip*8) as Int`（值域
+   < 2^31 截断无损；probe 先行验证 alloc/write64/read64/地址算术语义）。
+   同时删除 run() 的两条每指令冗余：`ops[ip-1] == ""` 兜底（装载期已
+   NOP 化）与 dispatch 的 opName 参数（每指令一次 List<String> get +
+   传参，未知指令诊断改为 dispatch 内按需直读）。
+2. **VmLocals**：slots/marks → mcSlots/mcMarks Memory 缓冲（Any 槽的
+   64 位裸表示直存直取——指针/tagged int 无损；未写槽读 0 = null ✓；
+   marks 零初始化 ≠ gen ✓ 代语义保持）；扩容 = 新块 + 拷贝。
+3. **VmStack（数据栈）**：d → mc 缓冲（push/pop/peek/vmSlotAt）；
+   P366 的 sp/cap 局部读纪律保留。
+4. **VmCallStack**：ips/frames/closures 三列 Memory 化；funcs 保留
+   String List（低频诊断路径）。
+
+**效果（5 轮中位，correct 逐轮校验）**：
+
+| 基准 | §10.106 末 | Memory 化后 | 本轮加速 | 累计（vs §10.105 基线） |
+|---|---|---|---|---|
+| fib28 | 24782.3 ms | **13365.2 ms** | 1.85× | **7.14×** |
+| loop 1M | 19722.0 ms | **9459.9 ms** | 2.09× | **2.43×** |
+
+**四方表更新**：fib28 相对 LLVM 7.9ms = **1692×**、相对 Seed VM
+937ms = **14.3×**（原 102×）；loop1M 相对 LLVM = **1198×**、相对
+Seed VM = **14.5×**（原 35×）。正确性：banner 33 行与 seed 参考输出
+逐字节一致（仅 host println 的 CRLF 行尾差异）、全流程 PASS；fib28 /
+loop1M 结果精确。
+
+**下一轮候选**：①dispatch 的 if-else 链臂序按动态频次复核（快速分派
+块之外的原链仍长）；②CALL/RET 的 collectArgs/returnFromFunc 路径剖析
+（函数调用语义的字符串参数 still argStrOf）；③超算符融合 P277 护栏
+根因（循环计数器陈旧读）——融合恢复后指令数直接下降。

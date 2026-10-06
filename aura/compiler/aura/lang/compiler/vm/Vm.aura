@@ -118,6 +118,15 @@ class Vm {
     private var cfTarget: Int = 0
     private var cfPc: Int = 0
 
+    /// P392：执行期热数组 Memory 裸缓冲（read64/write64 = runtime 单条 mov，
+    /// 替代 List 下标的 Collections_getAt 函数调用——每条指令 3 次 List 调用
+    /// 是解释器 26× 差距的主项）。buildLoadCaches 末尾从最终态一次性拷入。
+    private var mcOpCodes: Long = 0
+    private var mcA0: Long = 0
+    private var mcA1: Long = 0
+    private var mcN: Int = 0
+    private var mcValid: Int = 0
+
     // 保存的局部变量帧（帧切换用）
     private var savedLocals: VmFrameStack = VmFrameStack()
 
@@ -476,7 +485,7 @@ class Vm {
         this.ip = this.funcOffset("main")
         this.currentFunc = "main"
 
-        while (this.running && this.ip < this.opCodes.size()) {
+        while (this.running && (this.mcValid == 0 || this.ip < this.mcN)) {
             this.instructionCount = this.instructionCount + 1
             if (this.instructionCount > this.MAX_INSTRUCTIONS) {
                 this.error = "Instruction limit exceeded (" + toStr(this.MAX_INSTRUCTIONS) + ")"
@@ -484,19 +493,19 @@ class Vm {
                 break
             }
 
-            val opCode: Int = this.opCodes[this.ip]
+            // P392：热路径读 Memory 裸缓冲（值域 < 2^31，read64 as Int 无损）。
+            val opCode: Int = Memory.read64(this.mcOpCodes + this.ip * 8) as Int
             this.ip = this.ip + 1
 
-            // 注释行 / 空行（加载期已编号为 OP_NOP）
+            // 注释行 / 空行（加载期已编号为 OP_NOP——buildLineCache 与
+            // loadPredecoded 对空名/注释行统一编号，装载后不再有「空 ops 行」，
+            // 旧兜底 `ops[ip-1] == ""` 每指令一次 List<String> get + streq 纯冗余，
+            // P392 移除）。
             if (opCode == Opcodes.OP_NOP) {
                 continue
             }
-            // 兜底：空 opcode 文本的行
-            if (this.ops[this.ip - 1] == "") {
-                continue
-            }
 
-            this.dispatch(opCode, this.ops[this.ip - 1])
+            this.dispatch(opCode)
         }
 
         return this.returnValue
@@ -547,7 +556,7 @@ class Vm {
     ///
     /// P0.4（ADR-002）：分派只做**整数**比较（`Opcodes` 常量），无指令名
     /// 字符串比较；`opName` 仅用于未知指令的诊断信息。
-    private fun dispatch(op: Int, opName: String): Unit {
+    private fun dispatch(op: Int): Unit {
         // ── 常量指令 ──
         // ── 热指令快速分派（方案 D）：按动态频次把高频臂前置，
         // 未命中落入下方原链（臂语义与原链逐字一致）。 ──
@@ -1116,8 +1125,10 @@ class Vm {
         }
 
         // ── 未知指令（含已废弃的协程指令，D5/ADR-001）──
+        // P392：opName 参数移除——run() 每条指令为它做一次 List<String>
+        // get + 传参（streq 诊断仅未知指令需要），改此处按需直读。
         else {
-            this.error = "Unknown opcode: " + opName
+            this.error = "Unknown opcode: " + toStr(op) + " [" + this.ops[this.ip - 1] + "]"
             this.running = false
         }
         }
@@ -3376,6 +3387,21 @@ class Vm {
         // 根治；本优化经 banner/fib28/loop1M 三程序输出精确校验。
         // ⚠️ 顺序契约：loadArgsFlat → fuseHotPairs → buildLoadCaches，
         // 本函数不得触碰 arg0/1Ints。
+        // P392：最终态拷入 Memory 裸缓冲（执行期零 List 调用）。
+        this.mcN = this.opCodes.size()
+        this.mcOpCodes = Memory.alloc(this.mcN * 8)
+        this.mcA0 = Memory.alloc(this.mcN * 8)
+        this.mcA1 = Memory.alloc(this.mcN * 8)
+        var mi: Int = 0
+        while (mi < this.mcN) {
+            Memory.write64(this.mcOpCodes + mi * 8, this.opCodes[mi])
+            val a0: Int = if (this.arg0Ints.size() > mi) { this.arg0Ints[mi] } else { this.argNoneMark }
+            val a1: Int = if (this.arg1Ints.size() > mi) { this.arg1Ints[mi] } else { this.argNoneMark }
+            Memory.write64(this.mcA0 + mi * 8, a0)
+            Memory.write64(this.mcA1 + mi * 8, a1)
+            mi = mi + 1
+        }
+        this.mcValid = 1
     }
 
     /// 装载期超级指令融合（方案 D）：对预解码流做一次线性窥孔改写。
@@ -3788,6 +3814,15 @@ class Vm {
     }
 
     private fun arg0IntOf(): Int {
+        // P392：Memory 缓冲快路径（mcValid 后哨兵语义由装载期落值保证——
+        // 非纯数字行装载期落 argNoneMark，此处哨兵值按调用方语义兜底 0）。
+        if (this.mcValid == 1) {
+            val v: Int = Memory.read64(this.mcA0 + (this.ip - 1) * 8) as Int
+            if (v != this.argNoneMark) {
+                return v
+            }
+            return 0
+        }
         // P352：快路径必须先查表长——arg0Ints 未填充（P271 跳过）时，
         // 空表 OOB 读经 __list_get 的 null 守卫返回 0，哨兵比较误通过
         // ⇒ 所有指令参数恒 0（STORE_LOCAL 槽号、JUMP 目标全错）。
@@ -3802,6 +3837,13 @@ class Vm {
 
     /// 第 i 条指令的 arg1 整数值（同上）。
     private fun arg1IntOf(): Int {
+        if (this.mcValid == 1) {
+            val v: Int = Memory.read64(this.mcA1 + (this.ip - 1) * 8) as Int
+            if (v != this.argNoneMark) {
+                return v
+            }
+            return 0
+        }
         if (this.arg1Ints.size() > this.ip - 1) {
             val v: Int = this.arg1Ints[this.ip - 1]
             if (v != this.argNoneMark) {

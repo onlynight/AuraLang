@@ -15,77 +15,71 @@ package aura.lang.compiler.vm
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.collection.HashMap
+import aura.lang.native.Memory
 
 /// VM 值栈（元素为 `Any`）。
 class VmStack {
 
-    private var d: List<Any> = arrayListOf<Any>()
+    // P392: Memory raw buffer (same rationale as VmLocals) -- data-stack
+    // push/pop is the fixed pairing cost of every arithmetic instruction.
+    // Any values stored/loaded as raw 64-bit representations.
+    private var mc: Long = 0
     private var sp: Int = 0
     private var cap: Int = 0
 
-    /// 压入一个值。
     fun push(v: Any): Unit {
-        // P366：sp/cap 各读一次入局部——同字段多次读在 photon 下可能被
-        // CSE 合并（跨 field_set 的读未失效 → d[sp] 用旧值 → pop 读到
-        // 上一位/未初始化槽）。
+        // P366: read sp/cap into locals once (photon CSE hazard).
         val sp0: Int = this.sp
         val cap0: Int = this.cap
         if (sp0 < cap0) {
-            this.d[sp0] = v
+            Memory.write64(this.mc + sp0 * 8, v as Long)
         } else {
-            this.d.add(v)
-            this.cap = cap0 + 1
+            val newCap: Int = cap0 * 2 + 64
+            val nb: Long = Memory.alloc(newCap * 8)
+            var j: Int = 0
+            while (j < sp0) {
+                Memory.write64(nb + j * 8, Memory.read64(this.mc + j * 8))
+                j = j + 1
+            }
+            this.mc = nb
+            this.cap = newCap
+            Memory.write64(this.mc + sp0 * 8, v as Long)
         }
         this.sp = sp0 + 1
     }
 
-    /// 弹出栈顶（空栈返回 null）。
     fun pop(): Any {
         val sp0: Int = this.sp
         if (sp0 <= 0) {
             return null
         }
         this.sp = sp0 - 1
-        return this.d[sp0 - 1]
+        return Memory.read64(this.mc + (sp0 - 1) * 8) as Any
     }
 
-    /// 查看栈顶（不弹出；空栈返回 null）。
     fun peek(): Any {
         val sp0: Int = this.sp
         if (sp0 <= 0) {
             return null
         }
-        return this.d[sp0 - 1]
+        return Memory.read64(this.mc + (sp0 - 1) * 8) as Any
     }
 
-    /// 当前元素个数。
     fun size(): Int {
         return this.sp
     }
 
-    /// 按下标读取（从栈底数，不弹出；越界返回 null）。
-    ///
-    /// 用途：`listOf(a, b, c)` 这类**变参**内建必须按**原顺序**取实参 ——
-    /// 逐个 `pop` 会把顺序反转（实测 `listOf(1,2,3,4,5)` 得到 `[5,4,3,2,1]`，
-    /// `list[0]` 打印 5、`list[4]` 打印 1）。
-    /// 方法名刻意加前缀：本项目的 AOT 存在「同名成员被错绑到无关对象」的问题
-    ///（实测 `VmCollections.getAt(list, idx)` 被绑到别的 `getAt`，函数体根本不执行）。
     fun vmSlotAt(i: Int): Any {
         if (i < 0 || i >= this.sp) {
             return null
         }
-        return this.d[i]
+        return Memory.read64(this.mc + i * 8) as Any
     }
 
-    /// 清空。
     fun clear(): Unit {
-        this.d = arrayListOf<Any>()
         this.sp = 0
-        this.cap = 0
     }
 }
-
-/// VM 字符串栈（调用栈 / 异常处理器栈）。
 class VmStrStack {
 
     private var d: List<String> = arrayListOf<String>()
@@ -174,74 +168,96 @@ class VmFrameStack {
 /// → null，与空表语义一致）。
 class VmLocals {
 
-    private var slots: List<Any> = arrayListOf<Any>()
-    private var marks: List<Int> = arrayListOf<Int>()
+    // P392: Memory raw buffers (read64/write64 = single runtime mov) --
+    // LOAD_LOCAL/STORE_LOCAL are the hottest instruction pair; the old
+    // List<Any>/List<Int> accesses were Collections runtime calls.
+    // Any slots stored/loaded as raw 64-bit representations (pointers and
+    // tagged ints lossless); unwritten slots read 0 = null;
+    // marks zero-init = 0 != gen.
+    private var mcSlots: Long = 0
+    private var mcMarks: Long = 0
     private var filled: Int = 0
+    private var cap: Int = 0
     private var gen: Int = 1
 
-    /// 读取槽位；未在当前代写入过 → null。
-    /// （方法名刻意避开 get/put：emit 对裸名 get/put 有 Map 内建改派，
-    /// 会把 VmLocals 指针当 AuraDynList 送进 C mapSet → 崩溃。）
     fun getSlot(k: Int): Any {
         if (k >= 0 && k < this.filled) {
-            // P341：下标形式——photon 编译下 .get 的调用窗口内实参槽会被
-            // 相邻值覆写（布局敏感），比较误配 → LOAD_LOCAL 空值。
-            if (this.marks[k] == this.gen) {
-                return this.slots[k]
+            if ((Memory.read64(this.mcMarks + k * 8) as Int) == this.gen) {
+                return Memory.read64(this.mcSlots + k * 8) as Any
             }
         }
         return null
     }
 
-    /// 写入槽位（按需扩容，扩容后旧槽标记保持 0 → 仍是未初始化语义）。
     fun putSlot(k: Int, v: Any): Unit {
-        while (this.filled <= k) {
-            this.slots.add(null)
-            this.marks.add(0)
-            this.filled = this.filled + 1
+        if (k >= this.filled) {
+            if (k >= this.cap) {
+                val newCap: Int = k * 2 + 64
+                val ns: Long = Memory.alloc(newCap * 8)
+                val nm: Long = Memory.alloc(newCap * 8)
+                var j: Int = 0
+                while (j < this.filled) {
+                    Memory.write64(ns + j * 8, Memory.read64(this.mcSlots + j * 8))
+                    Memory.write64(nm + j * 8, Memory.read64(this.mcMarks + j * 8))
+                    j = j + 1
+                }
+                this.mcSlots = ns
+                this.mcMarks = nm
+                this.cap = newCap
+            }
+            this.filled = k + 1
         }
-        this.slots[k] = v
-        this.marks[k] = this.gen
+        Memory.write64(this.mcSlots + k * 8, v as Long)
+        Memory.write64(this.mcMarks + k * 8, this.gen)
     }
 
-    /// 已扩容的槽位数（诊断/trace 用）。
     fun getSize(): Int {
         return this.filled
     }
 
-    /// 帧复用重置：gen+1，零分配（槽位数组与标记数组容量保留）。
     fun reset(): Unit {
         this.gen = this.gen + 1
     }
 }
 
-/// 调用栈（方案 D-1，2026-10-03）：四个并行列替代「toStr 拼接竖线串」。
-///
-/// 旧实现每次调用 `toStr(ip)+"|"+toStr(frame)+"|"+func+"|"+toStr(closure)`
-/// ≈ 7 次字符串分配 + 返回时 2 次 fieldAt substr —— 每调用 ~11 次分配
-/// 且从不释放（fib(30) 160 万调用即 GB 级）。并行列 push 复用容量
-/// （sp < cap 时 set 原位写，零分配），peek 取回的本来就是 Int。
 class VmCallStack {
 
-    private var ips: List<Int> = arrayListOf<Int>()
-    private var frames: List<Int> = arrayListOf<Int>()
+    // P392: the three Int parallel columns Memory-ized (CALL/RET fixed
+    // 4 List calls became 4 movs); funcs kept as String List (low
+    // frequency -- currentFunc restore diagnostics).
+    private var mcIps: Long = 0
+    private var mcFrames: Long = 0
+    private var mcClosures: Long = 0
     private var funcs: List<String> = arrayListOf<String>()
-    private var closures: List<Int> = arrayListOf<Int>()
     private var sp: Int = 0
     private var cap: Int = 0
 
     fun push(ip: Int, frame: Int, func: String, closure: Int): Unit {
         if (this.sp < this.cap) {
-            this.ips.set(this.sp, ip)
-            this.frames.set(this.sp, frame)
-            this.funcs.set(this.sp, func)
-            this.closures.set(this.sp, closure)
+            Memory.write64(this.mcIps + this.sp * 8, ip)
+            Memory.write64(this.mcFrames + this.sp * 8, frame)
+            this.funcs[this.sp] = func
+            Memory.write64(this.mcClosures + this.sp * 8, closure)
         } else {
-            this.ips.add(ip)
-            this.frames.add(frame)
+            val newCap: Int = this.cap * 2 + 64
+            val ni: Long = Memory.alloc(newCap * 8)
+            val nf: Long = Memory.alloc(newCap * 8)
+            val nc: Long = Memory.alloc(newCap * 8)
+            var j: Int = 0
+            while (j < this.sp) {
+                Memory.write64(ni + j * 8, Memory.read64(this.mcIps + j * 8))
+                Memory.write64(nf + j * 8, Memory.read64(this.mcFrames + j * 8))
+                Memory.write64(nc + j * 8, Memory.read64(this.mcClosures + j * 8))
+                j = j + 1
+            }
+            this.mcIps = ni
+            this.mcFrames = nf
+            this.mcClosures = nc
             this.funcs.add(func)
-            this.closures.add(closure)
-            this.cap = this.cap + 1
+            this.cap = newCap
+            Memory.write64(this.mcIps + this.sp * 8, ip)
+            Memory.write64(this.mcFrames + this.sp * 8, frame)
+            Memory.write64(this.mcClosures + this.sp * 8, closure)
         }
         this.sp = this.sp + 1
     }
@@ -256,14 +272,14 @@ class VmCallStack {
         if (this.sp <= 0) {
             return 0
         }
-        return this.ips.get(this.sp - 1)
+        return Memory.read64(this.mcIps + (this.sp - 1) * 8) as Int
     }
 
     fun peekClosure(): Int {
         if (this.sp <= 0) {
             return -1
         }
-        return this.closures.get(this.sp - 1)
+        return Memory.read64(this.mcClosures + (this.sp - 1) * 8) as Int
     }
 
     fun size(): Int {
