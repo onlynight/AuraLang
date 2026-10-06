@@ -3187,3 +3187,25 @@ ss_ovf/tf_zero 标签、loadPredecoded constPool/funcs 赋值、ISel 整数
 Const 守卫、fuseGuard、解码探针、标签审计脚本、提取工作流。
 宿主状态：完整运行 exit=0 无段错误；helloworld 打印待 RA 专项后
 回归（LOADONLY ✓ / 解码探针全绿基线已备）。
+
+### 10.80 P310 基准：photon 原生编译正确性验证通过，进程启动受 64MB arena 提交拖累（2026-10-06 续LXIII）
+
+**新 photon 驱动**（PhotonP310，含本会话全部修复）安装为
+PhotonHatCompile.exe。端到端验证：
+- bench_fib10：photon 原生 `fib(10) = 55` ✓（3 次 0.53s ≈ 176ms/次）
+- bench_fib25：photon 原生 `fib(25) = 75025` ✓；seed VM 同 75025 ✓
+- 最小三操作数加链（11+22+33）：`x=66` ✓（P301 嵌套加链在该规模不触发）
+
+**性能实测注意**：photon 原生进程 ~0.45s/次，主体为 **64MB heapArena
+的 .data 提交开销**（加载期一次性提交），非计算耗时（fib25 原生计算
+应在 10ms 级）。后续优化方向：arena 缩容起步（如 8MB）+ 满载扩容，
+或 VirtualAlloc 惰性提交（MEM_RESERVE + 按需 MEM_COMMIT）。
+
+**bench 脚本缺陷记录**：scripts/bench-photon-vs-vm.ps1 的 env-var 模式
+（AURA_HAT_*）对新驱动无效（驱动为规避 Env.get 段错误已改固定路径
+约定）→ 脚本实际编译的是 current.aura（VM 宿主）而非 bench 程序，
+其 "Photon AOT" 列数字无效。已改用固定路径中继手动基准（本节数字）。
+
+**最终状态**：photon 工具链端到端可用（驱动→HAT→SSA→LIR→DAG→COFF
+→原生 exe，输出正确）；VM 宿主完整运行 exit=0 无段错误；helloworld
+打印仍被解码 flat 布局敏感截断拦截（§10.77），待 RA 专项。
