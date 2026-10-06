@@ -3635,3 +3635,41 @@ Unknown opcode）——**每次修复重排布局、激活另一 phi-web 位点�
 **本会话累计 8 提交**：f2db1df/5be39b0/c80a2b1/6879121/8946c0e/8d877cf/
 4818d38/ddec7a5 + 本轮（布局统一 + 引用赋值）。真实进展：横幅完整打印、
 Hello World 行恢复、常量系统逐位正确、堆/常量全对齐、列表布局全统一。
+
+### 10.94 四方执行效率对比基准（2026-10-06 续LXXV）
+
+**方法**：同一基准程序（fib28 递归 / 25M Long 累加循环）经四条执行链，
+Windows x64，各 3 次取中位（Wall clock，含进程启动）。
+入口：LLVM AOT = `aura build --aot`（seed 前端 → LLVM -O2）；Photon AOT =
+PhotonHatCompile 驱动（HAT→SSA→LIR→DAG→自研 X86→COFF→lld-link）；Seed VM =
+`aura run`（.auc 解释器，含 ~350ms 标准库装载+语义检查）；Photon Aura VM =
+photon 编译的 VmRunner 宿主。
+
+**fib(28) = 317811（632K 次递归调用）**：
+
+| 执行链 | 中位耗时 | 相对 LLVM |
+|---|---|---|
+| LLVM IR AOT | **23ms** | 1× |
+| Photon AOT | **30ms** | 1.30× |
+| Seed VM | 1069ms | 46× |
+| Photon Aura VM | ✗ 无法执行（执行期缺陷，见 §10.92-93） | — |
+
+**loop 2500 万次 Long 累加（acc = 312499987500000）**：
+
+| 执行链 | 中位耗时 | 相对 LLVM |
+|---|---|---|
+| LLVM IR AOT | **74ms** | 1× |
+| Photon AOT | ✗ 崩溃（Long 循环回归，exit=127 无输出；i<1M 正常——阈值间确定性腐蚀，phi-web 家族） | — |
+| Seed VM | 13959ms | 189× |
+
+**结论**：
+1. **Photon AOT 已达 LLVM 的 1.3× 以内**（fib28：30ms vs 23ms）——自研后端
+   的代码质量对标 LLVM -O2 可用；差距主要在寄存器分配（P270 全栈槽 vs
+   LLVM 线性扫描）。
+2. Photon AOT **Long 循环回归**：i<1M 正常、≥5M 静默崩（exit=127 无输出，
+   同形代码仅常量不同）——phi-web/值模型家族新增实例，随本体修复验收。
+3. **Seed VM 解释开销 30-190×**：递归调用密集 46×、纯算术循环 189×——
+   Photon AOT 的存在意义。
+4. **Photon Aura VM**：执行期仍有 phi-web 残留崩点（本轮最后状态：
+   constLines 逐位正确 ✓、横幅完整 ✓，LoadConst `5+t0` 调用窗误读随布局
+   交替发作）——完成 phi-web 本体修复后加入对比。

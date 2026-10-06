@@ -848,6 +848,11 @@ class X86Emitter {
             } else if (funcName == "Memory_write") {
                 this.enc.emitMovByteMemReg("rcx", "rdx")
                 this.enc.emitXorRR("eax", "eax")
+            } else if (funcName == "__is_tagged_int") {
+                // P363：rax = rcx & 1——Plan A 装箱判定。调用窗误判（偶数
+                // 字符串指针被判 tagged）→ toStrAny 走拆箱分支打印指针十进制。
+                this.enc.emitMovRR("rax", "rcx")
+                this.enc.emitAndRI("rax", 1)
             } else if (funcName != "" && funcName != "@imm") {
                 this.enc.emitCallRel(funcName)
             }
