@@ -3340,3 +3340,34 @@ fib28 2.1×、fib10/fib25 输出一致）；标签闭合审计 0 缺失。
 **下会话**：RA 五区隔离重设计（RegisterAllocator computeFrameLayout +
 X86Emitter prologue + getSpillOffset 统一）→ buildLoadCaches 通过 →
 VM run → helloworld 打印 → 基准回归。
+
+### 10.86 重大突破：photon 编译 VM 完整执行 Phase A-G 全流程！（2026-10-06 续LXVII）
+
+**里程碑**（mmap 文件缓冲 + substring 重写 + ISel 守卫 + fuseGuard +
+spill-base 144 + constPool 赋值 + 传递闭包扫描 全部生效）：
+
+photon 编译的 VM 宿主**首次完整执行 .auc 程序 Phase A-G 全流程**：
+```
+✓ Phase A: 基本打印
+✓ Phase B: 变量和算术（name=, count=, count+8=）
+✓ Phase C: [3] 算术运算（+,-,*,/,%）→ 100, 23
+✓ Phase D: [4] 字符串拼接 → Compiler, Hello, !
+✓ Phase E: [5] 条件语句 → true/false 四种比较
+✓ Phase F: [6] 循环语句 → 0, 1, 1+2+3+4+5=
+✓ Phase G: [7] 函数定义与调用 → add(3,5), fibonacci(10), factorial(10)
+→ 最终输出框 ═══ 出现（程序到达结论段）
+→ SIGSEGV（结尾腐坏）
+```
+
+**已知残余**：LOAD_LOCAL/LOAD_GLOBAL 读取返回空值（name=, count= 等
+变量值为空），函数调用返回值也为空。这些是 VmLocals/栈操作在 photon
+编译下的帧槽腐坏表现。最终 SIGSEGV = 程序尾部遇到空值边界条件。
+
+**修复根因链（本轮确认）**：.auc 文件缓冲区（Allocator.malloc 分配在
+arena 内）被后续 arena 分配覆写（arena bump 游标回绕到早期地址）→
+reader 对象也被覆写（data/dataLen/pos = 路径字符串 "buil","/cur",".eua"）
+→ 解码读路径字符而非 .auc 字节 → 99% opcode 不识别 → flat 截断。
+修复 = .auc 缓冲区改用 Memory.mmap 独立映射（绕过 arena）。
+
+**下会话**：修复 VmLocals putSlot/getSlot 或 LOAD_LOCAL/STORE_LOCAL
+的帧槽腐坏 → 变量值正确 → 程序完整 PASS → 基准对比。
