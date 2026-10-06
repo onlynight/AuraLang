@@ -3600,3 +3600,10 @@ rax=0 的怀疑）——症状无变化，非本层。label-free 版本语义等
 **状态（p379）**：解码 ✓ / opcode ✓ / constLines ✓ / 槽号 ✓ /
 push-pop 平衡 ✓ / 真实字符串打印 ✓（[1] 段两行已恢复）/ 余 3 个
 bit0 置位值 → 下轮以 [CA] bits 探针 + 分配地址审计定位置位源。
+
+**§10.92 追记（P366）**：VmStack push/pop/peek 改单次字段读入局部（CSE 跨
+field_set 合并怀疑）——banner 第一行 ╔══╗ 恢复打印、Hello World 行恢复；
+LoadConst 的 if 表达式守卫 t0 亦 phi-web（去掉守卫，idx 恒在界内）。
+**剩余症状收敛到极窄**：仅两个 `println("")`（const[4]/[8] 空串）弹出
+`heapPtr|1`（空串堆指针 bit0 被置位，两次同值）——空串在某处 +1
+（@str 物化或串边界），下轮以 [CA] bits 探针定位该分配点即可。

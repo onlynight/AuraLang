@@ -25,30 +25,37 @@ class VmStack {
 
     /// 压入一个值。
     fun push(v: Any): Unit {
-        if (this.sp < this.cap) {
-            this.d[this.sp] = v
+        // P366：sp/cap 各读一次入局部——同字段多次读在 photon 下可能被
+        // CSE 合并（跨 field_set 的读未失效 → d[sp] 用旧值 → pop 读到
+        // 上一位/未初始化槽）。
+        val sp0: Int = this.sp
+        val cap0: Int = this.cap
+        if (sp0 < cap0) {
+            this.d[sp0] = v
         } else {
             this.d.add(v)
-            this.cap = this.cap + 1
+            this.cap = cap0 + 1
         }
-        this.sp = this.sp + 1
+        this.sp = sp0 + 1
     }
 
     /// 弹出栈顶（空栈返回 null）。
     fun pop(): Any {
-        if (this.sp <= 0) {
+        val sp0: Int = this.sp
+        if (sp0 <= 0) {
             return null
         }
-        this.sp = this.sp - 1
-        return this.d[this.sp]
+        this.sp = sp0 - 1
+        return this.d[sp0 - 1]
     }
 
     /// 查看栈顶（不弹出；空栈返回 null）。
     fun peek(): Any {
-        if (this.sp <= 0) {
+        val sp0: Int = this.sp
+        if (sp0 <= 0) {
             return null
         }
-        return this.d[this.sp - 1]
+        return this.d[sp0 - 1]
     }
 
     /// 当前元素个数。

@@ -889,14 +889,11 @@ class AucModule {
                 mod.numOpNames.add(constMnemonic(constTags, idx))
                 // P361：LoadConst 按常量标签分派数值 opcode——标签 0-4 →
                 // LOAD_CONST_I/F/S/B/N = 5-9 **线性映射 5+tag**（无分支——
-                // if/else 链的合并值在 photon 下陈旧读，实测 opc0 读成 0 →
-                // numOpCodes[0]=0 命中旧 CONST_INT 臂，全流错位）。
-                val t0: Int = if (idx >= 0 && idx < constTags.size()) constTags.get(idx) else 2
-                if (t0 > 4) {
-                    mod.numOpCodes.add(7)
-                } else {
-                    mod.numOpCodes.add(5 + t0)
-                }
+                // if/else 链的合并值在 photon 下陈旧读）。P366：idx 恒在
+                // constsCount 内（同文件 u16），去掉 if 表达式守卫
+                //（if 表达式赋值的 t0 亦 phi-web 陈旧读，numOpCodes 值错）。
+                val t0: Int = constTags.get(idx)
+                mod.numOpCodes.add(5 + t0)
                 mod.numArgsFlat.add(toStr(idx))
                 count = count + 1
                 var adv: Int = 1 + operandSize
