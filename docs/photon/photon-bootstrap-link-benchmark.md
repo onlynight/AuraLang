@@ -3810,3 +3810,33 @@ Aura Compiler 行**全部真实打印**（相较 §10.92 的 5/10 失败 → 本
 **状态（p403）**：装载链全绿 ✓ / banner 完整 ✓ / Hello World ✓ /
 `println("")` 空串 ×2 + 尾部 SIGSEGV = 剩余（槽位复用/指针污染家族，
 phi-web 本体修复的验收项）。
+
+### 10.100 会话 XV：charCodeAt 内联 + [i]/.get 双路读取对照——终点诊断（2026-10-06 续LXXXI）
+
+**P383**：charCodeAt 内联（movzx eax, byte [rcx+rdx]，同 Memory.read 同款）——
+vmSubstr/字符串解析的逐字符调用窗消除。
+
+**P384 终点诊断**：CALL 臂（op 62）双读取对照——
+```
+[62] fn=[println] argc=0 cnt=2 a0=[println] a1=[] ip=4
+```
+* fn = argStrOf(0) = argStrs[9] = "println" ✓
+* cnt = argCountOf() = argCounts[3] = 2 ✓
+* a1 = argStrOf(1) = argStrs[10] = **""**（.get 路径直读 = 列表本体内容）
+* [AS] 探针（loadPredecoded 帧）.get(30/31/32) = println/""/"" ✓
+  ——**一致**：instr10 = `println("")` 的 arg 本就是空串 ✓
+
+**终极定位**：argStrs[10] = "" 的成因 = **loadArgsFlat 的
+`vmSubstr(ln, c0+1, lnN-c0-1)` 在该调用点返回空串**——vmSubstr 内部的
+`end` 变量（两次重赋值 = 两处 merge phi）家槽跨调用残留前次值（end=7），
+substring(8, 7) → ""。**同函数相邻调用点一成一败 = phi MOV 边匹配错位
+的又一实例**（支配集修复后剩余 = (a0) 带标签配对的标签质量 + (a1) 精确
+匹配覆盖不了的其余入边）。
+
+**终点结论**：photon 编译 VM 的剩余缺陷（println("") 空行、计算值错、
+尾部 SIGSEGV）全部收敛于 **phi MOV 边匹配的最后残留**——支配集已修
+(a2)，剩余 = (a0) 标签可信度审计 + (a1) 覆盖率。下一轮以
+`AURA_PHI_DIAG=1` 的 [phi-nomov] 诊断审计全部未匹配边，逐条定性。
+
+**本会话（X-XV）累计 16 提交**。装载链全绿、opCodes/constLines 逐位
+正确、banner 完整打印、Hello World 真实打印、支配集健全化。
