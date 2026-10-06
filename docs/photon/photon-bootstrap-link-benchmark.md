@@ -3035,3 +3035,35 @@ VM argStrs:   slot 30=[p]  slot 31=[p]              ✗ 全变 "p"
 **下轮首查**（单点）：vmSubstr 内 `text.substring(start, end)` 调用点
 的 text 装载指令（记下槽位）——对照 HAT 该处 SSA 值来源，找 RA 的
 receiver 槽分配错误。次选：String.substring 原生包装的 rcx 装载。
+
+### 10.75 P293-295：总根定位——SSA 跨块类型丢失，`count + 1` 编译成 strcat（2026-10-06 续LVIII）
+
+**终极 smokin gun**（map 权威地址，decodeNumeric 主循环尾部编译产物）：
+```
+mov -0x220(%rbp),%r10 → rcx    ; count
+mov -0x238(%rbp),%r10 → rdx    ; readByte 结果
+call strcat                     ; ← `count = count + 1` 编译成了字符串拼接！
+mov %rax,-0x1f8(%rbp)           ; count = strcat(count, byte串)
+```
+`var count: Int = 0` 在循环体块内 **丢失 Int 类型**（SSA 跨块类型合并
+缺陷 = P230/P235 已知的 phi 缺陷族）→ `+` 按 String 重载解析 → strcat。
+count 变 "1"/"11"/"111"… → decoded 恒 1（toI32 截断）→ 循环提前退出 →
+flat 截断（219/8/1194 随布局）→ argStrs 残缺 → "Unknown function: p"。
+fuse r 不推进、probe 丢失、布局敏感——全部同根：**类型丢失后按 String
+语义编译的每一条语句**。
+
+**同族实证（本轮）**：①链式 field-get 接收者 `.size()` → 裸名 "size"
+（方法解析丢接收者类型）；②vmSubstr 恒返 "p"（String.substring 的
+receiver/参数走错槽——类型驱动槽分配）。全部 = 类型丢失的不同表现。
+
+**修复目标收敛到一处**：SsaBuilder（HAT→SSA）的**变量类型跨块合并**——
+循环回边处变量类型应保持声明类型（Int），不得回落 String 默认。修一处，
+decodeNumeric/loadArgsFlat/fuseHotPairs 及全部未来循环一并治愈。
+
+**本段已修复并验证**：
+1. emitStringSubstring 三重缺陷：ss_ovf 标签缺失（溢出检查死）+ 拷贝
+   stride 8 + 漏加 start —— 全部重写为 strcat 同款连续字节拷贝。
+2. emitToFloat 补 tf_zero 标签。
+3. loadPredecoded 补 constPool/funcs 赋值（此前从未赋字段，buildLoadCaches
+   构建恒空）。
+4. 标签闭合审计脚本：PhotonRuntime 全发射器 0 缺失。

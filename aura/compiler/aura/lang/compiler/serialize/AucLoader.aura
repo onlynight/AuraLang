@@ -408,6 +408,9 @@ object AucLoaderUtils {
             val decoded: Int = decodeNumeric(reader, codeLens.get(fi3), nativeNames,
                 nativeParams, constTags, funcNames, funcParams, mod.slotMethodNames,
                 mod.classNames, lineNo2, mod)
+            // P283 解码探针：每函数 codeLen vs 实解码数 vs 读指针（flat 截断定位）
+            println("[DC] f=" + toStr(fi3) + " codeLen=" + toStr(codeLens.get(fi3))
+                + " decoded=" + toStr(decoded) + " pos=" + toStr(reader.pos))
             lineNo2 = lineNo2 + decoded
             fi3 = fi3 + 1
         }

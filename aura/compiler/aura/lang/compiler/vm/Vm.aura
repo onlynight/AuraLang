@@ -338,6 +338,12 @@ class Vm {
 
         this.exportsTable = exports
         this.importsTable = imports
+        // ⚠️ P293 关键修复：consts/funcs 参数此前从未赋给字段——末尾的
+        // buildLoadCaches() 从 this.funcTable/this.constPool 构建
+        // funcOffsetMap/funcParamMap/constLines，恒空 → LOAD_CONST 全垃圾、
+        // CALL funcName 截断（Unknown function: p）。
+        this.constPool = consts
+        this.funcTable = funcs
         // P239 括号探针 B：loadArgsFlat 消费点
         println("[winB] n=" + toStr(args.size()))
         println("[winB-0]=[" + args.get(0) + "]")

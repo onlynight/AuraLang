@@ -655,26 +655,43 @@ object PhotonRuntime {
         enc.emitCmpRI("rax", 67100768)
         enc.emitJccLabel("g", "ss_ovf")
         enc.emitStoreRIP("heapBump", "rax")
-        // 逐字节拷贝（源遇 NUL 提前停，剩余补 0）
+        // ⚠️ P292 拷贝循环重写：旧发射按 qword 槽存字节（emitStoreIndexed8
+        // 步长 8）且读源漏加 start（[rcx+r11]）→ 结果串 = 首字符+NUL，
+        // strlen=1 → vmSubstr 一切输入恒返 "p"（print 内置表首字符）。
+        // 现改为 strcat 同款连续字节拷贝：rcx += start，r9 写指针步进 1。
+        enc.emitAddRR("rcx", "rdx")          // rcx = str + start
+        enc.emitMovRR("r9", "r10")           // r9 = 写指针
         enc.emitXorRR("r11", "r11")
         enc.emitLabel("ss_copy_loop")
         enc.emitCmpRR("r11", "r8")
-        enc.emitJccLabel("ge", "ss_copy_done")
-        enc.emitMovzxRegMemIndexed("eax", "rcx", "r11")
+        enc.emitJccLabel("ge", "ss_zpad")
+        enc.emitMovzxRegMemByte("eax", "rcx")
         enc.emitTestRR("rax", "rax")
         enc.emitJccLabel("z", "ss_zpad")
-        enc.emitStoreIndexed8("r10", "r11", 0, "rax")
+        enc.emitMovByteMemReg("r9", "rax")   // [r9] = al（步长 1）
+        enc.emitIncRR("rcx")
+        enc.emitIncRR("r9")
         enc.emitIncRR("r11")
         enc.emitJmpLabel("ss_copy_loop")
         enc.emitLabel("ss_zpad")
-        enc.emitStoreIndexed8("r10", "r11", 0, "rax")  // 写 0（rax 此刻为 0）
-        enc.emitIncRR("r11")
-        enc.emitJmpLabel("ss_zpad")
-        enc.emitLabel("ss_copy_done")
-        // 尾 NUL：[r10 + len] = 0（eax 已为 0？保守再清）
         enc.emitXorRR("eax", "eax")
-        enc.emitStoreIndexed8("r10", "r8", 0, "rax")
+        enc.emitLabel("ss_zpad_loop")
+        enc.emitCmpRR("r11", "r8")
+        enc.emitJccLabel("ge", "ss_copy_done")
+        enc.emitMovByteMemReg("r9", "eax")
+        enc.emitIncRR("r9")
+        enc.emitIncRR("r11")
+        enc.emitJmpLabel("ss_zpad_loop")
+        enc.emitLabel("ss_copy_done")
+        enc.emitMovByteMemReg("r9", "eax")   // 尾 NUL
         enc.emitMovRR("rax", "r10")
+        enc.emitEpilogue()
+        // ⚠️ P292 补 ss_ovf 标签：旧代码 JccLabel("g","ss_ovf") 的标签从未
+        // 发射，跳转解析回落「下一条指令」→ 溢出检查形同虚设，分配爬过
+        // 限界覆写 heapBump 自身 → 游标归零 → arena 回绕（P274 全系列
+        // 野句柄/布局敏感崩溃的总根）。
+        enc.emitLabel("ss_ovf")
+        enc.emitXorRR("eax", "eax")
         enc.emitEpilogue()
     }
 
@@ -2703,6 +2720,7 @@ object PhotonRuntime {
         enc.emitStackLoad("rax", -0x20)
         enc.emitCmpRI("rax", 0)
         enc.emitJccLabel("eq", "tf_zero")
+        enc.emitLabel("tf_zero")  // P292 补标签（原缺失，eq 跳转回落下一条指令）
 
         // 处理符号
         enc.emitCmpRI("rax", 0)
