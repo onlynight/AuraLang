@@ -3278,3 +3278,34 @@ AucReader 对象地址冲突（分配器返回了同一地址，或寻址计算�
 修复 = 分配器寻址（Allocator.malloc 与 emitObjectAlloc 游标的一致性）
 或 AucReader 对象改入 RA 溢出区。修复后跑 LOADONLY → 解码 1194 →
 Phase A-E PASS → helloworld 全链回归。
+
+### 10.84 会话终态：六修复落地，flat 8→49（+512%），余量实验证实敏感不可增量修（2026-10-06 续LXV）
+
+**最终基线**（P313 驱动，全部修复生效，2048B margin 回退验证）：
+```
+[winB] n=49                                        ← flat 从 8 → 49（+512%）
+[FLAT0] [3]=[println,1] ✓                          ← substring 修复生效
+[FLAT30] [30]=[48] [31]=[3] [32]=[2]               ← 解码推进至 instr ~10
+[AS] [30]=[4] [31]=[] [32]=[]                      ← vmSubstr 修复后残留截断
+exit=0（无段错误）✓
+```
+
+**margin 实验**：2048→65536 反而更早崩（帧尺寸敏感极端化）——已回退。
+
+**已修复清单（全部有指令级/探针级证据）**：
+1. emitStringSubstring stride-8 + 漏 start + ss_ovf 缺失（三合一）
+2. emitToFloat tf_zero 标签缺失
+3. loadPredecoded 漏赋 constPool/funcs
+4. ISel Add 分派守卫（整数 Const 强制整数加）
+5. fuseGuard（fuse 循环 r 卡死护栏）
+6. 帧预算扫描传递闭包重写（walkExtraNodes）
+7. 提取工作流 ps1 修复（陈旧日志指向）
+
+**未修（RA 五区隔离专项 §10.41/§10.53/§10.61）**：
+- decodeNumeric 循环 `offset` 推进丢嵌套 @add 第二操作数
+  （offset 只 +1 丢 +operandSize → 解码循环 800 次→49 次退出）
+- `count = count + 1` 增量在 11 参大函数中部分失效（decoded 恒 33）
+- loadArgsFlat vmSubstr 对 flat 越界索引段错误（flat 不完整所致）
+
+**下会话路线**：RA/帧布局五区隔离 → 上述三项自然消除 → 解码 1194 →
+Phase A-E PASS → helloworld 打印 → fib 回归。
