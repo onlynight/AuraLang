@@ -3840,3 +3840,22 @@ substring(8, 7) → ""。**同函数相邻调用点一成一败 = phi MOV 边匹
 
 **本会话（X-XV）累计 16 提交**。装载链全绿、opCodes/constLines 逐位
 正确、banner 完整打印、Hello World 真实打印、支配集健全化。
+
+### §10.94 基准更新（支配集修复后复测，2026-10-06 续LXXXII）
+
+**fib(28)**（Photon AOT 用当前驱动含支配集+值模型+列表统一全套重建）：
+
+| 执行链 | 中位耗时 | 相对 LLVM |
+|---|---|---|
+| LLVM IR AOT | **22ms** | 1× |
+| Photon AOT | **25ms** | **1.14×** |
+| Seed VM | 925ms | 42× |
+| Photon Aura VM | ✗（执行期：[62] argc=0 空行 + 尾部 SIGSEGV） | — |
+
+**loop25M**：LLVM 74ms / Photon AOT ✗（Long 循环回归 exit=127 未变）/
+Seed VM 13959ms。Photon Aura VM ✗。
+
+**结论更新**：支配集 + 值模型 + 列表统一全套落地后，**Photon AOT 与
+LLVM 差距缩至 1.14×**（前测 1.30×）——phi MOV 支配健全化消除了错误
+边写入的额外开销。Photon Aura VM 执行期缺陷（§10.97 [i] 路径 null）
+独立于本基准，待 [i]/.get 统一后入榜。
