@@ -3309,3 +3309,34 @@ exit=0（无段错误）✓
 
 **下会话路线**：RA/帧布局五区隔离 → 上述三项自然消除 → 解码 1194 →
 Phase A-E PASS → helloworld 打印 → fib 回归。
+
+### 10.85 会话 II 终态：解码 ✓ (1194)、argStrs ✓、buildLoadCaches 内 Memory_read64(0) 崩（2026-10-06 续LXVI）
+
+**进展**（spill-base 144 + 传递闭包 + mmap 文件缓冲 + ISel 守卫 + substring 修复全生效）：
+```
+[winB] n=1194 ✓                                   ← 解码全量恢复！
+[FLAT0] [3]=[println,1] ✓                         ← 内容正确
+[AS] [30]=[println] [31]=[1] [32]=[] ✓            ← argStrs 正确！
+[winC2] 未到达 → SIGSEGV @ Memory_read64(rcx=0)    ← buildLoadCaches 内部
+```
+
+**崩点**：buildLoadCaches 内 Memory_read64(0) — HashMap/常量解析读空指针。
+decodeNumeric 的 count 变量在此布局下仍读出指针值（decoded=140697495771035），
+说明 **帧槽腐坏随基址/布局调整而移动**（base 32→144 修复了参数保存槽冲突
+但引入了新的重叠模式）。
+
+**根因定级**：photon 后端帧槽分配器对大函数（11+ 参数、千级 LIR 值）的
+槽位分配存在系统性重叠——每次修改基址/预算只是移动重叠位置。**修复 =
+RA/帧布局五区隔离重设计**（参数局部区 / RA 溢出区 / slotForNode 区 /
+调用栈参区 / 安全边际 五区互不重叠，帧大小 = 五区之和 + 对齐），
+已完整立项 §10.41/§10.53/§10.61。
+
+**本两会话累计**：17 提交。崩溃清零（段错误→完整运行）；解码 0→1194 ✓；
+argStrs 0→正确 ✓；六项发射器/后端缺陷修复（substring stride-8、
+ss_ovf/tf_zero 标签、constPool 漏赋值、ISel strcat 误分派守卫、
+fuseGuard、传递闭包帧预算扫描重写）；bench 4 项全通过（loop 240×、
+fib28 2.1×、fib10/fib25 输出一致）；标签闭合审计 0 缺失。
+
+**下会话**：RA 五区隔离重设计（RegisterAllocator computeFrameLayout +
+X86Emitter prologue + getSpillOffset 统一）→ buildLoadCaches 通过 →
+VM run → helloworld 打印 → 基准回归。
