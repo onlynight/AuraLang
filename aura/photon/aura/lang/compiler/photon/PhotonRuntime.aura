@@ -651,7 +651,10 @@ object PhotonRuntime {
         enc.emitMovRR("r10", "rax")         // r10 = ptr
         enc.emitAddRR("rax", "r8")
         enc.emitIncRR("rax")
-        enc.emitSubRR("rax", "r9")          // rax = base + len + 1
+        // P364：同 strcat——推进量 8 字节对齐
+        enc.emitAddRI("rax", 7)
+        enc.emitAndRI("rax", -8)
+        enc.emitSubRR("rax", "r9")          // rax = base + align8(len + 1)
         enc.emitCmpRI("rax", 67100768)
         enc.emitJccLabel("g", "ss_ovf")
         enc.emitStoreRIP("heapBump", "rax")
@@ -1085,6 +1088,11 @@ object PhotonRuntime {
         enc.emitAddRR("rcx", "rax")
         enc.emitIncRR("rcx")
                  // rcx = need
+        // P364：推进量 8 字节对齐——裸 len+1 推进让奇长度串产出奇指针，
+        // Plan A「指针恒偶」装箱判定破产（isTaggedInt 误判 → println 打印
+        // 指针十进制，交替性值错的根因）。
+        enc.emitAddRI("rcx", 7)
+        enc.emitAndRI("rcx", -8)
 
         // base = [heapBump]；new = base + need；越界则回绕0 重新开
         enc.emitMovRIP("rax", "heapBump")

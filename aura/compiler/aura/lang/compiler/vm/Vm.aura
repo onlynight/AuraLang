@@ -1861,6 +1861,15 @@ class Vm {
         while (i >= 0) {
             val v: Any = this.stack.pop()
             val s: String = VmOps.toStrAny(v)
+            // P363：值类型诊断（有界，与 [LC]/[SL] 共用计数器）
+            if (this.dbgLcCount < 20) {
+                this.dbgLcCount = this.dbgLcCount + 1
+                val vBits: Long = v as Long
+                println("[CA] tagged=" + toStr(VmOps.isTaggedInt(v))
+                    + " str=" + toStr(VmOps.isString(v))
+                    + " sLen=" + toStr(s.length)
+                    + " bits=" + toStr(vBits))
+            }
             if (result == "") {
                 result = s
             } else {
@@ -3585,14 +3594,18 @@ class Vm {
 
     /// 常量池按下标直取（arg0/1IntOf 预解析下标的免解析快路径）。
     private fun getConstByIdx(idx: Int): Any {
+        // P364：**单返回路径**——旧双返回（String 路径 + Any fallback 路径）
+        // 的合并值在 photon 下按调用点布局被 Int 装箱（字符串指针
+        // (v<<1)|1），println 打印指针十进制（[CA] tagged=true 实证）。
+        // constLines 已完备（54 条解码期直建），fallback 仅作越界兜底。
         val n: Int = this.constLines.size()
-        if (idx >= 0 && idx < n) {
-            // P359：constLines 现为**转义态**（解码端就地切分），统一反转义。
-            // 无转义时 unescapeConst 原样返回，成本仅一次扫描。
-            return this.unescapeConst(this.constLines[idx])
+        var k: Int = idx
+        if (k < 0) { k = 0 }
+        if (k > n - 1) { k = n - 1 }
+        if (n <= 0) {
+            return ""
         }
-        return this.unescapeConst(VmOps.getFieldAt(this.constPool, idx, "
-"))
+        return this.unescapeConst(this.constLines[k])
     }
 
     /// 装载扁平参数串（loadPredecoded）：每条 "a0,a1[,a2]"，空段保序。

@@ -398,8 +398,14 @@ class PhotonObjectWriter {
             //
             // 偏移按**去引号后**的载荷长度累加（与 `stringConstsToHex` 同步，
             // 两处都用 `unquote`），空串同样占 1 个 NUL 字节。
+            // P365：每条 **8 字节对齐**——紧凑排布产生奇地址 @str 指针，
+            // Plan A「指针恒偶」装箱判定破产（isTaggedInt 误判 → println
+            // 打印指针十进制）。偏移累加与实际写入两处口径必须一致。
             recs.add("@str." + this.toStr(i) + "|" + this.toStr(rdataOff) + "|2|0|3")
-            rdataOff = rdataOff + this.unquote(parts[i]).length + 1  // 内容 + NUL 终止符
+            val plen: Int = this.unquote(parts[i]).length + 1  // 内容 + NUL 终止符
+            var adv: Int = plen
+            if (adv % 8 != 0) { adv = adv + (8 - adv % 8) }
+            rdataOff = rdataOff + adv
             i = i + 1
         }
 
@@ -1397,7 +1403,16 @@ class PhotonObjectWriter {
         var i: Int = 0
         while (i < parts.size) {
             // `unquote`：.rdata 里放不带引号的载荷（与 `buildSymbols` 的偏移口径一致）
-            val one: String = this.asciiToHex(this.unquote(parts[i]), -1) + "00"  // NUL 终止
+            // P365：每条 8 字节对齐（与 buildSymbols 的偏移累加口径一致）
+            val payload: String = this.unquote(parts[i])
+            var one: String = this.asciiToHex(payload, -1) + "00"  // NUL 终止
+            var pad: Int = 8 - ((payload.length + 1) % 8)
+            if (pad == 8) { pad = 0 }
+            var pi: Int = 0
+            while (pi < pad) {
+                one = one + "00"
+                pi = pi + 1
+            }
             outParts.add(one)
             i = i + 1
             if (i % 50 == 0) {
