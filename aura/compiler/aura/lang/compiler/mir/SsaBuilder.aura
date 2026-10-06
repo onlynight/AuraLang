@@ -1958,7 +1958,29 @@ class SsaBuilder {
         // 映射运算符
         val mirOp: String = this.mapBinaryOp(op)
 
-        return this.program.addValue(mirOp, typeId, args, "", this.curBlock)
+        var typeId2: Int = typeId
+        // ── Add 的 String 定型（P388，源头版）──
+        //
+        // HIR 对二元节点也常不带类型（`src.tyOf` 空串）⇒ Add 值落 Basic ⇒
+        // 后端按整数加法发射。ISel 的操作数嗅探（P293）本可兜底，但 phi 的
+        // 类型同样会在 Lowering 中丢失 ⇒ 嗅探失手（实测 escapeConstValue 的
+        // `out = out + bs + "n"` 循环被编成指针加法 → strlen(垃圾指针) 崩，
+        // fib28.auc 装载期，2026-10-06）。此处直接按操作数定型 Add：
+        // 任一操作数为 String 且另一侧不是「非串整数字面量」⇒ String。
+        // （`count + 1` 的 P293 反向规则原样保留：整型常量救回整数加。）
+        if (typeId2 == this.types.fromTypeName("") && mirOp == "Add") {
+            val lt2: Int = this.program.valueOf(left).type
+            val rt2: Int = this.program.valueOf(right).type
+            val lhsStr2: Boolean = this.types.isString(lt2)
+            val rhsStr2: Boolean = this.types.isString(rt2)
+            val lhsIntConst2: Boolean = this.program.valueOf(left).op == "Const" && !lhsStr2
+            val rhsIntConst2: Boolean = this.program.valueOf(right).op == "Const" && !rhsStr2
+            if ((lhsStr2 && !rhsIntConst2) || (rhsStr2 && !lhsIntConst2)) {
+                typeId2 = this.types.fromTypeName("String")
+            }
+        }
+
+        return this.program.addValue(mirOp, typeId2, args, "", this.curBlock)
     }
 
     /// 构建一元运算。
@@ -2175,6 +2197,24 @@ class SsaBuilder {
         //   「裸名 + 接收者类」三种形态，见其说明。）
         if (src.tyOf(id) == "" && this.isBoolExpr(src, id)) {
             typeId = this.types.fromTypeName("Boolean")
+        }
+        // ── String 返回类型定型（P387，与 Boolean 特例同型）──
+        //
+        // HIR 把 HirCall 的 type 一律写空串 ⇒ 调用值类型退化为 `Basic` ⇒
+        // 后端 `emitArith` 的「String + String → strcat」判定（含操作数兜底）
+        // 双双失手：`toStrAny(a) + toStrAny(b)` 这类声明 String 返回值的拼接
+        // 被编成**整数指针加法**，strcat 收到两指针之和 → strlen 崩（实测
+        // Photon VM 宿主 helloworld 首个串拼接 0xC0000005，2026-10-06）。
+        // 仅认 String：指针宽度语义真正有差异的只有它（`+` 必须是 strcat）；
+        // 整数/浮点/指针与 Basic 同宽，定型可能改变指令选择（P293 反向风险），
+        // 一律维持 Basic 不动。查表用**裸方法名**（methodRetTypes 以声明名
+        // 登记，仅覆盖 class/struct/object 方法——自由函数不入表，维持现状）；
+        // 歧义/未命中回落 `""` → Basic（uniqueMethodReturnType 既有语义）。
+        if (typeId == this.types.fromTypeName("") && bareName != "") {
+            val retTy: String = this.uniqueMethodReturnType(bareName)
+            if (retTy == "String") {
+                typeId = this.types.fromTypeName("String")
+            }
         }
         // 溶解对象 getter 自愈（见 `ensureSingletonGetter`）：调用点解析出
         // `X_getInstance` 而 X 未登记时，就地补登记 + 合成 getter —— 漏了就是

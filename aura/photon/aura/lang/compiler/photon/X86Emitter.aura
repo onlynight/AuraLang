@@ -60,6 +60,9 @@ class X86Emitter {
     /// 主循环用的下标（对应 `funcNames` / `funcIdRange`）。
     private var fnIdx: Int = 0
 
+    /// P388 诊断：当前发射函数名（函数边界处捕获）。
+    private var curEmitFuncName: String = ""
+
     /// 字符串常量表（逗号分隔）。
     private var strConsts: String = ""
 
@@ -336,6 +339,7 @@ class X86Emitter {
                 this.curIdRange = rangeCap
                 println("[FSZ] " + toStr(this.canaryFuncIdx) + "|" + instrFunc
                         + " range=" + toStr(rangeCap) + " frame=" + toStr(frame))
+                this.curEmitFuncName = instrFunc
                 if (srParts.size % 2 == 1) { frame = frame + 8 }
                 // ⚠️ 为发射器额外分配的调用结果槽留余量（见 `extraSlotCount`）。
                 // 余量旧值「256 槽 × 8B = 2KB」**不够**：大函数（loadModule/
@@ -876,8 +880,9 @@ class X86Emitter {
             val dst: String = this.regOfNode(node)
             // 诊断：打印调用结果的落点决策（有界）。
             if (this.slotDiagCount < 200) {
-                // P386：按被调名过滤（fnIdx 对位不可靠），追踪 ln 的家与调用结果落点。
-                if (funcName == "VmOps_vmSubstr" || funcName == "__list_get") {
+                // P388：限定 escapeConstValue 内的 strcat/println——跨调用存活的落槽取证。
+                if ((funcName == "strcat" || funcName == "println")
+                        && this.curEmitFuncName == "AucLoaderUtils_escapeConstValue") {
                     this.slotDiagCount = this.slotDiagCount + 1
                     println("[CALLDST] aux=" + funcName + " nodeId=" + toStr(nodeId)
                             + " node.id=" + toStr(node.id) + " reg=[" + node.reg + "] dst=[" + dst + "]"
@@ -1245,13 +1250,28 @@ class X86Emitter {
     private var slotOvrCount: Int = 0
 
     /// 登记 nodeId → 兜底槽偏移（偏移为负；0 表示未分配）。
+    ///
+    /// ⚠️ P389：写后即读自检——List 索引写在**大 id** 下曾疑失效（写后读回 0
+    /// ⇒ slotForNode 每次分配新槽 ⇒ 写 S1 读 S2 ⇒ 跨调用值腐坏）。命中即打印
+    /// （有界），并回退到**逐位重写**一次。
     private fun setNodeSlot(id: Int, off: Int): Unit {
         if (id < 0) { return }
         while (this.nodeStackDisp.size <= id) {
             this.nodeStackDisp.add(0)
         }
         this.nodeStackDisp[id] = off
+        if (this.nodeStackDisp[id] != off) {
+            if (this.nssFailCount < 20) {
+                this.nssFailCount = this.nssFailCount + 1
+                println("[NSS-FAIL] id=" + toStr(id) + " off=" + toStr(off)
+                        + " readback=" + toStr(this.nodeStackDisp[id])
+                        + " size=" + toStr(this.nodeStackDisp.size))
+            }
+        }
     }
+
+    /// P389 诊断：setNodeSlot 写失效计数。
+    private var nssFailCount: Int = 0
 
     /// 查询 nodeId 的兜底槽偏移（未分配返回 0）。
     private fun nodeSlot(id: Int): Int {

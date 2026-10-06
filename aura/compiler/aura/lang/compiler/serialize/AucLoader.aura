@@ -222,10 +222,7 @@ class AucModule {
     /// 从文件加载 .auc 模块。
     fun loadModule(path: String): AucModule {
         val mod: AucModule = AucModule()
-        println("A")   // AucModule created
-
         val reader: AucReader = AucReader()
-        println("B")   // AucReader created
         if (!reader.readFromFile(path)) {
             mod.error = "cannot read file: " + path
             return mod
@@ -265,6 +262,10 @@ class AucModule {
         // 用 `as Int` 而不是 `.toInt()`（Long.toInt() 在自举 AOT 下同 `Int.toLong()` 一样不可靠）
         // ⚠️ P253：Long↔Int 截断在 photon AOT 下不可信（readU32 的 `as Long`
         // 扩展同样存疑），凡 Int 消费一律 readU32Int 直出。
+        // 5. 常量池（不含标签，VM 从操作码推断类型）
+        // 用 `as Int` 而不是 `.toInt()`（Long.toInt() 在自举 AOT 下同 `Int.toLong()` 一样不可靠）
+        // ⚠️ P253：Long↔Int 截断在 photon AOT 下不可信（readU32 的 `as Long`
+        // 扩展同样存疑），凡 Int 消费一律 readU32Int 直出。
         mod.constsCount = reader.readU32Int()
         // 常量**类型标签**要单独记录：`.auc` 里 `LoadConst` 是类型无关的单操作码
         //（整数/字符串/布尔共用 0），而文本字节码的 `CONST_INT`/`CONST_STRING`
@@ -281,22 +282,16 @@ class AucModule {
             val tag: Int = reader.readByte()
             constTags.add(tag)
             val value: String = readConstValue(reader, tag)
-            if (mod.constsCount <= 12) {
-            }
-            poolAcc = poolAcc + escapeConstValue(value)
+            val esc: String = escapeConstValue(value)
+            poolAcc = poolAcc + esc
             poolAcc = poolAcc + "\n"
             // P360：常量循环本身是可靠循环（[LP] 实证 offset/count 推进正确）——
             // 转义值直接入 constLines，消灭一切事后扫描（扫描器循环计数器
             // 陈旧读是 §10.89 总根，loadModule/Vm 两侧扫描全部漂移实证）。
-            mod.constLines.add(escapeConstValue(value))
+            mod.constLines.add(esc)
             ci = ci + 1
         }
         mod.constPool = poolAcc
-        // P374：解码侧 numOpCodes 本体诊断
-        println("[NC] n=" + toStr(mod.numOpCodes.size())
-            + " [0]=" + toStr(mod.numOpCodes.get(0))
-            + " [1]=" + toStr(mod.numOpCodes.get(1))
-            + " [30]=" + toStr(mod.numOpCodes.get(30)))
         // P358：池本体测量
         var nlCount: Int = 0
         var mi: Int = 0
@@ -624,15 +619,29 @@ class AucModule {
         if (!hasSpecial) {
             return v
         }
+        // P389：单字符 "
+" / "\" 快速路径——直接返回预转义常量，
+        // 不进 concat 循环（.auc 常量池里含特殊字符的值几乎全是这三种）。
+        if (v.length == 1) {
+            if (v.charCodeAt(0) == 10) { return "
+" }
+            if (v.charCodeAt(0) == 92) { return "\\" }
+        }
+        // P388：改用**字面量反斜杠**——String.fromCharCode(92) 的调用窗在
+        // fib28.auc 装载期崩（escape 体从未被 banner 走过，此处首次执行）。
+        // 语义等价：92 = '\'。
+        val bs: String = "\\"
         var out: String = ""
         var i: Int = 0
         val n: Int = v.length
         while (i < n) {
             val c: Int = v.charCodeAt(i)
             if (c == 92) {
-                out = out + String.fromCharCode(92) + String.fromCharCode(92)
+                out = out + bs
+                out = out + bs
             } else if (c == 10) {
-                out = out + String.fromCharCode(92) + "n"
+                out = out + bs
+                out = out + "n"
             } else {
                 out = out + String.fromCharCode(c)
             }

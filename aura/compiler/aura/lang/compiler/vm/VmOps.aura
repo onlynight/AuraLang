@@ -256,7 +256,10 @@ object VmOps {
         if (typeof(v) == "Boolean") {
             return v as Boolean
         }
-        val s: String = toStr(v)
+        // P387：必须走 toStrAny——AOT 下 toStr 是纯整数实现，字符串（vmBool
+        // 的 "true"/"false"）会被打成指针值十进制 ⇒ "false" 落到兜底
+        // `return true` ⇒ 一切字符串条件恒真（实测 `10 < 5` 走 then 分支）。
+        val s: String = toStrAny(v)
         if (s == "true") {
             return true
         }
@@ -327,7 +330,7 @@ object VmOps {
             if (bb == 0) {
                 return 0
             }
-            return intOf(a) / bb
+            return toAny(intOf(a) / bb)
         }
     }
 
@@ -344,7 +347,7 @@ object VmOps {
             if (bb == 0) {
                 return 0
             }
-            return intOf(a) % bb
+            return toAny(intOf(a) % bb)
         }
     }
 
@@ -353,7 +356,7 @@ object VmOps {
         if (isFloat(a)) {
             return -parseFloat(toStr(a))
         } else {
-            return -intOf(a)
+            return toAny(-intOf(a))
         }
     }
 
@@ -862,12 +865,20 @@ object VmOps {
     ///   * 函数名（Aura 前端生成的文本字节码）；
     ///   * **十进制序号**（`.auc` 二进制里 `CALL` 的操作数是函数下标），
     ///     按函数表**行序**（0 起）解析。
+    /// 在函数表中查找函数入口偏移（未找到返回 0）。
+    ///
+    /// 表格式：每行 `name|offset|paramCount`，`\n` 分隔。
+    ///
+    /// ⚠️ P388：**纯字符扫描，不经 split/ArrayList/vmSubstr**——AOT 下
+    /// `ArrayList<String>` 的 add/size/get 相互不一致（实测 split("main|0|0")
+    /// 返回 size=3 而 get(1)="0|0"，即第二管道未切分的产物），致使
+    /// fibonacci 的偏移被解析成 toI32("868|1")=8681（toI32Raw 跳过非数字
+    /// 继续累加）→ ip 跑飞越界 → VM 静默停机（rc=0 无输出，2026-10-06）。
+    /// 三个字段全部用下标扫描切分，`indexOf` 家族的既有可靠路径。
     fun findFuncOffset(funcTable: String, funcName: String): Int {
         if (funcTable == null || funcTable == "" || funcName == "") {
             return 0
         }
-        val numeric: Boolean = isAllDigits(funcName)
-        val wantIdx: Int = toI32(funcName)
         var row: Int = 0
         var result: Int = 0
         var len: Int = funcTable.length
@@ -877,16 +888,36 @@ object VmOps {
             while (end < len && funcTable.charCodeAt(end) != 10) {
                 end = end + 1
             }
-            val line: String = vmSubstr(funcTable, start, end - start)
-            if (line != "") {
-                val parts: List<String> = split(line, "|")
-                if (parts.size >= 2) {
-                    if (numeric) {
-                        if (row == wantIdx) {
-                            return toI32(parts.get(1))
+            if (end > start) {
+                // 行内三段：name = [start, p1)，off = [p1+1, p2)，pc = [p2+1, end)
+                var p1: Int = start
+                while (p1 < end && funcTable.charCodeAt(p1) != 124) {
+                    p1 = p1 + 1
+                }
+                if (p1 < end) {
+                    var p2: Int = p1 + 1
+                    while (p2 < end && funcTable.charCodeAt(p2) != 124) {
+                        p2 = p2 + 1
+                    }
+                    // name 精确匹配：长度相等且逐字符一致
+                    if (p1 - start == funcName.length) {
+                        var match: Boolean = true
+                        var ci: Int = 0
+                        while (ci < funcName.length) {
+                            if (funcTable.charCodeAt(start + ci) != funcName.charCodeAt(ci)) {
+                                match = false
+                                ci = funcName.length
+                            }
+                            ci = ci + 1
                         }
-                    } else if (parts.get(0) == funcName) {
-                        result = toI32(parts.get(1))
+                        if (match) {
+                            if (p2 < end) {
+                                result = toI32Range(funcTable, p1 + 1, p2)
+                            } else {
+                                result = toI32Range(funcTable, p1 + 1, end)
+                            }
+                            return result
+                        }
                     }
                 }
                 row = row + 1
@@ -897,13 +928,11 @@ object VmOps {
     }
 
     /// 在函数表中查找函数参数个数（语义同 [`findFuncOffset`]）。
+    /// P388：与 findFuncOffset 同款纯字符扫描（split/ArrayList 不可靠家族回避）。
     fun findFuncParamCount(funcTable: String, funcName: String): Int {
         if (funcTable == null || funcTable == "" || funcName == "") {
             return -1
         }
-        val numeric: Boolean = isAllDigits(funcName)
-        val wantIdx: Int = toI32(funcName)
-        var row: Int = 0
         var result: Int = -1
         var len: Int = funcTable.length
         var start: Int = 0
@@ -912,23 +941,65 @@ object VmOps {
             while (end < len && funcTable.charCodeAt(end) != 10) {
                 end = end + 1
             }
-            val line: String = vmSubstr(funcTable, start, end - start)
-            if (line != "") {
-                val parts: List<String> = split(line, "|")
-                if (parts.size >= 3) {
-                    if (numeric) {
-                        if (row == wantIdx) {
-                            return toI32(parts.get(2))
+            if (end > start) {
+                var p1: Int = start
+                while (p1 < end && funcTable.charCodeAt(p1) != 124) {
+                    p1 = p1 + 1
+                }
+                if (p1 < end) {
+                    var p2: Int = p1 + 1
+                    while (p2 < end && funcTable.charCodeAt(p2) != 124) {
+                        p2 = p2 + 1
+                    }
+                    if (p1 - start == funcName.length) {
+                        var match: Boolean = true
+                        var ci: Int = 0
+                        while (ci < funcName.length) {
+                            if (funcTable.charCodeAt(start + ci) != funcName.charCodeAt(ci)) {
+                                match = false
+                                ci = funcName.length
+                            }
+                            ci = ci + 1
                         }
-                    } else if (parts.get(0) == funcName) {
-                        result = toI32(parts.get(2))
+                        if (match) {
+                            if (p2 < end) {
+                                result = toI32Range(funcTable, p2 + 1, end)
+                            } else {
+                                result = -1
+                            }
+                            return result
+                        }
                     }
                 }
-                row = row + 1
             }
             start = end + 1
         }
         return result
+    }
+
+    /// P388：区间整数解析——`[from, to)` 内的十进制数字（非数字即停）。
+    /// 不产子串：回避 substring/vmSubstr/split 的 AOT 不可靠家族。
+    /// （对比 [`toI32Raw`]：后者跳过非数字继续累加，`"868|1"` 会被解析成 8681。）
+    fun toI32Range(text: String, from: Int, to: Int): Int {
+        var total: Int = 0
+        var i: Int = from
+        var neg: Boolean = false
+        if (i < to && text.charCodeAt(i) == 45) {
+            neg = true
+            i = i + 1
+        }
+        while (i < to) {
+            val c: Int = text.charCodeAt(i)
+            if (c < 48 || c > 57) {
+                break
+            }
+            total = total * 10 + (c - 48)
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
     }
 
     /// 按分隔符分割字符串。

@@ -3925,3 +3925,66 @@ buildNodeSpans 触达覆盖 call 实参已有（touchInstr 三层），但溢出
 仍出现两活值同槽；修复后预期拼接/循环残留与 fib28.auc 装载一并验收，
 Photon Aura VM 入榜四方基准。VmOps_replace 的 2 条未匹配边随 (a0) 标签
 质量审计顺带清零。
+
+### 10.102 会话 XVII：Photon Aura VM 正常运行达成——前端 String 定型 + 空串序列化 + 值装箱 + 函数表扫描（P387-389）（2026-10-06 续LXXXIV）
+
+**目标达成：banner（tests/helloworld.aura）.auc 全流程 PASS + fib28.auc
+端到端 rc=0（fib(28)=317811）——Photon Aura VM 首次双程序正常运行并入榜
+四方基准（fib28 中位 96.2s，all-correct，纯解释开销为 SeedVM 的 ~113×，
+性能优化留后续）。**
+
+本轮五个永久性根因修复（全部经机器码/IR 级证据定案）：
+
+1. **P387：SsaBuilder.buildCall 的 String 返回类型定型**——HIR 把 HirCall
+   的 type 一律写空串 ⇒ 调用值落 Basic ⇒ 后端「String+String→strcat」判定
+   （含操作数兜底）双双失手：`toStrAny(a)+toStrAny(b)` 被编成**整数指针
+   加法**（strcat 收到两指针之和 → strlen 崩）。仿 Boolean 特例补定型，
+   仅认 String（指针宽度语义唯一有差异的类型；整数/浮点维持 Basic，
+   P293 反向风险不碰）。恢复：name=/count=/算术段全部正确。
+2. **P388：buildBinary 的 Add 操作数定型（源头版）**——HIR 对二元节点也
+   不带类型 ⇒ 循环体 `out = out + bs + "n"` 落 Basic；Lowering 中 phi 类型
+   再丢失 ⇒ ISel 操作数嗅探失手。按「任一操作数 String 且另一侧非整型
+   字面量」定型 Add 为 String（P293 整型常量救回规则原样保留）。
+3. **P388：HatSerializer 空串字面量**——constOpName/constLiteral 对
+   `aux==""` 的兜底**先于**类型判断：String 空串字面量（`var out = ""`）
+   被序列化成 `@i32_const null` ⇒ 重解析 aux="null" 且 LIR 侧类型丢失 ⇒
+   ISel 数值路径 strToInt("null")=0 ⇒ 物化 NULL 指针 ⇒ strcat(null,…)
+   崩（fib28.auc 装载期首触）。String 判断前移 + 空串渲染 `""`。
+   ISel 的 `constVal0==""` 守卫（P227）兜住 LIR 类型丢失。
+4. **P387：div/mod/neg 裸 Int 返回装箱**——add/sub/mul 均走 toAny 装箱，
+   唯 div/mod/neg 返回裸值 ⇒ Plan A 下裸偶数 = 字符串伪指针 ⇒
+   `100/23` 的结果拼接即 strlen(4) 崩。统一 toAny。
+   **toBool 改走 toStrAny**——AOT 下 toStr 是纯整数实现，vmBool 的
+   "false" 被打成指针十进制 ⇒ 落兜底 return true ⇒ 一切字符串条件恒真
+   （实测 `10 < 5` 走 then 分支）。
+5. **P388：funcTable 查找纯字符扫描**——`ArrayList<String>` 的
+   split/add/size/get 在 AOT 下相互不一致（实测 split("main|0|0") 返回
+   size=3 而 get(1)="0|0"）⇒ fibonacci 偏移被解析成 toI32("868|1")=8681
+   （toI32Raw 跳过非数字继续累加）→ ip 跑飞越界 → VM 静默停机（rc=0）。
+   findFuncOffset/findFuncParamCount 改逐字符三段切分（name|off|pc），
+   新增 toI32Range（区间内非数字即停）。fibonacci(10)=55、
+   factorial(10)=3628800 恢复。
+
+**深挖记录（未定案，下阶段输入）**：干净（探针全无）构建装载 fib28.auc
+仍偶发 SIGSEGV，崩点随探针/布局漂移。自研调试器（DEBUG_ONLY + RBP 链
+行走，[rbp+0x40] 返回地址——7 个 callee-saved push 之后）捕获：崩点
+EXE+0x332a8 ≈ Vm_init 的 HashMap 字段初始化链（field[41]/[42] ←
+HashMap__new0），READ 目标 **-1**，RCX=0xd0（小整数疑似泄漏成指针）。
+运行期证据：escapeConstValue 循环内的 println/[M] 探针承重（移除即崩、
+纯读不承重、静默门控不承重——**执行的分配改变堆布局**），指向堆元数据
+腐坏家族（与 §10.101 遗留的「拼接第二操作数为空」同源）。本轮以
+escape 快速路径（单字符 \n / \ 直接返回预转义常量，不经 concat 循环）
++ concat 拆分覆盖当前全部工作负载；堆/分配链的布局敏感腐坏（P390）留待
+RA/发射器专项。
+
+**§10.94 基准终版（当前驱动，5 轮中位，fresh 进程）**：
+
+| 执行链 | fib(28) 中位 | 相对 LLVM | loop 25M | Photon Aura VM |
+|---|---|---|---|---|
+| LLVM IR AOT | 7.9ms | 1× | 59.6ms | — |
+| Photon AOT | 11.2ms | 1.42× | 63.7ms（1.07×） | — |
+| Seed VM | 852.8ms | 108× | 14631.8ms | — |
+| **Photon Aura VM** | **96240ms，all-correct ✓** | — | 未测 | **首次入榜** |
+
+（Photon AOT 本轮 Fib 1.42× 较上轮 1.21× 略退——本轮驱动含全部定型/装箱
+修复，先求正确；loop 仍 1.07×。）

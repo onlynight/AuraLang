@@ -254,6 +254,9 @@ class InstructionSelector {
     /// P386 诊断：vmSubstr 调用实参追踪（前 40 个）。AURA_PHI_DIAG=1 时输出。
     private var diagCallArgCnt: Int = 0
 
+    /// P387 诊断：Add 类型判定追踪（前 60 个）。AURA_PHI_DIAG=1 时输出。
+    private var diagAddCnt: Int = 0
+
     /// 每块的传递前驱闭包（位集，wordsPer * slots 个 Int；见 pass1.5）。
     private var predClosure: List<Int> = arrayListOf<Int>()
     private var predClosureWords: Int = 0
@@ -2125,6 +2128,16 @@ class InstructionSelector {
         // **任一操作数为整数 Const ⇒ 强制整数加**（Aura 源码拼接一律先
         // toStr，`str + Int常量` 形态不存在于自举代码）。
         var addIsStr: Boolean = this.types.isString(val.type)
+        if (this.phiDiagOn && this.diagAddCnt < 6000 && val.op == "Add") {
+            this.diagAddCnt = this.diagAddCnt + 1
+            val dv0: LirValue = this.lir.valueOf(val.args[0])
+            val dv1: LirValue = this.lir.valueOf(val.args[1])
+            println("[ADDSEL] fn=" + this.funcName + " ty=" + MachineDagUtils.toStr(val.type)
+                    + "=[" + this.types.typeNameOf(val.type) + "]"
+                    + " lhs=" + MachineDagUtils.toStr(dv0.type) + "=[" + this.types.typeNameOf(dv0.type) + "]"
+                    + " rhs=" + MachineDagUtils.toStr(dv1.type) + "=[" + this.types.typeNameOf(dv1.type) + "]"
+                    + " isStr=" + MachineDagUtils.toStr(if (addIsStr) 1 else 0))
+        }
         if (!addIsStr && this.lir != null && val.args.size >= 2) {
             val lhsV: LirValue = this.lir.valueOf(lhs)
             val rhsV: LirValue = this.lir.valueOf(rhs)
