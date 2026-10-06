@@ -328,6 +328,10 @@ class X86Emitter {
                         // ⇒ 每次 call 都被踩（实测上一版正是因此全面崩坏）。
                         var fsz: Int = 32 + (ms + 1) * 8            // RA 区底
                         var baseLocal: Int = fsz                    // 兜底槽基址
+                        // ⚠️ P296 预算加倍：funcExtraSlots 扫描对部分节点计数不足
+                        //（实测 decodeNumeric/融合循环的深槽写越界踩其他帧），
+                        // 4× 乘数 + 256 槽下限吸收漏计。
+                        ex = ex * 4 + 256
                         fsz = fsz + 16 + ex * 8                     // + 兜底槽区
                         if (fsz % 16 != 0) { fsz = fsz + (16 - fsz % 16) }
                         frame = fsz

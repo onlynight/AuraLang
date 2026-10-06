@@ -3099,3 +3099,37 @@ decodeNumeric/loadArgsFlat/fuseHotPairs 及全部未来循环一并治愈。
 
 **状态**：LOADONLY ✓ / 解码部分 ✓ / 宿主运行 exit=0 ✓（fuseGuard）/
 helloworld 打印被 flat 截断拦截（8~1194 随布局）。
+
+### 10.77 P296：解码循环 offset 推进丢操作数——嵌套 Basic @add 链降级丢失（2026-10-06 续LX）
+
+**指令级实锤**（decodeNumeric 主循环尾部，p294/p296 两个布局一致）：
+```asm
+mov $0x1 → -0x248              ; 常量 1
+mov -0x200(%rbp) → -0x250      ; offset
+add -0x248 + -0x250 → -0x250   ; offset = offset + 1   ← 只有 +1！
+```
+源码 `offset = offset + 1 + operandSize` 的 HAT：
+```
+@t17551 = @add(@codeLen, @t17550) : Basic
+@t17552 = @add(@t17549, @t17551) : Basic
+```
+**两层 @add 链，编译产物只保留第一层（offset+1），第二操作数
+@t17551（=codeLen+operandSize）被丢** → offset 每指令只 +1（应为
++1+operandSize）→ 解码循环迭代数≠指令数 → flat 截断（8/219/1194
+随布局）→ "Unknown function: p"。
+
+**系统性定性（终版）**：photon 后端（LIR→DAG 降级或 DAG 构建）对
+**嵌套 Basic 类型 @add 链**丢失操作数/整个加法节点。受害清单扩容：
+解码 offset 推进、fuse r 推进、count 计数（→strcat 型误分派，已由
+P295 ISel 守卫修复）、probe println。共性 = **Basic 类型加法链**；
+String 类型 @add（296 处）无一丢失。
+
+**已修复并保持**：substring 三缺陷重写（✓ argStrs=["println","1"] 正确）、
+ss_ovf/tf_zero 标签、constPool/funcs 赋值、ISel 整数 Const 守卫、
+fuseGuard、帧预算 4×（P296，未愈但防御性保留）。
+
+**下轮首查（真正的终局）**：LIR→DAG 降级器对嵌套 Basic @add 的处理——
+MachineDag 构建处（selectPattern/addNode）对 Value-引用-Value 链的
+节点注册；或 ISel emitAdd 对 Add-operand 的 resolveNode 递归展开。
+验证法：AURA_PHOTON_DEBUG_HIR 的 DAG dump 或最小 .aura 重构造
+（`var a = x + 1 + y` 三操作数链）对比 HAT/DAG/产物三层。
