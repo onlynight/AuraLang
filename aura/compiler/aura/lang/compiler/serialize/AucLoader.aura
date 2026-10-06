@@ -54,6 +54,10 @@ class AucModule {
     var numericMode: Boolean = false
     /// 每条指令的助记符（Aura VM 命名，经 VM 侧 `Opcodes.fromName` 数值化）。
     var numOpNames: List<String> = arrayListOf<String>()
+    /// P350：每条指令的 VM 数值 opcode（经 aucToVmOp 映射，与 numOpNames
+    /// 平行）。photon 下 fromName 的字符串比较布局敏感误配，执行流直接
+    /// 消费本表，文本名仅供诊断。
+    var numOpCodes: List<Int> = arrayListOf<Int>()
     /// 每条指令的操作数（加载期已解析：函数名/常量下标/全局行号）。
     /// ⚠️ 2026-10-06 扁平化：每指令一条**逗号串**（"a0,a1[,a2]"，空段保序），
     /// 取代每指令一个 List<String>——2MB 编译器 .auc ≈ 20 万指令 × List
@@ -95,8 +99,121 @@ class AucModule {
     }
 }
 
-/// .auc 加载器。
-object AucLoaderUtils {
+    /// .auc 加载器。
+    object AucLoaderUtils {
+
+        /// .auc 数值 opcode → VM 数值 opcode（P350：fromName 的字符串比较在
+        /// photon 下布局敏感误配——PRINT 误配成 STORE_LOCAL 之类，指令流
+        /// 整体错位。装载期直接携带数值，文本名仅供诊断）。
+        /// LoadConst（aucOp 0）按常量标签分派，由调用方特判。
+        fun aucToVmOp(aucOp: Int): Int {
+            if (aucOp == 110) { return 110 }
+            if (aucOp == 111) { return 111 }
+
+        if (aucOp == 0) { return 0 }
+        if (aucOp == 1) { return 10 }
+        if (aucOp == 2) { return 11 }
+        if (aucOp == 3) { return 20 }
+        if (aucOp == 4) { return 21 }
+        if (aucOp == 5) { return 22 }
+        if (aucOp == 6) { return 23 }
+        if (aucOp == 7) { return 24 }
+        if (aucOp == 8) { return 25 }
+        if (aucOp == 9) { return 42 }
+        if (aucOp == 10) { return 40 }
+        if (aucOp == 11) { return 41 }
+        if (aucOp == 12) { return 43 }
+        if (aucOp == 13) { return 44 }
+        if (aucOp == 14) { return 45 }
+        if (aucOp == 15) { return 46 }
+        if (aucOp == 16) { return 47 }
+        if (aucOp == 17) { return 30 }
+        if (aucOp == 18) { return 31 }
+        if (aucOp == 19) { return 32 }
+        if (aucOp == 20) { return 33 }
+        if (aucOp == 21) { return 34 }
+        if (aucOp == 22) { return 35 }
+        if (aucOp == 23) { return 50 }
+        if (aucOp == 24) { return 52 }
+        if (aucOp == 25) { return 51 }
+        if (aucOp == 26) { return 60 }
+        if (aucOp == 27) { return 63 }
+        if (aucOp == 28) { return 65 }
+        if (aucOp == 29) { return 66 }
+        if (aucOp == 30) { return 70 }
+        if (aucOp == 31) { return 73 }
+        if (aucOp == 32) { return 71 }
+        if (aucOp == 33) { return 72 }
+        if (aucOp == 34) { return 110 }
+        if (aucOp == 35) { return 111 }
+        if (aucOp == 36) { return 64 }
+        if (aucOp == 37) { return 53 }
+        if (aucOp == 38) { return 74 }
+        if (aucOp == 39) { return 75 }
+        if (aucOp == 40) { return 61 }
+        if (aucOp == 41) { return 76 }
+        if (aucOp == 42) { return 80 }
+        if (aucOp == 43) { return 81 }
+        if (aucOp == 44) { return 82 }
+        if (aucOp == 45) { return 83 }
+        if (aucOp == 46) { return 84 }
+        if (aucOp == 47) { return 85 }
+        if (aucOp == 48) { return 86 }
+        if (aucOp == 49) { return 87 }
+        if (aucOp == 53) { return 114 }
+        if (aucOp == 54) { return 112 }
+        if (aucOp == 55) { return 113 }
+        if (aucOp == 56) { return 115 }
+        if (aucOp == 57) { return 116 }
+        if (aucOp == 58) { return 117 }
+        if (aucOp == 59) { return 120 }
+        if (aucOp == 60) { return 121 }
+        if (aucOp == 61) { return 130 }
+        if (aucOp == 62) { return 131 }
+        if (aucOp == 63) { return 132 }
+        if (aucOp == 64) { return 133 }
+        if (aucOp == 65) { return 134 }
+        if (aucOp == 70) { return 67 }
+        if (aucOp == 71) { return 68 }
+        if (aucOp == 72) { return 91 }
+        if (aucOp == 73) { return 92 }
+        if (aucOp == 74) { return 200 }
+        if (aucOp == 75) { return 201 }
+        if (aucOp == 76) { return 202 }
+        if (aucOp == 77) { return 69 }
+        if (aucOp == 78) { return 62 }
+        if (aucOp == 80) { return 100 }
+        if (aucOp == 81) { return 101 }
+        if (aucOp == 82) { return 122 }
+        if (aucOp == 83) { return 123 }
+        if (aucOp == 84) { return 140 }
+        if (aucOp == 85) { return 141 }
+        if (aucOp == 86) { return 142 }
+        if (aucOp == 87) { return 143 }
+        if (aucOp == 88) { return 144 }
+        if (aucOp == 89) { return 150 }
+        if (aucOp == 90) { return 151 }
+        if (aucOp == 91) { return 152 }
+        if (aucOp == 92) { return 153 }
+        if (aucOp == 93) { return 170 }
+        if (aucOp == 94) { return 171 }
+        if (aucOp == 95) { return 172 }
+        if (aucOp == 96) { return 173 }
+        if (aucOp == 97) { return 174 }
+        if (aucOp == 98) { return 180 }
+        if (aucOp == 99) { return 181 }
+        if (aucOp == 100) { return 182 }
+        if (aucOp == 101) { return 183 }
+        if (aucOp == 102) { return 184 }
+        if (aucOp == 103) { return 160 }
+        if (aucOp == 104) { return 161 }
+        if (aucOp == 105) { return 162 }
+        if (aucOp == 106) { return 190 }
+        if (aucOp == 107) { return 191 }
+        if (aucOp == 108) { return 192 }
+        if (aucOp == 109) { return 193 }
+            return -1
+        }
 
     /// 从文件加载 .auc 模块。
     fun loadModule(path: String): AucModule {
@@ -149,6 +266,9 @@ object AucLoaderUtils {
         //（整数/字符串/布尔共用 0），而文本字节码的 `CONST_INT`/`CONST_STRING`
         // 是有类型的 —— 加载期按标签把它翻译成对应的类型化助记符。
         val constTags: List<Int> = arrayListOf<Int>()
+        // P354：池串改局部累加——mod.constPool 字段读拼接链的 field_get
+        // 调用窗会返回陈旧池（条目漂移）。局部槽累加 + 循环后一次赋字段。
+        var poolAcc: String = ""
         var ci: Int = 0
         while (ci < mod.constsCount) {
             val tag: Int = reader.readByte()
@@ -157,13 +277,14 @@ object AucLoaderUtils {
             if (mod.constsCount <= 12) {
             }
             // P340：嵌套拼接链（a + "\n" + b）在 photon 下偶发丢第二操作数
-            //（§10.77 家族）——摊平为两条双操作数语句，分隔符不再丢。
+            //（§10.77 家族）——摊平为两条双操作数语句；P354 改局部累加。
             if (ci > 0) {
-                mod.constPool = mod.constPool + "\n"
+                poolAcc = poolAcc + "\n"
             }
-            mod.constPool = mod.constPool + escapeConstValue(value)
+            poolAcc = poolAcc + escapeConstValue(value)
             ci = ci + 1
         }
+        mod.constPool = poolAcc
 
         // 6. Native 函数（布局对齐 Rust `to_bytes`）：
         //    write_str(name) + u16 param_count + u8 ffi_abi
@@ -426,17 +547,19 @@ object AucLoaderUtils {
         probeL.add("AA")
         probeL.add("BB")
         // 函数表：起始行 = 指令下标（无数值注释占位行）
-        // P340：多操作数拼接链摊平（同 constPool 修复）。
+        // P340：多操作数拼接链摊平（同 constPool 修复）；P354 局部累加。
+        var ftAcc: String = ""
         var fi4: Int = 0
         while (fi4 < mod.funcsCount) {
-            mod.funcTable = mod.funcTable + funcNames.get(fi4)
-            mod.funcTable = mod.funcTable + "|"
-            mod.funcTable = mod.funcTable + toStr(startLines.get(fi4))
-            mod.funcTable = mod.funcTable + "|"
-            mod.funcTable = mod.funcTable + toStr(funcParams.get(fi4))
-            mod.funcTable = mod.funcTable + "\n"
+            ftAcc = ftAcc + funcNames.get(fi4)
+            ftAcc = ftAcc + "|"
+            ftAcc = ftAcc + toStr(startLines.get(fi4))
+            ftAcc = ftAcc + "|"
+            ftAcc = ftAcc + toStr(funcParams.get(fi4))
+            ftAcc = ftAcc + "\n"
             fi4 = fi4 + 1
         }
+        mod.funcTable = ftAcc
 
         reader.dispose()
         AucLoaderUtils.lastLoaded = mod
@@ -594,16 +717,11 @@ object AucLoaderUtils {
             // 串长实际 < 65536，读两个 u16 与写端 u32 字节序兼容。
             val lenLo: Int = reader.readU16()
             val lenHi: Int = reader.readU16()
-            var i: Int = 0
             val len: Int = lenLo + lenHi * 65536
-            var result: String = ""
-            while (i < len) {
-                val c: Int = reader.readByte()
-                if (c < 0) { break }
-                result = result + String.fromCharCode(c)
-                i = i + 1
-            }
-            return result
+            // P356：逐字节 while 的 `i = i + 1` 不推进（循环推进家族）→
+            // 每串读到 EOF → 常量条目=池后缀（[9len]=445 实证）。复用
+            // AucReader.readStrFrom 递归（funcNames 解码同款，已验证）。
+            return reader.readStrN(len)
         } else if (tag == 3) {  // CONST_BOOL
             val v: Int = reader.readByte()
             return toStr(v)
@@ -750,6 +868,11 @@ object AucLoaderUtils {
                 // LoadConst：助记符由常量标签决定
                 val idx: Int = reader.readU16()
                 mod.numOpNames.add(constMnemonic(constTags, idx))
+                // P350：LoadConst 按常量标签分派数值 opcode
+                val t0: Int = if (idx >= 0 && idx < constTags.size()) constTags.get(idx) else 2
+                var opc0: Int = 7
+                if (t0 == 0) { opc0 = 5 } else if (t0 == 1) { opc0 = 6 } else if (t0 == 3) { opc0 = 8 } else if (t0 == 4) { opc0 = 9 }
+                mod.numOpCodes.add(opc0)
                 mod.numArgsFlat.add(toStr(idx))
                 count = count + 1
                 var adv: Int = 1 + operandSize
@@ -760,6 +883,7 @@ object AucLoaderUtils {
                 val target: Int = reader.readI32()
                 val li: Int = instrIndexAt(reader, startPos, target, codeLen)
                 mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 mod.numArgsFlat.add(toStr(baseLine + li))
                 count = count + 1
                 var adv: Int = 1 + operandSize
@@ -770,6 +894,7 @@ object AucLoaderUtils {
                 val fidx: Int = reader.readU16()
                 val n0: String = nameAt(funcNames, fidx)
                 mod.numOpNames.add("CALL")
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 // P340：三操作数拼接链摊平（丢第二操作数家族）
                 val a26: String = n0 + ","
                 mod.numArgsFlat.add(a26 + toStr(paramAt(funcParams, fidx)))
@@ -783,6 +908,7 @@ object AucLoaderUtils {
                 var n0: String = nameAt(nativeNames, idx)
                 if (n0 == "") { n0 = toStr(idx) }
                 mod.numOpNames.add("CALL_NATIVE_ARGS")
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 val a27: String = n0 + ","
                 mod.numArgsFlat.add(a27 + toStr(paramAt(nativeParams, idx)))
                 count = count + 1
@@ -796,6 +922,7 @@ object AucLoaderUtils {
                 var n0: String = nameAt(nativeNames, idx)
                 if (n0 == "") { n0 = toStr(idx) }
                 mod.numOpNames.add("CALL_NATIVE_ARGS")
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 val a78: String = n0 + ","
                 mod.numArgsFlat.add(a78 + toStr(argc))
                 count = count + 1
@@ -806,6 +933,7 @@ object AucLoaderUtils {
                 // NewObject(类 ID) → 类名（类表下标即 ID，与 Rust class_id_map 一致）
                 val cid: Int = reader.readU16()
                 mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 mod.numArgsFlat.add(classNameAt(classNames, cid))
                 count = count + 1
                 var adv: Int = 1 + operandSize
@@ -818,6 +946,7 @@ object AucLoaderUtils {
                 var a0: String = toStr(h)
                 if (fname != "") { a0 = fname }
                 mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 mod.numArgsFlat.add(a0)
                 count = count + 1
                 var adv: Int = 1 + operandSize
@@ -831,6 +960,7 @@ object AucLoaderUtils {
                     a0 = slotNames.get(slot)
                 }
                 mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 mod.numArgsFlat.add(a0)
                 count = count + 1
                 var adv: Int = 1 + operandSize
@@ -841,6 +971,7 @@ object AucLoaderUtils {
                 val modIdx: Int = reader.readU16()
                 val symIdx: Int = reader.readU16()
                 mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 val a71: String = toStr(modIdx) + ","
                 mod.numArgsFlat.add(a71 + toStr(symIdx))
                 count = count + 1
@@ -853,6 +984,7 @@ object AucLoaderUtils {
                 var a0: String = nameAt(funcNames, fidx)
                 if (a0 == "") { a0 = toStr(fidx) }
                 mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 mod.numArgsFlat.add(a0)
                 count = count + 1
                 var adv: Int = 1 + operandSize
@@ -864,6 +996,7 @@ object AucLoaderUtils {
                 var a0: String = nameAt(funcNames, fidx)
                 if (a0 == "") { a0 = toStr(fidx) }
                 mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 mod.numArgsFlat.add(a0)
                 count = count + 1
                 var adv: Int = 1 + operandSize
@@ -873,6 +1006,7 @@ object AucLoaderUtils {
                 // InstanceOf/CheckCast(类 ID) → 类名
                 val cid: Int = reader.readU16()
                 mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 mod.numArgsFlat.add(classNameAt(classNames, cid))
                 count = count + 1
                 var adv: Int = 1 + operandSize
@@ -890,6 +1024,7 @@ object AucLoaderUtils {
                     catchName = classNameAt(classNames, catchId)
                 }
                 mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 val a82a: String = toStr(baseLine + li) + ","
                 val a82b: String = a82a + toStr(slot) + ","
                 mod.numArgsFlat.add(a82b + catchName)
@@ -900,6 +1035,7 @@ object AucLoaderUtils {
             } else if (operandSize == 2) {
                 val v: Int = reader.readU16()
                 mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 mod.numArgsFlat.add(toStr(v))
                 count = count + 1
                 var adv: Int = 1 + operandSize
@@ -909,6 +1045,7 @@ object AucLoaderUtils {
                 val v0: Int = reader.readU16()
                 val v1: Int = reader.readU16()
                 mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
                 val a4a: String = toStr(v0) + ","
                 mod.numArgsFlat.add(a4a + toStr(v1))
                 count = count + 1
@@ -923,6 +1060,7 @@ object AucLoaderUtils {
             // 之前的陈旧 count/offset 写回循环 phi 家槽（实测 count 每逢本臂
             // 回滚到 1，decoded 恒 1/2）。
             mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
             mod.numArgsFlat.add("")
             count = count + 1
             // 对齐函数边界（防操作数宽度判断漂移）

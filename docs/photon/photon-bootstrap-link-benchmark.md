@@ -3482,3 +3482,46 @@ helloworld 打印待执行期实参解析修复。
 strcat 实参，值模型修复后需重查）②Phase C-F 的计算值（100/23 等为 [LC]
 探针 chunk 内容，非真实计算输出）③尾部 SIGSEGV ④getFieldAt 诊断路径
 （[LC] 探针误导，真实常量走 constLines ✓）。
+
+### 10.89 会话 V：执行链三连修——数值 opcode、argIntOf 快路径、值模型后真字符串打印；总根最终收敛为「循环携带计数器陈旧读」（2026-10-06 续LXX）
+
+**里程碑**：横幅 ╔══╗ 十行**真实字符串**首次打印（toStrAny 标签分派生效）；
+STORE_LOCAL 槽号 1-6 全部正确（argIntOf 快路径修复后）。
+
+**本段四项修复**：
+
+1. **数值 opcode 直通（P350）**：fromName 的字符串比较在 photon 下布局敏感
+   误配（PRINT→STORE_LOCAL 之类，指令流整体错位）。AucModule 新增
+   `numOpCodes`（aucToVmOp 132 常量映射，LoadConst 按标签分派 5-9），
+   decodeNumeric 16 臂同步填充，loadPredecoded 直接消费——文本名仅供诊断。
+
+2. **argIntOf 快路径哨兵误通过（P352，LOAD_LOCAL/STORE_LOCAL 空值真凶）**：
+   arg0Ints 未填充（P271）时空表 OOB 读经 __list_get 的 null 守卫**返回 0**，
+   `0 != argNoneMark` 误通过 → 所有指令参数恒 0（STORE 槽号、JUMP 目标）。
+   修复：快路径先查表长。修复后 [SL] slot=1..6 递增 ✓。
+
+3. **Opcodes.X 常量字面量化（P348）**：dispatch 的单例字段读布局敏感
+   （132 常量按名字长度降序 sed 替换）。
+
+4. **池/函数表局部累加（P354）+ readConstValue 递归化（P356→readStrN）**。
+
+**总根最终收敛（本轮最重要的定性）**：**简单 while 循环的循环携带计数器在
+循环体内被陈旧读**。直接证据：常量池构建循环 `if (ci > 0) poolAcc += "\n"`
+的 ci 读到 stale 0 → 分隔符整段跳过 → 池条目黏连（[CL2] [9len]=445，
+"Aura"+后续条目内容）。同族实例：decodeNumeric count（§10.87 decoded 恒 1/2）、
+readConstValue 的 i（读穿到 EOF）、putSlot 的 filled、fuseHotPairs 的 r、
+arg0IntOf 的 OOB 读。**逐点修症状不可收敛已被 5 个会话证实——修复 =
+ISel 的跨块 liveness/phi web（§10.41 立项的 RA 工程），或 SsaBuilder 的
+循环变量规范化。**
+
+**排除项（有实证）**：调用窗腐坏假说——Memory.read/write 内联（P357，
+movzx/store byte 直接寻址）后 [9len]=445 无变化；__field_get/set 内联
+（P345）同理。调用窗确有小规模影响（.get→[i] 修复属实）但非条目黏连根因。
+
+**工具沉淀**：/FIXED+/STACK 重链 + obj 偏移+0x140001000 = gdb 地址断点；
+println 断点实参序列；[SL]/[CL2]/[T32]/[LP] 源级探针族。
+
+**状态（p362）**：解码 1194 ✓ / 数值 opcode ✓ / STORE_LOCAL 槽号 ✓ /
+横幅真实打印 ✓ / 常量条目黏连（ci stale read）→ 局部变量值错 →
+Phase G 后 SIGSEGV。下一步单一目标：循环携带计数器的 phi home 写/read
+正确性（SsaBuilder 循环变量规范化或 ISel liveness）。

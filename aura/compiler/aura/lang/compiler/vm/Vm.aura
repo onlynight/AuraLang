@@ -288,7 +288,7 @@ class Vm {
             // P241 窗口二分：registerAucClasses 之前
                 // P2.2c：类表 → 类继承注册表（parent_id 0 = Any；防自环）
                 this.registerAucClasses(mod.classNames, mod.classParentIds)
-                        this.loadPredecoded(mod.numOpNames, mod.numArgsFlat, mod.constPool,
+                        this.loadPredecoded(mod.numOpNames, mod.numOpCodes, mod.numArgsFlat, mod.constPool,
                 mod.funcTable, mod.exports, mod.imports)
             println("[winC2] post-loadPredecoded")
             val r: Any = this.run()
@@ -336,7 +336,7 @@ class Vm {
     /// 助记符经 `Opcodes.fromName` 数值化（加载期一次），参数为加载器已解析的
     /// 最终形态（函数名/常量下标/全局行号）；执行期零解析。
     /// `.auc` 调用约定：形参槽从 1 开始（`aucArgBase = 1`）。
-    fun loadPredecoded(opNames: List<String>, args: List<String>, consts: String,
+    fun loadPredecoded(opNames: List<String>, opCodesNum: List<Int>, args: List<String>, consts: String,
         funcs: String, exports: String, imports: String): Unit {
         this.bytecode = ""
 
@@ -364,10 +364,20 @@ class Vm {
         println("[FLAT30] [30]=[" + args.get(30) + "] [31]=[" + args.get(31) + "] [32]=[" + args.get(32) + "]")
         println("[AS] [30]=[" + this.argStrs.get(30) + "] [31]=[" + this.argStrs.get(31) + "] [32]=[" + this.argStrs.get(32) + "]")
         this.opCodes = arrayListOf<Int>()
-        var i: Int = 0
-        while (i < opNames.size()) {
-            this.opCodes.add(Opcodes.fromName(opNames.get(i)))
-            i = i + 1
+        if (opCodesNum.size() == opNames.size() && opNames.size() > 0) {
+            // P350：直接消费解码期数值 opcode（fromName 的字符串比较在 photon
+            // 下布局敏感误配——PRINT 误配成 STORE_LOCAL 之类）
+            var i2: Int = 0
+            while (i2 < opCodesNum.size()) {
+                this.opCodes.add(opCodesNum[i2])
+                i2 = i2 + 1
+            }
+        } else {
+            var i: Int = 0
+            while (i < opNames.size()) {
+                this.opCodes.add(Opcodes.fromName(opNames.get(i)))
+                i = i + 1
+            }
         }
         this.lines = arrayListOf<String>()
         this.ip = 0
@@ -525,7 +535,16 @@ class Vm {
                 this.stack.push(v)
             }
         } else if (op == 11) {
-            this.locals.putSlot(this.arg0IntOf(), this.stack.pop())
+            val slot: Int = this.arg0IntOf()
+            val sv: Any = this.stack.pop()
+            this.locals.putSlot(slot, sv)
+            // P349：局部槽诊断（前 6 次）
+            if (this.dbgLcCount < 6) {
+                this.dbgLcCount = this.dbgLcCount + 1
+                println("[SL] slot=" + toStr(slot) + " filled=" + toStr(this.locals.getSize())
+                    + " vLen=" + toStr(VmOps.toStrAny(sv).length)
+                    + " ip=" + toStr(this.ip) + " raw=[" + this.argStrOf(0) + "]")
+            }
         } else if (op == 5) {
             // 诊断（前 3 次）：常量池行是否完好（2026-10-06 装载链追踪）
             if (this.dbgLcCount < 3) {
@@ -3293,6 +3312,7 @@ class Vm {
         }
         println("[BLC-ft] names=" + toStr(this.funcNamesL.size()))
         this.constLines = arrayListOf<String>()
+        // P355：split 版在此布局下崩，回退扫描器（漂移待查池本体）
         val cp: String = this.constPool
         var cs: Int = 0
         var j: Int = 0
@@ -3307,6 +3327,11 @@ class Vm {
         if (cs < cn) {
             this.constLines.add(this.unescapeConst(VmOps.vmSubstr(cp, cs, cn - cs)))
         }
+        // P355：一次性诊断
+        println("[CL2] n=" + toStr(this.constLines.size())
+            + " [9len]=" + toStr(this.constLines.get(9).length)
+            + " [10len]=" + toStr(this.constLines.get(10).length)
+            + " [9]=[" + this.constLines.get(9) + "]")
         // ⚠️ P271：arg0Ints/arg1Ints 构建**暂时跳过**——这些 Int 值经
         // Collections_listAppend 写入列表，如果 arg0Ints/arg1Ints 的句柄
         // 与 argStrs 混叠（Vm 对象字段索引冲突），Int 写入会破坏 argStrs
@@ -3678,18 +3703,25 @@ class Vm {
     }
 
     private fun arg0IntOf(): Int {
-        val v: Int = this.arg0Ints.get(this.ip - 1)
-        if (v != this.argNoneMark) {
-            return v
+        // P352：快路径必须先查表长——arg0Ints 未填充（P271 跳过）时，
+        // 空表 OOB 读经 __list_get 的 null 守卫返回 0，哨兵比较误通过
+        // ⇒ 所有指令参数恒 0（STORE_LOCAL 槽号、JUMP 目标全错）。
+        if (this.arg0Ints.size() > this.ip - 1) {
+            val v: Int = this.arg0Ints[this.ip - 1]
+            if (v != this.argNoneMark) {
+                return v
+            }
         }
         return VmOps.toI32(this.argStrOf(0))
     }
 
     /// 第 i 条指令的 arg1 整数值（同上）。
     private fun arg1IntOf(): Int {
-        val v: Int = this.arg1Ints.get(this.ip - 1)
-        if (v != this.argNoneMark) {
-            return v
+        if (this.arg1Ints.size() > this.ip - 1) {
+            val v: Int = this.arg1Ints[this.ip - 1]
+            if (v != this.argNoneMark) {
+                return v
+            }
         }
         return VmOps.toI32(this.argStrOf(1))
     }

@@ -418,6 +418,14 @@ class AucReader {
         return readStrFrom(result + String.fromCharCode(c), remaining - 1)
     }
 
+    /// P356：读定长字符串（u32 长度前缀由调用方消费）。复用已验证的
+    /// readStrFrom 递归（readConstValue 的逐字节 while 在 photon 下
+    /// `i = i + 1` 不推进 → 常量读到 EOF，条目=池后缀）。
+    fun readStrN(len: Int): String {
+        if (len <= 0) { return "" }
+        return readStrFrom("", len)
+    }
+
     /// 跳过字节。
     fun skip(n: Long) {
         pos = pos + n

@@ -849,6 +849,14 @@ class X86Emitter {
                 this.enc.emitLabel("fset_null_" + toStr(nodeId))
                 this.enc.emitMovRI("rax", 0)
                 this.enc.emitLabel("fset_end_" + toStr(nodeId))
+            } else if (funcName == "Memory_read") {
+                // P357：movzx eax, byte [rcx]——readByte 是全二进制最热调用
+                // （每个字符/字节读取一层调用窗），布局敏感腐坏的头号源。
+                // 指令序列与 PhotonRuntime.emitMemoryRead 一致。
+                this.enc.emitMovzxRegMemByte("eax", "rcx")
+            } else if (funcName == "Memory_write") {
+                this.enc.emitMovByteMemReg("rcx", "rdx")
+                this.enc.emitXorRR("eax", "eax")
             } else if (funcName != "" && funcName != "@imm") {
                 this.enc.emitCallRel(funcName)
             }
