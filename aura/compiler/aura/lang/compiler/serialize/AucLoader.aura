@@ -741,7 +741,8 @@ object AucLoaderUtils {
                 mod.numOpNames.add(constMnemonic(constTags, idx))
                 mod.numArgsFlat.add(toStr(idx))
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (opcode == 23 || opcode == 24 || opcode == 25) {
                 // Jump/JumpIfTrue/JumpIfFalse：i32 字节偏移 → 全局行号
@@ -750,7 +751,8 @@ object AucLoaderUtils {
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numArgsFlat.add(toStr(baseLine + li))
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (opcode == 26) {
                 // CALL 函数下标 → 函数名 + 参数个数（前向引用已由两遍扫描解决）
@@ -759,7 +761,8 @@ object AucLoaderUtils {
                 mod.numOpNames.add("CALL")
                 mod.numArgsFlat.add(n0 + "," + toStr(paramAt(funcParams, fidx)))
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (opcode == 27) {
                 // CallNative: u16 idx（argc 取该原生的形参个数）
@@ -769,7 +772,8 @@ object AucLoaderUtils {
                 mod.numOpNames.add("CALL_NATIVE_ARGS")
                 mod.numArgsFlat.add(n0 + "," + toStr(paramAt(nativeParams, idx)))
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (opcode == 78) {
                 // CallNativeArgs: u16 idx + u16 argc
@@ -780,7 +784,8 @@ object AucLoaderUtils {
                 mod.numOpNames.add("CALL_NATIVE_ARGS")
                 mod.numArgsFlat.add(n0 + "," + toStr(argc))
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (opcode == 30) {
                 // NewObject(类 ID) → 类名（类表下标即 ID，与 Rust class_id_map 一致）
@@ -788,7 +793,8 @@ object AucLoaderUtils {
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numArgsFlat.add(classNameAt(classNames, cid))
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (opcode == 32 || opcode == 33) {
                 // GetField/SetField：字段名哈希（内建成员翻译回名字）
@@ -799,7 +805,8 @@ object AucLoaderUtils {
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numArgsFlat.add(a0)
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (opcode == 40) {
                 // CallMethod(vtable 槽位) → 方法名
@@ -811,7 +818,8 @@ object AucLoaderUtils {
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numArgsFlat.add(a0)
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (opcode == 71) {
                 // CallExternal: u16 mod_idx + u16 sym_idx
@@ -820,7 +828,8 @@ object AucLoaderUtils {
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numArgsFlat.add(toStr(modIdx) + "," + toStr(symIdx))
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (opcode == 70 || opcode == 77) {
                 // CallExport / CallAot：函数下标 → 函数名
@@ -830,7 +839,8 @@ object AucLoaderUtils {
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numArgsFlat.add(a0)
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (opcode == 72) {
                 // MakeClosure: 函数下标 → 函数名（捕获经 CALL 侧语义，.auc 无捕获）
@@ -840,7 +850,8 @@ object AucLoaderUtils {
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numArgsFlat.add(a0)
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (opcode == 80 || opcode == 81) {
                 // InstanceOf/CheckCast(类 ID) → 类名
@@ -848,7 +859,8 @@ object AucLoaderUtils {
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numArgsFlat.add(classNameAt(classNames, cid))
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (opcode == 82) {
                 // PushHandler: i32 目标偏移 → 行号 + u16 slot + u16 catchType(类 ID)
@@ -864,14 +876,16 @@ object AucLoaderUtils {
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numArgsFlat.add(toStr(baseLine + li) + "," + toStr(slot) + "," + catchName)
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (operandSize == 2) {
                 val v: Int = reader.readU16()
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numArgsFlat.add(toStr(v))
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             } else if (operandSize == 4) {
                 val v0: Int = reader.readU16()
@@ -879,7 +893,8 @@ object AucLoaderUtils {
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numArgsFlat.add(toStr(v0) + "," + toStr(v1))
                 count = count + 1
-                offset = offset + 1 + operandSize
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
                 continue
             }
             // operandSize == 0：无操作数（opcodeName 单点重算，无合并）

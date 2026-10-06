@@ -3133,3 +3133,34 @@ MachineDag 构建处（selectPattern/addNode）对 Value-引用-Value 链的
 节点注册；或 ISel emitAdd 对 Add-operand 的 resolveNode 递归展开。
 验证法：AURA_PHOTON_DEBUG_HIR 的 DAG dump 或最小 .aura 重构造
 （`var a = x + 1 + y` 三操作数链）对比 HAT/DAG/产物三层。
+
+### 10.78 会话收尾：四修复保持，spill-base 实验回退，交接清单（2026-10-06 续LXI）
+
+**保持的已验证修复**（P292 最小复现 x=66 ✓ + P292 宿主 argStrs 正确 ✓）：
+1. emitStringSubstring 重写（stride-8/漏 start/ss_ovf 缺失——vmSubstr 恒返
+   "p" 的根因）。
+2. emitToFloat 补 tf_zero。
+3. loadPredecoded 补 constPool/funcs 赋值（constLines/funcOffsetMap 空的
+   根因）。
+4. ISel Add 分派守卫（整数 Const 操作数强制整数加——decodeNumeric
+   count+1 → strcat 的根因）。
+5. fuseGuard（fuse 循环 r 卡死 → 64MB 耗尽崩溃）。
+6. 标签闭合审计脚本（ss_ovf/tf_zero 缺失模式，0 缺失保持）。
+
+**回退**：getSpillOffset 基址 32→80 实验（P297-298）——修复后 loadModule
+反而早期失败（err=[loadAucAndRun: ]）——**帧布局系统性缺陷随布局移动
+症状**：修一处他处现形，证实只有 RA/帧布局本体根治可解。已 git checkout
+回退，待 RA 专项统一处理。
+
+**交接清单（下轮按序）**：
+1. RA/帧布局根治：溢出槽与参数保存槽的基址重叠（getSpillOffset 32 +
+   n*8 与 prologue 参数槽 -0x30/-0x38/-0x40 冲突）+ funcExtraSlots 扫描
+   漏计（decodeNumeric 深槽写越界踩其他帧）——**需统一帧布局设计**
+   （参数槽/影子空间/RA 溢出/slotForNode/调用栈参五区隔离），并回归
+   Opcodes.buildNameMap + loader + fuse 三标本。
+2. 解码 flat-add 布局敏感丢失（8/219/1194）：opcode 分派链 asm 对照
+   operandSizeLookup 表（dump 已截断于 0x1400235b1，续 0x1400235b1 后）。
+3. 修复后回归：LOADONLY ✓ → helloworld 打印 → fib。
+
+**状态**：LOADONLY ✓ / 解码部分 ✓ / 宿主运行 exit=0 ✓（fuseGuard）/
+helloworld 被 loader flat 截断拦截（帧布局系统性缺陷）。
