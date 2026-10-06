@@ -3988,3 +3988,54 @@ RA/发射器专项。
 
 （Photon AOT 本轮 Fib 1.42× 较上轮 1.21× 略退——本轮驱动含全部定型/装箱
 修复，先求正确；loop 仍 1.07×。）
+
+### 10.103 会话 XVIII：P390 布局敏感 SIGSEGV 精确定位——GetField 索引降级 + per-function vid 撞号（2026-10-07）
+
+**观测体系升级**：①自研 Python 调试器（DEBUG_ONLY_THIS_PROCESS + RBP 链
+行走，返回地址在 [rbp+0x40]——8 push 帧布局）+ **lld-link /MAP**（链接器
+输出 RVA→符号映射，崩点归因必需，已永久启用）；②stdout 全缓冲坑：崩溃
+丢失缓冲输出，「零输出」≠「早期崩溃」——定位必须走调试器/反汇编。
+
+**P390 崩点定案（run_fast 形态 3/3 稳定复现）**：
+```
+main → VmRunner_loadAucAndRun → Vm_loadAucAndRun
+     → AucLoaderUtils_loadModule(+0x664) → AucLoaderUtils_escapeConstValue(+0xe8) ← 崩
+指令：mov rax, [rcx + rdx*8 + 0x10]   ← __field_get 内联（P345）
+现场：rcx=0xd0（栈残留小整数）rdx=堆指针 → 和为非规范地址 → #GP
+     （Windows 对非规范地址 AV 报 target=0xFFFFFFFFFFFFFFFF）
+语义：escapeConstValue 的 `this.escTrace != 0` 门控（上轮遗留诊断代码）——
+     object 单例字段读 = GetField 分派（全模块唯一一处 GetField，
+     baseOp=Call baseAux=AucLoaderUtils_getInstance）→ 合成
+     `Call __field_get(getInstance(), idx)` → 发射期内联读时 rcx/rdx
+     未装载（emitCallArgs 的装载 mov 在 obj 中缺失——装载缺失的精确
+     机制待 RA/发射器专项，见下）。
+```
+**为何「探针承重」**：门控 if 的 field_get 每次调用 escape 都执行——读
+栈残留做对象指针，残留值随布局变化：恰好看进可读页则「绿」，撞非规范
+地址则崩。上轮 [M] 探针的分配改变残留 ⇒ 绿；删除门控 ⇒ 彻底消失。
+
+**本轮落地**：
+1. **escTrace 门控删除（止血）**——诊断残留代码本身即雷区，5/5 运行
+   rc=0，banner 全流程 PASS + fib28 端到端全绿复验。
+2. **per-function vid 状态重置（InstructionSelection.selectFunction）**——
+   nodeMapIds / phiClaimFrom / phiClaimNode / phiEntryMapIds /
+   phiEntryMapHomes / phiEntryMapCnt 此前只在模块级 select() 重置，而 LIR
+   各函数 ValueID 从各自 0 编号 ⇒ 函数间 vid 撞号即 lookupNode 返回**别的
+   函数的 DAG 节点**（实测 escape 的 field_get arg0 曾解析到
+   Vm_loadArgsFlat 的 Mov 节点 n17811 aux=flat）——跨函数节点引用家族的
+   结构性修复。
+3. **/MAP 链接映射**（PhotonSystemLinker，exe 输出旁 .map）——后续所有
+   崩点归因基础设施。
+4. **AURA_XE_DIAG 门控探针**（X86Emitter emitCallArgs 现场）——保留供
+   专项复现。
+
+**P390 遗留（下阶段单一工程，RA/发射器专项）**：GetField→field_get 的
+内联发射中 emitCallArgs 的实参装载 mov 缺失（obj 反汇编实证：getInstance
+call 与内联读之间零 mov）——疑似 field_get 的 "call %func" 模板发射路径
+与常规 call 不同（全模块 1305 处 field_get 仅极少数经 emitCallArgs 探
+针），需逐模板核对装载路径。另：GetField 的字段索引在 .hat 序列化丢失、
+按 index 0 降级（1950 行注释）——escTrace 读到的是 field0（name 指针），
+单例字段读语义整体待修。
+
+**回归状态**：banner 全流程 PASS ✓ / fib28 端到端 rc=0 ✓ / Photon AOT
+双基准全绿 ✓（本轮零回归）。

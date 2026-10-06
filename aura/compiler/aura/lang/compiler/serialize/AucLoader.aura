@@ -636,6 +636,9 @@ class AucModule {
         val n: Int = v.length
         while (i < n) {
             val c: Int = v.charCodeAt(i)
+            if (v.length != n) {
+                println("[STOMP]")
+            }
             if (c == 92) {
                 out = out + bs
                 out = out + bs

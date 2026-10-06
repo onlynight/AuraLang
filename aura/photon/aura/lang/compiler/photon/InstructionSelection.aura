@@ -257,6 +257,12 @@ class InstructionSelector {
     /// P387 诊断：Add 类型判定追踪（前 60 个）。AURA_PHI_DIAG=1 时输出。
     private var diagAddCnt: Int = 0
 
+    /// P390 诊断：emitCall escape 过滤计数（独立）。
+    private var diagCeCnt: Int = 0
+
+    /// P390 诊断：GetField 分派计数（独立）。
+    private var diagGfCnt: Int = 0
+
     /// 每块的传递前驱闭包（位集，wordsPer * slots 个 Int；见 pass1.5）。
     private var predClosure: List<Int> = arrayListOf<Int>()
     private var predClosureWords: Int = 0
@@ -834,6 +840,21 @@ class InstructionSelector {
         this.paramIndex = 0
         this.constRegCounter = 0
         this.phiPreds = ""
+
+        // P390：**per-function vid 状态全量重置**——LIR 各函数的 ValueID 都从
+        // 各自 0 起编号，而 nodeMapIds / phiClaimFrom / phiEntryMap* 按 vid
+        // 索引且此前只在模块级 select() 重置 ⇒ 函数间 vid 撞号即互相串节点：
+        // 实测 escapeConstValue 的 `Call __field_get(args=[getInstance, idx])`
+        // 的 arg0 解析到 **Vm_loadArgsFlat 的 Mov 节点**（vid 撞号），其栈槽
+        // 在本函数帧内从未写入 → field_get 内联读到栈残留 0xd0 当对象指针 →
+        // `mov rax,[0xd0+堆指针*8+0x10]` 非规范地址 → #GP（崩点随布局漂移、
+        // 探针「承重」的物理机制：残留值随布局变化）。2026-10-07。
+        this.nodeMapIds = arrayListOf<Int>()
+        this.phiClaimFrom = arrayListOf<Int>()
+        this.phiClaimNode = arrayListOf<Int>()
+        this.phiEntryMapIds = arrayListOf<Int>()
+        this.phiEntryMapHomes = arrayListOf<Int>()
+        this.phiEntryMapCnt = 0
 
         // 记录函数起始指令数（多函数发射时用于标记指令边界）。
         val startInstr: Int = this.dag.instrCount
@@ -1948,6 +1969,13 @@ class InstructionSelector {
         // （单字段对象恒正确）且保住区间/干扰的完整性；正式路径是前端
         // emitFieldGet 的 `Call __field_get(obj, idx)`（带真索引）。
         if (op == "GetField") {
+            // P390 诊断：GetField 分派的 args 形态（独立计数，前 40）。
+            if (this.phiDiagOn && this.diagGfCnt < 40) {
+                this.diagGfCnt = this.diagGfCnt + 1
+                println("[GF] fn=[" + this.funcName + "] n=" + MachineDagUtils.toStr(val.args.size)
+                        + " aux=[" + val.aux + "] baseOp=" + (if (val.args.size > 0) { this.lir.valueOf(val.args[0]).op } else { "-" })
+                        + " baseAux=[" + (if (val.args.size > 0) { this.lir.valueOf(val.args[0]).aux } else { "-" }) + "]")
+            }
             var baseNode: Int = -1
             var baseTy: Int = 0
             if (val.args.size > 0) {
@@ -1959,6 +1987,11 @@ class InstructionSelector {
             var fldArgs: String = ""
             if (baseNode >= 0) {
                 fldArgs = MachineDagUtils.toStr(baseNode)
+            }
+            // P390 诊断：合成现场值。
+            if (this.phiDiagOn && this.diagGfCnt < 40) {
+                println("[GF2] baseNode=" + MachineDagUtils.toStr(baseNode)
+                        + " fldArgs=[" + fldArgs + "]")
             }
             fldArgs = fldArgs + "," + MachineDagUtils.toStr(zeroNode)
             val gfNode: Int = this.dag.addNode("Value", "Call", val.type,
@@ -2760,6 +2793,13 @@ class InstructionSelector {
     private fun emitCall(val: LirValue, vid: Int): Int {
         // 解析参数（Lir P2.2：args 已是类型化 ValueID 列表，直接下标访问）。
         val args: List<Int> = val.args
+        // P390 诊断：escapeConstValue 内的 emitCall 调用（独立计数，前 20）。
+        if (this.phiDiagOn && this.diagCeCnt < 60
+                && this.funcName == "AucLoaderUtils_escapeConstValue") {
+            this.diagCeCnt = this.diagCeCnt + 1
+            println("[CE] fn=[" + this.funcName + "] aux=" + val.aux
+                    + " n=" + MachineDagUtils.toStr(args.size))
+        }
 
         // ⚠️ 这里**不能**对 `args[0]` 调 `resolveNode`：`resolveNode` 在查不到
         // 映射时会**现场发射**该值（`selectValue`），于是把一个属于**后面的块**
@@ -2822,7 +2862,8 @@ class InstructionSelector {
             if (!isMemToken) {
                 val argNode: Int = this.resolveNode(argLirId)
                 if (this.phiDiagOn && this.diagCallArgCnt < 400
-                        && resolvedName == "VmOps_vmSubstr") {
+                        && (resolvedName == "VmOps_vmSubstr"
+                            || resolvedName == "__field_get")) {
                     this.diagCallArgCnt = this.diagCallArgCnt + 1
                     println("[CAL] fn=" + this.funcName + " call=" + MachineDagUtils.toStr(vid)
                             + " arg" + MachineDagUtils.toStr(k) + " lir=" + MachineDagUtils.toStr(argLirId)

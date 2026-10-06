@@ -238,6 +238,10 @@ class PhotonSystemLinker {
             outName = outName + ".lib"
         }
         cmd = cmd + "/OUT:" + outName + " "
+        // P390：/MAP 输出 RVA→符号映射（调试器崩点归因必需；产物旁 <out>.map）
+        if (this.outputType == "exe") {
+            cmd = cmd + "/MAP:" + outName + ".map "
+        }
 
         // 输出类型标志
         if (this.outputType == "dll") {
