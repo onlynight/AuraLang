@@ -3724,3 +3724,32 @@ collectArgs 的弹出值。尾部 SIGSEGV 未变。
 
 **状态（p398）**：解码 ✓ / 数值 opcode ✓ / constLines ✓ / opCodes ✓ /
 push 侧值模型 ✓ / pop→println 链待独立探针定位。
+
+### 10.97 会话 XII：argc=0 病因定位——[i] 索引路径与 .get 路径实现分裂（2026-10-06 续LXXVIII）
+
+**决定性实验（P380 探针）**：CALL 臂内同时打印两种读取——
+```
+[62] fn=[println] argc=0 cnt=2 a1=[] direct=[] idx=10
+```
+* `cnt=2`：argCountOf() 经 __list_get 读 argCounts ✓ 正确
+* `fn=[println]`：argStrOf(0) 读 argStrs[9] ✓ 正确
+* `a1=[] / direct=[]`：**argStrOf(1) 与硬编码 argStrs[10] 全部返回 null** ✗
+
+**结论**：argStrs 列表内容正确（[AS] 探针 `.get(30/31/32)` 返回
+println/1/"" 逐位正确），但**[i] 索引读取在部分索引上返回 null**——
+`[i]` 与 `.get` 解析到不同实现（.get → Collections.getAt ✓ 正常工作；
+[i] → 另一实现，部分调用点返回 null）。这解释了：
+* println argc=0：CALL 臂 argCountOf() ≥ 2 ✓ 但 argStrOf(1) = null
+  → toI32(null) = 0 → println(空串)（**空行打印的根因**）
+* LOAD_LOCAL 空值：argStrOf(0) 偶发 null → toI32 = 0 → 槽号 0
+*STORE_LOCAL 串位、calculation 值错——全部 = 同一 [i] 路径实现缺陷。
+
+**下轮单一行动**：trace `[i]` 索引的完整 lowering（Hir Index → SsaBuilder
+buildIndex → `__list_get` 调用 → emitListGet）——定位哪一环在部分索引
+返回 null（嫌疑：__list_get 的 len/idx 比较在 compiled dispatch 的
+寄存器状态下误判；或 buildIndex 的 args 拼接链（"base,idx" 串拼接）
+丢字段——§10.89 拼接链家族）。注意：**[i] 与 .get 必须统一到同一实现**
+（当前 __list_get core 与 Collections.getAt 双轨）。
+
+**状态（p400）**：解码 ✓ / opcode ✓ / constLines ✓ / push-pop ✓ /
+argc=0 定位 ✓（[i] 路径 null）。本会话累计 11 提交。
