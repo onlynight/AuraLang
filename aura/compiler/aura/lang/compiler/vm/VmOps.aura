@@ -269,7 +269,9 @@ object VmOps {
         if (isFloat(a) || isFloat(b)) {
             return parseFloat(toStr(a)) + parseFloat(toStr(b))
         } else if (isString(a) || isString(b)) {
-            return toStr(a) + toStr(b)
+            // P347：字符串分支必须走 toStrAny（运行时 toStr 是纯整数实现，
+            // 字符串指针会打成指针值十进制）
+            return toStrAny(a) + toStrAny(b)
         } else {
             return intOf(a) + intOf(b)
         }
@@ -553,7 +555,19 @@ object VmOps {
     /// 里同一次 `toStr(v)` 得到 "5"、返回的却是 "0"）。经由本函数的调用点
     /// 与 `VmOps.toI32(toStr(x))` 等既有可靠路径一致。
     fun toStrAny(v: Any): String {
-        return toStr(v)
+        // P347：photon 运行时 toStr 是**纯整数**实现（入参直接按 Int 打十进制，
+        // 不查 Plan A 装箱标签）——字符串指针会被打成指针值十进制（实测
+        // println 打出 140699966958608 = 0x7FF6.. 指针值）。此处按 Plan A
+        // 标签分派：装箱整数（奇数）→ 拆箱 toStr；真实指针（字符串等）→
+        // 原样；null → "null"。种子 VM 下 isTaggedInt 恒 false，typeof 准确，
+        // 走指针分支 = 字符串原样，行为不变。
+        if (v == null) {
+            return "null"
+        }
+        if (isTaggedInt(v)) {
+            return toStr(intOf(v))
+        }
+        return v as String
     }
 
     /// Int → String（不依赖 toStr，避免 AOT 转换问题）。

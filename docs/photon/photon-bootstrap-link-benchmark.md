@@ -3441,3 +3441,44 @@ reader 对象也被覆写（data/dataLen/pos = 路径字符串 "buil","/cur",".e
 **状态**：LOADONLY ✓ / 解码 1194 ✓（全函数） / opCodes ✓ / constLines ✓ /
 funcTable ✓ / VM 进入执行循环（err 优雅退出，无段错误 until 程序尾部）/
 helloworld 打印待执行期实参解析修复。
+
+### 10.88 会话 IV：值模型分派修复——真实字符串输出贯通（banner 十行真实打印）＋ Opcodes 常量字面量化（2026-10-06 续LXIX）
+
+**突破**：photon 编译 VM 首次打印**真实程序字符串**——横幅 ╔══...╗ 十行全部
+正确输出（此前是指针值十进制数字×10）。程序真实执行抵达 Phase G 的 ══ 框。
+
+**本段两项根因修复**：
+
+1. **VmOps.toStrAny 标签分派（P347，本轮最重要）**：photon 运行时 toStr 是
+   **纯整数**实现（入参直接按 Int 打十进制，不查 Plan A 装箱标签）——字符串
+   指针被打成指针值十进制（gdb println 断点 + 源码级 [PR] 探针双实证：
+   println 收到的 10 个"数字"= d[0] 里同一字符串指针的十进制）。
+   修复：toStrAny 按 Plan A 标签分派——装箱整数（奇数，`__is_tagged_int`）
+   → 拆箱 toStr(intOf(v))；真实指针（字符串）→ 原样 `v as String`；null →
+   "null"。种子 VM 下 isTaggedInt 恒 false、行为不变。
+   同步替换 Vm.aura 全部 Any 型 `toStr(...)` 调用点（25 处：toI32/parseFloat/
+   .length/getConstByIdx 8 臂）；VmOps.add 字符串分支 `toStr(a)+toStr(b)` →
+   `toStrAny(a)+toStrAny(b)`（同族，ADD opcode 的串拼接）。
+
+2. **Vm.aura dispatch 的 Opcodes.X 常量全部字面量化（P348）**：`Opcodes.X`
+   是单例字段读（synthesizedCtor 零初始化 / 字段调用窗，AucLoader §10.78 已
+   有同族 workaround）——布局一移常量读就变垃圾，指令 1 即 Unknown opcode。
+   132 个常量按**名字长度降序** sed 替换为字面量（RETURN_UNIT 先于 RETURN），
+   残留仅 Opcodes.fromName/OP_NOP（函数调用，安全）。
+
+**定位方法论沉淀**：
+- gdb 无法直用：VEH 异常 0xc0000008 打断脚本（veh_install 移除后仍被
+  KiRaiseUserException 命中）；/FIXED+/STACK 重链 na348.exe 后地址断点可用
+  （obj 偏移 + 0x140001000 = 运行时 VA；**重链必须带 /STACK**，否则 524KB
+  帧提前栈溢出假象）。
+- println 断点实参序列：PL1/PL2=.rdata 探针串 ✓、PL3=RAW-INT 0x104——
+  真实 const（.rdata/@str）与裸整数混入，最终由源码级 toStrAny 分派根治。
+- 运行时 println 是 strlen 风格 C 串打印——「打印大数字」实为打印
+  toStrBuffer 里的十进制数字节（单静态缓冲复用）。
+
+**当前状态（p350）**：解码 1194 ✓ / opCodes ✓ / constLines ✓ / 横幅真实打印 ✓
+/ 程序执行抵达 Phase G ══ 框 → 尾部 SIGSEGV（未变）。
+**未修**：①局部变量值仍空（"name = " 后无值——STORE_LOCAL/LOAD_LOCAL 链或
+strcat 实参，值模型修复后需重查）②Phase C-F 的计算值（100/23 等为 [LC]
+探针 chunk 内容，非真实计算输出）③尾部 SIGSEGV ④getFieldAt 诊断路径
+（[LC] 探针误导，真实常量走 constLines ✓）。
