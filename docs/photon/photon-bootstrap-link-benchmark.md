@@ -3859,3 +3859,69 @@ Seed VM 13959ms。Photon Aura VM ✗。
 LLVM 差距缩至 1.14×**（前测 1.30×）——phi MOV 支配健全化消除了错误
 边写入的额外开销。Photon Aura VM 执行期缺陷（§10.97 [i] 路径 null）
 独立于本基准，待 [i]/.get 统一后入榜。
+
+### 10.101 会话 XVI：@imm 帧预算污染（Long 循环真根因）+ P372 别名停用（VM 宿主 Hello World 恢复）（2026-10-06 续LXXXIII）
+
+**P385：Long 循环回归真根因定案——@imm 常量值污染帧预算**。上轮定性
+「混合宽度 Long+Int 加法」被本轮三步证伪：①N=1M 输出 acc=499999500000
+**精确正确**（acc 远超 2^32 ⇒ Long 运算无罪）；②计时 0.13s 即死 ⇒ 非运行
+进度阈值，是**源码常量本身**；③常量二分：2,094,000 ✓ / 2,095,000 ✗，且
+dump diff 唯一结构差异 = `[FSZ] 4|main range=2094001 frame=16752160`——
+**帧大小 = (循环边界常量+1)×8**。机理：`cmp %src, @imm` 模板的 nodes=[节点,
+**裸常量值**]（emitCmpImm 直接 strToInt 作 imm），scanFunctionMaxSlots 把
+nodes 逐项当节点 ID 走传递闭包 ⇒ 常量值并入 walkMaxId ⇒ P321 帧预算
+（ID 区间×8）随最大常量线性膨胀 ⇒ N=25M → 帧 200MB > 64MB 栈保留 →
+main 入口 `sub rsp` 一步跨出栈底，启动即崩 exit=127 无输出。**修复**：
+walkExtraNodes 顶部剪枝（节点 ID 稠密 0..nodeCount-1，≥nodeCount 必非节点）。
+复测：main 帧 200MB→**960 字节**（range=100），25M 循环完整跑通
+acc=312499987500000 精确正确。§10.94/§10.98 的「阈值性腐蚀/phi-web 家族」
+定性全部作废。
+
+**P382 补修（会话 XV 遗留）**：支配集提交版引用未定义标识符 `domArr`
+（声明为 `dArr`，seed 对未知名「发裸名」→ LLVM `use of undefined value`，
+驱动**从提交源码无法重建**）；另 `var acc: List<Int>` 与同函数上方
+`var acc: Int` 同名异型（seed 槽复用雷区）→ 改 `dAcc`。修复后驱动可重建。
+
+**phi-nomov 全量审计（AURA_PHI_DIAG=1）**：VM 宿主全闭包（1194 函数）
+**仅 2 条未匹配边**（VmOps_replace pred=2183 phi=12955/12956，break 边，
+不在当前失败路径）——「漏发 MOV」类基本清零。
+
+**P386-A：vmSubstr 去 phi 实验（反证）**：早返回风格重写（零 merge phi、
+零重赋值）→ [62] argc=0 与尾部 SIGSEGV **逐位不变** ⇒ §10.100 对 end-phi
+家槽残留的定罪**不成立**。
+
+**P386-B：残余腐坏真源 = P372 phi 槽别名接线（本会话决定性发现）**。
+证据链：①[VS] 探针（vmSubstr 入口）：s1 调用实参 `t=[println] s=8 l=1`
+——text 收到的是 **s0 的值**（应为 ln="println,1"），Int 实参全对 ⇒
+仅串接收者错；②[CAL] 探针（ISel emitCall）：四个调用点 arg0 全部
+`lir=32661→node` **接线正确** ⇒ 腐坏在发射期槽解析；③[CALLDST]：两个
+不同 vmSubstr 调用节点共享同一槽（nodeId=4181/4357 均 dst=stack:-408）——
+别名表合并所致。**机理**：emitPhi 对每个非 Const/Phi 入边登记「定义节点→
+phi 节点」槽别名 ⇒ 定义槽与 phi 家槽合一 ⇒ **其它入边的 MOV 直接覆写仍
+存活的定义值**（定义在其它路径还有后续使用时）——这就是「逐调用点一成
+一败、修一处动一处」17 会话打地鼠的物理机制。**处置**：停用 PhotonPipeline
+的 setPhiSlotAlias 接线（P372 机制保留代码、不接线；正确做法是带干扰
+检查的 coalescing，留待 RA 本体工程）。**复测**：[62] argc=0 a1=[] 从
+18/18 → **0/18**；banner 四行 + [1]-[5] 段全部真实输出，Hello World /
+Aura Compiler v0.1.0-phase9 恢复（§10.99 状态从 8/10 → 全绿线）。
+
+**§10.94 基准终版更新（当前驱动：P385+支配集+值模型+别名停用，5 轮中位，
+fresh 进程）**：
+
+| 执行链 | fib(28) 中位 | 相对 LLVM | loop 25M 中位 | 相对 LLVM |
+|---|---|---|---|---|
+| LLVM IR AOT | 7.7ms | 1× | 58.6ms | 1× |
+| **Photon AOT** | **9.3ms** | **1.21×** | **58.6ms** | **≈1.00×** |
+| Seed VM（aura run） | 836.9ms | 109× | 14177.4ms | 242× |
+| Photon Aura VM | ✗（fib28.auc 装载期 SIGSEGV） | — | ✗ | — |
+
+**Photon Aura VM 当前精确状态**：banner 程序段 [1]-[5] 真实输出（变量/
+算术/字符串/条件全通，残留 = `const + var` 拼接第二操作数为空——
+VmOps.add → toStrAny 调用结果的槽在 strcat 调用窗被其它调用结果覆写，
+RA 溢出槽干扰家族；guest 循环段 SIGSEGV；fib28.auc 装载早期 SIGSEGV）。
+
+**下阶段单一工程（更新）**：RA 溢出槽干扰（调用结果槽跨调用覆写）——
+buildNodeSpans 触达覆盖 call 实参已有（touchInstr 三层），但溢出槽分配
+仍出现两活值同槽；修复后预期拼接/循环残留与 fib28.auc 装载一并验收，
+Photon Aura VM 入榜四方基准。VmOps_replace 的 2 条未匹配边随 (a0) 标签
+质量审计顺带清零。

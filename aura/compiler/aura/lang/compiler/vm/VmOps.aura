@@ -538,20 +538,19 @@ object VmOps {
         if (start < 0) {
             return ""
         }
+        if (length < 0) {
+            return ""
+        }
         if (start >= text.length) {
             return ""
         }
-        var end: Int = start + length
-        if (end < 0) {
-            end = 0
+        // P386：早返回风格——`end` 不再重赋值（旧实现两次重赋值 = 两处
+        // merge phi，photon ISel 下 end 家槽跨调用残留前次值 ⇒ 同函数相邻
+        // 调用点一成一败，§10.100 定罪）。全函数零 merge phi。
+        if (start + length > text.length) {
+            return text.substring(start, text.length)
         }
-        if (end > text.length) {
-            end = text.length
-        }
-        if (start == end) {
-            return ""
-        }
-        return text.substring(start, end)
+        return text.substring(start, start + length)
     }
 
     /// `Any` → 原始 64 位表示。

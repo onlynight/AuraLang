@@ -292,6 +292,11 @@ class AucModule {
             ci = ci + 1
         }
         mod.constPool = poolAcc
+        // P374：解码侧 numOpCodes 本体诊断
+        println("[NC] n=" + toStr(mod.numOpCodes.size())
+            + " [0]=" + toStr(mod.numOpCodes.get(0))
+            + " [1]=" + toStr(mod.numOpCodes.get(1))
+            + " [30]=" + toStr(mod.numOpCodes.get(30)))
         // P358：池本体测量
         var nlCount: Int = 0
         var mi: Int = 0

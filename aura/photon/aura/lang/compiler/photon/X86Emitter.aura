@@ -202,7 +202,14 @@ class X86Emitter {
 
     /// 递归收集节点传递闭包：记录节点 ID 的 min/max（P321：帧预算 = ID 区间，
     /// 不再区分有色/无色——发射期任何 slotForNode(id) 的 id 都在本闭包内）。
+    /// ⚠️ P385：instr.nodes 里混有**非节点载荷**——`cmp %src, @imm` 的
+    /// nodes[1] 是**裸常量值**（emitCmpImm 直接 strToInt 作 imm），`jmp @target`
+    /// 的 nodes[0] 是标签号。旧实现一律当节点 ID 走闭包 ⇒ 常量值并入
+    /// walkMaxId ⇒ 帧预算 = 最大常量×8（实测 bench_loop 25M → 帧 200MB，
+    /// main 入口 sub rsp 一步跨出 64MB 栈保留 → 启动即崩 exit=127）。
+    /// 节点 ID 稠密分布于 0..nodeCount-1，≥nodeCount 必非节点，直接剪枝。
     private fun walkExtraNodes(dag: MachineDag, nodeId: Int): Unit {
+        if (nodeId < 0 || nodeId >= dag.nodeCount) { return }
         val mark: String = "|" + toStr(nodeId) + "|"
         if (this.walkSeenCsv.indexOf(mark) >= 0) { return }
         this.walkSeenCsv = this.walkSeenCsv + toStr(nodeId) + "|"
@@ -868,13 +875,16 @@ class X86Emitter {
             // 里 strcat 的第二个实参读成第一个实参的寄存器；println 拿不到实参）。
             val dst: String = this.regOfNode(node)
             // 诊断：打印调用结果的落点决策（有界）。
-            if (this.slotDiagCount < 24) {
-                this.slotDiagCount = this.slotDiagCount + 1
-                println("[CALLDST] aux=" + funcName + " nodeId=" + toStr(nodeId)
-                        + " node.id=" + toStr(node.id) + " reg=[" + node.reg + "] dst=[" + dst + "]"
-                        + " nodeSlot=" + toStr(this.nodeSlot(node.id))
-                        + " base=" + toStr(this.curSpillBase)
-                        + " n=" + toStr(this.extraSlotCount))
+            if (this.slotDiagCount < 200) {
+                // P386：按被调名过滤（fnIdx 对位不可靠），追踪 ln 的家与调用结果落点。
+                if (funcName == "VmOps_vmSubstr" || funcName == "__list_get") {
+                    this.slotDiagCount = this.slotDiagCount + 1
+                    println("[CALLDST] aux=" + funcName + " nodeId=" + toStr(nodeId)
+                            + " node.id=" + toStr(node.id) + " reg=[" + node.reg + "] dst=[" + dst + "]"
+                            + " nodeSlot=" + toStr(this.nodeSlot(node.id))
+                            + " base=" + toStr(this.curSpillBase)
+                            + " n=" + toStr(this.extraSlotCount))
+                }
             }
             // 返回值落地：无论 dst 是什么，都必须把 rax 搬到目标位置。
             // 若节点被 spill 到栈槽，直接存栈；否则 mov 到目标寄存器。

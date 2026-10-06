@@ -251,6 +251,9 @@ class InstructionSelector {
     private var phiDiagEmitted: Int = 0
     private var phiDiagMissing: Int = 0
 
+    /// P386 诊断：vmSubstr 调用实参追踪（前 40 个）。AURA_PHI_DIAG=1 时输出。
+    private var diagCallArgCnt: Int = 0
+
     /// 每块的传递前驱闭包（位集，wordsPer * slots 个 Int；见 pass1.5）。
     private var predClosure: List<Int> = arrayListOf<Int>()
     private var predClosureWords: Int = 0
@@ -1163,10 +1166,12 @@ class InstructionSelector {
                         val sLo4: Int = predOff[b4 - base]
                         val sHi4: Int = predOff[b4 - base + 1]
                         if (sHi4 > sLo4) {
-                            // acc = ⋂ dom[直接前驱]（首前驱起全 1 初值）
-                            var acc: List<Int> = arrayListOf<Int>()
+                            // dAcc = ⋂ dom[直接前驱]（首前驱起全 1 初值）
+                            // ⚠️ 本函数上方已有 `var acc: Int`（predOff 计数）——
+                            // 同函数同名异型会触发 seed 裸名/槽复用家族缺陷，故用 dAcc。
+                            var dAcc: List<Int> = arrayListOf<Int>()
                             var wA: Int = 0
-                            while (wA < wordsPer) { acc.add(-1); wA = wA + 1 }
+                            while (wA < wordsPer) { dAcc.add(-1); wA = wA + 1 }
                             var si4: Int = sLo4
                             var pCount: Int = 0
                             while (si4 < sHi4) {
@@ -1174,7 +1179,7 @@ class InstructionSelector {
                                 if (p4 >= base && p4 <= top) {
                                     var w4: Int = 0
                                     while (w4 < wordsPer) {
-                                        acc[w4] = acc[w4] and domArr[p4 * wordsPer + w4]
+                                        dAcc[w4] = dAcc[w4] and dArr[p4 * wordsPer + w4]
                                         w4 = w4 + 1
                                     }
                                     pCount = pCount + 1
@@ -1185,9 +1190,9 @@ class InstructionSelector {
                                 var w5: Int = 0
                                 var dBl: Boolean = false
                                 while (w5 < wordsPer) {
-                                    val newW: Int = acc[w5] or (1 << ((b4 - base) % 32))
-                                    if (domArr[b4 * wordsPer + w5] != newW) {
-                                        domArr[b4 * wordsPer + w5] = newW
+                                    val newW: Int = dAcc[w5] or (1 << ((b4 - base) % 32))
+                                    if (dArr[b4 * wordsPer + w5] != newW) {
+                                        dArr[b4 * wordsPer + w5] = newW
                                         dBl = true
                                     }
                                     w5 = w5 + 1
@@ -2803,6 +2808,13 @@ class InstructionSelector {
                 || argVal.aux == "entry_mem" || argVal.aux == "mem_after_store"
             if (!isMemToken) {
                 val argNode: Int = this.resolveNode(argLirId)
+                if (this.phiDiagOn && this.diagCallArgCnt < 400
+                        && resolvedName == "VmOps_vmSubstr") {
+                    this.diagCallArgCnt = this.diagCallArgCnt + 1
+                    println("[CAL] fn=" + this.funcName + " call=" + MachineDagUtils.toStr(vid)
+                            + " arg" + MachineDagUtils.toStr(k) + " lir=" + MachineDagUtils.toStr(argLirId)
+                            + " op=" + argVal.op + " node=" + MachineDagUtils.toStr(argNode))
+                }
                 if (argNode >= 0) {
                     argNodeList.add(argNode)
                 }
