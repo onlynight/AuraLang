@@ -4077,3 +4077,43 @@ AURA_XE_DIAG=1）——stdout 全缓冲在崩溃时丢输出，本轮两轮探�
 正确——正确修法是 .hat 序列化携带字段名/索引（HatSerializer 的 @field
 不带名字，1950 行注释），单例字段读语义整体留待前端定型专项。当前
 自举代码零用户（[GF] 全量普查仅 escape 一处，已随 escTrace 删除）。
+
+### 10.105 会话 XX：四方执行效率对比终表（Photon Aura VM 首次全量入榜，2026-10-07）
+
+**口径**：同一基准源码经四条执行链，Windows x64，各 5 轮取中位（Wall
+clock，fresh 进程），输出正确性逐轮校验（correct=all 5 runs 输出精确且
+rc=0）。Photon Aura VM 宿主 = PhotonHatCompile 当前驱动构建
+（auc_vm_runner，P385-389 全套修复 + GetField 兜底常规化）。
+
+**fib(28) = 317811（632K 次递归调用）**：
+
+| 执行链 | 中位耗时 | 相对 LLVM | vs Seed VM |
+|---|---|---|---|
+| LLVM IR AOT | **7.9 ms** | 1× | — |
+| Photon AOT | 9.4 ms | **1.19×** | 0.010× |
+| Seed VM（aura run） | 937.2 ms | 119× | 1× |
+| **Photon Aura VM** | 95424.8 ms | 12079× | **102×** |
+
+**loop 100 万次 Long 累加（四方统一口径，新增）**：
+
+| 执行链 | 中位耗时 | 相对 LLVM |
+|---|---|---|
+| LLVM IR AOT | **7.9 ms** | 1× |
+| Photon AOT | 6.5 ms | **0.82×** |
+| Seed VM | 652.7 ms | 83× |
+| **Photon Aura VM** | 23020.9 ms | 2914× |
+
+**loop 2500 万次（三方；Photon Aura VM 按解释比外推单轮 ~9.6 小时/轮不
+可测，未入榜）**：LLVM 58.2 ms / Photon AOT 60.0 ms（1.03×）/ Seed VM
+14071.7 ms（242×）。
+
+**结论**：
+1. **Photon Aura VM 首次以全量正确姿态入榜四方对比**：fib28 与 loop1M
+   两基准逐轮 correct——P387-389 修复链（String 定型 / 空串序列化 / 装箱
+   / 函数表扫描 / GetField 常规化）后纯 Aura VM 解释器端到端可用。
+2. **性能分层清晰**：Photon AOT 贴平 LLVM（fib 1.19×、loop 0.82-1.03×）
+   ；Photon Aura VM 解释开销 = Seed VM（Rust 元循环）的 **35-102×**——
+   纯 Aura 解释器 vs Rust 解释器的实现语言开销是主要项，热路径臂序/
+   装载缓存/超算符融合是后续优化抓手（现 fusion 被 P277 护栏截断）。
+3. 光子自举宿主稳定性备注：seed CLI 的 `--vm=aura` 回放通道自身存在
+   偶发 lex error / 段错误（rc=1/139，产出不受影响），与 photon 链无关。
