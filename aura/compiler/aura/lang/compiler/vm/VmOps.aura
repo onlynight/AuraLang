@@ -114,7 +114,11 @@ object VmOps {
     fun intOf(v: Any): Int {
         if (isTaggedInt(v)) {
             val raw: Long = v as Long
-            return raw as Int
+            // P378：(raw - 1) / 2 = 精确拆箱（raw 奇，raw-1 偶，整除无截断
+            // 误差；负数同样成立）。photon 无 aura_to_int_any，`as Int` 是
+            // 纯截断不拆箱。
+            val real: Long = (raw - 1) / 2
+            return real as Int
         }
         return toI32(toStr(v))
     }
@@ -267,7 +271,12 @@ object VmOps {
 
     /// Int -> Any。
     fun toAny(v: Int): Any {
-        return v
+        // P378：Plan A 装箱——Int 的 Any 形态 = (v<<1)|1（恒奇）。裸值入
+        // Any 槽会让 isTaggedInt/typeof 的奇偶判定翻车（偶数误判 String、
+        // 奇指针误判 Int）。Long→Any = 裸字传递（photon 无额外装箱）。
+        val l: Long = v as Long
+        val tagged: Long = l * 2 + 1
+        return tagged as Any
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -283,7 +292,7 @@ object VmOps {
             // 字符串指针会打成指针值十进制）
             return toStrAny(a) + toStrAny(b)
         } else {
-            return intOf(a) + intOf(b)
+            return toAny(intOf(a) + intOf(b))
         }
     }
 
@@ -292,7 +301,7 @@ object VmOps {
         if (isFloat(a) || isFloat(b)) {
             return parseFloat(toStr(a)) - parseFloat(toStr(b))
         } else {
-            return intOf(a) - intOf(b)
+            return toAny(intOf(a) - intOf(b))
         }
     }
 
@@ -301,7 +310,7 @@ object VmOps {
         if (isFloat(a) || isFloat(b)) {
             return parseFloat(toStr(a)) * parseFloat(toStr(b))
         } else {
-            return intOf(a) * intOf(b)
+            return toAny(intOf(a) * intOf(b))
         }
     }
 

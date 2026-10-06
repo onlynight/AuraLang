@@ -1176,36 +1176,38 @@ object PhotonRuntime {
     //（`Lowering.lowerLoad/lowerStore` `addValueWithChain`，值不登记
     // `LirBlock.instrs`，DAG 里根本没有加存储指令）
     /// 编码 `__list_alloc(rcx = count) rax = list`
+
     fun emitListAlloc(enc: X86Encoder): Unit {
-        // 内联布局 [count@0][elems@8...]+slack（回退到 p199b 已验证形态）。
-        // P374：slack 8192→65536——8KB = 1024 元素上限，而 VM 宿主的
-        // numOpNames/numArgsFlat/numOpCodes/constLines 各 1194 条、argStrs
-        // 3582 条——**全部越界写穿相邻堆块**（append 无 grow 逻辑、布局无
-        // 容量字段无法检测；实测 opCodes[0]=2048、[1]=堆指针——相邻列表
-        // 的数据）。64KB = 8192 元素，arena 64MB 容纳 ~百列表绰绰有余。
-        // core 布局统一尝试（§10.22-10.25）因深层槽别名暂缓。
+        // P378：统一 **core 布局** [len@0][cap@8][itemsPtr@16] + items 区
+        //（预期 count + 64KB slack）——arrayListOf/__list_alloc = 唯一列表
+        // 工厂，listAppend（core+增长）/get/set 全 core。旧内联形态与
+        // emitArrayListOf 的注释（core）及全部消费端矛盾 = 双表示混乱根源。
         enc.emitPrologue(0x20)
-        enc.emitMovRR("r8", "rcx")
-        enc.emitShlRI("rcx", 3)
-        enc.emitAddRI("rcx", 8)
-        enc.emitAddRI("rcx", 65536)
+        enc.emitMovRR("r8", "rcx")                 // r8 = 预期 count
+        enc.emitShlRI("rcx", 3)                    // count*8
+        enc.emitAddRI("rcx", 24)                   // + 头 24B
+        enc.emitAddRI("rcx", 65536)                // + slack
         enc.emitMovRIP("rax", "heapBump")
         enc.emitMovRR("rdx", "rax")
         enc.emitAddRR("rdx", "rcx")
         enc.emitCmpRI("rdx", 67100768)
-        enc.emitJccLabel("le", "list_alloc_ok")
-        // 溢出：返回 NULL（heapBump 不动）——旧回绕会从 arena 起点重叠分配。
+        enc.emitJccLabel("le", "la_ok")
         enc.emitXorRR("eax", "eax")
-        enc.emitJmpLabel("list_alloc_fail")
-        enc.emitLabel("list_alloc_ok")
+        enc.emitJmpLabel("la_fail")
+        enc.emitLabel("la_ok")
         enc.emitStoreRIP("heapBump", "rdx")
         enc.emitLeaRIP("r9", "heapArena")
-        enc.emitAddRR("rax", "r9")
-        enc.emitStoreMemDisp32("rax", 0, "r8")
-        enc.emitLabel("list_alloc_fail")
+        enc.emitAddRR("rax", "r9")                 // rax = ptr
+        enc.emitXorRR("r10", "r10")
+        enc.emitStoreMemDisp32("rax", 0, "r10")    // [ptr+0] = len = 0
+        enc.emitStoreMemDisp32("rax", 8, "r8")     // [ptr+8] = cap = 预期 count
+        enc.emitAddRI("rax", 24)                   // r9 = items = ptr + 24
+        enc.emitMovRR("r9", "rax")
+        enc.emitSubRI("rax", 24)                   // rax = ptr
+        enc.emitStoreMemDisp32("rax", 16, "r9")    // [ptr+16] = items
+        enc.emitLabel("la_fail")
         enc.emitEpilogue()
     }
-
 
     /// 编码 `__list_setat(rcx = list, rdx = idx, r8 = val) rax = list`
     /// 添加 null 检查防止崩溃

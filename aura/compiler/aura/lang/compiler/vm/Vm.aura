@@ -379,6 +379,11 @@ class Vm {
                 i = i + 1
             }
         }
+        // P373：opcode 头部诊断
+        println("[OC] n=" + toStr(this.opCodes.size())
+            + " [0]=" + toStr(this.opCodes.get(0))
+            + " [1]=" + toStr(this.opCodes.get(1))
+            + " numN=" + toStr(opNames.size()) + " numC=" + toStr(opCodesNum.size()))
         this.lines = arrayListOf<String>()
         this.ip = 0
         this.running = true
@@ -541,7 +546,7 @@ class Vm {
             val slot: Int = this.arg0IntOf()
             val v: Any = this.locals.getSlot(slot)
             if (v == null) {
-                this.stack.push(0)
+                this.stack.push(toAny(0))
             } else {
                 this.stack.push(v)
             }
@@ -569,7 +574,7 @@ class Vm {
         } else if (op == 201) {
             val v: Any = this.locals.getSlot(this.arg0IntOf())
             if (v == null) {
-                this.stack.push(0)
+                this.stack.push(toAny(0))
             } else {
                 this.stack.push(v)
             }
@@ -627,7 +632,7 @@ class Vm {
             // local[a] → local[b]（拷贝合一）
             val v: Any = this.locals.getSlot(this.arg0IntOf())
             if (v == null) {
-                this.locals.putSlot(this.arg1IntOf(), 0)
+                this.locals.putSlot(this.arg1IntOf(), toAny(0))
             } else {
                 this.locals.putSlot(this.arg1IntOf(), v)
             }
@@ -708,7 +713,7 @@ class Vm {
             //（自检样例槽位里存的是整数所以看不出来；`.auc` 路径存字符串时，
             // `println(toStr(x))` 就会打印出 0）。
             if (v == null) {
-                this.stack.push(0)
+                this.stack.push(toAny(0))
             } else {
                 this.stack.push(v)
             }
@@ -717,7 +722,7 @@ class Vm {
             this.locals.putSlot(slot, this.stack.pop())
         } else if (op == 12) {
             val slot: Int = VmOps.toI32(this.argStrOf(0))
-            this.locals.putSlot(slot, 0)
+            this.locals.putSlot(slot, toAny(0))
         } else if (op == 13) {
             this.stack.pop()
         } else if (op == 14) {
@@ -1939,13 +1944,13 @@ class Vm {
         // 注意：堆指针的装箱类型名随宿主不同可能是 "Int" 或 "Long"（实测
         // seed 宿主为 "Int"），故此处接受全部整型，非整型值非对象。
         if (!VmOps.isNumeric(obj)) {
-            this.stack.push(0)
+            this.stack.push(toAny(0))
             return
         }
         val objKey: String = VmOps.toStrAny(obj)
         if (VmOps.toI64(objKey) == 0L) {
             // 空指针 / 非对象值：保持旧的容错语义（读缺失字段得 0）
-            this.stack.push(0)
+            this.stack.push(toAny(0))
             return
         }
         val fields: HashMap<String, Any> = this.objectFields.getOrDefault(objKey, HashMap<String, Any>())

@@ -3696,3 +3696,31 @@ saved，跨 Memory_alloc 调用存活）。
 双表示的精确归属（哪个调用点走哪个表示）需逐点清点后统一。
 **状态（p393）**：constLines ✓（[9]="Aura" [10]="42"）、横幅+段落打印保持、
 err=[Unknown opcode] instrs=1 不变。
+
+### 10.96 会话 XI：连贯 Plan A 值模型落地（toAny 真装箱 + intOf 真拆箱 + 列表 core 大统一）（2026-10-06 续LXXVII）
+
+**值模型三件套（P378）**：
+1. **VmOps.toAny 真装箱**：Int→Any = `(v<<1)|1`（恒奇）——旧恒等让裸偶数被
+   typeof/isTaggedInt 误判 String、裸奇指针被误判 Int（[CA] tagged 值 =
+   指针按裸奇整数入槽的直接后果）。
+2. **intOf 真拆箱**：`(raw-1)/2`（奇数精确整除，负数成立）——photon 无
+   aura_to_int_any，`as Int` = 纯截断不拆箱（旧 intOf 返回装箱字）。
+3. **VmOps.add/sub/mul 整数结果重装箱**：`toAny(intOf ± intOf)`。
+4. **Vm.aura 裸 push(0)/putSlot(0) → toAny(0)**（7 处）——LOAD_LOCAL null
+   分支、DECL_LOCAL、fused 臂的 0 值入槽全部装箱。
+
+**列表 core 大统一（P378）**：**发现 emitArrayListOf 注释明言 __list_alloc
+应为 core 布局（[len@0][cap@8][itemsPtr@0x10]）而 emitListAlloc 实现为内联
+形态**——工厂与全部消费端（listAppend core+增长、get/set core）矛盾 =
+双表示混乱的根源实体。重写 emitListAlloc 为 core：[len=0][cap=预期count]
+[items=ptr+24] + 64KB items 区。get/set/append 全 core 一致。
+
+**实测（p395/p398）**：opCodes 头部 [0]=7 [1]=11 **逐位正确**（LOAD_CONST_S/
+STORE_LOCAL——数字 opcode 链全通）！constLines ✓。LoadConst push 全部
+tagged=false、sLen 逐位正确（120/52/49/17/31...）——push 侧值模型完全健康。
+**余**：println 输出空行（pop→collectArgs→toStrAny→println 链路）——
+[CA] 探针被 [P7v] 共享计数器饿死，pop 侧失明；下轮用独立计数器定位
+collectArgs 的弹出值。尾部 SIGSEGV 未变。
+
+**状态（p398）**：解码 ✓ / 数值 opcode ✓ / constLines ✓ / opCodes ✓ /
+push 侧值模型 ✓ / pop→println 链待独立探针定位。
