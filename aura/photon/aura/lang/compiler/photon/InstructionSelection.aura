@@ -1958,10 +1958,22 @@ class InstructionSelector {
         // 字符串 concat 编成**整数指针加法**（实测 readMagic 的
         // `result = result + fromCharCode(c)`：循环退出后读到 0x200 垃圾、
         // strlen(0x200) 段错误，2026-10-06）。
-        val addIsStr: Boolean = this.types.isString(val.type)
-                || (this.lir != null && val.args.size >= 2
-                    && (this.types.isString(this.lir.valueOf(lhs).type)
-                        || this.types.isString(this.lir.valueOf(rhs).type)))
+        // ⚠️⚠️ P293 反向缺陷（同一分派的另一面）：操作数兜底会把**整数加**
+        // 误判成 strcat——一端类型被污染成 String（跨块类型丢失，§10.75）
+        // 时，`count + 1` 的 Int 常量 1 救不了它 → strcat → "111"…
+        // （实测 decodeNumeric 的 count+1 → strcat → 解码截断）。修复：
+        // **任一操作数为整数 Const ⇒ 强制整数加**（Aura 源码拼接一律先
+        // toStr，`str + Int常量` 形态不存在于自举代码）。
+        var addIsStr: Boolean = this.types.isString(val.type)
+        if (!addIsStr && this.lir != null && val.args.size >= 2) {
+            val lhsV: LirValue = this.lir.valueOf(lhs)
+            val rhsV: LirValue = this.lir.valueOf(rhs)
+            val lhsStr: Boolean = this.types.isString(lhsV.type)
+            val rhsStr: Boolean = this.types.isString(rhsV.type)
+            val lhsIntConst: Boolean = lhsV.op == "Const" && !lhsStr
+            val rhsIntConst: Boolean = rhsV.op == "Const" && !rhsStr
+            addIsStr = (lhsStr && !rhsIntConst) || (rhsStr && !lhsIntConst)
+        }
         if (val.op == "Add" && addIsStr) {
             return this.emitStrcat(val, vid, lhsNode, rhsNode)
         }

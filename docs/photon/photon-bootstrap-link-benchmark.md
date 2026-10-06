@@ -3067,3 +3067,35 @@ decodeNumeric/loadArgsFlat/fuseHotPairs 及全部未来循环一并治愈。
 3. loadPredecoded 补 constPool/funcs 赋值（此前从未赋字段，buildLoadCaches
    构建恒空）。
 4. 标签闭合审计脚本：PhotonRuntime 全发射器 0 缺失。
+
+### 10.76 P295：ISel 守卫落地；丢语句=布局敏感系统性缺陷，转入后端本体修复（2026-10-06 续LIX）
+
+**已落地**：ISel 的 Add 分派守卫——`任一操作数为整数 Const ⇒ 强制整数加`
+（InstructionSelection emitAdd：addIsStr 计算重写）。保护 `count + 1`
+类整数加不被类型污染推入 strcat；P228 的 String concat 修复不受影响
+（fromCharCode 等非 Const 操作数照常 strcat）。
+
+**P295 实测**：布局再次漂移，decodeNumeric 的 flat-add 丢失点移动，
+[winB] n=8 复现。**ISel 守卫不能治愈布局敏感丢失**——丢失发生在更
+基础的层（SSA→LIR→DAG→emit 链路按布局丢语句）。
+
+**系统性结论（本轮全部证据汇总）**：
+* 受害语句清单：fuse r-advance（r 卡 55）、loader decode flat-add
+  （8/219/1194 随布局）、decode count-increment（decoded=1）、
+  count+1 的 strcat 误分派、probe println 丢失（P291 全触发/P284 全丢）。
+* 共性：**全部是「存储/推进」类语句**，按函数布局有/无地消失。
+* 机制假说（待证）：语句在 SSA→LIR→DAG 降级或指令选择中被视为
+  死代码/被合并——「跨块 liveness 不可靠」的另一种表现（§10.63 同族）。
+
+**下轮路线**（后端本体）：
+1. 取 decodeNumeric 为标本：HAT 32 处 listAppend vs 编译产物 32 处
+   call（✓ 都在）——**丢失不在 ISel 发射，在运行期分支不可达**：
+   循环分派对 opcode 槽的比较链，部分 opcode 落入无名分支（跳过追加）。
+   ← 先 dump opcode 比较链 asm，对照 20 个分支的 cmp 立即数与
+   operandSizeLookup 表。
+2. 或上 AURA_PHOTON_STOP=A/B/C/D 阶段短路 + 每阶段 flat 计数，
+   二分定位丢语句的遍。
+3. RA 根治（跨块 liveness 含回边传播）仍是终极方案。
+
+**状态**：LOADONLY ✓ / 解码部分 ✓ / 宿主运行 exit=0 ✓（fuseGuard）/
+helloworld 打印被 flat 截断拦截（8~1194 随布局）。
