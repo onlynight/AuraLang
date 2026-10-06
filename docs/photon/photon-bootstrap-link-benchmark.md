@@ -3554,3 +3554,25 @@ sp 字段读写序）——用 [SL] 探针扩展打印 pop 前后的 stack.size(
 
 **状态（p370）**：解码 1194 ✓ / 数值 opcode ✓ / constLines 逐位正确 ✓ /
 STORE_LOCAL 槽号 ✓ / 值滞后一个 push（唯一剩余）→ Phase G 后 SIGSEGV。
+
+### 10.91 会话 VII：LoadConst opc0 陈旧读零修复（分支线性化）——程序文本真实流淌（2026-10-06 续LXXII）
+
+**里程碑**：[P7]/[P11] 栈深探针实证 push/pop **完全平衡**（depth 1→1、2→2、
+3→3），程序段落文本（║ 行、[1]/[2]/[3] 段头）真实打印，[LC] 探针
+poolLine=[42] 首次逐位正确。
+
+**本段根因（P361，phi-web 的第 N 次现形）**：LoadConst 臂的 `var opc0: Int = 7`
++ if/else 链——链后 opc0 **陈旧读成 0**（phi-web 病）→ numOpCodes[0] = 0 →
+命中旧 CONST_INT(0) 臂静默错译 → 全指令流错位、STORE 弹到前一个 push。
+修复：标签→opcode 映射**线性化** `numOpCodes.add(5 + t0)`（标签 0-4 →
+5-9 恰好线性，无分支可腐蚀；>4 的异常标签单独分支加 7）。
+修复后 [P7] 触发、深度平衡、真实文本流淌。
+
+**当前剩余（单一层）**：部分 println 打印 **toStrBuffer 十进制数字节**
+（0x7FF6 段指针 = ASLR 后宿主镜像地址；数字内容 = 某些 toStr(int) 调用
+残留在单静态缓冲里的字节）。即部分 LOAD_CONST_S 推入的值仍是
+「toStrBuffer 指针」而非 constLines 串——值标签/指针在其一层。
+另有中段 SIGSEGV（crash 点随布局移动）。
+
+**状态（p373）**：解码 ✓ / 数值 opcode ✓ / constLines 逐位正确 ✓ /
+push-pop 平衡 ✓ / 段落头+横幅真实打印 ✓ / 余：部分常量 print 的值层。

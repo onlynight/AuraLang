@@ -569,13 +569,6 @@ class Vm {
             val slot: Int = this.arg0IntOf()
             val sv: Any = this.stack.pop()
             this.locals.putSlot(slot, sv)
-            // P349：局部槽诊断（前 6 次）
-            if (this.dbgLcCount < 6) {
-                this.dbgLcCount = this.dbgLcCount + 1
-                println("[SL] slot=" + toStr(slot) + " filled=" + toStr(this.locals.getSize())
-                    + " vLen=" + toStr(VmOps.toStrAny(sv).length)
-                    + " ip=" + toStr(this.ip) + " raw=[" + this.argStrOf(0) + "]")
-            }
         } else if (op == 5) {
             // 诊断（前 3 次）：常量池行是否完好（2026-10-06 装载链追踪）
             if (this.dbgLcCount < 3) {
