@@ -3371,3 +3371,73 @@ reader 对象也被覆写（data/dataLen/pos = 路径字符串 "buil","/cur",".e
 
 **下会话**：修复 VmLocals putSlot/getSlot 或 LOAD_LOCAL/STORE_LOCAL
 的帧槽腐坏 → 变量值正确 → 程序完整 PASS → 基准对比。
+
+### 10.87 会话 III：五项根因修复落地——解码全对（1194）、opCodes 正确、VM 启动执行；余项收敛到执行期实参解析（2026-10-06 续LXVIII）
+
+**里程碑**：photon 编译 VM 的**装载链全绿**——decodeNumeric 全函数解码完毕（7/7 函数，flat 1194 全对）、opCodes 数值化正确（LOAD_CONST_S=7/STORE_LOCAL=11/LOAD_LOCAL=10 逐项验证）、constLines 54 条正确（const[10]="42"）、funcTable 起始行正确、VM 进入执行循环。
+
+**本段五项根因修复（全部有指令级/探针级实证）**：
+
+1. **帧预算 ID 区间上界（P321，§10.41/§10.53/§10.61 五区隔离的实现）**：
+   X86Emitter 帧大小不再是「扫描计数+256 盲区+2048」——扫描与发射两套遍历的
+   集合漂移即写穿帧底。改为数学封闭上界：`frame = 144 + ID区间×8 + 2048`，
+   兜底槽序号 ≤ 区间宽度（每节点一槽、按 id 记忆），**不可能越界**。
+   [FSOVR] 越界金丝雀全构建 0 触发；[FSZ] 306 函数帧尺寸全部落界内。
+   附带 /STACK:16MB 链接保险（PhotonPipeline 两条链接路径）。
+
+2. **SsaBuilder buildIf varMap 回滚（P326）**：then 分支以 continue/break/return
+   终结时，else 分支的 varMap 必须回滚到 if 之前——旧行为让 else 继承 then 的
+   varMap ⇒ 支配关系违规（else 臂读兄弟臂的值）。实测 decodeNumeric 的
+   count/offset 在修复前每轮回滚（[LP] 探针：cnt 0→6 后弹回 1）、修复后
+   循环变量全程单调递进。
+
+3. **ISel phi (b) 强制兜底删除（P330）**：phi 入参数 ≠ 实际前驱数时（SSA
+   continue 边丢失/陈旧 latch 标签，常态），旧兜底把**不相干路径的剩余值**从
+   尾部强行配给未匹配前驱 → 每轮把陈旧值写回循环 phi 家槽。正确语义：未匹配
+   前驱 = 该路径未赋值 ⇒ **不发 MOV**（家槽现内容 = 上一轮值，恰为所求）。
+   附 [phi-nomov] 有界诊断。
+
+4. **`.get(i)` → `[i]` 下标形式（P341）**：photon 编译下 `.get` 的调用窗口内
+   实参槽被相邻值覆写（布局敏感）。Opcodes.fromName 换 `[i]` 后 opCodes
+   立即全对（16/0/10 → 7/11/10）；VmLocals getSlot/putSlot、Vm.argStrOf/
+   argCountOf/arg2-4IntOf/getConstByIdx 同步换下标。**RA 注释早已记载
+   （`list.get(i)` 未链接/不可靠，`[i]` 才是受支持路径）——本次以实验坐实。**
+
+5. **装载路径多操作数拼接链摊平（P340）+ realDecoded（P331）+ buildLoadCaches
+   恢复（P333/334）**：
+   - constPool/funcTable/numArgsFlat 的 `a + sep + b` 链在 photon 下偶发丢第二
+     操作数（§10.77 家族）→ 全部摊平为双操作数语句；
+   - decoded 返回值不可靠（循环 phi 家槽污染，恒 1/2）→ funcTable 起始行改用
+     **flat 实际增量**（numOpNames.size 差值，与 [winB] 1194 逐位一致）；
+   - buildLoadCaches 恢复启用：funcOffsetMap/funcParamMap 换**平行 List** 线性
+     扫描（HashMap 在 photon 下读空崩溃，§10.85 同族）；funcTable 手工扫描
+     循环暂跳过（photon 下崩，[BLC-ft] 前崩），CALL 走 findFuncOffset 现场解析。
+   - X86Emitter：__field_get/__field_set 内联为 `mov rax,[rcx+rdx*8+16]` +
+     null 守卫（P345，指令序列与 PhotonRuntime 逐条一致）。
+
+**本段定位过程的关键实证**（工具链沉淀）：
+- [FSZ]/[FSOVR]：帧尺寸与越界金丝雀（本次起常驻，行为无副作用）。
+- [LP] 循环探针：decodeNumeric 内 opcode/operandSize/offset/pos 逐轮实测——
+  定位 count/offset 回滚的精确形态（每逢 op=54/os==0 臂后回滚）。
+- [DC]/[DC2]/fld 三读实验：证明 decoded=3 是**返回值本身**（phi 问题）而非
+  返回值传递腐坏（帧槽问题）——一次实验分流两个假设。
+- 反汇编双槽穷举（-0x138/-0x140/-0x1a0/-0x2b8/-0x2d0 全读写点）：排除槽碰撞，
+  锁定 phi 语义层。
+
+**未修（下会话首查，已指令级收敛）**：
+1. **执行期 println 实参 stale**：VM 运行后前 10 条 println 打印**同一**指针值
+   （0x7FF6...，.rdata 地址）——push/pop 链或 println 实参装载把 10 个不同
+   const 收敛到同一槽。已排除：帧越界（FSOVR 0）、`-8` 共享槽（0 触发）、
+   __field_get/set 调用窗（内联后症状不变）。**下轮首查：gdb 断 VmStack_push/
+   VmStack_pop，看 sp/cap 字段读写与 d[sp] 落点**——若 sp 恒 0 即 push 的
+   field 链坏；若 sp 正常则 pop→println 的实参解析坏。
+2. **err/instrs/exit 尾部读取腐坏**：VmRunner 的 `vm.getError()` 等返回
+   指针值（err=[281397070078208]）——getError 字符串拼接链或字段读同族。
+3. **getFieldAt 兜底扫描**仍漏换行（[LC] 探针显示多行块）——仅诊断路径使用
+   （真实常量走 constLines ✓），但 [LC] 探针输出误导，排查时须区分。
+4. **constLines 个别条目仍黏连**（n=54 ✓ 但 [10] 后段含后续条目文本——分割
+   位置个别漂移，toI32 取前导数字不受影响，字符串常量内容受影响）。
+
+**状态**：LOADONLY ✓ / 解码 1194 ✓（全函数） / opCodes ✓ / constLines ✓ /
+funcTable ✓ / VM 进入执行循环（err 优雅退出，无段错误 until 程序尾部）/
+helloworld 打印待执行期实参解析修复。

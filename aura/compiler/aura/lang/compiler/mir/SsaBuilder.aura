@@ -855,6 +855,10 @@ class SsaBuilder {
         this.buildBlock(src, HirUtils.hirKidsAt(kids, 1))
         if (traceOn) println("      [if5] after buildBlock then")
 
+        // then 分支是否以**自身终结指令**结束（continue/break/return ——
+        // 注意必须在下面的自动 Br 补发**之前**判定）。
+        val thenSelfTerm: Boolean = this.program.blockOf(this.curBlock).term >= 0
+
         // 设置 then 块到 merge 块的跳转
         val thenBlockObj: MirBlock = this.program.blockOf(this.curBlock)
         if (thenBlockObj.term < 0) {
@@ -870,6 +874,16 @@ class SsaBuilder {
         if (kCount > 2) {
             if (traceOn) println("      [if8] before buildBlock else")
             this.curBlock = elseBlock
+            // ⚠️ P326（2026-10-06）：then 分支以终结指令结束时，then 路径**永不
+            // 经过 else**——else 分支的变量可见性必须回滚到 if 之前的状态。
+            // 旧行为让 else 直接继承 then 之后的 varMap ⇒ 支配关系违规：
+            // else 臂引用 then 臂的定义值（如 `if (c) { count = count + 1; continue }
+            // else if …` 中第二臂的 count 读到第一臂的 count+1 值）——运行期
+            // 该值是上一轮迭代的残渣。实测 decodeNumeric 的 count/offset 每轮
+            // 回滚（decoded 恒 3/1）、AucLoader 全函数解码量塌缩。
+            if (thenSelfTerm) {
+                this.varMap = varMapBefore
+            }
             this.buildBlock(src, HirUtils.hirKidsAt(kids, 2))
             if (traceOn) println("      [if9] after buildBlock else")
             val elseBlockObj: MirBlock = this.program.blockOf(this.curBlock)

@@ -42,18 +42,22 @@ class X86Emitter {
     /// 一个下标递增即可取到当前函数的帧信息，无需按名字查找。
     private var funcNames: List<String> = arrayListOf<String>()
 
-    /// 预扫结果：每个函数实际用到的**最大溢出槽号**（`-1` = 未用任何槽）。
-    private var funcMaxSlots: List<Int> = arrayListOf<Int>()
-
-    /// 每函数的「发射器兜底槽」数（无色节点经 regOfNodeRaw ③ 分配的
-    /// slotForNode 槽），供帧大小计算使用（见 scanFunctionMaxSlots）。
-    private var funcExtraSlots: List<Int> = arrayListOf<Int>()
-    // P301: 传递闭包遍历的游标（按函数重置）
+    /// 预扫结果：每个函数的**节点 ID 区间宽度**（maxId − minId + 1）。
+    ///
+    /// P321 五区隔离（§10.79 立项的根治）：帧大小不再是「扫描计数 + 256 盲区
+    /// 兜底 + 2048 余量」——计数扫描与发射期首次分配是**两套独立遍历**，集合
+    /// 一旦不匹配，兜底槽就写穿帧底（腐坏随布局移动的根源）。
+    /// 改用**数学上封闭的上界**：发射期 `slotForNode(id≥0)` 只会对传递闭包内
+    /// 的节点各分配**一个**槽（按 nodeId 记忆复用），因此兜底槽总数 ≤ 闭包内
+    /// 不同节点数 ≤ maxId − minId + 1。帧 = 144（参数暂存区）+ 区间×8 +
+    /// 2048 边际，**不可能越界**。
+    private var funcIdRange: List<Int> = arrayListOf<Int>()
+    // P321: 传递闭包遍历的游标（按函数重置）
     private var walkSeenCsv: String = "|"
-    private var walkMaxSlot: Int = -1
-    private var extraCsvWalk: String = "|"
+    private var walkMinId: Int = -1
+    private var walkMaxId: Int = -1
 
-    /// 主循环用的下标（对应 `funcNames` / `funcMaxSlots`）。
+    /// 主循环用的下标（对应 `funcNames` / `funcIdRange`）。
     private var fnIdx: Int = 0
 
     /// 字符串常量表（逗号分隔）。
@@ -89,7 +93,7 @@ class X86Emitter {
         this.relocRecords = ""
         this.frameSize = 0x50
         this.funcNames = arrayListOf<String>()
-        this.funcMaxSlots = arrayListOf<Int>()
+        this.funcIdRange = arrayListOf<Int>()
         this.fnIdx = 0
         this.strConsts = ""
         this.funcOffsets = ""
@@ -137,19 +141,18 @@ class X86Emitter {
     /// 落在未提交页上 ⇒ `0xC0000005`（详见 `X86Encoder.emitPrologue`），
     /// 而且 528 KB × 2 层就超出 1 MB 的默认栈 ⇒ 任何两层调用都栈溢出。
     ///
-    /// 帧大小 = `32 + (最大槽号+1)*8`（16 字节对齐）；该函数未用任何槽时
+    /// 帧大小 = `144 + ID 区间×8 + 2048`（16 字节对齐）；该函数未用任何槽时
     /// 退回历史默认 `0x50`。顺序与主循环的函数边界检测一致，
     /// 因此主循环按下标取用（见 `funcNames` / `fnIdx`）。
     private fun scanFunctionMaxSlots(dag: MachineDag): Unit {
         this.funcNames = arrayListOf<String>()
-        this.funcMaxSlots = arrayListOf<Int>()
-        this.funcExtraSlots = arrayListOf<Int>()
+        this.funcIdRange = arrayListOf<Int>()
         if (this.allocator == null) {
             return
         }
         this.walkSeenCsv = "|"
-        this.walkMaxSlot = -1
-        this.extraCsvWalk = "|"
+        this.walkMinId = -1
+        this.walkMaxId = -1
         var curFn: String = ""
         var i: Int = 0
         while (i < dag.instrCount) {
@@ -161,8 +164,8 @@ class X86Emitter {
                 }
                 curFn = fn
                 this.walkSeenCsv = "|"
-                this.walkMaxSlot = -1
-                this.extraCsvWalk = "|"
+                this.walkMinId = -1
+                this.walkMaxId = -1
             }
             // 根节点：nodes + output + call 实参——**传递闭包**全遍历
             //（P301 旧实现只扫根节点，表达式链的中间节点漏计 ⇒ 兜底槽
@@ -197,19 +200,14 @@ class X86Emitter {
         }
     }
 
-    /// 递归收集节点传递闭包：spill_slot 计最大号；无色/rax 节点计入兜底预算
+    /// 递归收集节点传递闭包：记录节点 ID 的 min/max（P321：帧预算 = ID 区间，
+    /// 不再区分有色/无色——发射期任何 slotForNode(id) 的 id 都在本闭包内）。
     private fun walkExtraNodes(dag: MachineDag, nodeId: Int): Unit {
         val mark: String = "|" + toStr(nodeId) + "|"
         if (this.walkSeenCsv.indexOf(mark) >= 0) { return }
         this.walkSeenCsv = this.walkSeenCsv + toStr(nodeId) + "|"
-        var c: String = ""
-        if (this.allocator != null) { c = this.allocator.getColor(nodeId) }
-        if (c.startsWith("spill_slot_")) {
-            val slot: Int = MachineDagUtils.strToInt(c.substring(11))
-            if (slot > this.walkMaxSlot) { this.walkMaxSlot = slot }
-        } else if (c == "" || c == "rax") {
-            this.extraCsvWalk = this.extraCsvWalk + toStr(nodeId) + "|"
-        }
+        if (this.walkMinId < 0 || nodeId < this.walkMinId) { this.walkMinId = nodeId }
+        if (nodeId > this.walkMaxId) { this.walkMaxId = nodeId }
         val node: DagNode = dag.nodeOf(nodeId)
         var args: List<String> = MachineDagUtils.splitArgs(node.args)
         var j: Int = 0
@@ -222,14 +220,12 @@ class X86Emitter {
 
     private fun flushSlotGroup(fn: String): Unit {
         this.funcNames.add(fn)
-        this.funcMaxSlots.add(this.walkMaxSlot)
-        var en: Int = 0
-        var cp: Int = 0
-        while (cp < this.extraCsvWalk.length) {
-            if (this.extraCsvWalk.charCodeAt(cp) == 124) { en = en + 1 }
-            cp = cp + 1
+        // P321: 帧预算 = ID 区间宽度（min..max 至少覆盖闭包内全部节点）。
+        var range: Int = 0
+        if (this.walkMaxId >= 0) {
+            range = this.walkMaxId - this.walkMinId + 1
         }
-        this.funcExtraSlots.add(en)
+        this.funcIdRange.add(range)
     }
 
     /// 发射整个 MachineDag 为机器码（支持多函数：每个函数独立 prologue/epilogue）。
@@ -298,49 +294,41 @@ class X86Emitter {
                 // 模块级帧（自举 `Main.aura` = 528 KB）套给每个函数，既会一步跨过
                 // 守卫页导致 `0xC0000005`，两层调用又会撑爆默认 1 MB 栈。
                 var frame: Int = this.frameSize
-                // 本函数 RA 溢出区的字节数（额外槽必须从它**下方**开始，否则重叠）。
-                var spillBase: Int = 32
+                // 本函数兜底槽区的基址（P321 固定 144：参数暂存区 [rbp-8..rbp-144)
+                // 不再与任何槽分配共享）。
+                var spillBase: Int = 144
+                var rangeCap: Int = 0
                 if (this.fnIdx < this.funcNames.size
                     && this.funcNames[this.fnIdx] == instrFunc) {
-                    val ms: Int = this.funcMaxSlots[this.fnIdx]
-                    // 发射器兜底槽数（无色节点），与 RA 溢出槽并列计入帧
-                    var ex: Int = 0
-                    if (this.fnIdx < this.funcExtraSlots.size) {
-                        ex = this.funcExtraSlots[this.fnIdx]
-                    }
-                    if (ms >= 0 || ex > 0) {
-                        // 帧布局（2026-10-06 勘误）：
-                        //   [rbp-32 .. rbp-fsz)         = RA 溢出槽区
-                        //   [rbp-fsz-8 .. rbp-fsz-8-ex*8) = 发射器兜底槽区
-                        // spillBase 必须是 **RA 区底（不含兜底区）**——slotForNode
-                        // 以 `-(spillBase + 8 + k*8)` 落点，若把兜底区算进
-                        // spillBase，所有兜底槽都会落到 frame 之下（rsp 红区）
-                        // ⇒ 每次 call 都被踩（实测上一版正是因此全面崩坏）。
-                        var ms2: Int = ms
-                        if (this.allocator != null) {
-                            // P301: 用 RA 的权威溢出槽数兜底（发射器扫描有盲区）
-                            var raSS: Int = this.allocator.getSpillSlots()
-                            if (raSS > ms2) { ms2 = raSS }
-                        }
-                        var fsz: Int = 144 + (ms2 + 1) * 8          // RA 区底（P301: 基址 144 越 11 参局部槽）
-                        var baseLocal: Int = fsz                    // 兜底槽基址
-                        // ⚠️ P296 预算加倍：funcExtraSlots 扫描对部分节点计数不足
-                        //（实测 decodeNumeric/融合循环的深槽写越界踩其他帧），
-                        // 4× 乘数 + 256 槽下限吸收漏计。
-                        ex = ex + 256
-                        fsz = fsz + 16 + ex * 8                     // + 兜底槽区
-                        if (fsz % 16 != 0) { fsz = fsz + (16 - fsz % 16) }
-                        frame = fsz
-                        spillBase = baseLocal
-                    } else {
-                        // 该函数没有溢出槽 → 不需要为溢出区留空间
-                        frame = 0x50
-                    }
+                    // P321 五区隔离帧布局（§10.41/§10.53/§10.61 立项）：
+                    //
+                    //   [rbp+0x48 ..]              入参（影子空间之上，emitParam 基址）
+                    //   [rbp-8 .. rbp-144)         区A 参数暂存区（id<0 固定槽 -8 等，
+                    //                              不做任何按值分配）
+                    //   [rbp-144 .. rbp-144-R*8)   区B 兜底槽区（R = funcIdRange，
+                    //                              slotForNode 顺序分配，数学封闭）
+                    //   [rbp-144-R*8-2048 ..)      区C 安全边际（栈参 0x20+24×8=0xC0
+                    //                              与未预见临时都在这里消化）
+                    //
+                    // 旧实现帧预算来自「扫描计数 + 256 盲区 + 布局实验调参」——扫描
+                    // 与发射两套遍历的集合/顺序一旦漂移，兜底槽写穿帧底被 call 踩掉
+                    // （= 布局敏感腐坏家族的根源，修一处他处现形不可收敛）。
+                    // ID 区间是发射期槽总数的**上界**（每节点至多一槽且按 id 记忆），
+                    // 从根上消除不匹配的可能。
+                    val range: Int = this.funcIdRange[this.fnIdx]
+                    rangeCap = range
+                    var fsz: Int = 144 + (range + 1) * 8
+                    if (fsz % 16 != 0) { fsz = fsz + (16 - fsz % 16) }
+                    frame = fsz
+                    spillBase = 144
                     this.fnIdx = this.fnIdx + 1
                 }
                 // 额外槽计数按函数清零，并把基址交给 `slotForNode`。
                 this.extraSlotCount = 0
                 this.curSpillBase = spillBase
+                this.curIdRange = rangeCap
+                println("[FSZ] " + toStr(this.canaryFuncIdx) + "|" + instrFunc
+                        + " range=" + toStr(rangeCap) + " frame=" + toStr(frame))
                 if (srParts.size % 2 == 1) { frame = frame + 8 }
                 // ⚠️ 为发射器额外分配的调用结果槽留余量（见 `extraSlotCount`）。
                 // 余量旧值「256 槽 × 8B = 2KB」**不够**：大函数（loadModule/
@@ -840,7 +828,28 @@ class X86Emitter {
             val funcName: String = node.aux
             // 先按 Win64 约定装载实参寄存器，再发 CALL。
             this.emitCallArgs(node, dag)
-            if (funcName != "" && funcName != "@imm") {
+            // P345（2026-10-06）：__field_get/__field_set **内联**——字段访问
+            // 走调用时，实参/结果槽在调用窗口内被相邻值覆写（布局敏感），
+            // 实测 VmStack 的 sp/d 字段读坏 → push 全落 d[0]、LOAD_LOCAL 空。
+            // 指令序列与 PhotonRuntime.emitFieldGet/Set 逐条一致。
+            if (funcName == "__field_get") {
+                this.enc.emitCmpRI("rcx", 0)
+                this.enc.emitJccLabel("eq", "fget_null_" + toStr(nodeId))
+                this.enc.emitLoadIndexed8("rax", "rcx", "rdx", 16)
+                this.enc.emitJmpLabel("fget_end_" + toStr(nodeId))
+                this.enc.emitLabel("fget_null_" + toStr(nodeId))
+                this.enc.emitMovRI("rax", 0)
+                this.enc.emitLabel("fget_end_" + toStr(nodeId))
+            } else if (funcName == "__field_set") {
+                this.enc.emitCmpRI("rcx", 0)
+                this.enc.emitJccLabel("eq", "fset_null_" + toStr(nodeId))
+                this.enc.emitStoreIndexed8("rcx", "rdx", 16, "r8")
+                this.enc.emitMovRR("rax", "rcx")
+                this.enc.emitJmpLabel("fset_end_" + toStr(nodeId))
+                this.enc.emitLabel("fset_null_" + toStr(nodeId))
+                this.enc.emitMovRI("rax", 0)
+                this.enc.emitLabel("fset_end_" + toStr(nodeId))
+            } else if (funcName != "" && funcName != "@imm") {
                 this.enc.emitCallRel(funcName)
             }
             // ── 返回值落地（Win64：返回值固定放在 rax）──
@@ -1095,6 +1104,10 @@ class X86Emitter {
     /// 在函数 prologue 处设置（见 `emitFunction`）。
     private var curSpillBase: Int = 32
 
+    /// 当前函数的兜底槽预算（P321 = ID 区间宽度）。`slotForNode` 分配新槽时
+    /// 超过它 = 发射触达了闭包扫描之外的节点（数学界被破坏），立即打印诊断。
+    private var curIdRange: Int = 0
+
     /// 栈帧 canary：本函数实际 `sub rsp` 的帧大小（含 2048B 兜底与奇数寄存器
     /// 对齐），canary 槽按 `rbp - canaryFrameSize + 常量` 定位。0 = 未插桩。
     /// epilogue 校验见 `emitCanaryChecks`（P0-2 首次越界写定位，2026-10-06）。
@@ -1156,6 +1169,15 @@ class X86Emitter {
             // 不与之重叠（见 `emitFunction` 的 prologue 段）。
             s = 0 - (this.curSpillBase + 8 + this.extraSlotCount * 8)
             this.setNodeSlot(nodeId, s)
+            // P321 越界金丝雀：新槽序号超过 ID 区间预算 = 发射触达了扫描闭包外的
+            // 节点，槽已越过帧底（下一个 call 即踩）。有界打印，一次构建最多 40 条。
+            if (this.extraSlotCount > this.curIdRange && this.slotOvrCount < 40) {
+                this.slotOvrCount = this.slotOvrCount + 1
+                println("[FSOVR] k=" + toStr(this.extraSlotCount)
+                        + " range=" + toStr(this.curIdRange)
+                        + " id=" + toStr(nodeId)
+                        + " off=" + toStr(s))
+            }
         }
         if (this.slotDiagCount < 12) {
             this.slotDiagCount = this.slotDiagCount + 1
@@ -1167,6 +1189,9 @@ class X86Emitter {
 
     /// 诊断计数（见 `slotForNode`）。
     private var slotDiagCount: Int = 0
+
+    /// P321 越界金丝雀计数（有界，见 `slotForNode`）。
+    private var slotOvrCount: Int = 0
 
     /// 登记 nodeId → 兜底槽偏移（偏移为负；0 表示未分配）。
     private fun setNodeSlot(id: Int, off: Int): Unit {

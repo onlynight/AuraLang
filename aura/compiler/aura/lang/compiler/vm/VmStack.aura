@@ -177,8 +177,10 @@ class VmLocals {
     /// 会把 VmLocals 指针当 AuraDynList 送进 C mapSet → 崩溃。）
     fun getSlot(k: Int): Any {
         if (k >= 0 && k < this.filled) {
-            if (this.marks.get(k) == this.gen) {
-                return this.slots.get(k)
+            // P341：下标形式——photon 编译下 .get 的调用窗口内实参槽会被
+            // 相邻值覆写（布局敏感），比较误配 → LOAD_LOCAL 空值。
+            if (this.marks[k] == this.gen) {
+                return this.slots[k]
             }
         }
         return null
@@ -191,8 +193,8 @@ class VmLocals {
             this.marks.add(0)
             this.filled = this.filled + 1
         }
-        this.slots.set(k, v)
-        this.marks.set(k, this.gen)
+        this.slots[k] = v
+        this.marks[k] = this.gen
     }
 
     /// 已扩容的槽位数（诊断/trace 用）。

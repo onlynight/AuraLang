@@ -1258,25 +1258,23 @@ class InstructionSelector {
                             }
                             ri2 = ri2 + 1
                         }
-                        // (b) 兜底：仍未命中的前驱，**从尾部（追加条）向前**
-                        // 选首个未使用的入边值。phi.args = [before, bodyEnd,
-                        // cont1, …]——追加条是 buildContinue 登记的 continue
-                        // 点值；无法精确匹配的前驱恰是 continue 前驱，应优先
-                        // 拿追加条。旧实现从头部选 ⇒ continue 前驱抢走
-                        // before(0)、latch 抢走 contVid ⇒ 循环变量恒 0
-                        //（实测 probe_break total=1 死循环，2026-10-05）。
+                        // (b) P330：**删除强制兜底**。旧实现把「剩余入边值」从尾部
+                        // 强行配给未匹配前驱——当 phi 入参数 ≠ 实际前驱数（SSA
+                        // 构建期的 continue 边丢失/陈旧 latch 标签，常态）时，
+                        // 这会把**不相干路径的陈旧值**写进 phi 家槽：实测
+                        // decodeNumeric 循环 phi 17 入参 vs 18 实际前驱，(b) 把
+                        // 孤儿 latch 值配给 op==0 臂 → 每轮 count/offset 被
+                        // 重置（decoded 恒 1/2，flat 塌缩）。
+                        // 正确语义：未匹配前驱 = 该路径**未赋值**该循环变量 ⇒
+                        // phi 取上一轮值 = 家槽现内容 ⇒ **不发 MOV** 即正确。
                         var rj: Int = 0
                         while (rj < predN) {
                             if (pickOfPred[rj] < 0) {
-                                var aj: Int = incomingN - 1
-                                while (aj >= 0) {
-                                    val usedAj: Int = used[aj]
-                                    if (usedAj == 0) {
-                                        pickOfPred[rj] = aj
-                                        used[aj] = 1
-                                        break
-                                    }
-                                    aj = aj - 1
+                                if (this.phiDiagOn && this.phiDiagMissing < 40) {
+                                    this.phiDiagMissing = this.phiDiagMissing + 1
+                                    println("[phi-nomov] fn=" + this.funcName
+                                            + " pred=" + MachineDagUtils.toStr(predFlat[pLo + rj])
+                                            + " phi=" + MachineDagUtils.toStr(phiVid))
                                 }
                             }
                             rj = rj + 1
@@ -1544,8 +1542,6 @@ class InstructionSelector {
         }
         this.phiMovFlat[idx * this.phiMovCap + cnt] =
             MachineDagUtils.toStr(phiVid) + "," + MachineDagUtils.toStr(incomingVid)
-        println("[pmAdd] blk=" + toStr(blockId) + " phi=" + toStr(phiVid)
-                + " <- in=" + toStr(incomingVid))
         this.phiMovCnt[idx] = cnt + 1
         this.phiMovTotal = this.phiMovTotal + 1
     }

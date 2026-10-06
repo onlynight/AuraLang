@@ -495,6 +495,9 @@ class PhotonPipeline {
             linker.addFlag("/ENTRY:main")
             linker.addFlag("/MACHINE:X64")
             linker.addFlag("/NODEFAULTLIB")
+            // P321: 大函数帧（ID 区间上界后仍可达数十 KB）× 深调用链需要更大栈；
+            // reserve=commit 免去守卫页提交依赖（emitPrologue 的逐页下探仍在）。
+            linker.addFlag("/STACK:16777216")
         }
         linker.useDefaultLibs = false
         // ⚠️ runtime **确实**需要 kernel32 了：`env_get` 走 `GetEnvironmentVariableA`
@@ -815,6 +818,9 @@ class PhotonPipeline {
             linker.addFlag("/ENTRY:main")
             linker.addFlag("/MACHINE:X64")
             linker.addFlag("/NODEFAULTLIB")
+            // P321: 大函数帧（ID 区间上界后仍可达数十 KB）× 深调用链需要更大栈；
+            // reserve=commit 免去守卫页提交依赖（emitPrologue 的逐页下探仍在）。
+            linker.addFlag("/STACK:16777216")
         }
         linker.useDefaultLibs = false
         // 同另一条链接路径：`env_get` 需要 kernel32（见上）。

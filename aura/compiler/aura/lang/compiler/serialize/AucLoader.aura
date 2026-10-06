@@ -156,7 +156,9 @@ object AucLoaderUtils {
             val value: String = readConstValue(reader, tag)
             if (mod.constsCount <= 12) {
             }
-            if (mod.constPool != "") {
+            // P340：嵌套拼接链（a + "\n" + b）在 photon 下偶发丢第二操作数
+            //（§10.77 家族）——摊平为两条双操作数语句，分隔符不再丢。
+            if (ci > 0) {
                 mod.constPool = mod.constPool + "\n"
             }
             mod.constPool = mod.constPool + escapeConstValue(value)
@@ -405,13 +407,17 @@ object AucLoaderUtils {
         while (fi3 < mod.funcsCount) {
             startLines.add(lineNo2)
             reader.pos = codeStarts.get(fi3)
+            val startOpCount: Int = mod.numOpNames.size()
             val decoded: Int = decodeNumeric(reader, codeLens.get(fi3), nativeNames,
                 nativeParams, constTags, funcNames, funcParams, mod.slotMethodNames,
                 mod.classNames, lineNo2, mod)
-            // P283 解码探针：每函数 codeLen vs 实解码数 vs 读指针（flat 截断定位）
+            // P331：decoded 返回值在 photon 下不可靠（循环 phi 家槽被陈旧 MOV
+            // 污染，实测恒 1/2）——但 flat 追加本身全对（[winB] n=1194 实证）。
+            // 起始行改用 **flat 实际增量** 计算，绕开坏计数器。
+            val realDecoded: Int = mod.numOpNames.size() - startOpCount
             println("[DC] f=" + toStr(fi3) + " codeLen=" + toStr(codeLens.get(fi3))
-                + " decoded=" + toStr(decoded) + " pos=" + toStr(reader.pos))
-            lineNo2 = lineNo2 + decoded
+                + " real=" + toStr(realDecoded) + " pos=" + toStr(reader.pos))
+            lineNo2 = lineNo2 + realDecoded
             fi3 = fi3 + 1
         }
         // P239 括号探针 A：decode 完成点的 numArgsFlat 健康度
@@ -420,10 +426,15 @@ object AucLoaderUtils {
         probeL.add("AA")
         probeL.add("BB")
         // 函数表：起始行 = 指令下标（无数值注释占位行）
+        // P340：多操作数拼接链摊平（同 constPool 修复）。
         var fi4: Int = 0
         while (fi4 < mod.funcsCount) {
-            mod.funcTable = mod.funcTable + funcNames.get(fi4) + "|"
-                + toStr(startLines.get(fi4)) + "|" + toStr(funcParams.get(fi4)) + "\n"
+            mod.funcTable = mod.funcTable + funcNames.get(fi4)
+            mod.funcTable = mod.funcTable + "|"
+            mod.funcTable = mod.funcTable + toStr(startLines.get(fi4))
+            mod.funcTable = mod.funcTable + "|"
+            mod.funcTable = mod.funcTable + toStr(funcParams.get(fi4))
+            mod.funcTable = mod.funcTable + "\n"
             fi4 = fi4 + 1
         }
 
@@ -759,7 +770,9 @@ object AucLoaderUtils {
                 val fidx: Int = reader.readU16()
                 val n0: String = nameAt(funcNames, fidx)
                 mod.numOpNames.add("CALL")
-                mod.numArgsFlat.add(n0 + "," + toStr(paramAt(funcParams, fidx)))
+                // P340：三操作数拼接链摊平（丢第二操作数家族）
+                val a26: String = n0 + ","
+                mod.numArgsFlat.add(a26 + toStr(paramAt(funcParams, fidx)))
                 count = count + 1
                 var adv: Int = 1 + operandSize
                 offset = offset + adv
@@ -770,7 +783,8 @@ object AucLoaderUtils {
                 var n0: String = nameAt(nativeNames, idx)
                 if (n0 == "") { n0 = toStr(idx) }
                 mod.numOpNames.add("CALL_NATIVE_ARGS")
-                mod.numArgsFlat.add(n0 + "," + toStr(paramAt(nativeParams, idx)))
+                val a27: String = n0 + ","
+                mod.numArgsFlat.add(a27 + toStr(paramAt(nativeParams, idx)))
                 count = count + 1
                 var adv: Int = 1 + operandSize
                 offset = offset + adv
@@ -782,7 +796,8 @@ object AucLoaderUtils {
                 var n0: String = nameAt(nativeNames, idx)
                 if (n0 == "") { n0 = toStr(idx) }
                 mod.numOpNames.add("CALL_NATIVE_ARGS")
-                mod.numArgsFlat.add(n0 + "," + toStr(argc))
+                val a78: String = n0 + ","
+                mod.numArgsFlat.add(a78 + toStr(argc))
                 count = count + 1
                 var adv: Int = 1 + operandSize
                 offset = offset + adv
@@ -826,7 +841,8 @@ object AucLoaderUtils {
                 val modIdx: Int = reader.readU16()
                 val symIdx: Int = reader.readU16()
                 mod.numOpNames.add(opcodeName(opcode))
-                mod.numArgsFlat.add(toStr(modIdx) + "," + toStr(symIdx))
+                val a71: String = toStr(modIdx) + ","
+                mod.numArgsFlat.add(a71 + toStr(symIdx))
                 count = count + 1
                 var adv: Int = 1 + operandSize
                 offset = offset + adv
@@ -874,7 +890,9 @@ object AucLoaderUtils {
                     catchName = classNameAt(classNames, catchId)
                 }
                 mod.numOpNames.add(opcodeName(opcode))
-                mod.numArgsFlat.add(toStr(baseLine + li) + "," + toStr(slot) + "," + catchName)
+                val a82a: String = toStr(baseLine + li) + ","
+                val a82b: String = a82a + toStr(slot) + ","
+                mod.numArgsFlat.add(a82b + catchName)
                 count = count + 1
                 var adv: Int = 1 + operandSize
                 offset = offset + adv
@@ -891,18 +909,25 @@ object AucLoaderUtils {
                 val v0: Int = reader.readU16()
                 val v1: Int = reader.readU16()
                 mod.numOpNames.add(opcodeName(opcode))
-                mod.numArgsFlat.add(toStr(v0) + "," + toStr(v1))
+                val a4a: String = toStr(v0) + ","
+                mod.numArgsFlat.add(a4a + toStr(v1))
                 count = count + 1
                 var adv: Int = 1 + operandSize
                 offset = offset + adv
                 continue
             }
             // operandSize == 0：无操作数（opcodeName 单点重算，无合并）
+            // ⚠️ P329：此臂必须显式 continue——它是 if/else 链中唯一无 continue
+            // 的臂，fall-through 会经 merge phi 链回连循环头，而链上 merge 的
+            // 前驱标签在 PushHandler 化后全部失配（陈旧边），运行期把上一轮
+            // 之前的陈旧 count/offset 写回循环 phi 家槽（实测 count 每逢本臂
+            // 回滚到 1，decoded 恒 1/2）。
             mod.numOpNames.add(opcodeName(opcode))
             mod.numArgsFlat.add("")
             count = count + 1
             // 对齐函数边界（防操作数宽度判断漂移）
             offset = offset + 1 + operandSize
+            continue
         }
 
         if (reader.pos < endPos) {

@@ -41,8 +41,12 @@ class Vm {
 
     // ── 加载期索引与诊断（方案 A2/D/E）──
     private var traceMode: Boolean = false
-    private var funcOffsetMap: HashMap<String, Int> = HashMap<String, Int>()
-    private var funcParamMap: HashMap<String, Int> = HashMap<String, Int>()
+    /// 函数表索引（P334：HashMap 在 photon 编译下 get/put 读空崩溃
+    ///（§10.85 Memory_read64(0)），改平行 List 线性扫描——函数表 ~300 项、
+    /// CALL 低频，性能无碍。
+    private var funcNamesL: List<String> = arrayListOf<String>()
+    private var funcOffL: List<Int> = arrayListOf<Int>()
+    private var funcPcL: List<Int> = arrayListOf<Int>()
     private var constLines: List<String> = arrayListOf<String>()
     private var arg0Ints: List<Int> = arrayListOf<Int>()
     private var arg1Ints: List<Int> = arrayListOf<Int>()
@@ -391,6 +395,16 @@ class Vm {
         this.currentClosure = -1
         this.accelEnabled = false
         this.accelTable = HashMap<String, Int>()
+        // P333：buildLoadCaches 恢复启用——§10.85 的 Memory_read64(0) 崩点之后
+        // 已落地五项修复（mmap 文件缓冲 / 帧预算 ID 区间上界 / buildIf varMap
+        // 回滚 / phi (b) 兜底删除 / realDecoded）。constLines 走本函数的
+        // charCodeAt 扫描构建（getFieldAt 兜底扫描在 photon 下漏换行，
+        // [LC] 探针实证多行块），CALL 所需 funcOffsetMap 也在此构建。
+        // P333：buildLoadCaches 恢复启用——§10.85 的 Memory_read64(0) 崩点之后
+        // 已落地五项修复（mmap 文件缓冲 / 帧预算 ID 区间上界 / buildIf varMap
+        // 回滚 / phi (b) 兜底删除 / realDecoded）。constLines 走本函数的
+        // charCodeAt 扫描构建（getFieldAt 兜底扫描在 photon 下漏换行），
+        // funcOffsetMap 换平行 List（HashMap 在 photon 下读空，§10.85 同族）。
         this.fuseHotPairs()
         this.buildLoadCaches()
     }
@@ -3209,18 +3223,26 @@ class Vm {
 
     /// 查找函数入口偏移（未找到返回 0）。
     private fun funcOffset(funcName: String): Int {
-        val cached: Int = this.funcOffsetMap.getOrDefault(funcName, -1)
-        if (cached >= 0) {
-            return cached
+        var i: Int = 0
+        val n: Int = this.funcNamesL.size()
+        while (i < n) {
+            if (this.funcNamesL.get(i) == funcName) {
+                return this.funcOffL.get(i)
+            }
+            i = i + 1
         }
         return VmOps.findFuncOffset(this.funcTable, funcName)
     }
 
     /// 查找函数参数个数（未找到返回 -1）。
     private fun funcParamCount(funcName: String): Int {
-        val cachedPc: Int = this.funcParamMap.getOrDefault(funcName, -1)
-        if (cachedPc >= 0) {
-            return cachedPc
+        var i: Int = 0
+        val n: Int = this.funcNamesL.size()
+        while (i < n) {
+            if (this.funcNamesL.get(i) == funcName) {
+                return this.funcPcL.get(i)
+            }
+            i = i + 1
         }
         return VmOps.findFuncParamCount(this.funcTable, funcName)
     }
@@ -3234,8 +3256,13 @@ class Vm {
     /// 装载期索引构建（方案 A2+E）：函数表 → 两张 HashMap；常量池 → 行缓存；
     /// 指令参数 → 预解析 Int。装载完成后调用一次；执行路径零解析零分配。
     private fun buildLoadCaches(): Unit {
-        this.funcOffsetMap = HashMap<String, Int>()
-        this.funcParamMap = HashMap<String, Int>()
+        this.funcNamesL = arrayListOf<String>()
+        this.funcOffL = arrayListOf<Int>()
+        this.funcPcL = arrayListOf<Int>()
+        // P338：funcTable 手工扫描循环在 photon 下崩溃（[BLC-ft] 前崩），
+        // 暂跳过——funcOffset/funcParamCount 走 VmOps.findFuncOffset/findFuncParamCount
+        // 现场解析（独立实现）。CALL 低频，性能可接受。
+        if (false) {
         val ft: String = this.funcTable
         var start: Int = 0
         var i: Int = 0
@@ -3252,8 +3279,9 @@ class Vm {
                             if (name != "") {
                                 val off: Int = VmOps.toI32(VmOps.vmSubstr(line, p1 + 1, p2 - p1 - 1))
                                 val pc: Int = VmOps.toI32(VmOps.vmSubstr(line, p2 + 1, line.length - p2 - 1))
-                                this.funcOffsetMap.put(name, off)
-                                this.funcParamMap.put(name, pc)
+                                this.funcNamesL.add(name)
+                                this.funcOffL.add(off)
+                                this.funcPcL.add(pc)
                             }
                         }
                     }
@@ -3262,6 +3290,8 @@ class Vm {
             }
             i = i + 1
         }
+        }
+        println("[BLC-ft] names=" + toStr(this.funcNamesL.size()))
         this.constLines = arrayListOf<String>()
         val cp: String = this.constPool
         var cs: Int = 0
@@ -3486,7 +3516,8 @@ class Vm {
     /// 取第 k 个参数的字符串值（扁平槽：0/1/2 直取；≥3 当前指令集无此形态）。
     private fun argStrOf(k: Int): String {
         if (k <= 2) {
-            return this.argStrs.get((this.ip - 1) * 3 + k)
+            // P341：下标形式（.get 调用窗口实参槽覆写，布局敏感）
+            return this.argStrs[(this.ip - 1) * 3 + k]
         }
         return ""
     }
@@ -3494,12 +3525,12 @@ class Vm {
     /// 取第 k 个参数的字符串值（k ≥ 3 恒空：当前指令集参数最多 5 个且
     /// 槽 3/4 仅融合指令使用、必为数值——走 arg3/4IntOf）。
     private fun argCountOf(): Int {
-        return this.argCounts.get(this.ip - 1)
+        return this.argCounts[this.ip - 1]
     }
 
     /// 数值快路径：槽 2/3/4 的预解析值（sentinel 时回退按字符串解析）。
     private fun arg2IntOf(): Int {
-        val v: Int = this.arg2Ints.get(this.ip - 1)
+        val v: Int = this.arg2Ints[this.ip - 1]
         if (v != this.argNoneMark) {
             return v
         }
@@ -3507,7 +3538,7 @@ class Vm {
     }
 
     private fun arg3IntOf(): Int {
-        val v: Int = this.arg3Ints.get(this.ip - 1)
+        val v: Int = this.arg3Ints[this.ip - 1]
         if (v != this.argNoneMark) {
             return v
         }
@@ -3515,7 +3546,7 @@ class Vm {
     }
 
     private fun arg4IntOf(): Int {
-        val v: Int = this.arg4Ints.get(this.ip - 1)
+        val v: Int = this.arg4Ints[this.ip - 1]
         if (v != this.argNoneMark) {
             return v
         }
@@ -3526,7 +3557,8 @@ class Vm {
     private fun getConstByIdx(idx: Int): Any {
         val n: Int = this.constLines.size()
         if (idx >= 0 && idx < n) {
-            return this.constLines.get(idx)
+            // P341：下标形式（同 argStrOf）
+            return this.constLines[idx]
         }
         return this.unescapeConst(VmOps.getFieldAt(this.constPool, idx, "
 "))

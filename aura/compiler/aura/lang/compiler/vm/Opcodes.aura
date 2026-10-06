@@ -240,9 +240,13 @@ internal object Opcodes {
             this.buildNameMap()
         }
         var i: Int = 0
-        while (i < this.flatNames.size()) {
-            if (this.flatNames.get(i) == name) {
-                return this.flatCodes.get(i)
+        val n: Int = this.flatNames.size()
+        // P341：`.get(i)` 改下标 `[i]`——photon 编译下 .get 的调用窗口内实参
+        // 槽被相邻值覆写（布局敏感），字符串比较误配（实测 LOAD_CONST_S→16、
+        // STORE_LOCAL→0）。`[i]` 内联读，无调用窗口。
+        while (i < n) {
+            if (this.flatNames[i] == name) {
+                return this.flatCodes[i]
             }
             i = i + 1
         }

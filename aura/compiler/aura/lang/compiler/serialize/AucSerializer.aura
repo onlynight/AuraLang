@@ -295,15 +295,19 @@ class AucReader {
             return 0
         }
         FileOps.lseek(fd, 0, 0)
-        val buf: Long = Allocator.malloc(size)
-        if (buf == 0) {
+        // ⚠️ P310 关键修复：.auc 文件缓冲区改用 Memory.mmap（独立映射），
+        // 不走 Allocator.malloc（heapArena bump）。旧路径下 26KB 文件缓冲
+        // 与 AucReader 对象在 arena 内地址冲突（路径字符串覆写 reader 的
+        // data/dataLen/pos → decode 读路径字符 "buil//cur.eua" 而非 .auc
+        // 字节 → 99% opcode 不识别 → flat 截断 → Unknown function: p）。
+        val buf: Long = Memory.mmap(0, size, 3, 3, -1)
+        if (buf == 0 || buf == -1) {
             FileOps.close(fd)
             return 0
         }
         val n: Long = FileOps.read(fd, buf, size)
         FileOps.close(fd)
         if (n <= 0) {
-            Allocator.free(buf)
             return 0
         }
         dataLen = n
