@@ -4039,3 +4039,41 @@ call 与内联读之间零 mov）——疑似 field_get 的 "call %func" 模板�
 
 **回归状态**：banner 全流程 PASS ✓ / fib28 端到端 rc=0 ✓ / Photon AOT
 双基准全绿 ✓（本轮零回归）。
+
+### 10.104 会话 XIX：P390-b 根治——SsaBuilder 兜底 GetField 残缺形态修正（2026-10-07 续）
+
+**P390-b 根因定案**：上轮崩点（escapeConstValue 的 field_get 内联读未装载
+寄存器）的发射缺失源自**前端的残缺形态**——SsaBuilder 的字段读取兜底
+（buildFieldAccess 无法定型 owner 时）产出 `GetField args=[obj, memHead]`：
+**第二操作数是内存链 token 而非字段索引**。该 op 经 HAT（`@field(obj, mem)`
+）、重解析、Lowering 到 ISel 的 GetField 分支后按 index 0 降级合成
+`Call __field_get(getInstance(), idx)`——但其发射路径的 emitCallArgs 实参
+装载整体缺失（obj 反汇编实证：getInstance call 与内联读之间零 mov），
+rcx/rdx 为调用现场残留（rcx=0xd0 栈残留小整数、rdx=堆指针），内联读
+`[rcx+rdx*8+0x10]` 和为非规范地址 → #GP。
+
+**触发链完整还原**：本轮上界追加的 escTrace 诊断字段误加在 AucModule 类
+而 escapeConstValue 属 AucLoaderUtils（object 溶解）⇒ `this.escTrace` 的
+owner 定型失败（字段不在方法所属类）⇒ 落兜底 GetField ⇒ 崩。诊断代码
+踩中语言层残缺通路——**任何**「无法定型的字段读」都会触发（不只是
+escTrace）。
+
+**修复（SsaBuilder 兜底 GetField 常规降级）**：兜底不再产残缺
+`GetField args=[obj, memHead]`，改走 `emitFieldGet(objVal, ty, 0)`——
+与 ISel GetField 分支的 index-0 降级语义一致（读 field0），但形态为
+`Call __field_get(obj, idx)` 常规调用：实参装载、活跃区间、发射路径全部
+回归主干。**验证**：HAT 形态正常化（`@call @__field_get(obj, 0)`）；
+obj 反汇编装载链恢复（`mov r10,[rbp-0xa8]; mov rcx,r10; mov rax,[rcx+
+rdx*8+0x10]`）；**崩溃形态（escTrace 门控在场）5/5 rc=0 不再崩**。
+
+**回归**：banner 全流程 PASS ✓ / fib28 端到端 rc=0 ✓ / Photon AOT
+fib28+loop25M 双基准全绿 ✓（acc=312499987500000 精确）。
+
+**附加产出**：field_get 装载现场探针改造为**落盘文件版**（fget_last.txt，
+AURA_XE_DIAG=1）——stdout 全缓冲在崩溃时丢输出，本轮两轮探针观测被
+毒化的教训固化为「定位探针必须落盘」纪律。
+
+**遗留**：GetField 的 index-0 降级语义（读到 field0 而非目标字段）仍不
+正确——正确修法是 .hat 序列化携带字段名/索引（HatSerializer 的 @field
+不带名字，1950 行注释），单例字段读语义整体留待前端定型专项。当前
+自举代码零用户（[GF] 全量普查仅 escape 一处，已随 escTrace 删除）。

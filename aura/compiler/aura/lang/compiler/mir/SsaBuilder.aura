@@ -2360,23 +2360,17 @@ class SsaBuilder {
         }
 
         val objVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
-        var args: String = toStr(objVal)
-
-        // Phase A: 内存链 — GetField 可能读取内存，依赖 memHead
-        if (this.memHead >= 0) {
-            args = args + "," + toStr(this.memHead)
-        }
-
-        val typeId: Int = this.types.fromTypeName(src.tyOf(id))
-        val fieldVal: Int = this.program.addValue("GetField", typeId, args, fieldName, this.curBlock)
-
-        // Phase A: 更新内存链 — GetField 后创建新的 mem token
-        if (this.memHead >= 0) {
-            val memTypeId: Int = this.types.intType(64)
-            this.memHead = this.program.addValue("MemToken", memTypeId, toStr(fieldVal), "mem_after_get", this.curBlock)
-        }
-
-        return fieldVal
+        // ── P390-b：兜底 GetField 改走 emitFieldGet 常规降级 ──
+        //
+        // 旧兜底产 `GetField args=[obj, memHead]`——**字段索引被 mem token
+        // 占位**（残缺形态）：后端对该 op 按 index 0 降级读 field0，且其发射
+        // 路径的实参装载缺失（实测 escapeConstValue 的 `this.escTrace != 0`
+        // 落此处 → field_get 内联读未装载的 rcx/rdx → 非规范地址 #GP，崩点
+        // 随布局漂移、探针「承重」全家桶，2026-10-07）。改为
+        // emitFieldGet(obj, ty, 0)：与 ISel GetField 分支的降级语义一致
+        // （读 field0），但走 `Call __field_get(obj, idx)` 常规形态——实参
+        // 装载、活跃区间、发射路径全部回归主干。字段读不改内存，不推进链。
+        return this.emitFieldGet(objVal, src.tyOf(id), 0)
     }
 
     /// 构建数组/集合元素访问（Phase A S2: 内存链 Load）。
