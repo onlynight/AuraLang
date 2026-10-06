@@ -3233,3 +3233,22 @@ loop 计算本体 ≈0.13s 内完成。**计算密集型负载原生码比 seed 
 
 **状态**：photon 原生编译→运行链路性能与正确性双确认；VM 宿主运行
 exit=0；helloworld 打印仍待 RA 专项（§10.79）。
+
+### 10.82 对比实测：photon 编译 VM vs seed 编译 VM 运行同一 current.auc（2026-10-06 续LXV）
+
+| | photon 编译 VM（P310 驱动） | seed 编译 VM（auc_vm_runner） |
+|---|---|---|
+| 装载 current.auc | ✓ | ✓ |
+| 解码 1194 条 | ✗ 截断 46 条 | ✓ 全量 |
+| 执行 | ✗ 11 条后 Unknown function: p | ✓ Phase A-E 全流程验证: PASS |
+| 耗时 | 0.684s（含崩溃） | **0.041s** |
+
+**差距定性**：seed VM 41ms 完成全部装载+解码+执行；photon VM 因解码
+flat 截断（帧槽分配布局敏感腐坏）在 loadArgsFlat 崩溃。两份宿主由
+**同一份 Vm.aura/AucLoader.aura 源码**编译——差距全部来自 photon 后端
+的帧槽分配/值选择缺陷（§10.75-§10.77 已指令级定性）。
+
+**剩余修复**（已立项，RA/帧布局五区隔离专项）：溢出槽基址与参数保存
+槽重叠（getSpillOffset 32 基址 vs prologue -0x30/-0x38/-0x48）、
+funcExtraSlots 传递闭包扫描（P301 已重写）覆盖完整性、嵌套 Basic @add
+链 DAG 降级保真。修复后以本节双列对比表回归验收。
