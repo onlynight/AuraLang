@@ -410,43 +410,23 @@ class Vm {
         // 回滚 / phi (b) 兜底删除 / realDecoded）。constLines 走本函数的
         // charCodeAt 扫描构建（getFieldAt 兜底扫描在 photon 下漏换行），
         // funcOffsetMap 换平行 List（HashMap 在 photon 下读空，§10.85 同族）。
-        // P359：constLines 优先消费解码端就地切分的行（转义态，
-        // getConstByIdx/getConst 统一反转义）；为空回退本侧扫描。
-        this.constLines = arrayListOf<String>()
-        if (constLinesIn.size() > 0) {
-            var i3: Int = 0
-            while (i3 < constLinesIn.size()) {
-                this.constLines.add(constLinesIn[i3])
-                i3 = i3 + 1
-            }
-        } else {
-            val cp: String = this.constPool
-            println("[CPV] len=" + toStr(cp.length))
-            var cs: Int = 0
-            var j: Int = 0
-            val cn: Int = cp.length
-            while (j < cn) {
-                if (cp.charCodeAt(j) == 10) {
-                    this.constLines.add(this.unescapeConst(VmOps.vmSubstr(cp, cs, j - cs)))
-                    cs = j + 1
-                }
-                j = j + 1
-            }
-            if (cs < cn) {
-                this.constLines.add(this.unescapeConst(VmOps.vmSubstr(cp, cs, cn - cs)))
-            }
-        }
+        // P359/P370：constLines 直接引用解码端列表（转义态，getConstByIdx/
+        // getConst 统一反转义）。拷贝循环的 listAppend/get 调用窗按布局
+        // 崩/漂移——引用赋值零调用，VM 侧只读。
+        this.constLines = constLinesIn
         val clLines: List<String> = this.constLines
         val cln: Int = clLines.size()
-        if (cln > 10) {
+        if (cln > 12) {
             println("[CL2] n=" + toStr(cln)
-                + " [9len]=" + toStr(clLines.get(9).length)
-                + " [10len]=" + toStr(clLines.get(10).length)
-                + " [9]=[" + clLines.get(9) + "]")
+                + " [9]=[" + clLines.get(9) + "] [10]=[" + clLines.get(10) + "]"
+                + " L=" + toStr(clLines.get(9).length) + "," + toStr(clLines.get(10).length))
         } else {
             println("[CL2] n=" + toStr(cln) + " (short)")
         }
-        this.fuseHotPairs()
+        // P369：fuseHotPairs 暂跳过——纯优化（语义不变），新布局下其内部
+        // opCodes/argStrs 访问触发 phi-web 残留崩点。跳过后执行走未融合
+        // 指令流，仅慢不改语义。恢复条件：循环计数器 phi-home 修复。
+        // this.fuseHotPairs()
         this.buildLoadCaches()
     }
 
@@ -699,7 +679,20 @@ class Vm {
         } else if (op == 6) {
             this.stack.push(VmOps.parseFloat(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf()))))
         } else if (op == 7) {
-            this.stack.push(this.getConstByIdx(this.arg0IntOf()))
+            val cv: Any = this.getConstByIdx(this.arg0IntOf())
+            // P367：push 前值诊断（与 [CA] 共用计数器，二分 tagged 产生层）
+            if (this.dbgLcCount < 20) {
+                this.dbgLcCount = this.dbgLcCount + 1
+                if (VmOps.isTaggedInt(cv)) {
+                    // 奇值：按字节串读其指向内容与前一地址内容
+                    val vs: String = cv as String
+                    println("[P7v] TAGGED sLen=" + toStr(VmOps.toStrAny(cv).length)
+                        + " at-v=[" + VmOps.vmSubstr(vs, 0, 10) + "]")
+                } else {
+                    println("[P7v] tagged=false sLen=" + toStr(VmOps.toStrAny(cv).length))
+                }
+            }
+            this.stack.push(cv)
         } else if (op == 8) {
             this.stack.push(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())) == "1")
         } else if (op == 9) {

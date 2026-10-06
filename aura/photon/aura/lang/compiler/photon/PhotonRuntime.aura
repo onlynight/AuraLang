@@ -1205,17 +1205,18 @@ object PhotonRuntime {
     /// 编码 `__list_setat(rcx = list, rdx = idx, r8 = val) rax = list`
     /// 添加 null 检查防止崩溃
     fun emitListSetAt(enc: X86Encoder): Unit {
-        // ⚠️ core 布局（同 emitListGet，2026-10-06）：旧内联写 [list+8+idx*8]
-        // 会从 cap 槽开始踩穿相邻堆。idx 越界时不动列表、原样返回 list。
+        // P368：回退内联布局 [len@0][elems@8]——emitListAlloc 为内联形态
+        //（[count@0][elems@8]+slack，core 尝试已回退），get/set 曾被切到
+        // core（[len@0][cap@8][items@16]）——items 槽读到的是**第一个元素
+        // 的值**被当指针 ⇒ 元素读=串内容当 qword、写=野写串内容（实测
+        // println 弹出串字节 qword、交替性值错）。
+        // idx 越界时不动列表、原样返回 list。
         enc.emitCmpRI("rcx", 0)
         enc.emitJccLabel("eq", "list_set_null")
         enc.emitMovMemDisp32("rax", "rcx", 0)        // rax = len
         enc.emitCmpRR("rdx", "rax")
         enc.emitJccLabel("ge", "list_set_oob")       // idx >= len → 不写
-        enc.emitMovMemDisp32("r9", "rcx", 16)        // r9 = items
-        enc.emitCmpRI("r9", 0)
-        enc.emitJccLabel("eq", "list_set_oob")
-        enc.emitStoreIndexed8("r9", "rdx", 0, "r8")  // [items + idx*8] = val
+        enc.emitStoreIndexed8("rcx", "rdx", 8, "r8") // [list + 8 + idx*8] = val
         enc.emitMovRR("rax", "rcx")
         enc.emitRet()
         enc.emitLabel("list_set_oob")
@@ -1229,21 +1230,14 @@ object PhotonRuntime {
     /// 编码 `__list_get(rcx = list, rdx = idx) rax = value`
     /// 添加 null 检查防止崩溃（对象模型未完全实现时 list 可能null）
     fun emitListGet(enc: X86Encoder): Unit {
-        // ⚠️ core 布局 [len@0][cap@8][items@16]（2026-10-06）：旧实现按内联
-        // 布局读 [list+8+idx*8]，对 core 列表 idx=0 读到 cap、idx=1 读到
-        // **items 指针**——指针作为「元素」流入 strlen/下标运算后成为野读/
-        // 野写引擎（实测 helloworld：17 处 `.get` 绑定此符号，args.count 被
-        // 下游野写踩成 0x15555 → loadArgsFlat 循环失控 8.7 万次 → 64MB
-        // arena 耗尽 → listSet(list=1) 段错误）。
+        // P368：回退内联布局 [len@0][elems@8]——与 emitListAlloc 一致
+        //（core 尝试已回退，见 emitListSetAt 同款说明）。idx >= len → 0。
         enc.emitCmpRI("rcx", 0)
         enc.emitJccLabel("eq", "list_get_null")
         enc.emitMovMemDisp32("rax", "rcx", 0)        // rax = len
         enc.emitCmpRR("rdx", "rax")
         enc.emitJccLabel("ge", "list_get_null")      // idx >= len → 0
-        enc.emitMovMemDisp32("r9", "rcx", 16)        // r9 = items
-        enc.emitCmpRI("r9", 0)
-        enc.emitJccLabel("eq", "list_get_null")
-        enc.emitLoadIndexed8("rax", "r9", "rdx", 0)  // rax = [items + idx*8]
+        enc.emitLoadIndexed8("rax", "rcx", "rdx", 8) // rax = [list + 8 + idx*8]
         enc.emitRet()
         enc.emitLabel("list_get_null")
         enc.emitMovRI("eax", 0)

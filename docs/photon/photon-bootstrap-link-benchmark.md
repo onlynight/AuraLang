@@ -3607,3 +3607,31 @@ LoadConst 的 if 表达式守卫 t0 亦 phi-web（去掉守卫，idx 恒在界�
 **剩余症状收敛到极窄**：仅两个 `println("")`（const[4]/[8] 空串）弹出
 `heapPtr|1`（空串堆指针 bit0 被置位，两次同值）——空串在某处 +1
 （@str 物化或串边界），下轮以 [CA] bits 探针定位该分配点即可。
+
+### 10.93 会话 IX：列表布局大统一（alloc/append/get/set 全内联）+ constLines 引用赋值（2026-10-06 续LXXIV）
+
+**根因级发现（P368）**：**列表布局分裂**——emitListAlloc 为内联形态
+（[count@0][elems@8]+slack，2026-10-06 core 尝试「回退到 p199b 已验证
+形态」），而 emitListGet/SetAt 被切到 core 形态（[len@0][cap@8][items@16]，
+items 为指针）——**get/set 的 items 槽 [list+16] 读到的是第一个元素的值
+被当指针** ⇒ 元素读 = 串内容当 qword、写 = 野写串内容。实测：println 弹出
+「串字节 qword」（[CA] tagged=true sLen=15 = 串首字节奇偶 × 指针十进制）、
+交替性值错、同值残留槽（同一野基址）。
+修复：get/set/index 统一回退内联布局 [list+8+idx*8]（与 alloc/append/
+remove/count 全族一致）。
+
+**结构性简化（P370）**：constLines 改**引用赋值**（this.constLines =
+constLinesIn，同一列表对象，VM 侧只读）——拷贝循环的 listAppend/get
+调用窗按布局崩/漂移，引用赋值零调用。LoadConst 的 t0 if 表达式守卫
+（phi-web）删除。fuseHotPairs 暂跳过（纯优化，新布局下其内部访问触发
+phi-web 残留崩点）。
+
+**实测（p387）**：constLines 逐位正确（[9]="Aura" [10]="42" L=4,2）✓。
+**余**：LoadConst 的 `5 + t0` 加法仍中调用窗（布局再次移动 → instrs=1
+Unknown opcode）——**每次修复重排布局、激活另一 phi-web 位点，癞蛤蟆
+战术已证不可赢**。剩余工程 = phi-web 本体修复（SsaBuilder 循环变量
+规范化 / ISel 跨块 liveness），即 §10.41 立项本体。
+
+**本会话累计 8 提交**：f2db1df/5be39b0/c80a2b1/6879121/8946c0e/8d877cf/
+4818d38/ddec7a5 + 本轮（布局统一 + 引用赋值）。真实进展：横幅完整打印、
+Hello World 行恢复、常量系统逐位正确、堆/常量全对齐、列表布局全统一。
