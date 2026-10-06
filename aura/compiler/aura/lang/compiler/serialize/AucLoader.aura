@@ -58,6 +58,10 @@ class AucModule {
     /// 平行）。photon 下 fromName 的字符串比较布局敏感误配，执行流直接
     /// 消费本表，文本名仅供诊断。
     var numOpCodes: List<Int> = arrayListOf<Int>()
+    /// P359：常量池按行切分（**转义态**，VM 侧 getConstByIdx 反转义）。
+    /// 在 loadModule 内就地切分——poolAcc 局部槽在该帧内可读（[CP] 实证），
+    /// 传到 VM 侧再扫则调用窗漂移（split 收到空串/扫描器 445 长段）。
+    var constLines: List<String> = arrayListOf<String>()
     /// 每条指令的操作数（加载期已解析：函数名/常量下标/全局行号）。
     /// ⚠️ 2026-10-06 扁平化：每指令一条**逗号串**（"a0,a1[,a2]"，空段保序），
     /// 取代每指令一个 List<String>——2MB 编译器 .auc ≈ 20 万指令 × List
@@ -268,6 +272,9 @@ class AucModule {
         val constTags: List<Int> = arrayListOf<Int>()
         // P354：池串改局部累加——mod.constPool 字段读拼接链的 field_get
         // 调用窗会返回陈旧池（条目漂移）。局部槽累加 + 循环后一次赋字段。
+        // P358：每条**无条件**追加 "\n"（含末尾）——`if (ci > 0)` 的体内
+        // ci 读是循环携带计数器陈旧读（§10.89 总根），分隔符被整段跳过。
+        // 尾随空段被 Vm 侧 split 扫描的 `if (cs < cn)` 自然忽略。
         var poolAcc: String = ""
         var ci: Int = 0
         while (ci < mod.constsCount) {
@@ -276,15 +283,27 @@ class AucModule {
             val value: String = readConstValue(reader, tag)
             if (mod.constsCount <= 12) {
             }
-            // P340：嵌套拼接链（a + "\n" + b）在 photon 下偶发丢第二操作数
-            //（§10.77 家族）——摊平为两条双操作数语句；P354 改局部累加。
-            if (ci > 0) {
-                poolAcc = poolAcc + "\n"
-            }
             poolAcc = poolAcc + escapeConstValue(value)
+            poolAcc = poolAcc + "\n"
+            // P360：常量循环本身是可靠循环（[LP] 实证 offset/count 推进正确）——
+            // 转义值直接入 constLines，消灭一切事后扫描（扫描器循环计数器
+            // 陈旧读是 §10.89 总根，loadModule/Vm 两侧扫描全部漂移实证）。
+            mod.constLines.add(escapeConstValue(value))
             ci = ci + 1
         }
         mod.constPool = poolAcc
+        // P358：池本体测量
+        var nlCount: Int = 0
+        var mi: Int = 0
+        val mn: Int = poolAcc.length
+        while (mi < mn) {
+            if (poolAcc.charCodeAt(mi) == 10) { nlCount = nlCount + 1 }
+            mi = mi + 1
+        }
+        println("[CP] len=" + toStr(mn) + " nl=" + toStr(nlCount)
+            + " head=[" + VmOps.vmSubstr(poolAcc, 0, 60) + "]")
+        // P360：constLines 改在常量循环内直接构建（转义态）——本函数与
+        // VM 侧的扫描器循环均漂移（§10.89 总根），已全部废弃。
 
         // 6. Native 函数（布局对齐 Rust `to_bytes`）：
         //    write_str(name) + u16 param_count + u8 ffi_abi

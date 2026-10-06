@@ -289,7 +289,7 @@ class Vm {
                 // P2.2c：类表 → 类继承注册表（parent_id 0 = Any；防自环）
                 this.registerAucClasses(mod.classNames, mod.classParentIds)
                         this.loadPredecoded(mod.numOpNames, mod.numOpCodes, mod.numArgsFlat, mod.constPool,
-                mod.funcTable, mod.exports, mod.imports)
+                mod.constLines, mod.funcTable, mod.exports, mod.imports)
             println("[winC2] post-loadPredecoded")
             val r: Any = this.run()
             return r
@@ -337,7 +337,7 @@ class Vm {
     /// 最终形态（函数名/常量下标/全局行号）；执行期零解析。
     /// `.auc` 调用约定：形参槽从 1 开始（`aucArgBase = 1`）。
     fun loadPredecoded(opNames: List<String>, opCodesNum: List<Int>, args: List<String>, consts: String,
-        funcs: String, exports: String, imports: String): Unit {
+        constLinesIn: List<String>, funcs: String, exports: String, imports: String): Unit {
         this.bytecode = ""
 
         this.exportsTable = exports
@@ -408,13 +408,44 @@ class Vm {
         // P333：buildLoadCaches 恢复启用——§10.85 的 Memory_read64(0) 崩点之后
         // 已落地五项修复（mmap 文件缓冲 / 帧预算 ID 区间上界 / buildIf varMap
         // 回滚 / phi (b) 兜底删除 / realDecoded）。constLines 走本函数的
-        // charCodeAt 扫描构建（getFieldAt 兜底扫描在 photon 下漏换行，
-        // [LC] 探针实证多行块），CALL 所需 funcOffsetMap 也在此构建。
-        // P333：buildLoadCaches 恢复启用——§10.85 的 Memory_read64(0) 崩点之后
-        // 已落地五项修复（mmap 文件缓冲 / 帧预算 ID 区间上界 / buildIf varMap
-        // 回滚 / phi (b) 兜底删除 / realDecoded）。constLines 走本函数的
         // charCodeAt 扫描构建（getFieldAt 兜底扫描在 photon 下漏换行），
         // funcOffsetMap 换平行 List（HashMap 在 photon 下读空，§10.85 同族）。
+        // P359：constLines 优先消费解码端就地切分的行（转义态，
+        // getConstByIdx/getConst 统一反转义）；为空回退本侧扫描。
+        this.constLines = arrayListOf<String>()
+        if (constLinesIn.size() > 0) {
+            var i3: Int = 0
+            while (i3 < constLinesIn.size()) {
+                this.constLines.add(constLinesIn[i3])
+                i3 = i3 + 1
+            }
+        } else {
+            val cp: String = this.constPool
+            println("[CPV] len=" + toStr(cp.length))
+            var cs: Int = 0
+            var j: Int = 0
+            val cn: Int = cp.length
+            while (j < cn) {
+                if (cp.charCodeAt(j) == 10) {
+                    this.constLines.add(this.unescapeConst(VmOps.vmSubstr(cp, cs, j - cs)))
+                    cs = j + 1
+                }
+                j = j + 1
+            }
+            if (cs < cn) {
+                this.constLines.add(this.unescapeConst(VmOps.vmSubstr(cp, cs, cn - cs)))
+            }
+        }
+        val clLines: List<String> = this.constLines
+        val cln: Int = clLines.size()
+        if (cln > 10) {
+            println("[CL2] n=" + toStr(cln)
+                + " [9len]=" + toStr(clLines.get(9).length)
+                + " [10len]=" + toStr(clLines.get(10).length)
+                + " [9]=[" + clLines.get(9) + "]")
+        } else {
+            println("[CL2] n=" + toStr(cln) + " (short)")
+        }
         this.fuseHotPairs()
         this.buildLoadCaches()
     }
@@ -3311,27 +3342,8 @@ class Vm {
         }
         }
         println("[BLC-ft] names=" + toStr(this.funcNamesL.size()))
-        this.constLines = arrayListOf<String>()
-        // P355：split 版在此布局下崩，回退扫描器（漂移待查池本体）
-        val cp: String = this.constPool
-        var cs: Int = 0
-        var j: Int = 0
-        val cn: Int = cp.length
-        while (j < cn) {
-            if (cp.charCodeAt(j) == 10) {
-                this.constLines.add(this.unescapeConst(VmOps.vmSubstr(cp, cs, j - cs)))
-                cs = j + 1
-            }
-            j = j + 1
-        }
-        if (cs < cn) {
-            this.constLines.add(this.unescapeConst(VmOps.vmSubstr(cp, cs, cn - cs)))
-        }
-        // P355：一次性诊断
-        println("[CL2] n=" + toStr(this.constLines.size())
-            + " [9len]=" + toStr(this.constLines.get(9).length)
-            + " [10len]=" + toStr(this.constLines.get(10).length)
-            + " [9]=[" + this.constLines.get(9) + "]")
+        // P359：constLines 构建移至 loadPredecoded（消费解码端就地切分的
+        // mod.constLines；本函数作用域无 constLinesIn，曾误置于此）。
         // ⚠️ P271：arg0Ints/arg1Ints 构建**暂时跳过**——这些 Int 值经
         // Collections_listAppend 写入列表，如果 arg0Ints/arg1Ints 的句柄
         // 与 argStrs 混叠（Vm 对象字段索引冲突），Int 写入会破坏 argStrs
@@ -3582,8 +3594,9 @@ class Vm {
     private fun getConstByIdx(idx: Int): Any {
         val n: Int = this.constLines.size()
         if (idx >= 0 && idx < n) {
-            // P341：下标形式（同 argStrOf）
-            return this.constLines[idx]
+            // P359：constLines 现为**转义态**（解码端就地切分），统一反转义。
+            // 无转义时 unescapeConst 原样返回，成本仅一次扫描。
+            return this.unescapeConst(this.constLines[idx])
         }
         return this.unescapeConst(VmOps.getFieldAt(this.constPool, idx, "
 "))
@@ -3730,7 +3743,8 @@ class Vm {
         val idx: Int = VmOps.toI32(idxStr)
         val n: Int = this.constLines.size()
         if (idx >= 0 && idx < n) {
-            return this.constLines.get(idx)
+            // P359：转义态统一反转义
+            return unescapeConst(this.constLines.get(idx))
         }
         return unescapeConst(VmOps.getFieldAt(this.constPool, idx, "\n"))
     }

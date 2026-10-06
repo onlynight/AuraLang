@@ -3525,3 +3525,32 @@ println 断点实参序列；[SL]/[CL2]/[T32]/[LP] 源级探针族。
 横幅真实打印 ✓ / 常量条目黏连（ci stale read）→ 局部变量值错 →
 Phase G 后 SIGSEGV。下一步单一目标：循环携带计数器的 phi home 写/read
 正确性（SsaBuilder 循环变量规范化或 ISel liveness）。
+
+### 10.90 会话 VI：常量系统全贯通——constLines 解码期直建（[9]="Aura" [10]="42" 逐位正确）（2026-10-06 续LXXI）
+
+**里程碑**：constLines 54 条**逐位正确**（[9]="Aura"、[10]="42"，长度 4/2 实证）
+——常量读取链（LOAD_CONST_I/S/B → 值）全通。
+
+**本段关键决策与修复**：
+
+1. **constLines 改解码期直建（P360）**：poolAcc 在常量循环内逐条
+   `mod.constLines.add(escapeConstValue(value))`——常量循环是可靠循环
+   （[LP] 实证 offset/count 推进正确），事后扫描器（loadModule 侧/Vm 侧）
+   全部漂移（[CL2] [9len]=445 实证）→ **全部废弃**。池串/分隔符照旧保留
+   （getFieldAt 兜底 + 诊断用）。
+2. **转义态统一反转义（P359）**：constLines 持转义值，getConstByIdx/getConst
+   统一 `unescapeConst`（无转义时零成本直返）。
+3. **结构归位（P359b）**：constLines 消费移入 loadPredecoded（buildLoadCaches
+   作用域无 constLinesIn 曾致 `undefined symbol: size`——字段 .size() 解析成
+   裸名的又一个实例，先拷局部规避）。
+4. **无条件分隔符（P358）**：池串每条后无条件加 "\n"（`if (ci > 0)` 的体内
+   ci 陈旧读跳分隔符——尾随空段被 split 侧 `if (cs < cn)` 自然忽略）。
+
+**剩余唯一缺陷（指令级定性）**：STORE_LOCAL 弹到的值**滞后一个 push**
+（slot1←""、slot2←"Aura"——slot2 拿到 slot1 应有的值）。即 push/pop 序列
+在编译后的 dispatch 内存在**一次额外的 pop 或缺失的 push**。下轮首查：
+dispatch 的 LOAD_CONST_S 臂 push 与 STORE_LOCAL 臂 pop 的栈序（VmStack
+sp 字段读写序）——用 [SL] 探针扩展打印 pop 前后的 stack.size() 即可二分。
+
+**状态（p370）**：解码 1194 ✓ / 数值 opcode ✓ / constLines 逐位正确 ✓ /
+STORE_LOCAL 槽号 ✓ / 值滞后一个 push（唯一剩余）→ Phase G 后 SIGSEGV。
