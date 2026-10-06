@@ -48,6 +48,10 @@ class X86Emitter {
     /// 每函数的「发射器兜底槽」数（无色节点经 regOfNodeRaw ③ 分配的
     /// slotForNode 槽），供帧大小计算使用（见 scanFunctionMaxSlots）。
     private var funcExtraSlots: List<Int> = arrayListOf<Int>()
+    // P301: 传递闭包遍历的游标（按函数重置）
+    private var walkSeenCsv: String = "|"
+    private var walkMaxSlot: Int = -1
+    private var extraCsvWalk: String = "|"
 
     /// 主循环用的下标（对应 `funcNames` / `funcMaxSlots`）。
     private var fnIdx: Int = 0
@@ -143,68 +147,34 @@ class X86Emitter {
         if (this.allocator == null) {
             return
         }
+        this.walkSeenCsv = "|"
+        this.walkMaxSlot = -1
+        this.extraCsvWalk = "|"
         var curFn: String = ""
-        var curMax: Int = -1
-        var extraCsv: String = "|"
         var i: Int = 0
         while (i < dag.instrCount) {
             val instr: DagInstruction = dag.instrOf(i)
             val fn: String = instr.funcName
             if (fn != curFn) {
                 if (curFn != "") {
-                    this.funcNames.add(curFn)
-                    this.funcMaxSlots.add(curMax)
-                    // 额外槽 = 该函数内所有「无色/rax 且未 spill」节点的去重数
-                    // ——这些节点发射时会经 regOfNodeRaw ③ 分配 slotForNode 兜底
-                    // 槽（基址在 RA 溢出区下方）。旧实现只数 RA spill 槽，额外
-                    // 槽完全没算 ⇒ 帧少 2KB 余量一旦被超出就写进 rsp 下方红区
-                    //（实测 Opcodes.buildNameMap：100 个 put ⇒ 493 个额外槽
-                    // 超出 2048B 余量 ⇒ 野写踩栈 + 返回地址全毁，2026-10-06）。
-                    var en: Int = 0
-                    var cp: Int = 0
-                    while (cp < extraCsv.length) {
-                        if (extraCsv.charCodeAt(cp) == 124) { en = en + 1 }
-                        cp = cp + 1
-                    }
-                    this.funcExtraSlots.add(en)
-                    extraCsv = "|"
+                    this.flushSlotGroup(curFn)
                 }
                 curFn = fn
-                curMax = -1
-                extraCsv = "|"
+                this.walkSeenCsv = "|"
+                this.walkMaxSlot = -1
+                this.extraCsvWalk = "|"
             }
-            // 该指令用到的节点：nodes + call 节点的实参（emitCallArgs 会
-            // 解析它们的槽位——旧扫描漏掉 ⇒ 少算）
-            val ns: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+            // 根节点：nodes + output + call 实参——**传递闭包**全遍历
+            //（P301 旧实现只扫根节点，表达式链的中间节点漏计 ⇒ 兜底槽
+            // 预算不足 → 深槽写穿帧 → 野写踩调用者保存区，2026-10-06）
+            var ns: List<String> = MachineDagUtils.splitArgs(instr.nodes)
             var j: Int = 0
             while (j < ns.size) {
                 val nid: Int = MachineDagUtils.strToInt(ns[j])
-                if (nid >= 0) {
-                    val c: String = this.allocator.getColor(nid)
-                    if (c != "" && c.startsWith("spill_slot_")) {
-                        val slot: Int = MachineDagUtils.strToInt(c.substring(11))
-                        if (slot > curMax) {
-                            curMax = slot
-                        }
-                    } else if ((c == "" || c == "rax")
-                               && extraCsv.indexOf("|" + toStr(nid) + "|") < 0) {
-                        extraCsv = extraCsv + toStr(nid) + "|"
-                    }
-                }
+                if (nid >= 0) { this.walkExtraNodes(dag, nid) }
                 j = j + 1
             }
-            // ⚠️ P249：**output 节点也要扫**——Phi 强制溢出后其唯一出现位置
-            // 是边 MOV（pattern 7）的 instr.output；漏扫 ⇒ slotForNode 槽号
-            // 超出 funcExtraSlots 预算 ⇒ 写进 rsp 下方红区（P231 教训）。
-            if (instr.output >= 0) {
-                val oc: String = this.allocator.getColor(instr.output)
-                if (!(oc != "" && oc.startsWith("spill_slot_"))
-                        && (oc == "" || oc == "rax")
-                        && extraCsv.indexOf("|" + toStr(instr.output) + "|") < 0) {
-                    extraCsv = extraCsv + toStr(instr.output) + "|"
-                }
-            }
-            // call 指令：把 Call 节点的实参节点也纳入扫描
+            if (instr.output >= 0) { this.walkExtraNodes(dag, instr.output) }
             if (instr.nodes != "" && instr.output == -1) {
                 val cnid: Int = MachineDagUtils.strToInt(instr.nodes)
                 if (cnid >= 0) {
@@ -214,14 +184,7 @@ class X86Emitter {
                         var cj: Int = 0
                         while (cj < cargs.size) {
                             val anid: Int = MachineDagUtils.strToInt(cargs[cj])
-                            if (anid >= 0) {
-                                val ac: String = this.allocator.getColor(anid)
-                                if (!(ac != "" && ac.startsWith("spill_slot_"))
-                                        && (ac == "" || ac == "rax")
-                                        && extraCsv.indexOf("|" + toStr(anid) + "|") < 0) {
-                                    extraCsv = extraCsv + toStr(anid) + "|"
-                                }
-                            }
+                            if (anid >= 0) { this.walkExtraNodes(dag, anid) }
                             cj = cj + 1
                         }
                     }
@@ -230,16 +193,43 @@ class X86Emitter {
             i = i + 1
         }
         if (curFn != "") {
-            this.funcNames.add(curFn)
-            this.funcMaxSlots.add(curMax)
-            var enL: Int = 0
-            var cpL: Int = 0
-            while (cpL < extraCsv.length) {
-                if (extraCsv.charCodeAt(cpL) == 124) { enL = enL + 1 }
-                cpL = cpL + 1
-            }
-            this.funcExtraSlots.add(enL)
+            this.flushSlotGroup(curFn)
         }
+    }
+
+    /// 递归收集节点传递闭包：spill_slot 计最大号；无色/rax 节点计入兜底预算
+    private fun walkExtraNodes(dag: MachineDag, nodeId: Int): Unit {
+        val mark: String = "|" + toStr(nodeId) + "|"
+        if (this.walkSeenCsv.indexOf(mark) >= 0) { return }
+        this.walkSeenCsv = this.walkSeenCsv + toStr(nodeId) + "|"
+        var c: String = ""
+        if (this.allocator != null) { c = this.allocator.getColor(nodeId) }
+        if (c.startsWith("spill_slot_")) {
+            val slot: Int = MachineDagUtils.strToInt(c.substring(11))
+            if (slot > this.walkMaxSlot) { this.walkMaxSlot = slot }
+        } else if (c == "" || c == "rax") {
+            this.extraCsvWalk = this.extraCsvWalk + toStr(nodeId) + "|"
+        }
+        val node: DagNode = dag.nodeOf(nodeId)
+        var args: List<String> = MachineDagUtils.splitArgs(node.args)
+        var j: Int = 0
+        while (j < args.size) {
+            val aid: Int = MachineDagUtils.strToInt(args[j])
+            if (aid >= 0) { this.walkExtraNodes(dag, aid) }
+            j = j + 1
+        }
+    }
+
+    private fun flushSlotGroup(fn: String): Unit {
+        this.funcNames.add(fn)
+        this.funcMaxSlots.add(this.walkMaxSlot)
+        var en: Int = 0
+        var cp: Int = 0
+        while (cp < this.extraCsvWalk.length) {
+            if (this.extraCsvWalk.charCodeAt(cp) == 124) { en = en + 1 }
+            cp = cp + 1
+        }
+        this.funcExtraSlots.add(en)
     }
 
     /// 发射整个 MachineDag 为机器码（支持多函数：每个函数独立 prologue/epilogue）。
@@ -337,7 +327,7 @@ class X86Emitter {
                         // ⚠️ P296 预算加倍：funcExtraSlots 扫描对部分节点计数不足
                         //（实测 decodeNumeric/融合循环的深槽写越界踩其他帧），
                         // 4× 乘数 + 256 槽下限吸收漏计。
-                        ex = ex * 4 + 256
+                        ex = ex + 256
                         fsz = fsz + 16 + ex * 8                     // + 兜底槽区
                         if (fsz % 16 != 0) { fsz = fsz + (16 - fsz % 16) }
                         frame = fsz
