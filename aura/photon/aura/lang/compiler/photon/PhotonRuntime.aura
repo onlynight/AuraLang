@@ -2446,58 +2446,73 @@ object PhotonRuntime {
     /// 布局不匹配导致读取野值、`realloc` 段错误（0xC0000005）。
     /// 现在 `add` 映射到此函数，直接操作裸句柄布局，语义正确。
     fun emitCollectionListAppend(enc: X86Encoder): Unit {
-        // P374：**core 布局 + 增长**——[len@0][cap@8][items@16]。旧实现按内联
-        // 布局写 [rcx+8+count*8]：对 core 列表 count=0 写穿 cap、count≥1
-        // **覆盖 items 指针为 value** ⇒ 之后所有 get 从 value（串内容）处
-        // 取元素（实测 println 弹出串字节 qword / heapPtr|1）。
-        // 增长：len ≥ cap 时 newCap = max(cap*2, 4)，Memory_alloc 新块并
-        // 搬运旧元素（arena 无 free，旧块泄漏 = 既有语义）。
-        // 寄存器约定：rdi = list、rbx = newCap、rsi = items（callee-saved，
-        // 跨 Memory_alloc 调用存活；rsi 兼作搬运目的基址）。
-        enc.emitPrologue(0x40)
-        enc.emitMovRR("rdi", "rcx")                  // rdi = list
-        enc.emitStackStore(-0x10, "rdx")             // value
-        enc.emitMovMemDisp32("rax", "rdi", 0)        // len
+        // P381：**core 布局 + 增长 + 跨调用寄存器保存**。
+        // [len@0][cap@8][items@16]；len ≥ cap 时 newCap = max(cap*2, 4)、
+        // Memory_alloc 新块、搬运旧元素。
+        // ⚠️ 手写桩（Memory_alloc 等）**不保存 callee-saved 寄存器**——
+        // rdi/rsi/rbx 在调用后全灭（旧 grow 丢失 items/newCap/list 的
+        // 实测根因）。全部经栈槽跨调用传递。
+        enc.emitPrologue(0x50)
+        enc.emitStackStore(-0x10, "rcx")             // list
+        enc.emitStackStore(-0x18, "rdx")             // value
+        enc.emitMovMemDisp32("rax", "rcx", 0)        // len
         enc.emitStackStore(-0x20, "rax")
-        enc.emitMovMemDisp32("rbx", "rdi", 8)        // cap
-        enc.emitMovMemDisp32("rsi", "rdi", 16)       // rsi = items
-        enc.emitMovRR("rcx", "rbx")
+        enc.emitMovMemDisp32("rax", "rcx", 8)        // cap
+        enc.emitStackStore(-0x28, "rax")
+        enc.emitMovMemDisp32("rax", "rcx", 16)       // items
+        enc.emitStackStore(-0x30, "rax")
+        // len < cap → 直接写；否则增长
+        enc.emitStackLoad("rax", -0x20)
+        enc.emitStackLoad("rcx", -0x28)
         enc.emitCmpRR("rax", "rcx")
-        enc.emitJccLabel("l", "la_write")
-        // ── 增长：newCap = max(cap*2, 4)；new = Memory_alloc(newCap*8) ──
-        enc.emitShlRI("rbx", 1)
-        enc.emitCmpRI("rbx", 4)
+        enc.emitJccLabel("l", "la_grow")
+        enc.emitJmpLabel("la_write")
+        // ── 增长 ──
+        enc.emitLabel("la_grow")
+        enc.emitStackLoad("rax", -0x28)              // cap
+        enc.emitShlRI("rax", 1)                      // cap*2
+        enc.emitCmpRI("rax", 4)
         enc.emitJccLabel("ge", "la_cap_ok")
-        enc.emitMovRI("rbx", 4)
+        enc.emitMovRI("rax", 4)
         enc.emitLabel("la_cap_ok")
-        enc.emitMovRR("rcx", "rbx")
-        enc.emitShlRI("rcx", 3)                      // rcx = newCap*8
-        enc.emitCallRel("Memory_alloc")
+        enc.emitStackStore(-0x38, "rax")             // newCap
+        enc.emitShlRI("rax", 3)                      // newCap*8
+        enc.emitStackStore(-0x40, "rax")             // 字节数
+        enc.emitMovRR("rcx", "rax")
+        enc.emitCallRel("Memory_alloc")              // rax = 新块（rdi/rsi/rbx 全灭）
         enc.emitTestRR("rax", "rax")
         enc.emitJccLabel("z", "la_fail")
-        // 搬运旧元素：rcx = 0 .. len-1
-        enc.emitStackLoad("rdx", -0x20)              // rdx = len
+        // 搬运：rcx = 0..len-1：[old + rcx*8] → [rax + rcx*8]
+        enc.emitStackStore(-0x48, "rax")             // 新块（0x50 帧内）
+        enc.emitStackLoad("rdx", -0x20)              // len
+        enc.emitStackLoad("rsi", -0x30)              // old items
+        enc.emitMovRR("rdi", "rax")                  // 新 items
         enc.emitXorRR("rcx", "rcx")
         enc.emitLabel("la_copy")
         enc.emitCmpRR("rcx", "rdx")
         enc.emitJccLabel("ge", "la_copy_done")
         enc.emitLoadIndexed8("r9", "rsi", "rcx", 0)
-        enc.emitStoreIndexed8("rax", "rcx", 0, "r9")
+        enc.emitStoreIndexed8("rdi", "rcx", 0, "r9")
         enc.emitIncRR("rcx")
         enc.emitJmpLabel("la_copy")
         enc.emitLabel("la_copy_done")
-        enc.emitMovRR("rsi", "rax")                  // rsi = 新 items
-        enc.emitStoreMemDisp32("rdi", 8, "rbx")      // [list+8] = newCap
-        enc.emitJmpLabel("la_after")
-        // ── 写入：[items + len*8] = value；[list+0] = len + 1 ──
+        // 回填：[list+8] = newCap；[list+16] = 新 items
+        enc.emitStackLoad("rcx", -0x38)
+        enc.emitStackLoad("rdx", -0x10)
+        enc.emitStoreMemDisp32("rdx", 8, "rcx")
+        enc.emitStackLoad("rcx", -0x48)
+        enc.emitStoreMemDisp32("rdx", 16, "rcx")
+        enc.emitStackStore(-0x30, "rcx")             // items 更新
+        // ── 写入 [items + len*8] = value；[list+0] = len + 1 ──
         enc.emitLabel("la_write")
-        enc.emitLabel("la_after")
         enc.emitStackLoad("rdx", -0x10)              // value
         enc.emitStackLoad("rcx", -0x20)              // len
-        enc.emitStoreIndexed8("rsi", "rcx", 0, "rdx") // [items + len*8] = value
+        enc.emitStackLoad("rsi", -0x30)              // items
+        enc.emitStoreIndexed8("rsi", "rcx", 0, "rdx")
         enc.emitIncRR("rcx")
-        enc.emitStoreMemDisp32("rdi", 0, "rcx")      // [list+0] = len + 1
-        enc.emitMovRR("rax", "rdi")
+        enc.emitStackLoad("rdx", -0x10)
+        enc.emitStoreMemDisp32("rdx", 0, "rcx")
+        enc.emitMovRR("rax", "rdx")
         enc.emitEpilogue()
         enc.emitLabel("la_fail")
         enc.emitXorRR("eax", "eax")

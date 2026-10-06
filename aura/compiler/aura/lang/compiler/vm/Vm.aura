@@ -859,10 +859,11 @@ class Vm {
             // P380：CALL 参数计数诊断
             if (this.caDiag < 24) {
                 this.caDiag = this.caDiag + 1
-                val idx10: Int = (this.ip - 1) * 3 + 1
+                val base: Int = (this.ip - 1) * 3
                 println("[62] fn=[" + fname + "] argc=" + toStr(argc2)
                     + " cnt=" + toStr(this.argCountOf())
-                    + " a1=[" + this.argStrOf(1) + "] direct=[" + this.argStrs[idx10] + "] idx=" + toStr(idx10))
+                    + " a0=[" + this.argStrs.get(base) + "] a1=[" + this.argStrs.get(base + 1) + "]"
+                    + " ip=" + toStr(this.ip))
             }
             this.callOrBuiltin(fname, argc2)
         } else if (op == 63) {

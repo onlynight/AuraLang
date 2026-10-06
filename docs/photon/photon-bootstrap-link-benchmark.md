@@ -3753,3 +3753,37 @@ buildIndex → `__list_get` 调用 → emitListGet）——定位哪一环在部
 
 **状态（p400）**：解码 ✓ / opcode ✓ / constLines ✓ / push-pop ✓ /
 argc=0 定位 ✓（[i] 路径 null）。本会话累计 11 提交。
+
+### 10.98 会话 XIII：vmSubstr 逐调用点值腐坏定案——phi-web 工程边界确认（2026-10-06 续LXXIX）
+
+**决定性实验（P380 终版）**：CALL 臂用可信 `.get` 路径读 argStrs——
+```
+[62] fn=[println] argc=0 cnt=2 a0=[println] a1=[] ip=4
+```
+a0 = get(9) = "println" ✓；a1 = get(10) = "" ✗——**同一函数相邻调用点，
+一个成功一个返回空**。结合 [AS]（loadPredecoded 帧内 get(30/31/32) ✓）：
+**vmSubstr 在 instr3 的 s1 解析调用点腐坏**（返回空），在 loadPredecoded
+探针调用点正常——**逐调用点值腐坏**。
+
+**总根定案（终极版）**：photon 编译代码中，**同一函数的同一纯函数调用，
+按调用点布局交替成功/失败**。机制 = ISel 的跨块值存活（liveness/phi-web）
+在大函数（数百 merge 点）中按布局失效——任何 VM 源级修复只能移动腐坏点
+（本会话 12+ 提交实证：每修一处、布局重排、另一处发作）。
+
+**本会话真实落地（不依赖 phi-web、永久有效）**：
+1. 帧预算 ID 区间上界（数学封闭，越界不可能）
+2. 连贯 Plan A 值模型（toAny 装箱/intOf 拆箱/算术重装箱/裸零装箱 ×7）
+3. 列表 core 布局大统一（alloc 重写；append core+增长+寄存器保存；
+   get/set core 保持）
+4. 堆/@str 8 字节对齐
+5. 数字 opcode 直通 + argIntOf 哨兵 + constLines 解码期直建 + 引用赋值
+6. 装载链全绿：opCodes [0]=7 [1]=11、constLines [9]="Aura" [10]="42"、
+   funcTable real=1194 逐位正确
+
+**剩余单一缺陷（已定案）**：编译代码逐调用点值腐坏 = ISel liveness 工程
+（§10.41 本体）。修复后预期：Photon Aura VM 全链跑通（装载链已全绿，
+push 侧已健康，唯 pop→collectArgs 的调用点腐坏待 liveness 根治）+
+Photon AOT Long 循环回归验收。
+
+**基准已存档（§10.94）**：fib28 LLVM 23ms / Photon 30ms (1.3×) / Seed VM
+1069ms (46×)；loop25M LLVM 74ms / Seed VM 13959ms (189×)。
