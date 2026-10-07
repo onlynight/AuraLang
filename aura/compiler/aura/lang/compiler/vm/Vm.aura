@@ -127,6 +127,7 @@ class Vm {
     private var mcN: Int = 0
     private var mcValid: Int = 0
 
+
     // 保存的局部变量帧（帧切换用）
     private var savedLocals: VmFrameStack = VmFrameStack()
 
@@ -509,6 +510,7 @@ class Vm {
             val opCode: Int = Memory.read64(this.mcOpCodes + this.ip * 8) as Int
             this.ip = this.ip + 1
 
+
             // 注释行 / 空行（加载期已编号为 OP_NOP——buildLineCache 与
             // loadPredecoded 对空名/注释行统一编号，装载后不再有「空 ops 行」，
             // 旧兜底 `ops[ip-1] == ""` 每指令一次 List<String> get + streq 纯冗余，
@@ -573,6 +575,24 @@ class Vm {
         // ── 常量指令 ──
         // ── 热指令快速分派（方案 D）：按动态频次把高频臂前置，
         // 未命中落入下方原链（臂语义与原链逐字一致）。 ──
+        //
+        // ⚠ P412（2026-10-07）：本块的**顺序依据改为实测动态频次**，
+        // 不再是静态猜测。仪器：Vm 内置 per-opcode 计数器
+        // （AURA_OP_PROF=1，见 dumpOpProfile），实测 fib28（3137 万条
+        // guest 指令）与 loop1M（5300 万条）的分布，两基准一致：
+        //
+        //   LOAD_LOCAL 41.0% / STORE_LOCAL 26.2% / LOAD_CONST_I 6.6%
+        //   RETAIN 6.6% / RETURN+CALL+JUMP_IF_FALSE+LE 共 13.2%
+        //
+        // **反汇编实测**：每条 `if (op == N)` 编译成 11 条 x86
+        // （常量落栈 → 读回 → cmp → setcc → movzbq → 落栈 → 读回 →
+        //  cmp 0 → jcc），命中第 d 个臂须付 11×d 条。原链里
+        // **RETAIN 在第 95 位、LE 在第 45 位**，而两者分别执行 206 万 /
+        // 103 万次 ⇒ 仅比较链就 2.15B + 0.51B 条 x86——分别占 fib28
+        // 全程序 x86 的 ~28% 与 ~6.6%，是当前最大的单项开销。
+        //
+        // 本步（Step A）只把这两条提到 depth 4/5，其余臂顺移 2 位。
+        // 净收益 ≈ 2.3B 条 x86（约全程序 30%）。
         if (op == 10) {
             val slot: Int = this.arg0IntOf()
             val v: Any = this.locals.getSlot(slot)
@@ -589,6 +609,18 @@ class Vm {
             // P404：[LC] 装载链诊断探针摘除（2026-10-06 追踪用，git 历史
             // 可考）——逐指令 field 读 + 分支的热路径税。
             this.stack.push(toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))))
+        } else if (op == 112) {
+            // P412：RETAIN 原在第 95 位（206 万次 × 1045 条 = 2.15B 条 x86）。
+            // 臂体与原链逐字一致（原链 arm 仍是兜底，永不命中）。
+            this.retain()
+        } else if (op == 34) {
+            // P412：LE 原在第 45 位（103 万次 × 495 条 = 0.51B 条 x86）。
+            // 局部名加 34 后缀——§10.116 T1「if/else 分支重复声明同名 val
+            // ⇒ 函数级作用域提升 + 静默坏码」，本块已有 b/a（op 20/21/32），
+            // 新臂必须避让。
+            val b34: Any = this.stack.pop()
+            val a34: Any = this.stack.pop()
+            this.stack.push(VmOps.le(a34, b34))
         } else if (op == 51) {
             val cond: Any = this.stack.pop()
             if (!VmOps.toBool(cond)) {
@@ -3414,6 +3446,7 @@ class Vm {
             mi = mi + 1
         }
         this.mcValid = 1
+
     }
 
     /// 装载期超级指令融合（方案 D）：对预解码流做一次线性窥孔改写。
