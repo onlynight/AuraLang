@@ -53,6 +53,21 @@ scripts/photon/bench-aot-slope.sh [N1] [N2] [轮数]     # 默认 600M/1000M
 `build/` 被 .gitignore ⇒ 五个基准源（micro1/2/3、fib28、loop1m）归档于此。
 `vmopt.sh` 与 `bench-5way.sh` 启动时自动恢复缺失项（不覆盖本地改动）。
 
+### 7. `memprof.py` — 进程内存采样器（2026-10-07 新增）
+```
+<python> tools/photon-prof/memprof.py --runs 3 --label <标签> -- <命令...>
+```
+启动目标进程、5 ms 间隔采样，输出 peak_wset / peak_private / peak_vms。
+配合 VM 内建 `AURA_VM_LOADONLY=1` 可分离「装载期」与「执行期」内存。
+
+### 8. `mem-matrix.sh` — 内存对比矩阵
+`micro1/fib28/loop1m` × {Rust VM, Photon Aura VM} + 纯编译对照。
+**关键结论**（详见 `docs/photon/vm-memory-comparison.md`）：
+- Photon 固定提交 66.6 MB = 64 MiB 静态堆 BSS（`.data` 段）；工作集仅 8.7 MB
+- 执行期**线性增长**：`as Long` ≈62.5 B/次、函数调用 ≈35.6 B/次，**从不回收**
+- **64 MiB 硬上限**：Long 操作 ~1.02M 次即耗尽 → **SIGSEGV**（N=1.0M 正常 / 1.1M 崩）
+- 对照：Rust VM 同负载**零增长**（ARC + 空闲链表复用）
+
 ## 关键测量结论（2026-10-07）
 
 **动态指令分布（两基准一致）**：
