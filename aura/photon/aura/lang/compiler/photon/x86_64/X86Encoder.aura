@@ -1138,12 +1138,16 @@ class X86Encoder {
         this.writeByte(this.rexByte(true, 0, r))
         this.writeByte(0xC1)
         this.writeByte(0xC0 + (ext << 3) + (r & 7))
-        // ⚠️ 64 位模式下硬件按 **imm8 & 63** 取移位量——旧实现 `imm & 63`
-        // 把 16/20/24/32 全错成 0..15（实测移 32 变移 0：canary kind2 的
-        // 低 32 位提取退化为恒等 ⇒ 返回地址范围校验全体误报（obj3 的
-        // "1NAC" 刷屏）；guest 的 i32↔i64 装拆箱移位同样全体失真，
-        // 2026-10-06）。
-        this.writeByte(imm & 15)
+        // 64 位模式下硬件对 `shl/shr/sar r/m64, imm8` 实际取 **(imm8 & 63)** 为移位量。
+        // 这里把 imm8 原样写入低 8 位即可（CPU 会再 & 63）；用 `imm & 63` 与硬件
+        // 最终语义完全一致，且对任何 0..63 的移位常量都正确。
+        //
+        // ⚠️ 历史回归：曾误写成 `imm & 15`（只留低 4 位），导致 16/20/24/32 被错成
+        // 0/4/8/0——例如 `x << 20` 退化为 `x << 4`、`x << 32` 退化为恒等。这会让
+        // guest 的 i32↔i64 装拆箱全体失真，也让 P0-2b 的 `mb << 20`（扩容字节数）
+        // 算成 `mb << 4` ⇒ heapCap 下溢 ⇒ bump 分配越界段错误。正确做法是写完整
+        // imm8 字节，此处用 `imm & 63`。
+        this.writeByte(imm & 63)
     }
 
     /// 编码 SHL/SHR reg, CL（REX.W D3 /N）。

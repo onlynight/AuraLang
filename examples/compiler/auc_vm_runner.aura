@@ -15,6 +15,11 @@ import aura.lang.std.String
 import "../../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
 
 fun main(): Int {
+    // P0-2b：堆初始化——必须在任何分配之前（VmRunner 构造即会分配）。
+    // 由 runtime 的 Heap_init 完成：默认 64MiB 静态区 + AURA_HEAP_MB 扩容。
+    // ⚠ 放在此处（宿主层）而非 Vm.aura 内部：本文件只被 Photon 编译，
+    // 不会引入 Rust VM 侧「无 Heap_init 内置」的兼容问题。
+    Heap.init()
     val vm = VmRunner()
     vm.loadAucAndRun("build/vm/current.auc")
     val err: String = vm.getError()

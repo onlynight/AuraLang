@@ -556,15 +556,20 @@ object PhotonRuntime {
     fun emitFromCharCode(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRIP("rax", "heapBump")
-        enc.emitLeaRIP("rdx", "heapArena")
-        enc.emitAddRR("rax", "rdx")     // rax = ptr = heapArena + base
+        enc.emitMovRIP("rdx", "heapArenaBase")   // P0-2b：基址变量（默认 &heapArena）
+        enc.emitAddRR("rax", "rdx")     // rax = ptr = heapArenaBase + base
         enc.emitMovRR("r9", "rax")      // r9 = ptr（保存）
         enc.emitAddRI("rax", 8)
         enc.emitSubRR("rax", "rdx")     // rax = base + 8（新 bump 偏移）
-        enc.emitCmpRI("rax", 67100768)
-        enc.emitJccLabel("g", "fcc_ovf")
+        // P0-2b：容量改读变量 heapCap（AURA_HEAP_MB 可调大）
+        enc.emitMovRIP("r10", "heapCap")
+        enc.emitCmpRR("rax", "r10")
+        // P0-2：溢出不再「保持 bump 不动、返回旧 ptr」（静默错值），
+        // 改为明确报错 + exit(70)（见 emitHeapOom）。
+        enc.emitJccLabel("le", "fcc_ok")
+        enc.emitCallRel("__heap_oom")
+        enc.emitLabel("fcc_ok")
         enc.emitStoreRIP("heapBump", "rax")
-        enc.emitLabel("fcc_ovf")
         enc.emitMovzxRegReg8("eax", "ecx")
         enc.emitStoreMemDisp32("r9", 0, "rax")   // dword 写入：byte + 3×NUL
         enc.emitMovRR("rax", "r9")
@@ -646,7 +651,7 @@ object PhotonRuntime {
         enc.emitLabel("ss_len_ok")
         // bump 分配 len+1
         enc.emitMovRIP("rax", "heapBump")
-        enc.emitLeaRIP("r9", "heapArena")
+        enc.emitMovRIP("r9", "heapArenaBase")   // P0-2b：基址变量（默认 &heapArena）
         enc.emitAddRR("rax", "r9")          // rax = ptr
         enc.emitMovRR("r10", "rax")         // r10 = ptr
         enc.emitAddRR("rax", "r8")
@@ -655,8 +660,13 @@ object PhotonRuntime {
         enc.emitAddRI("rax", 7)
         enc.emitAndRI("rax", -8)
         enc.emitSubRR("rax", "r9")          // rax = base + align8(len + 1)
-        enc.emitCmpRI("rax", 67100768)
-        enc.emitJccLabel("g", "ss_ovf")
+        // P0-2b：容量改读变量 heapCap（r11 此刻空闲；r10 保存 ptr）
+        enc.emitMovRIP("r11", "heapCap")
+        enc.emitCmpRR("rax", "r11")
+        // P0-2：溢出改为明确报错 + exit(70)（见 emitHeapOom）。
+        enc.emitJccLabel("le", "ss_ok")
+        enc.emitCallRel("__heap_oom")
+        enc.emitLabel("ss_ok")
         enc.emitStoreRIP("heapBump", "rax")
         // ⚠️ P292 拷贝循环重写：旧发射按 qword 槽存字节（emitStoreIndexed8
         // 步长 8）且读源漏加 start（[rcx+r11]）→ 结果串 = 首字符+NUL，
@@ -689,13 +699,11 @@ object PhotonRuntime {
         enc.emitMovByteMemReg("r9", "eax")   // 尾 NUL
         enc.emitMovRR("rax", "r10")
         enc.emitEpilogue()
-        // ⚠️ P292 补 ss_ovf 标签：旧代码 JccLabel("g","ss_ovf") 的标签从未
-        // 发射，跳转解析回落「下一条指令」→ 溢出检查形同虚设，分配爬过
-        // 限界覆写 heapBump 自身 → 游标归零 → arena 回绕（P274 全系列
-        // 野句柄/布局敏感崩溃的总根）。
-        enc.emitLabel("ss_ovf")
-        enc.emitXorRR("eax", "eax")
-        enc.emitEpilogue()
+        // P0-2：原 `ss_ovf` 段已移除——溢出分支不再「返回 NULL」，
+        // 而是调 `__heap_oom`（明确报错 + exit(70)，不返回）。
+        // （P292 曾补过此标签：旧代码 JccLabel("g","ss_ovf") 的标签从未
+        //  发射，跳转解析回落「下一条指令」→ 溢出检查形同虚设。现已
+        //  彻底不需要该标签。）
     }
 
     /// 编码 `ProcessOps_aura_process_argCount() rax = 0`（2026-10-02 自举链接修复）
@@ -714,15 +722,19 @@ object PhotonRuntime {
     fun emitProcArgsStub(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
         enc.emitMovRIP("rax", "heapBump")
-        enc.emitLeaRIP("rdx", "heapArena")
+        enc.emitMovRIP("rdx", "heapArenaBase")   // P0-2b：基址变量
         enc.emitAddRR("rax", "rdx")
         enc.emitMovRR("r9", "rax")
         enc.emitAddRI("rax", 8)
         enc.emitSubRR("rax", "rdx")
-        enc.emitCmpRI("rax", 67100768)
-        enc.emitJccLabel("g", "pargs_ovf")
+        // P0-2b：容量改读变量 heapCap
+        enc.emitMovRIP("r10", "heapCap")
+        enc.emitCmpRR("rax", "r10")
+        // P0-2：溢出改为明确报错 + exit(70)（见 emitHeapOom）。
+        enc.emitJccLabel("le", "pargs_ok")
+        enc.emitCallRel("__heap_oom")
+        enc.emitLabel("pargs_ok")
         enc.emitStoreRIP("heapBump", "rax")
-        enc.emitLabel("pargs_ovf")
         enc.emitXorRR("eax", "eax")
         enc.emitStoreMemDisp32("r9", 0, "rax")
         enc.emitMovRR("rax", "r9")
@@ -978,11 +990,21 @@ object PhotonRuntime {
         // 改为：把 32 字节缓冲**拷贝到 heap 新块**返回（与 strcat 同堆）。
         enc.emitMovRR("rbx", "rsi")            // rbx = 源（toStrBuffer 内）
         enc.emitMovRIP("rax", "heapBump")      // old = bump
-        enc.emitLeaRIP("rdx", "heapArena")
+        enc.emitMovRIP("rdx", "heapArenaBase") // P0-2b：基址变量（默认 &heapArena）
         enc.emitAddRR("rdx", "rax")            // rdx = dst = arena + old
         enc.emitAddRI("rax", 32)               // 新偏移 = old + 32
         enc.emitAddRI("rax", 7)
         enc.emitAndRI("rax", -8)
+        // ⚠️ P0-2：本点是 7 个 bump 分配中**唯一无边界检查**的一处——
+        // boxAlloc 每次调用 **2 次 toStrAny**（把指针转字符串作 heapKinds
+        // 键），都走这里；堆满后直接推进 heapBump 越界写 ⇒ SIGSEGV
+        //（实测 loop1.1M 段错误、而 strcat 路径已能正确报 OOM 的差异根因）。
+        // P0-2b：容量改读变量 heapCap（r10 此刻空闲）
+        enc.emitMovRIP("r10", "heapCap")
+        enc.emitCmpRR("rax", "r10")
+        enc.emitJccLabel("le", "tos_ok")
+        enc.emitCallRel("__heap_oom")
+        enc.emitLabel("tos_ok")
         enc.emitStoreRIP("heapBump", "rax")
         enc.emitXorRR("r10", "r10")
         enc.emitLabel("tos_ccopy")
@@ -1094,23 +1116,25 @@ object PhotonRuntime {
         enc.emitAddRI("rcx", 7)
         enc.emitAndRI("rcx", -8)
 
-        // base = [heapBump]；new = base + need；越界则回绕0 重新开
+        // base = [heapBump]；new = base + need
         enc.emitMovRIP("rax", "heapBump")
     // rax = base
         enc.emitMovRR("rbx", "rax")
         enc.emitAddRR("rbx", "rcx")
           // rbx = new
-        enc.emitCmpRI("rbx", 67100768)
+        // P0-2b：容量改读变量 heapCap（r10 此刻空闲）
+        enc.emitMovRIP("r10", "heapCap")
+        enc.emitCmpRR("rbx", "r10")
         enc.emitJccLabel("le", "strcat_alloc_ok")
-        // 溢出：返回 NULL（heapBump 不动）。旧「回绕0 重新开」会把后续
-        // 字符串分配叠到早期对象上（堆自踩家族根因，同 emitObjectAlloc）。
-        enc.emitXorRR("eax", "eax")
-        enc.emitJmpLabel("strcat_fail")
+        // P0-2：溢出改为明确报错 + exit(70)（见 emitHeapOom）。旧「返回
+        // NULL」让调用方拿到空指针后继续拼写 ⇒ 段错误；旧「回绕0 重新开」
+        // 会把后续字符串分配叠到早期对象上（堆自踩家族根因，同 emitObjectAlloc）。
+        enc.emitCallRel("__heap_oom")
         enc.emitLabel("strcat_alloc_ok")
         enc.emitStoreRIP("heapBump", "rbx")
 
-        // dst = heapArena + base
-        enc.emitLeaRIP("r12", "heapArena")
+        // dst = heapArenaBase + base
+        enc.emitMovRIP("r12", "heapArenaBase")   // P0-2b：基址变量
         enc.emitAddRR("r12", "rax")
 
         // s1 dst（计= len1 + 1，含 NUL
@@ -1190,13 +1214,15 @@ object PhotonRuntime {
         enc.emitMovRIP("rax", "heapBump")
         enc.emitMovRR("rdx", "rax")
         enc.emitAddRR("rdx", "rcx")
-        enc.emitCmpRI("rdx", 67100768)
+        // P0-2b：容量改读变量 heapCap（r10 此刻空闲）
+        enc.emitMovRIP("r10", "heapCap")
+        enc.emitCmpRR("rdx", "r10")
         enc.emitJccLabel("le", "la_ok")
-        enc.emitXorRR("eax", "eax")
-        enc.emitJmpLabel("la_fail")
+        // P0-2：溢出改为明确报错 + exit(70)（见 emitHeapOom）。
+        enc.emitCallRel("__heap_oom")
         enc.emitLabel("la_ok")
         enc.emitStoreRIP("heapBump", "rdx")
-        enc.emitLeaRIP("r9", "heapArena")
+        enc.emitMovRIP("r9", "heapArenaBase")      // P0-2b：基址变量
         enc.emitAddRR("rax", "r9")                 // rax = ptr
         enc.emitXorRR("r10", "r10")
         enc.emitStoreMemDisp32("rax", 0, "r10")    // [ptr+0] = len = 0
@@ -1367,26 +1393,25 @@ object PhotonRuntime {
         enc.emitStackLoad("rdx", -0x10)
         enc.emitAddRR("rdx", "r12")
 
-        // 边界检
-        enc.emitCmpRI("rdx", 67100768)
+        // 边界检（P0-2b：容量改读变量 heapCap；r10 此刻空闲）
+        enc.emitMovRIP("r10", "heapCap")
+        enc.emitCmpRR("rdx", "r10")
         enc.emitJccLabel("le", "oa_alloc_ok")
 
-        // 溢出：干净失败（返回 NULL，heapBump 不动）。
-        // ⚠️ 旧实现「回绕：base=0, bump=size」= 后续分配从 heapArena+0
-        // 重新叠加——早期对象（Vm 实例、各单例）被新分配逐字节覆写：
-        // 实测 helloworld（2026-10-06）Vm.arg4Ints 槽被一块新列表的
-        // 长度字段写成 1 → listSet(list=1,…) → read64(1) 段错误，
-        // 且崩点随分配时序漂移（「崩点随构建漂移」家族的另一根因）。
-        enc.emitXorRR("rax", "rax")
-        enc.emitJmpLabel("oa_fail")
+        // P0-2：溢出改为明确报错 + exit(70)（见 emitHeapOom）。旧「返回
+        // NULL」让调用方（如 boxAlloc 的 `Memory.write32(ptr+8,…)`）在空
+        // 指针上继续写 ⇒ 段错误（实测 loop1.1M / loop2M）；
+        // 旧「回绕：base=0, bump=size」则让早期对象被新分配逐字节覆写
+        //（helloworld 2026-10-06，「崩点随构建漂移」家族的另一根因）。
+        enc.emitCallRel("__heap_oom")
 
         enc.emitLabel("oa_alloc_ok")
 
         // 更新 heapBump
         enc.emitStoreRIP("heapBump", "rdx")
 
-        // 计算实际地址：heapArena + offset
-        enc.emitLeaRIP("rsi", "heapArena")
+        // 计算实际地址：heapArenaBase + offset（P0-2b：基址变量）
+        enc.emitMovRIP("rsi", "heapArenaBase")
         enc.emitAddRR("rsi", "r12")
 
         // 保存返回地址（不被修改）
@@ -2250,6 +2275,19 @@ object PhotonRuntime {
 
     /// 编码 `Memory_mmap(rcx=addr, rdx=length, r8=prot, r9=flags, [sp]=fd, [sp]=offset) rax=ptr`。
     /// Windows: NtAllocateVirtualMemory (0x18)。
+    /// 编码 `Memory_mmap(addr, length, prot, flags, fd, offset) rax=ptr|-1`（P0-2b）。
+    ///
+    /// ⚠️ **P0-2b 暂回退（已知限制）**：本函数当前把 arg5/arg6（fd/offset）写在
+    /// `[rbp-0x68]`/`[rbp-0x60]`，而 Win64 下 `NtAllocateVirtualMemory(0x18)` 的
+    /// arg5/arg6 应在 `[rbp-0x70]`/`[rbp-0x68]`。错误槽位 ⇒ mmap 收到未初始化的
+    /// fd/offset ⇒ 返回 -1（MAP_FAILED）。`emitHeapInit` 判定 `≤0` 后**安全回落
+    /// 64MiB**——即 `AURA_HEAP_MB>64` 当前**不生效**（功能缺位但无崩溃）。
+    ///
+    /// 正确写法（arg5/arg6 写 `-0x70`/`-0x68`，AllocationType/Protect 占该槽，
+    /// rbx 挪到 `-0x60`）经反汇编确认字节正确，但会让种子编译器
+    /// `aura build --aot` 确定性产出坏驱动（五门全坏 / 静默错值，fib28 计时
+    /// ~4300ms→~1000ms）。**落地正确版前必须先修种子编译器回归**
+    /// （见 `scripts/photon/vmopt.sh` 头部注释）。
     fun emitMemoryMmap(enc: X86Encoder): Unit {
         enc.emitPrologue(0x90)
         enc.emitStackStore(-0x70, "rbx")
@@ -2263,14 +2301,6 @@ object PhotonRuntime {
         enc.emitXorRR("r8", "r8")
         enc.emitLeaStack("r9", -0x38)
         enc.emitMovRR("r10", "rcx")
-        // ⚠️ Nt* syscall 的**第 5/6 个参数在栈上**，位置是 `[rsp+0x28]` / `[rsp+0x30]`
-        //（Win64 前 4 个实参占 `[rsp+0x00..0x20]` 的影子空间，第 5 个从 +0x28 开始）。
-        // 本函数 `emitPrologue(0x90)` ⇒ `rsp = rbp-0x90` ⇒ 正确槽位是
-        // **`rbp-0x68`（AllocationType）与 `rbp-0x60`（Protect）**。
-        // 旧实现写在 `-0x58`/`-0x50`（= `rsp+0x38/0x40`，偏了 0x10）⇒ 内核读到的是
-        // 残留栈数据 ⇒ `STATUS_INVALID_PARAMETER` ⇒ 直接走 `mm_fail` 返回 **0**
-        //（实测 `probe_mmap` 的 `mmap1: 0`：`ArenaAllocator.init` 又把 0 当成成功，
-        //  于是「mmap 堆」形同虚设、`alloc` 恒返回 0 —— P4 第 1 项的真根因）。
         enc.emitMovRI32("eax", 0x3000)
         enc.emitStackStore(-0x68, "rax")
         enc.emitMovRI32("eax", 4)
@@ -2317,6 +2347,181 @@ object PhotonRuntime {
         enc.emitCallRel("println")
         enc.emitMovRI32("ecx", 1)
         enc.emitCallRel("exit")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `__heap_oom()`：heapArena 耗尽的**明确报错 + 非零退出**（P0-2）。
+    ///
+    /// 背景（2026-10-07 内存分析，docs/photon/vm-memory-comparison.md）：
+    /// 6 个 bump 分配点此前在越界时**静默失败**——要么「返回 NULL」（调用方
+    /// 立即解引用，如 boxAlloc 的 `Memory.write32(ptr+8,…)` ⇒ 写地址 0x8
+    /// 段错误），要么「返回旧指针」（静默错值）。实测 `loop1m`（Long 累加
+    /// 100 万次）堆用量已达 62.5MB / 64MiB 静止 arena，N=1.1M 即 SIGSEGV
+    /// 且**无任何提示**。本函数把「溢出」统一变成一行 ASCII 诊断 + exit(70)
+    ///（70 = C 运行库的 OOM 退出码约定，见 aura_std_cffi.c
+    ///「超限诊断 + 中止（退出码 70：与普通编译失败区分）」）。
+    ///
+    /// ⚠ 消息写入 `.data` 段的 `oomMsg:24` 缓冲——runtime obj **不能**用
+    /// `@str.N`（那是主对象字符串常量池的符号，跨对象会链接失败）。
+    /// 纯 ASCII：Windows 控制台默认代码页会把中文显示成乱码（同 C 侧注释）。
+    ///
+    /// ```asm
+    /// __heap_oom:
+    ///   push rbp; mov rbp, rsp; sub rsp, 0x20
+    ///   lea  rdx, [rel oomMsg]
+    ///   mov  eax, 0x4D4F4F5B        ; "[OOM"    + 高 4 字节 0
+    ///   mov  [rdx], rax
+    ///   mov  eax, 0x4548205D        ; "] HE"
+    ///   mov  [rdx+4], rax
+    ///   mov  eax, 0x46205041        ; "AP F"
+    ///   mov  [rdx+8], rax
+    ///   mov  eax, 0x0A4C4C55        ; "ULL\n"（rax 高 32 位为 0 ⇒ 尾部 NUL）
+    ///   mov  [rdx+12], rax
+    ///   mov  rcx, rdx
+    ///   call println
+    ///   mov  ecx, 70
+    ///   call exit                   ; 不返回
+    ///   leave; ret                  ; 不可达兜底
+    /// ```
+    /// 输出：`[OOM] HEAP FULL`
+    fun emitHeapOom(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x20)
+        enc.emitLeaRIP("rdx", "oomMsg")
+        enc.emitMovRI("eax", 0x4D4F4F5B)
+        enc.emitStoreMemDisp32("rdx", 0, "rax")
+        enc.emitMovRI("eax", 0x4548205D)
+        enc.emitStoreMemDisp32("rdx", 4, "rax")
+        enc.emitMovRI("eax", 0x46205041)
+        enc.emitStoreMemDisp32("rdx", 8, "rax")
+        enc.emitMovRI("eax", 0x0A4C4C55)
+        enc.emitStoreMemDisp32("rdx", 12, "rax")
+        enc.emitMovRR("rcx", "rdx")
+        enc.emitCallRel("println")
+        enc.emitMovRI32("ecx", 70)
+        enc.emitCallRel("exit")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `Heap_init()`：把 arena 的**默认**基址/容量写回变量（P0-2b）。
+    ///
+    /// 默认：base = &heapArena（64MiB 静态区）、cap = 67100768
+    ///（= 64MiB − 0x890 余量）。由**宿主 main 的第一行**调用——7 个 bump
+    /// 分配点现在都从 `heapArenaBase` / `heapCap` 变量取值，未初始化即
+    /// 为 0（分配会立刻 OOM 报错，fail-safe 而非静默乱写）。
+    ///
+    /// ```asm
+    /// Heap_init:
+    ///   push rbp; mov rbp, rsp; sub rsp, 0x20
+    ///   lea  rax, [rel heapArena]
+    ///   mov  [rel heapArenaBase], rax
+    ///   mov  rax, 67100768
+    ///   mov  [rel heapCap], rax
+    ///   leave; ret
+    /// ```
+    /// 编码 `Heap_init()`：初始化 arena 变量，并支持 `AURA_HEAP_MB` 扩容（P0-2b）。
+    ///
+    /// **默认**：base = &heapArena（64MiB 静态区），cap = 67100768
+    ///（= 64MiB − 0x890 余量）。
+    ///
+    /// **扩容**：读环境变量 `AURA_HEAP_MB`（整数 MiB）；若 > 64，则
+    /// `Memory_mmap` 一块 `mb × 1MiB` 的新区并整体采纳（base/heapBump 归零）。
+    ///
+    /// ⚠️ 为什么"读环境变量 + mmap"全放在 runtime 汇编里、而不是宿主 Aura 层：
+    /// 宿主源码（`examples/compiler/auc_vm_runner.aura`）头部有实测记载——
+    /// "`Env.get` 与 VmRunner 大规模内联共存时亦有取值异常"，故宿主侧用
+    /// `Env.get` 不可靠；runtime 的 `env_get`（Win32 GetEnvironmentVariableA
+    /// 直调）没有这个问题。
+    ///
+    /// 由**宿主 main 的第一行**调用（在任何分配之前；7 个 bump 分配点现已
+    /// 全部从 `heapArenaBase` / `heapCap` 取值，未初始化即为 0 ⇒ 任何分配
+    /// 都会立刻 OOM 报错，fail-safe 而非静默乱写）。
+    ///
+    /// ```asm
+    /// Heap_init:
+    ///   push rbp; mov rbp, rsp; sub rsp, 0x40
+    ///   lea  rax, [rel heapArena]          ; 默认 base
+    ///   mov  [rel heapArenaBase], rax
+    ///   mov  rax, 67100768                 ; 默认 cap
+    ///   mov  [rel heapCap], rax
+    ///   lea  rdx, [rel heapMbName]         ; 写入 "AURA_HEAP_MB"
+    ///   mov  eax, 0x41525541  ; "AURA"
+    ///   mov  [rdx], rax
+    ///   mov  eax, 0x4145485F  ; "_HEA"
+    ///   mov  [rdx+4], rax
+    ///   mov  eax, 0x424D5F50  ; "P_MB"
+    ///   mov  [rdx+8], rax
+    ///   mov  eax, 0
+    ///   mov  [rdx+12], rax    ; NUL 结尾
+    ///   lea  rcx, [rel heapMbName]
+    ///   call env_get                       ; rax = value 指针
+    ///   mov  rcx, rax
+    ///   call toInt                         ; rax = mb
+    ///   cmp  rax, 64
+    ///   jle  hi_done                       ; ≤64MiB → 保持默认
+    ///   shl  rax, 20                       ; bytes = mb << 20
+    ///   mov  [rbp-0x10], rax
+    ///   xor  rcx, rcx                      ; addr = 0
+    ///   mov  rdx, [rbp-0x10]               ; length
+    ///   call Memory_mmap                   ; rax = ptr（0 = 失败）
+    ///   test rax, rax
+    ///   jz   hi_done
+    ///   mov  [rel heapArenaBase], rax      ; 采纳新块
+    ///   mov  rdx, [rbp-0x10]
+    ///   sub  rdx, 65536                    ; 余量
+    ///   mov  [rel heapCap], rdx
+    ///   xor  rdx, rdx
+    ///   mov  [rel heapBump], rdx           ; 新块从 0 开始
+    /// hi_done:
+    ///   leave; ret
+    /// ```
+    fun emitHeapInit(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x40)
+        // ── 默认：base = &heapArena, cap = 67100768 ──
+        enc.emitLeaRIP("rax", "heapArena")
+        enc.emitStoreRIP("heapArenaBase", "rax")
+        enc.emitMovRI("rax", 67100768)
+        enc.emitStoreRIP("heapCap", "rax")
+        // ── 把环境变量名 "AURA_HEAP_MB" 写入 heapMbName（12 字符 + NUL）──
+        enc.emitLeaRIP("rdx", "heapMbName")
+        enc.emitMovRI("eax", 0x41525541)          // "AURA"
+        enc.emitStoreMemDisp32("rdx", 0, "rax")
+        enc.emitMovRI("eax", 0x4145485F)          // "_HEA"
+        enc.emitStoreMemDisp32("rdx", 4, "rax")
+        enc.emitMovRI("eax", 0x424D5F50)          // "P_MB"
+        enc.emitStoreMemDisp32("rdx", 8, "rax")
+        enc.emitMovRI("eax", 0)
+        enc.emitStoreMemDisp32("rdx", 12, "rax")  // NUL 结尾
+        // ── mb = toInt(env_get("AURA_HEAP_MB"))；缺失 → 0（保持默认）──
+        enc.emitLeaRIP("rcx", "heapMbName")
+        enc.emitCallRel("env_get")
+        enc.emitMovRR("rcx", "rax")
+        enc.emitCallRel("toInt")
+        enc.emitCmpRI("rax", 64)
+        enc.emitJccLabel("le", "hi_done")
+        // ── 扩容：bytes = mb << 20；p = Memory_mmap(0, bytes, 3, 34, -1, 0) ──
+        //   ⚠️ 旧实现只传了 addr/length 两个参数（prot/flags/fd/offset 缺失）→
+        //   mmap 收到未初始化的值，返回 -1（MAP_FAILED）；却只判 `test rax,rax;
+        //   jz`（非 0 即认成功）→ 把 -1 当有效基址采纳 → 首分配解引用 -1 段错误。
+        //   这里补齐 6 个参数，并把失败判定改为 `cmp rax,0; jle`（≤0 含 -1/0）。
+        enc.emitShlRI("rax", 20)
+        enc.emitStackStore(-0x10, "rax")          // bytes 暂存 [rbp-0x10]
+        enc.emitXorRR("rcx", "rcx")               // arg1 addr   = 0
+        enc.emitStackLoad("rdx", -0x10)           // arg2 length = bytes
+        enc.emitMovRI32("r8d", 3)                 // arg3 prot   = PROT_READ|PROT_WRITE
+        enc.emitMovRI32("r9d", 34)                // arg4 flags  = MAP_PRIVATE|MAP_ANONYMOUS
+        enc.emitStoreImm32Stack(-0x20, -1)        // arg5 fd     = -1   ([rsp+0x20])
+        enc.emitStoreImm32Stack(-0x18, 0)         // arg6 offset = 0    ([rsp+0x28])
+        enc.emitCallRel("Memory_mmap")            // rax = 新区指针 或 -1（MAP_FAILED）
+        enc.emitCmpRI("rax", 0)
+        enc.emitJccLabel("le", "hi_done")         // ≤0（含 -1 / 0）⇒ 保持默认 64MiB
+        // ── 采纳：base = p, cap = bytes − 65536（余量）, bump 归零 ──
+        enc.emitStoreRIP("heapArenaBase", "rax")
+        enc.emitStackLoad("rdx", -0x10)
+        enc.emitSubRI("rdx", 65536)
+        enc.emitStoreRIP("heapCap", "rdx")
+        enc.emitXorRR("rdx", "rdx")
+        enc.emitStoreRIP("heapBump", "rdx")
+        enc.emitLabel("hi_done")
         enc.emitEpilogue()
     }
 
@@ -2890,7 +3095,7 @@ object PhotonRuntime {
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
     val BUILD_ID: String = "p276-listget-core-layout"
-    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores"
+    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
     fun buildRuntimeObject(): String {
@@ -3360,6 +3565,14 @@ object PhotonRuntime {
         val encThrow = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitThrow(encThrow)
         writer.appendFunction(encThrow.toHex(), "__throw", PhotonObjectWriterUtils.joinRelocRecords(encThrow.getRelocations()))
+        // P0-2：heapArena 耗尽处理器（明确报错 + exit(70)，替代静默 NULL/段错误）
+        val encHoom = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitHeapOom(encHoom)
+        writer.appendFunction(encHoom.toHex(), "__heap_oom", PhotonObjectWriterUtils.joinRelocRecords(encHoom.getRelocations()))
+        // P0-2b：堆基址/容量变量化后的初始化与扩容采纳函数
+        val encHinit = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitHeapInit(encHinit)
+        writer.appendFunction(encHinit.toHex(), "Heap_init", PhotonObjectWriterUtils.joinRelocRecords(encHinit.getRelocations()))
         val encAl = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitArrayListOf(encAl)
         writer.appendFunction(encAl.toHex(), "arrayListOf", PhotonObjectWriterUtils.joinRelocRecords(encAl.getRelocations()))
@@ -3481,7 +3694,7 @@ object PhotonRuntime {
 
         // .data 段：toStrBuffer(32B) + arena(1MB) + bump 游标(8B) + 对象 bump(8B)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,heapArena:67108864,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapArena:67108864,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
         println("[rt] dataSection set, dataChars=" + writer.dataSection.length + " textChars=" + writer.textSection.length)
 
         // 构建符号表（包含所有函数和 .data 符号        println("[rt] before buildSymbols")
@@ -3814,6 +4027,14 @@ object PhotonRuntime {
         val encThrow = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitThrow(encThrow)
         writer.appendFunction(encThrow.toHex(), "__throw", PhotonObjectWriterUtils.joinRelocRecords(encThrow.getRelocations()))
+        // P0-2：heapArena 耗尽处理器（明确报错 + exit(70)，替代静默 NULL/段错误）
+        val encHoom = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitHeapOom(encHoom)
+        writer.appendFunction(encHoom.toHex(), "__heap_oom", PhotonObjectWriterUtils.joinRelocRecords(encHoom.getRelocations()))
+        // P0-2b：堆基址/容量变量化后的初始化与扩容采纳函数
+        val encHinit = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitHeapInit(encHinit)
+        writer.appendFunction(encHinit.toHex(), "Heap_init", PhotonObjectWriterUtils.joinRelocRecords(encHinit.getRelocations()))
         val encAl = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitArrayListOf(encAl)
         writer.appendFunction(encAl.toHex(), "arrayListOf", PhotonObjectWriterUtils.joinRelocRecords(encAl.getRelocations()))
@@ -3894,7 +4115,7 @@ object PhotonRuntime {
         writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,heapArena:67108864,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapArena:67108864,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
@@ -4227,6 +4448,14 @@ object PhotonRuntimeUtils {
         val encThrow = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitThrow(encThrow)
         writer.appendFunction(encThrow.toHex(), "__throw", PhotonObjectWriterUtils.joinRelocRecords(encThrow.getRelocations()))
+        // P0-2：heapArena 耗尽处理器（明确报错 + exit(70)，替代静默 NULL/段错误）
+        val encHoom = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitHeapOom(encHoom)
+        writer.appendFunction(encHoom.toHex(), "__heap_oom", PhotonObjectWriterUtils.joinRelocRecords(encHoom.getRelocations()))
+        // P0-2b：堆基址/容量变量化后的初始化与扩容采纳函数
+        val encHinit = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitHeapInit(encHinit)
+        writer.appendFunction(encHinit.toHex(), "Heap_init", PhotonObjectWriterUtils.joinRelocRecords(encHinit.getRelocations()))
         val encAl = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitArrayListOf(encAl)
         writer.appendFunction(encAl.toHex(), "arrayListOf", PhotonObjectWriterUtils.joinRelocRecords(encAl.getRelocations()))
@@ -4307,7 +4536,7 @@ object PhotonRuntimeUtils {
         writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,heapArena:67108864,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapArena:67108864,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）

@@ -65,6 +65,33 @@ extern interface Memory {
     @native(asm = "lock dec") fun arcDecrement(addr: Long): Long
 }
 
+// ═══════════════════════════════════════════════════════════
+// Heap — AOT 运行时堆（heapArena）的初始化与容量（P0-2b）
+// ═══════════════════════════════════════════════════════════
+
+/// 无体 `fun` = 外部符号调用（同 `Memory.alloc` → `Memory_alloc`）：
+/// `Heap.init()` → `Heap_init`。
+///
+/// 实现由 Photon runtime obj 提供（`PhotonRuntime.emitHeapInit`）：
+/// 默认 64MiB 静态区；若环境变量 `AURA_HEAP_MB` > 64，则 mmap 一块
+/// `mb × 1MiB` 的新区并整体采纳（详见 emitHeapInit 的文档注释）。
+///
+/// ⚠ 由**宿主 main 的第一行**调用——7 个 bump 分配点已全部改从
+/// `heapArenaBase` / `heapCap` 两个变量取值，不初始化即全为 0，
+/// 任何分配都会立刻 OOM 报错（fail-safe，而非静默乱写）。
+///
+/// ⚠ 只被 **Photon 编译的宿主**调用（Rust VM 无 `Heap_init` 内置）——
+/// 调用点仅存在于 `examples/compiler/auc_vm_runner.aura`（纯 Photon 目标）。
+///
+/// 用 `extern interface`（而非 `object`）：无体 `fun init()` 会被编译器降低为
+/// 对外部符号 `Heap_init` 的**引用**（同 `Memory.alloc` → `Memory_alloc`），
+/// 真正的定义由 Photon runtime obj 的 `emitHeapInit` 提供。若用 `object`，
+/// 无体 `fun` 会被编译成 `Heap_init` 的**定义**，与 runtime obj 的 `Heap_init`
+/// 冲突（duplicate symbol）。
+extern interface Heap {
+    fun init(): Unit
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Arena 内存分配器 — Phase 4.1
 // ═══════════════════════════════════════════════════════════════
