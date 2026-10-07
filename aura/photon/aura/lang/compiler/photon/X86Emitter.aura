@@ -16,6 +16,7 @@ import aura.lang.compiler.photon.RegisterAllocator
 
 /// X86 发射器：将寄存器已分配的 MachineDag 编码为机器码字节。
 class X86Emitter {
+    private var scanFn: String = ""
 
     /// 编码器。
     private var enc: X86Encoder = null
@@ -169,6 +170,35 @@ class X86Emitter {
                 this.walkSeenCsv = "|"
                 this.walkMinId = -1
                 this.walkMaxId = -1
+                this.scanFn = fn
+            }
+            // P394：jmp/jcc/label 的 nodes **不是节点引用**——是基本块号
+            //（数千起，全模块累计）。旧实现一律当节点走传递闭包：块号 <
+            // nodeCount 时 dag.nodeOf 返回**完全无关函数的节点**，递归展开
+            // 其整棵 args 树 ⇒ walkMaxId 被拉到任意高 ⇒ 帧预算 = ID 区间×8
+            // 膨胀数十倍（实测 Vm_arg0IntOf range=18039 → 帧 144KB = 36 次
+            // 栈页探测/调用；全函数帧 4-14 万字节普遍污染）。跳过这三个
+            // 模板的 nodes 遍历（output 恒 -1，无闭包可走）。
+            val tpl: String = instr.template
+            if (tpl == "jmp @target" || tpl == "jcc @target" || tpl == "label") {
+                i = i + 1
+                continue
+            }
+            // P394：cmp %src,@imm 的 nodes[1] 是裸比较常量（emitCmpImm 直接
+            // strToInt 作 imm）——值 < nodeCount 时被当节点拉进闭包 ⇒ min 被
+            // 拉到 0/1 ⇒ range = 函数末节点号（全局累计数千）⇒ 帧预算膨胀
+            // 数十倍、每调用数十次栈页探测（实测全函数帧 4-14 万字节的单一
+            // 根因）。只扫第一槽（真实节点）。⚠️ 本分支位于 ns 声明之前，
+            // 必须自行 splitArgs（ns 在函数级作用域提升为未初始化——引用
+            // 它会静默零行为，2026-10-07）。
+            if (tpl == "cmp %src, @imm") {
+                val cns: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+                if (cns.size > 0) {
+                    val nid0: Int = MachineDagUtils.strToInt(cns[0])
+                    if (nid0 >= 0) { this.walkExtraNodes(dag, nid0) }
+                }
+                i = i + 1
+                continue
             }
             // 根节点：nodes + output + call 实参——**传递闭包**全遍历
             //（P301 旧实现只扫根节点，表达式链的中间节点漏计 ⇒ 兜底槽
