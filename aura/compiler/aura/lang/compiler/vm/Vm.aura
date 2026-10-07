@@ -489,11 +489,10 @@ class Vm {
         this.ip = this.funcOffset("main")
         this.currentFunc = "main"
 
-        // P401：指令计数改周期检查——逐条 `this.instructionCount += 1` 是
-        // 每指令 2 次 field 读 + 1 次 field 写（photon 下 ~7 条 x86）。
-        // 改为局部累加、每 IC_FLUSH 条批量刷回 field 并做一次上限检查；
-        // 循环任何出口（正常结束 / dispatch 内 error / 上限 break）都先
-        // 刷回余量，getInstructionCount() 在 run() 返回后仍精确。
+        // P401：指令计数改周期检查——逐条 field 加一（~7 条 x86/指令）改为
+        // 局部 icAcc 累加、每 2^20 条批量刷回 + 一次上限检查；循环所有出口
+        // （正常/错误/上限 break）都刷回余量，getInstructionCount() 在
+        // run() 返回后仍精确（上限触发最迟 2^20 条后生效，护栏语义不变）。
         var icAcc: Int = 0
         while (this.running && (this.mcValid == 0 || this.ip < this.mcN)) {
             icAcc = icAcc + 1
@@ -519,581 +518,7 @@ class Vm {
                 continue
             }
 
-        // ── 常量指令 ──
-        // ── 热指令快速分派（方案 D）：按动态频次把高频臂前置，
-        // 未命中落入下方原链（臂语义与原链逐字一致）。 ──
-        if (opCode == 10) {
-            val slot: Int = this.arg0IntOf()
-            val v: Any = this.locals.getSlot(slot)
-            if (v == null) {
-                this.stack.push(toAny(0))
-            } else {
-                this.stack.push(v)
-            }
-        } else if (opCode == 11) {
-            val slot: Int = this.arg0IntOf()
-            val sv: Any = this.stack.pop()
-            this.locals.putSlot(slot, sv)
-        } else if (opCode == 5) {
-            // 诊断（前 3 次）：常量池行是否完好（2026-10-06 装载链追踪）
-            if (this.dbgLcCount < 3) {
-                this.dbgLcCount = this.dbgLcCount + 1
-                val lcIdx: String = this.argStrOf(0)
-                println("[LC] n=" + toStr(this.dbgLcCount) + " idxArg=[" + lcIdx
-                        + "] poolLine=[" + this.getConst(lcIdx) + "]")
-            }
-            this.stack.push(toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))))
-        } else if (opCode == 51) {
-            val cond: Any = this.stack.pop()
-            if (!VmOps.toBool(cond)) {
-                this.ip = this.arg0IntOf()
-            }
-        } else if (opCode == 200) {
-            this.stack.push(toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))))
-            this.locals.putSlot(this.arg1IntOf(), this.stack.pop())
-        } else if (opCode == 201) {
-            val v: Any = this.locals.getSlot(this.arg0IntOf())
-            if (v == null) {
-                this.stack.push(toAny(0))
-            } else {
-                this.stack.push(v)
-            }
-            val cond: Any = this.stack.pop()
-            if (!VmOps.toBool(cond)) {
-                this.ip = this.arg1IntOf()
-            }
-        } else if (opCode == 202) {
-            // local[a] OP const[c] → local[s]
-            val b: Any = this.locals.getSlot(this.arg0IntOf())
-            val c: Any = toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg1IntOf()))))
-            val binop: Int = this.arg2IntOf()
-            var r: Any = 0
-            if (binop == 20) {
-                r = VmOps.add(b, c)
-            } else if (binop == 21) {
-                r = VmOps.sub(b, c)
-            } else if (binop == 22) {
-                r = VmOps.mul(b, c)
-            }
-            this.locals.putSlot(this.arg3IntOf(), r)
-        } else if (opCode == 203) {
-            // local[a] OP local[b] → local[s]
-            val b: Any = this.locals.getSlot(this.arg0IntOf())
-            val c: Any = this.locals.getSlot(this.arg1IntOf())
-            val binop: Int = this.arg2IntOf()
-            var r2: Any = 0
-            if (binop == 20) {
-                r2 = VmOps.add(b, c)
-            } else if (binop == 21) {
-                r2 = VmOps.sub(b, c)
-            } else if (binop == 22) {
-                r2 = VmOps.mul(b, c)
-            }
-            this.locals.putSlot(this.arg3IntOf(), r2)
-        } else if (opCode == 204) {
-            // local[a] < const[c] → tmp；false 跳 t（循环守卫 6 连合一）
-            val b: Any = this.locals.getSlot(this.arg0IntOf())
-            val c: Any = toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg1IntOf()))))
-            val cond: Any = VmOps.lt(b, c)
-            this.locals.putSlot(this.arg3IntOf(), cond)
-            if (!VmOps.toBool(cond)) {
-                this.ip = this.arg4IntOf()
-            }
-        } else if (opCode == 205) {
-            // local[a] < local[b] → tmp；false 跳 j（双局部守卫 5 连合一）
-            val x: Any = this.locals.getSlot(this.arg0IntOf())
-            val y: Any = this.locals.getSlot(this.arg1IntOf())
-            val cond: Any = VmOps.lt(x, y)
-            this.locals.putSlot(this.arg2IntOf(), cond)
-            if (!VmOps.toBool(cond)) {
-                this.ip = this.arg3IntOf()
-            }
-        } else if (opCode == 206) {
-            // local[a] → local[b]（拷贝合一）
-            val v: Any = this.locals.getSlot(this.arg0IntOf())
-            if (v == null) {
-                this.locals.putSlot(this.arg1IntOf(), toAny(0))
-            } else {
-                this.locals.putSlot(this.arg1IntOf(), v)
-            }
-        } else if (opCode == 20) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.add(a, b))
-        } else if (opCode == 21) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.sub(a, b))
-        } else if (opCode == 32) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.lt(a, b))
-        } else if (opCode == 60) {
-            val funcName: String = this.argStrOf(0)
-            var argc: Int = 0
-            if (this.argCountOf() >= 2) {
-                argc = this.arg1IntOf()
-            } else {
-                argc = this.funcParamCount(funcName)
-                if (argc < 0) { argc = 0 }
-            }
-            this.callOrBuiltin(funcName, argc)
-        } else if (opCode == 65) {
-            this.returnFromFunc()
-        } else if (opCode == 50) {
-            this.ip = this.arg0IntOf()
-        } else {
-                if (opCode == 0) {
-            val idx: Int = VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))
-            this.stack.push(toAny(idx))
-        } else if (opCode == 1) {
-            val val: Any = this.getConstByIdx(this.arg0IntOf())
-            this.stack.push(VmOps.parseFloat(toStr(val)))
-        } else if (opCode == 2) {
-            val val: Any = this.getConstByIdx(this.arg0IntOf())
-            this.stack.push(val)
-        } else if (opCode == 3) {
-            this.stack.push(this.argStrOf(0) == "true")
-        } else if (opCode == 4) {
-            this.stack.push(null)
-        }
-
-        // ── 类型化常量加载（`.auc` 路径：LoadConst 单操作码 + 常量标签）──
-        else if (opCode == 5) {
-            this.stack.push(toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))))
-        } else if (opCode == 6) {
-            this.stack.push(VmOps.parseFloat(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf()))))
-        } else if (opCode == 7) {
-            this.stack.push(this.getConstByIdx(this.arg0IntOf()))
-        } else if (opCode == 8) {
-            this.stack.push(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())) == "1")
-        } else if (opCode == 9) {
-            this.stack.push(null)
-        }
-
-        // ── 栈操作 ──
-        else if (opCode == 10) {
-            val slot: Int = VmOps.toI32(this.argStrOf(0))
-            val v: Any = this.locals.getSlot(slot)
-            // **不要**写成 `push(if (v == null) 0 else v)`：混合类型 if 表达式会被
-            // 推导成 `Int`，非空分支里的 `String` 指针会被截断成整数
-            //（自检样例槽位里存的是整数所以看不出来；`.auc` 路径存字符串时，
-            // `println(toStr(x))` 就会打印出 0）。
-            if (v == null) {
-                this.stack.push(toAny(0))
-            } else {
-                this.stack.push(v)
-            }
-        } else if (opCode == 11) {
-            val slot: Int = VmOps.toI32(this.argStrOf(0))
-            this.locals.putSlot(slot, this.stack.pop())
-        } else if (opCode == 12) {
-            val slot: Int = VmOps.toI32(this.argStrOf(0))
-            this.locals.putSlot(slot, toAny(0))
-        } else if (opCode == 13) {
-            this.stack.pop()
-        } else if (opCode == 14) {
-            this.stack.push(this.stack.peek())
-        } else if (opCode == 15) {
-            val top: Any = this.stack.pop()
-            val second: Any = this.stack.pop()
-            this.stack.push(top)
-            this.stack.push(second)
-        }
-
-        // ── 算术运算 ──
-        else if (opCode == 20) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.add(a, b))
-        } else if (opCode == 21) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.sub(a, b))
-        } else if (opCode == 22) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.mul(a, b))
-        } else if (opCode == 23) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.div(a, b))
-        } else if (opCode == 24) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.mod(a, b))
-        } else if (opCode == 25) {
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.neg(a))
-        } else if (opCode == 26) {
-            val a: Any = this.stack.pop()
-            this.stack.push(a)
-        }
-
-        // ── 比较运算 ──
-        else if (opCode == 30) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.eq(a, b))
-        } else if (opCode == 31) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.neq(a, b))
-        } else if (opCode == 32) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.lt(a, b))
-        } else if (opCode == 33) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.gt(a, b))
-        } else if (opCode == 34) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.le(a, b))
-        } else if (opCode == 35) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.ge(a, b))
-        }
-
-        // ── 逻辑/位运算 ──
-        else if (opCode == 40) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.and(a, b))
-        } else if (opCode == 41) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.or(a, b))
-        } else if (opCode == 42) {
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.not(a))
-        } else if (opCode == 43) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.bitAnd(a, b))
-        } else if (opCode == 44) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.bitOr(a, b))
-        } else if (opCode == 45) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.bitXor(a, b))
-        } else if (opCode == 46) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.shl(a, b))
-        } else if (opCode == 47) {
-            val b: Any = this.stack.pop()
-            val a: Any = this.stack.pop()
-            this.stack.push(VmOps.shr(a, b))
-        }
-
-        // ── 控制流 ──
-        else if (opCode == 50) {
-            this.ip = VmOps.toI32(this.argStrOf(0))
-        } else if (opCode == 51) {
-            val cond: Any = this.stack.pop()
-            if (!VmOps.toBool(cond)) {
-                this.ip = VmOps.toI32(this.argStrOf(0))
-            }
-        } else if (opCode == 52) {
-            val cond: Any = this.stack.pop()
-            if (VmOps.toBool(cond)) {
-                this.ip = VmOps.toI32(this.argStrOf(0))
-            }
-        } else if (opCode == 53) {
-            this.running = false
-        } else if (opCode == 54) {
-            // SSA phi 节点：在文本模式下为 no-opCode
-        }
-
-        // ── 函数调用 ──
-        else if (opCode == 60) {
-            val funcName: String = this.argStrOf(0)
-            // 文本字节码：`CALL name argc`；.auc 二进制：`CALL <函数下标>`（无 argc，
-            // 由函数表的参数个数补全）。
-            var argc: Int = 0
-            if (this.argCountOf() >= 2) {
-                argc = VmOps.toI32(this.argStrOf(1))
-            } else {
-                argc = this.funcParamCount(funcName)
-                if (argc < 0) { argc = 0 }
-            }
-            this.callOrBuiltin(funcName, argc)
-        } else if (opCode == 61) {
-            val methodName: String = this.argStrOf(0)
-            this.callMethod(methodName)
-        } else if (opCode == 62) {
-            // `.auc` 路径：加载器已把原生函数**下标**解析成名字，
-            // 直接复用内建分派（println / toStr / …）。
-            val fname: String = this.argStrOf(0)
-            var argc2: Int = 0
-            if (this.argCountOf() >= 2) {
-                argc2 = VmOps.toI32(this.argStrOf(1))
-            }
-            // P380：CALL 参数计数诊断
-            if (this.caDiag < 24) {
-                this.caDiag = this.caDiag + 1
-                val base: Int = (this.ip - 1) * 3
-                println("[62] fn=[" + fname + "] argc=" + toStr(argc2)
-                    + " cnt=" + toStr(this.argCountOf())
-                    + " a0=[" + this.argStrs.get(base) + "] a1=[" + this.argStrs.get(base + 1) + "]"
-                    + " ip=" + toStr(this.ip))
-            }
-            this.callOrBuiltin(fname, argc2)
-        } else if (opCode == 63) {
-            val idx: Int = VmOps.toI32(this.argStrOf(0))
-            this.callNative(idx)
-        } else if (opCode == 64) {
-            val idx: Int = VmOps.toI32(this.argStrOf(0))
-            this.callC(idx)
-        } else if (opCode == 65) {
-            this.returnFromFunc()
-        } else if (opCode == 66) {
-            this.returnValue = "Unit"
-            this.returnFromFunc()
-        } else if (opCode == 211) {
-            // P1.6：尾调用（帧复用）。文本：`CALL_TAIL name argc`；argc 省略时按函数表推导。
-            val tFunc: String = this.argStrOf(0)
-            var tArgc: Int = 0
-            if (this.argCountOf() >= 2) {
-                tArgc = VmOps.toI32(this.argStrOf(1))
-            } else {
-                tArgc = this.funcParamCount(tFunc)
-                if (tArgc < 0) { tArgc = 0 }
-            }
-            this.callTail(tFunc, tArgc)
-        }
-
-        // ── 对象/类 ──
-        else if (opCode == 70) {
-            val className: String = this.argStrOf(0)
-            this.newObject(className)
-        } else if (opCode == 71) {
-            val fieldName: String = this.argStrOf(0)
-            this.getField(fieldName)
-        } else if (opCode == 72) {
-            val fieldName: String = this.argStrOf(0)
-            this.setField(fieldName)
-        } else if (opCode == 73) {
-            val size: Any = this.stack.pop()
-            this.newArray(size)
-        } else if (opCode == 74) {
-            this.getIndex()
-        } else if (opCode == 75) {
-            this.setIndex()
-        } else if (opCode == 76) {
-            val ctorName: String = this.argStrOf(0)
-            this.callCtor(ctorName)
-        } else if (opCode == 210) {
-            // P1.2：声明类继承（parent "-" 或空 = 无父类）
-            var parent: String = ""
-            if (this.argCountOf() >= 2) { parent = this.argStrOf(1) }
-            this.defClass(this.argStrOf(0), parent)
-        }
-
-        // ── 集合 ──
-        else if (opCode == 80) {
-            this.stack.push(VmCollections.newList())
-            this.registerHeapTop("list")
-        } else if (opCode == 81) {
-            this.stack.push(VmCollections.newMap())
-            this.registerHeapTop("map")
-        } else if (opCode == 82) {
-            val list: Any = this.stack.pop()
-            val elem: Any = this.stack.pop()
-            VmCollections.push(list, elem)
-        } else if (opCode == 83) {
-            val list: Any = this.stack.peek()
-            this.stack.push(VmCollections.pop(list))
-        } else if (opCode == 84) {
-            // `.auc`（Rust MIR）语义是 **pop**（`Instr::ListLen`）；Aura 文本字节码用 peek
-            if (this.aucMode) {
-                val list: Any = this.stack.pop()
-                this.stack.push(VmCollections.length(list))
-            } else {
-                val list: Any = this.stack.peek()
-                this.stack.push(VmCollections.length(list))
-            }
-        } else if (opCode == 85) {
-            val map: Any = this.stack.pop()
-            val key: Any = this.stack.pop()
-            val val: Any = this.stack.pop()
-            VmCollections.mapSet(map, key, val)
-        } else if (opCode == 86) {
-            val map: Any = this.stack.pop()
-            val key: Any = this.stack.pop()
-            this.stack.push(VmCollections.mapGet(map, key))
-        } else if (opCode == 87) {
-            val map: Any = this.stack.peek()
-            this.stack.push(VmCollections.mapLen(map))
-        }
-
-        // ── 闭包 ──
-        else if (opCode == 90) {
-            this.loadClosure(this.argStrOf(0))
-        } else if (opCode == 91) {
-            this.makeClosure(this.argStrOf(0))
-        } else if (opCode == 92) {
-            this.callClosureAt()
-        } else if (opCode == 93) {
-            this.loadUpvalue(VmOps.toI32(this.argStrOf(0)))
-        } else if (opCode == 94) {
-            this.storeUpvalue(VmOps.toI32(this.argStrOf(0)))
-        }
-
-        // ── 类型检查 ──
-        else if (opCode == 100) {
-            val typeName: String = this.argStrOf(0)
-            this.instanceOf(typeName)
-        } else if (opCode == 101) {
-            val typeName: String = this.argStrOf(0)
-            this.checkCast(typeName)
-        } else if (opCode == 102) {
-            val typeName: String = this.argStrOf(0)
-            this.cast(typeName)
-        } else if (opCode == 103) {
-            val typeName: String = this.argStrOf(0)
-            this.checkType(typeName)
-        }
-
-        // ── ARC 生命周期 ──
-        else if (opCode == 110) {
-            this.incRef()
-        } else if (opCode == 111) {
-            this.decRef()
-        } else if (opCode == 112) {
-            this.retain()
-        } else if (opCode == 113) {
-            this.release()
-        } else if (opCode == 114) {
-            this.dropRef()
-        } else if (opCode == 115) {
-            this.weakRef()
-        } else if (opCode == 116) {
-            this.weakGet()
-        } else if (opCode == 117) {
-            this.boxAlloc()
-        }
-
-        // ── defer ──
-        else if (opCode == 120) {
-            // defer 区域开始（由 VM 管理清理栈）
-        } else if (opCode == 121) {
-            // defer 区域结束
-        }
-
-        // ── 协程（D5：已废弃，指令不进入 ADR-001 指令集，走到 else 报未知指令）──
-
-        // ── FFI ──
-        else if (opCode == 130) {
-            this.cstring()
-        } else if (opCode == 131) {
-            this.readCstr()
-        } else if (opCode == 132) {
-            this.ptrIsNull()
-        } else if (opCode == 133) {
-            this.ptrToInt()
-        } else if (opCode == 134) {
-            this.intToPtr()
-        }
-
-        // ── 异常处理 ──
-        else if (opCode == 122) {
-            this.pushHandlerAt()
-        } else if (opCode == 123) {
-            this.popHandler()
-        } else if (opCode == 124) {
-            this.throwException()
-        }
-
-        // ── 并发 ──
-        else if (opCode == 140) {
-            this.threadSpawn()
-        } else if (opCode == 141) {
-            this.threadJoin()
-        } else if (opCode == 142) {
-            this.threadSleep()
-        } else if (opCode == 143) {
-            this.threadId()
-        } else if (opCode == 144) {
-            this.threadParallelism()
-        } else if (opCode == 150) {
-            this.mutexNew()
-        } else if (opCode == 151) {
-            this.mutexLock()
-        } else if (opCode == 152) {
-            this.mutexUnlock()
-        } else if (opCode == 153) {
-            this.mutexTryLock()
-        } else if (opCode == 160) {
-            this.channelNew()
-        } else if (opCode == 161) {
-            this.channelSend()
-        } else if (opCode == 162) {
-            this.channelRecv()
-        } else if (opCode == 170) {
-            this.atomicNew()
-        } else if (opCode == 171) {
-            this.atomicLoad()
-        } else if (opCode == 172) {
-            this.atomicStore()
-        } else if (opCode == 173) {
-            this.atomicAdd()
-        } else if (opCode == 174) {
-            this.atomicCas()
-        } else if (opCode == 180) {
-            this.rwLockNew()
-        } else if (opCode == 181) {
-            this.rwLockReadLock()
-        } else if (opCode == 182) {
-            this.rwLockWriteLock()
-        } else if (opCode == 183) {
-            this.rwLockReadUnlock()
-        } else if (opCode == 184) {
-            this.rwLockWriteUnlock()
-        } else if (opCode == 190) {
-            this.condvarNew()
-        } else if (opCode == 191) {
-            this.condvarWait()
-        } else if (opCode == 192) {
-            this.condvarSignal()
-        } else if (opCode == 193) {
-            this.condvarBroadcast()
-        }
-
-        // ── 枚举 ──
-        else if (opCode == 200) {
-            this.enumConstruct(this.argStrOf(0))
-        } else if (opCode == 201) {
-            this.enumTag()
-        } else if (opCode == 202) {
-            this.makeFnRef(this.argStrOf(0))
-        }
-
-        // ── 跨模块 ──
-        else if (opCode == 67) {
-            this.callExport(this.argStrOf(0))
-        } else if (opCode == 68) {
-            this.callExternal(this.argStrOf(0), this.argStrOf(1))
-        }
-
-        // ── AOT ──
-        else if (opCode == 69) {
-            this.callAot(this.argStrOf(0))
-        }
-
-        // ── 未知指令（含已废弃的协程指令，D5/ADR-001）──
-        // P392：opName 参数移除——run() 每条指令为它做一次 List<String>
-        // get + 传参（streq 诊断仅未知指令需要），改此处按需直读。
-        else {
-            this.error = "Unknown opcode: " + toStr(opCode) + " [" + this.ops[this.ip - 1] + "]"
-            this.running = false
-        }
-        }
+            this.dispatch(opCode)
         }
         this.instructionCount = this.instructionCount + icAcc
 
@@ -1137,6 +562,591 @@ class Vm {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════
+    //  指令分派
+    // ═══════════════════════════════════════════════════════════
+
+    /// 按加载期缓存的数值编号执行一条指令。
+    ///
+    /// P0.4（ADR-002）：分派只做**整数**比较（`Opcodes` 常量），无指令名
+    /// 字符串比较；`opName` 仅用于未知指令的诊断信息。
+    private fun dispatch(op: Int): Unit {
+        // ── 常量指令 ──
+        // ── 热指令快速分派（方案 D）：按动态频次把高频臂前置，
+        // 未命中落入下方原链（臂语义与原链逐字一致）。 ──
+        if (op == 10) {
+            val slot: Int = this.arg0IntOf()
+            val v: Any = this.locals.getSlot(slot)
+            if (v == null) {
+                this.stack.push(toAny(0))
+            } else {
+                this.stack.push(v)
+            }
+        } else if (op == 11) {
+            val slot: Int = this.arg0IntOf()
+            val sv: Any = this.stack.pop()
+            this.locals.putSlot(slot, sv)
+        } else if (op == 5) {
+            // 诊断（前 3 次）：常量池行是否完好（2026-10-06 装载链追踪）
+            if (this.dbgLcCount < 3) {
+                this.dbgLcCount = this.dbgLcCount + 1
+                val lcIdx: String = this.argStrOf(0)
+                println("[LC] n=" + toStr(this.dbgLcCount) + " idxArg=[" + lcIdx
+                        + "] poolLine=[" + this.getConst(lcIdx) + "]")
+            }
+            this.stack.push(toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))))
+        } else if (op == 51) {
+            val cond: Any = this.stack.pop()
+            if (!VmOps.toBool(cond)) {
+                this.ip = this.arg0IntOf()
+            }
+        } else if (op == 200) {
+            this.stack.push(toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))))
+            this.locals.putSlot(this.arg1IntOf(), this.stack.pop())
+        } else if (op == 201) {
+            val v: Any = this.locals.getSlot(this.arg0IntOf())
+            if (v == null) {
+                this.stack.push(toAny(0))
+            } else {
+                this.stack.push(v)
+            }
+            val cond: Any = this.stack.pop()
+            if (!VmOps.toBool(cond)) {
+                this.ip = this.arg1IntOf()
+            }
+        } else if (op == 202) {
+            // local[a] OP const[c] → local[s]
+            val b: Any = this.locals.getSlot(this.arg0IntOf())
+            val c: Any = toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg1IntOf()))))
+            val binop: Int = this.arg2IntOf()
+            var r: Any = 0
+            if (binop == 20) {
+                r = VmOps.add(b, c)
+            } else if (binop == 21) {
+                r = VmOps.sub(b, c)
+            } else if (binop == 22) {
+                r = VmOps.mul(b, c)
+            }
+            this.locals.putSlot(this.arg3IntOf(), r)
+        } else if (op == 203) {
+            // local[a] OP local[b] → local[s]
+            val b: Any = this.locals.getSlot(this.arg0IntOf())
+            val c: Any = this.locals.getSlot(this.arg1IntOf())
+            val binop: Int = this.arg2IntOf()
+            var r2: Any = 0
+            if (binop == 20) {
+                r2 = VmOps.add(b, c)
+            } else if (binop == 21) {
+                r2 = VmOps.sub(b, c)
+            } else if (binop == 22) {
+                r2 = VmOps.mul(b, c)
+            }
+            this.locals.putSlot(this.arg3IntOf(), r2)
+        } else if (op == 204) {
+            // local[a] < const[c] → tmp；false 跳 t（循环守卫 6 连合一）
+            val b: Any = this.locals.getSlot(this.arg0IntOf())
+            val c: Any = toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg1IntOf()))))
+            val cond: Any = VmOps.lt(b, c)
+            this.locals.putSlot(this.arg3IntOf(), cond)
+            if (!VmOps.toBool(cond)) {
+                this.ip = this.arg4IntOf()
+            }
+        } else if (op == 205) {
+            // local[a] < local[b] → tmp；false 跳 j（双局部守卫 5 连合一）
+            val x: Any = this.locals.getSlot(this.arg0IntOf())
+            val y: Any = this.locals.getSlot(this.arg1IntOf())
+            val cond: Any = VmOps.lt(x, y)
+            this.locals.putSlot(this.arg2IntOf(), cond)
+            if (!VmOps.toBool(cond)) {
+                this.ip = this.arg3IntOf()
+            }
+        } else if (op == 206) {
+            // local[a] → local[b]（拷贝合一）
+            val v: Any = this.locals.getSlot(this.arg0IntOf())
+            if (v == null) {
+                this.locals.putSlot(this.arg1IntOf(), toAny(0))
+            } else {
+                this.locals.putSlot(this.arg1IntOf(), v)
+            }
+        } else if (op == 20) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.add(a, b))
+        } else if (op == 21) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.sub(a, b))
+        } else if (op == 32) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.lt(a, b))
+        } else if (op == 60) {
+            val funcName: String = this.argStrOf(0)
+            var argc: Int = 0
+            if (this.argCountOf() >= 2) {
+                argc = this.arg1IntOf()
+            } else {
+                argc = this.funcParamCount(funcName)
+                if (argc < 0) { argc = 0 }
+            }
+            this.callOrBuiltin(funcName, argc)
+        } else if (op == 65) {
+            this.returnFromFunc()
+        } else if (op == 50) {
+            this.ip = this.arg0IntOf()
+        } else {
+                if (op == 0) {
+            val idx: Int = VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))
+            this.stack.push(toAny(idx))
+        } else if (op == 1) {
+            val val: Any = this.getConstByIdx(this.arg0IntOf())
+            this.stack.push(VmOps.parseFloat(toStr(val)))
+        } else if (op == 2) {
+            val val: Any = this.getConstByIdx(this.arg0IntOf())
+            this.stack.push(val)
+        } else if (op == 3) {
+            this.stack.push(this.argStrOf(0) == "true")
+        } else if (op == 4) {
+            this.stack.push(null)
+        }
+
+        // ── 类型化常量加载（`.auc` 路径：LoadConst 单操作码 + 常量标签）──
+        else if (op == 5) {
+            this.stack.push(toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))))
+        } else if (op == 6) {
+            this.stack.push(VmOps.parseFloat(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf()))))
+        } else if (op == 7) {
+            this.stack.push(this.getConstByIdx(this.arg0IntOf()))
+        } else if (op == 8) {
+            this.stack.push(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())) == "1")
+        } else if (op == 9) {
+            this.stack.push(null)
+        }
+
+        // ── 栈操作 ──
+        else if (op == 10) {
+            val slot: Int = VmOps.toI32(this.argStrOf(0))
+            val v: Any = this.locals.getSlot(slot)
+            // **不要**写成 `push(if (v == null) 0 else v)`：混合类型 if 表达式会被
+            // 推导成 `Int`，非空分支里的 `String` 指针会被截断成整数
+            //（自检样例槽位里存的是整数所以看不出来；`.auc` 路径存字符串时，
+            // `println(toStr(x))` 就会打印出 0）。
+            if (v == null) {
+                this.stack.push(toAny(0))
+            } else {
+                this.stack.push(v)
+            }
+        } else if (op == 11) {
+            val slot: Int = VmOps.toI32(this.argStrOf(0))
+            this.locals.putSlot(slot, this.stack.pop())
+        } else if (op == 12) {
+            val slot: Int = VmOps.toI32(this.argStrOf(0))
+            this.locals.putSlot(slot, toAny(0))
+        } else if (op == 13) {
+            this.stack.pop()
+        } else if (op == 14) {
+            this.stack.push(this.stack.peek())
+        } else if (op == 15) {
+            val top: Any = this.stack.pop()
+            val second: Any = this.stack.pop()
+            this.stack.push(top)
+            this.stack.push(second)
+        }
+
+        // ── 算术运算 ──
+        else if (op == 20) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.add(a, b))
+        } else if (op == 21) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.sub(a, b))
+        } else if (op == 22) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.mul(a, b))
+        } else if (op == 23) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.div(a, b))
+        } else if (op == 24) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.mod(a, b))
+        } else if (op == 25) {
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.neg(a))
+        } else if (op == 26) {
+            val a: Any = this.stack.pop()
+            this.stack.push(a)
+        }
+
+        // ── 比较运算 ──
+        else if (op == 30) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.eq(a, b))
+        } else if (op == 31) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.neq(a, b))
+        } else if (op == 32) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.lt(a, b))
+        } else if (op == 33) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.gt(a, b))
+        } else if (op == 34) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.le(a, b))
+        } else if (op == 35) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.ge(a, b))
+        }
+
+        // ── 逻辑/位运算 ──
+        else if (op == 40) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.and(a, b))
+        } else if (op == 41) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.or(a, b))
+        } else if (op == 42) {
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.not(a))
+        } else if (op == 43) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.bitAnd(a, b))
+        } else if (op == 44) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.bitOr(a, b))
+        } else if (op == 45) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.bitXor(a, b))
+        } else if (op == 46) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.shl(a, b))
+        } else if (op == 47) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.shr(a, b))
+        }
+
+        // ── 控制流 ──
+        else if (op == 50) {
+            this.ip = VmOps.toI32(this.argStrOf(0))
+        } else if (op == 51) {
+            val cond: Any = this.stack.pop()
+            if (!VmOps.toBool(cond)) {
+                this.ip = VmOps.toI32(this.argStrOf(0))
+            }
+        } else if (op == 52) {
+            val cond: Any = this.stack.pop()
+            if (VmOps.toBool(cond)) {
+                this.ip = VmOps.toI32(this.argStrOf(0))
+            }
+        } else if (op == 53) {
+            this.running = false
+        } else if (op == 54) {
+            // SSA phi 节点：在文本模式下为 no-op
+        }
+
+        // ── 函数调用 ──
+        else if (op == 60) {
+            val funcName: String = this.argStrOf(0)
+            // 文本字节码：`CALL name argc`；.auc 二进制：`CALL <函数下标>`（无 argc，
+            // 由函数表的参数个数补全）。
+            var argc: Int = 0
+            if (this.argCountOf() >= 2) {
+                argc = VmOps.toI32(this.argStrOf(1))
+            } else {
+                argc = this.funcParamCount(funcName)
+                if (argc < 0) { argc = 0 }
+            }
+            this.callOrBuiltin(funcName, argc)
+        } else if (op == 61) {
+            val methodName: String = this.argStrOf(0)
+            this.callMethod(methodName)
+        } else if (op == 62) {
+            // `.auc` 路径：加载器已把原生函数**下标**解析成名字，
+            // 直接复用内建分派（println / toStr / …）。
+            val fname: String = this.argStrOf(0)
+            var argc2: Int = 0
+            if (this.argCountOf() >= 2) {
+                argc2 = VmOps.toI32(this.argStrOf(1))
+            }
+            // P380：CALL 参数计数诊断
+            if (this.caDiag < 24) {
+                this.caDiag = this.caDiag + 1
+                val base: Int = (this.ip - 1) * 3
+                println("[62] fn=[" + fname + "] argc=" + toStr(argc2)
+                    + " cnt=" + toStr(this.argCountOf())
+                    + " a0=[" + this.argStrs.get(base) + "] a1=[" + this.argStrs.get(base + 1) + "]"
+                    + " ip=" + toStr(this.ip))
+            }
+            this.callOrBuiltin(fname, argc2)
+        } else if (op == 63) {
+            val idx: Int = VmOps.toI32(this.argStrOf(0))
+            this.callNative(idx)
+        } else if (op == 64) {
+            val idx: Int = VmOps.toI32(this.argStrOf(0))
+            this.callC(idx)
+        } else if (op == 65) {
+            this.returnFromFunc()
+        } else if (op == 66) {
+            this.returnValue = "Unit"
+            this.returnFromFunc()
+        } else if (op == 211) {
+            // P1.6：尾调用（帧复用）。文本：`CALL_TAIL name argc`；argc 省略时按函数表推导。
+            val tFunc: String = this.argStrOf(0)
+            var tArgc: Int = 0
+            if (this.argCountOf() >= 2) {
+                tArgc = VmOps.toI32(this.argStrOf(1))
+            } else {
+                tArgc = this.funcParamCount(tFunc)
+                if (tArgc < 0) { tArgc = 0 }
+            }
+            this.callTail(tFunc, tArgc)
+        }
+
+        // ── 对象/类 ──
+        else if (op == 70) {
+            val className: String = this.argStrOf(0)
+            this.newObject(className)
+        } else if (op == 71) {
+            val fieldName: String = this.argStrOf(0)
+            this.getField(fieldName)
+        } else if (op == 72) {
+            val fieldName: String = this.argStrOf(0)
+            this.setField(fieldName)
+        } else if (op == 73) {
+            val size: Any = this.stack.pop()
+            this.newArray(size)
+        } else if (op == 74) {
+            this.getIndex()
+        } else if (op == 75) {
+            this.setIndex()
+        } else if (op == 76) {
+            val ctorName: String = this.argStrOf(0)
+            this.callCtor(ctorName)
+        } else if (op == 210) {
+            // P1.2：声明类继承（parent "-" 或空 = 无父类）
+            var parent: String = ""
+            if (this.argCountOf() >= 2) { parent = this.argStrOf(1) }
+            this.defClass(this.argStrOf(0), parent)
+        }
+
+        // ── 集合 ──
+        else if (op == 80) {
+            this.stack.push(VmCollections.newList())
+            this.registerHeapTop("list")
+        } else if (op == 81) {
+            this.stack.push(VmCollections.newMap())
+            this.registerHeapTop("map")
+        } else if (op == 82) {
+            val list: Any = this.stack.pop()
+            val elem: Any = this.stack.pop()
+            VmCollections.push(list, elem)
+        } else if (op == 83) {
+            val list: Any = this.stack.peek()
+            this.stack.push(VmCollections.pop(list))
+        } else if (op == 84) {
+            // `.auc`（Rust MIR）语义是 **pop**（`Instr::ListLen`）；Aura 文本字节码用 peek
+            if (this.aucMode) {
+                val list: Any = this.stack.pop()
+                this.stack.push(VmCollections.length(list))
+            } else {
+                val list: Any = this.stack.peek()
+                this.stack.push(VmCollections.length(list))
+            }
+        } else if (op == 85) {
+            val map: Any = this.stack.pop()
+            val key: Any = this.stack.pop()
+            val val: Any = this.stack.pop()
+            VmCollections.mapSet(map, key, val)
+        } else if (op == 86) {
+            val map: Any = this.stack.pop()
+            val key: Any = this.stack.pop()
+            this.stack.push(VmCollections.mapGet(map, key))
+        } else if (op == 87) {
+            val map: Any = this.stack.peek()
+            this.stack.push(VmCollections.mapLen(map))
+        }
+
+        // ── 闭包 ──
+        else if (op == 90) {
+            this.loadClosure(this.argStrOf(0))
+        } else if (op == 91) {
+            this.makeClosure(this.argStrOf(0))
+        } else if (op == 92) {
+            this.callClosureAt()
+        } else if (op == 93) {
+            this.loadUpvalue(VmOps.toI32(this.argStrOf(0)))
+        } else if (op == 94) {
+            this.storeUpvalue(VmOps.toI32(this.argStrOf(0)))
+        }
+
+        // ── 类型检查 ──
+        else if (op == 100) {
+            val typeName: String = this.argStrOf(0)
+            this.instanceOf(typeName)
+        } else if (op == 101) {
+            val typeName: String = this.argStrOf(0)
+            this.checkCast(typeName)
+        } else if (op == 102) {
+            val typeName: String = this.argStrOf(0)
+            this.cast(typeName)
+        } else if (op == 103) {
+            val typeName: String = this.argStrOf(0)
+            this.checkType(typeName)
+        }
+
+        // ── ARC 生命周期 ──
+        else if (op == 110) {
+            this.incRef()
+        } else if (op == 111) {
+            this.decRef()
+        } else if (op == 112) {
+            this.retain()
+        } else if (op == 113) {
+            this.release()
+        } else if (op == 114) {
+            this.dropRef()
+        } else if (op == 115) {
+            this.weakRef()
+        } else if (op == 116) {
+            this.weakGet()
+        } else if (op == 117) {
+            this.boxAlloc()
+        }
+
+        // ── defer ──
+        else if (op == 120) {
+            // defer 区域开始（由 VM 管理清理栈）
+        } else if (op == 121) {
+            // defer 区域结束
+        }
+
+        // ── 协程（D5：已废弃，指令不进入 ADR-001 指令集，走到 else 报未知指令）──
+
+        // ── FFI ──
+        else if (op == 130) {
+            this.cstring()
+        } else if (op == 131) {
+            this.readCstr()
+        } else if (op == 132) {
+            this.ptrIsNull()
+        } else if (op == 133) {
+            this.ptrToInt()
+        } else if (op == 134) {
+            this.intToPtr()
+        }
+
+        // ── 异常处理 ──
+        else if (op == 122) {
+            this.pushHandlerAt()
+        } else if (op == 123) {
+            this.popHandler()
+        } else if (op == 124) {
+            this.throwException()
+        }
+
+        // ── 并发 ──
+        else if (op == 140) {
+            this.threadSpawn()
+        } else if (op == 141) {
+            this.threadJoin()
+        } else if (op == 142) {
+            this.threadSleep()
+        } else if (op == 143) {
+            this.threadId()
+        } else if (op == 144) {
+            this.threadParallelism()
+        } else if (op == 150) {
+            this.mutexNew()
+        } else if (op == 151) {
+            this.mutexLock()
+        } else if (op == 152) {
+            this.mutexUnlock()
+        } else if (op == 153) {
+            this.mutexTryLock()
+        } else if (op == 160) {
+            this.channelNew()
+        } else if (op == 161) {
+            this.channelSend()
+        } else if (op == 162) {
+            this.channelRecv()
+        } else if (op == 170) {
+            this.atomicNew()
+        } else if (op == 171) {
+            this.atomicLoad()
+        } else if (op == 172) {
+            this.atomicStore()
+        } else if (op == 173) {
+            this.atomicAdd()
+        } else if (op == 174) {
+            this.atomicCas()
+        } else if (op == 180) {
+            this.rwLockNew()
+        } else if (op == 181) {
+            this.rwLockReadLock()
+        } else if (op == 182) {
+            this.rwLockWriteLock()
+        } else if (op == 183) {
+            this.rwLockReadUnlock()
+        } else if (op == 184) {
+            this.rwLockWriteUnlock()
+        } else if (op == 190) {
+            this.condvarNew()
+        } else if (op == 191) {
+            this.condvarWait()
+        } else if (op == 192) {
+            this.condvarSignal()
+        } else if (op == 193) {
+            this.condvarBroadcast()
+        }
+
+        // ── 枚举 ──
+        else if (op == 200) {
+            this.enumConstruct(this.argStrOf(0))
+        } else if (op == 201) {
+            this.enumTag()
+        } else if (op == 202) {
+            this.makeFnRef(this.argStrOf(0))
+        }
+
+        // ── 跨模块 ──
+        else if (op == 67) {
+            this.callExport(this.argStrOf(0))
+        } else if (op == 68) {
+            this.callExternal(this.argStrOf(0), this.argStrOf(1))
+        }
+
+        // ── AOT ──
+        else if (op == 69) {
+            this.callAot(this.argStrOf(0))
+        }
+
+        // ── 未知指令（含已废弃的协程指令，D5/ADR-001）──
+        // P392：opName 参数移除——run() 每条指令为它做一次 List<String>
+        // get + 传参（streq 诊断仅未知指令需要），改此处按需直读。
+        else {
+            this.error = "Unknown opcode: " + toStr(op) + " [" + this.ops[this.ip - 1] + "]"
+            this.running = false
+        }
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════
     //  函数调用与返回
