@@ -444,11 +444,12 @@ class Vm {
         } else {
             println("[CL2] n=" + toStr(cln) + " (short)")
         }
-        // P369/P397：fuseHotPairs 已重写为两遍扫描（遍 1 纯读识别计划、
-        // 遍 2 纯写执行，读写分离），但实测两遍版**仍死循环**（宿主内任何
-        // 对数千行指令流的增量循环遍历都会随机触发 P277 槽影子读家族——
-        // 循环变量槽读回旧值，与写法无关）。调用保持禁用，执行走未融合
-        // 指令流（仅慢）。重启条件：photon 发射器的槽影子读根治。
+        // P369/P397/P405：fuseHotPairs 两遍扫描 + 遍 1 单点递增形态 + 205
+        // pair 漏参修复（执行臂 4 参 vs 旧构造 3 参）已就绪，但调用保持
+        // 禁用：P277 槽影子读**与循环写法无关**——本轮实证仅启用 204 的
+        // 模式检查（banner 流零匹配、纯布局扰动）即令 banner 陷入无限
+        // 循环（26K 次头重印后段错误），与 §10.111「任何装载路径代码扰动
+        // 随机触发」一致。重启条件不变：P398 发射器槽影子读根治。
         // this.fuseHotPairs()
         this.buildLoadCaches()
     }
@@ -3447,31 +3448,35 @@ class Vm {
             }
             sj = sj + 1
         }
-        // ── Pass 1：识别（纯读）──
+        // ── Pass 1：识别（纯读）── P405：单点递增形态——步长经局部 step
+        // 在循环底一次性结算，消除「i = i + span; continue」双写游标
+        //（P277 影子读的触发布局）；blocked 内层循环同样单点递增。
         val planR: List<Int> = arrayListOf<Int>()
         val planF: List<Int> = arrayListOf<Int>()
+        val n1: Int = n - 1
         var i: Int = 0
-        while (i < n - 1) {
+        while (i < n1) {
             val f: Int = this.matchFuseAt(i, n)
+            var step: Int = 1
             if (f != 0) {
                 val span: Int = this.fuseSpanOf(f)
-                var k2: Int = i + 1
                 var blocked: Int = 0
-                while (k2 < i + span) {
+                var k2: Int = i + 1
+                val kEnd: Int = i + span
+                while (k2 < kEnd) {
                     if (k2 < n && isTarget.get(k2) == 1) {
                         blocked = 1
-                        k2 = i + span
+                        k2 = kEnd
                     }
                     k2 = k2 + 1
                 }
                 if (blocked == 0) {
                     planR.add(i)
                     planF.add(f)
-                    i = i + span
-                    continue
+                    step = span
                 }
             }
-            i = i + 1
+            i = i + step
         }
         // ── Pass 2：改写（纯写）──
         var pi: Int = 0
@@ -3500,7 +3505,7 @@ class Vm {
     /// 时原第二分支会错误假设同槽，此处不融合（放弃该对，语义安全）。
     private fun matchFuseAt(r: Int, n: Int): Int {
         val op: Int = this.opCodes.get(r)
-        if (false && r < n - 5
+        if (r < n - 5
             && op == 10
             && this.opCodes.get(r + 1) == 5
             && this.opCodes.get(r + 2) == 32
@@ -3514,21 +3519,21 @@ class Vm {
             }
             return 0
         }
-        if (false && r < n - 3
+        if (r < n - 3
             && op == 10
             && this.opCodes.get(r + 1) == 5
             && this.isArithOp(this.opCodes.get(r + 2))
             && this.opCodes.get(r + 3) == 11) {
             return 202
         }
-        if (false && r < n - 3
+        if (r < n - 3
             && op == 10
             && this.opCodes.get(r + 1) == 10
             && this.isArithOp(this.opCodes.get(r + 2))
             && this.opCodes.get(r + 3) == 11) {
             return 203
         }
-        if (false && r < n - 5
+if (false && (r < n - 5
             && op == 10
             && this.opCodes.get(r + 1) == 10
             && this.opCodes.get(r + 2) == 32
@@ -3566,7 +3571,13 @@ class Vm {
             if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
             if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
             if (f == 205) {
+                // P405 修复：205 的执行臂读 4 参（a,b,tmpSlot=arg2,
+                // jumpTarget=arg3）——原构造漏掉 r+5 行的跳转目标，
+                // arg3 落 argNoneMark → 0 → 跳回第 0 行（banner 重启 /
+                // loop1M 吞输出的实相）。
                 if (a3s != "") { pair.add(a3s) } else { pair.add("-1") }
+                val a5s: String = this.argStrs.get((r + 5) * 3)
+                if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
             } else {
                 pair.add(toStr(this.opCodes.get(r + 2)))
                 if (a3s != "") { pair.add(a3s) } else { pair.add("0") }
