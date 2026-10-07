@@ -236,3 +236,44 @@ AURA_VM_LOADONLY=1 <python> tools/photon-prof/memprof.py --runs 2 --label LOADON
 1. ② Rust VM 的 `aura run` 含编译期内存，与 ④ 的"装载+执行"口径不同（已单独给纯编译基线）；
 2. fib28 的 35.6 B/调用未逐行归因（候选路径见 §五）；
 3. 62.5 B/次 是**摊还值**（含 box + 注册表 + 字符串 key），未拆分为单项精确值。
+
+---
+
+## 九、P0-2b 追测：AURA_HEAP_MB 扩容生效后的内存矩阵（2026-10-08）
+
+P0-2b（`AURA_HEAP_MB` 环境变量扩容，commit `9a32e7d`）落地后重跑本矩阵。
+测量方法不变（`memprof.py` 3 轮取峰；环境变量经 Popen 继承传给宿主）。
+场景已固化进 `tools/photon-prof/mem-matrix.sh` 末段。
+
+### 9.1 数据
+
+| 场景 | exit | wall_ms(最快) | peak_wset（物理） | peak_private（提交） |
+|---|---|---|---|---|
+| PhotonVM loop1m 默认（62.5MB 负载，刚好塞进默认 arena） | 0 | 5510 | 66.8 | 64.7 |
+| PhotonVM loop1m mb128（不需要却扩容） | 0 | 5422 | 66.9 | **193.0** |
+| PhotonVM loop1100k 默认（68MB > 64MiB） | **70 [OOM]** | 5655 | 67.5 | 64.7 |
+| PhotonVM loop1100k mb128（最小够用） | 0 | 6031 | **101.9** | 193.0 |
+| PhotonVM loop1100k mb256 | 0 | 5985 | **101.9** | 321.2 |
+| PhotonVM loop1100k mb512 | 0 | 6018 | **101.9** | 577.7 |
+| RustVM loop1m（原生堆参照） | 0 | 1288 | 14.8 | 9.4 |
+| RustVM loop1100k（同负载，无上限） | 0 | 1390 | 14.7 | 9.3 |
+| RustVM 纯编译 loop1100k（拆分口径） | 0 | 15 | 7.1 | 1.5 |
+
+### 9.2 结论
+
+1. **扩容语义 = 预提交（MEM_RESERVE|MEM_COMMIT）**：`peak_private` 恒等于
+   `64.7 + N MB`（N = AURA_HEAP_MB）——扩容块在 Heap_init 一次性全额提交，
+   与实际用量无关。193.0 / 321.2 / 577.7 三个数严格线性。
+2. **物理内存只随触碰增长**：loop1100k 在 mb128/256/512 三档下 `peak_wset`
+   全部是 101.9 MB——68MB 负载只触碰新块前 ~35MB，多预留的部分**零物理代价**
+   （预提交未触碰页不驻留）。超配 512 跑 68MB 负载只浪费 commit charge，
+   不浪费 RAM。
+3. **扩容无运行时开销**：wall_ms 各档差异（5.4~6.0s）在噪声内；Heap_init 的
+   一次 NtAllocateVirtualMemory 是微秒级一次性成本。
+4. **OOM 守卫干净**：默认（或 mb=64 不足）时 loop1100k 走 P0-2a 的
+   `[OOM] HEAP FULL + exit 70`，峰值停在 64.7MB 提交——**不再段错误**
+   （修复前的行为是 SIGSEGV）。
+5. **跨 VM 差距的本质**：同一 1.1M Long 负载，Rust VM 只用 9.3MB private——
+   其原生分配器**逐次回收**被覆写的 Long 装箱；Photon bump arena 只增不减，
+   62.5B/次 × 1.1M ≈ 68MB 全部滞留。AURA_HEAP_MB 是**绕开**（买更大的
+   一次性 arena），不是**修复**（回收）；P1 方向仍是 §七的空闲链表/区间回收。
