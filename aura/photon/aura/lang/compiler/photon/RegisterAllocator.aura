@@ -218,19 +218,26 @@ class RegisterAllocator {
             // 不得不再先根治布局敏感家族。phi 正确路线维持「启发式配边 +
             // P229 状态」，RA 专项（跨块 MOV 定义的区间合成）留待布局
             // 根治后重启。
-            // ⚠️ P270 **全部值走栈槽**（禁用寄存器着色）——每值一个
+            // ⚠️ P270 曾**全部值走栈槽**（禁用寄存器着色）——每值一个
             // slotForNode 专属槽，读写家一致，彻底消除：
             //   * 寄存器冲突的布局敏感性
             //   * 跨块值被其他值覆写
             //   * phi 合并值的 RA 区间不可靠
             // 性能：全部经内存读写（比寄存器慢 ~2×），但**正确性优先**。
-            // 后续优化：只对跨块值溢出、短寿命值恢复着色（需正确 liveness）。
-            // if (node.kind == "Value" || node.kind == "Reg" || node.kind == "Const") {
-            //     val interference: String = this.buildIntervalInterference(i)
-            //     this.assignColor(i, interference)
-            // }
-            // P270: 着色禁用——所有节点颜色为空 ⇒ regOfNodeRaw ③ slotForNode
-            // 路径自动接管。funcExtraSlots 由 X86Emitter 扫描自动计数。
+            //
+            // ── P414（2026-10-07）**保守重启着色** ──
+            // 实测代价确认：生成代码 31~48% 是指令是栈往返，IPC≈2，
+            // 串行 store-forwarding 依赖链是与 Seed VM 差距（4.67×）的
+            // 结构性根因。此处按 P270 自己给出的路线重启，但**只对区间
+            // 完全落在单个基本块内、且长度受限的节点着色**：
+            //   * 不跨标签 ⇒ 天然避开「跨块覆写」与「phi 区间不可靠」
+            //   * 区间短 ⇒ 干扰集小，冲突概率低，布局敏感性影响面小
+            // 跨块值（含 phi）继续走 slotForNode 栈槽，行为与 P270 一致。
+            if (node.kind == "Value" || node.kind == "Reg" || node.kind == "Const") {
+                if (this.isColorableLocal(i)) {
+                    this.tryColorLocal(i)
+                }
+            }
             // 每 4000 节点打一次点：OOM 时最后一行即「卡在第几个节点」。
             if (i % 4000 == 3999) {
                 this.raProbe("step2 i=" + toStr(i + 1) + "/" + toStr(d.nodeCount) +
@@ -288,6 +295,26 @@ class RegisterAllocator {
         }
 
         this.callStackPop()
+    }
+
+    /// P414：仅当**有空闲颜色**时着色；无空闲则**不着色**（`colors` 保持空 ⇒
+    /// `regOfNodeRaw` ③ 自动退回 `slotForNode` 专属栈槽，行为与 P270 一致）。
+    ///
+    /// ⚠️ **绝不调用 `spill()`**。原因：RA 的溢出区与 `slotForNode` 的额外槽区
+    /// 在帧布局里**同处 144 基线以下、逐 8 字节向下分配**，两者同时启用会
+    /// 互相覆写：
+    ///   * `getSpillOffset` → `144 + slotNum * 8`（用作 `-offset`）
+    ///   * `slotForNode`    → `-(144 + 8 + extraSlotCount * 8)`
+    /// 实测：直接启用带 `spill()` 的 `assignColor` ⇒ 宿主立刻段错误
+    /// （帧内两区互相踩踏）。P270 下 `spillSlots` 恒为 0，所以该冲突从未暴露。
+    /// 不溢出即可保证 `spillSlots == 0` ⇒ `getSpillOffset` 恒返回 0 ⇒ 无冲突。
+    private fun tryColorLocal(nodeId: Int): Unit {
+        val interference: String = this.buildIntervalInterference(nodeId)
+        val used: String = this.getUsedColors(interference)
+        val free: String = this.getFreeColor(used)
+        if (free != "") {
+            this.colorPut(nodeId, free)
+        }
     }
 
     /// 分配颜色（寄存器）。
@@ -1057,6 +1084,60 @@ class RegisterAllocator {
     private fun nodeLastIdx(nodeId: Int): Int {
         if (nodeId < 0 || nodeId >= this.spanLast.size) { return -1 }
         return this.spanLast[nodeId]
+    }
+
+    // ── P414：保守着色的可行性判定 ──
+
+    /// 单基本块内可着色节点的**最大区间长度**（指令索引跨度）。
+    ///
+    /// 区间越短 ⇒ 同时活着的节点越少 ⇒ 干扰集越小 ⇒ 冲突概率越低，
+    /// 且布局位移的影响面越小。刻意取保守值，先拿「短寿命临时量」这一块。
+    private val COLOR_MAX_SPAN: Int = 0
+
+    /// 基本块入口指令索引表（惰性构建一次）。
+    private var blockStarts: List<Int> = arrayListOf<Int>()
+    private var blockStartsReady: Int = 0
+
+    /// 构建基本块入口表：任何**终止指令**的**下一条**即新块入口。
+    /// 与 `buildLabelIndexMap` 同判据（`isTerminatorTemplate`），但**自带缓存**
+    /// ——后者只在 `computeLiveAtEnd()` 内被调用，时机不确定。
+    private fun ensureBlockStarts(): Unit {
+        if (this.blockStartsReady == 1) { return }
+        this.blockStartsReady = 1
+        this.blockStarts = arrayListOf<Int>()
+        val n: Int = this.dag.instrCount
+        var i: Int = 0
+        while (i < n) {
+            if (this.isTerminatorTemplate(this.dag.instrOf(i).template)) {
+                this.blockStarts.add(i + 1)
+            }
+            i = i + 1
+        }
+    }
+
+    /// P414：该节点是否可以参与着色。
+    ///
+    /// 三个必要条件（缺一即放弃着色，退回 `slotForNode` 栈槽，与 P270 同）：
+    ///   ① 有活跃区间信息（`first/last >= 0`）；
+    ///   ② 区间跨度 ≤ `COLOR_MAX_SPAN`（短寿命临时量）；
+    ///   ③ 区间内**不含基本块边界**——即不存在块入口 `b` 满足
+    ///      `first < b <= last`。这条是关键：它一次性排除
+    ///      「跨块值被覆写」与「phi 合并区间不可靠」两类 P270 记载的
+    ///      失效模式（phi 必然跨块）。
+    private fun isColorableLocal(nodeId: Int): Boolean {
+        val f: Int = this.nodeFirstIdx(nodeId)
+        val l: Int = this.nodeLastIdx(nodeId)
+        if (f < 0 || l < 0) { return false }
+        if (l - f > this.COLOR_MAX_SPAN) { return false }
+        this.ensureBlockStarts()
+        var k: Int = 0
+        val bs: Int = this.blockStarts.size
+        while (k < bs) {
+            val b: Int = this.blockStarts[k]
+            if (b > f && b <= l) { return false }
+            k = k + 1
+        }
+        return true
     }
 
     // ── Phase D: 栈帧布局 ──

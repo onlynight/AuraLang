@@ -767,6 +767,13 @@ class X86Emitter {
 
     /// 把寄存器 `srcReg` 写入目的操作数（可能是栈槽 `stack:-N`）。
     private fun storeDstReg(dstRaw: String, srcReg: String): Unit {
+        // P414 修补：**先失效快照**，仅在真正落槽后重建。
+        // 旧写法只在「落槽」与「dst != src 的寄存器 mov」两条路径上更新快照，
+        // `dstRaw == srcReg`（两侧同名寄存器）路径**既不发射也不失效** ⇒
+        // 上一次落槽的快照残留。此时四重计数未变，紧随的 `loadDstReg` 会
+        // 误判「紧邻」而删掉一条必需的 load。着色启用后寄存器操作数变多，
+        // 该路径触发概率显著上升（P270 下几乎所有目的都是栈槽，故从未暴露）。
+        this.lastStLen = -1
         if (this.isStackRef(dstRaw)) {
             val off: Int = this.stackOffsetOf(dstRaw)
             this.enc.emitStackStore(off, srcReg)
@@ -779,7 +786,6 @@ class X86Emitter {
             this.lastStLabels = this.enc.labelCount()
             this.lastStJumps = this.enc.pendingJumpCount()
         } else if (dstRaw != srcReg) {
-            this.lastStLen = -1
             this.enc.emitMovRR(dstRaw, srcReg)
         }
     }
