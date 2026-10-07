@@ -4382,3 +4382,36 @@ AucAot.aura 源码保留为独立文件（未入宿主闭包）。
 2. guest.exe 运行验证 → fib28 → banner → 全量。
 3. 性能：guest 指令 = 3-8 条原生指令（无解释 dispatch），fib28 预期
    **< 100ms**——超越 Rust VM（937ms）10×+。
+
+### 10.113 四方执行效率对比（当前 HEAD 全量复测，2026-10-08）
+
+**口径**：当前 HEAD（含 P387-394 全套修复），5 轮中位，fresh 进程，
+逐轮 correct 校验（输出精确 + rc=0）。
+
+**fib(28) = 317811（632K 次递归调用）**：
+
+| 执行链 | 中位耗时 | 相对 LLVM | vs Seed VM |
+|---|---|---|---|
+| LLVM IR AOT | **9.3 ms** | 1× | — |
+| Photon AOT | 9.9 ms | **1.06×** | 0.011× |
+| Seed VM（Rust） | 930.3 ms | 100× | 1× |
+| **Photon Aura VM** | 5206.7 ms | 560× | **5.6×** |
+
+**loop 100 万次 Long 累加（四方统一口径）**：
+
+| 执行链 | 中位耗时 | 相对 LLVM |
+|---|---|---|
+| LLVM IR AOT | **8.2 ms** | 1× |
+| Photon AOT | 6.7 ms | **0.82×** |
+| Seed VM | 677.1 ms | 83× |
+| **Photon Aura VM** | 4057.2 ms | 495× |
+
+**loop 2500 万次（三方；Photon Aura VM 未测）**：
+LLVM 58.8ms / Photon AOT 58.5ms（1.00×）/ Seed VM 14100.4ms（240×）。
+
+**要点**：
+1. Photon AOT 与 LLVM 持平（fib 1.06×、loop1M 0.82×、loop25M 1.00×）。
+2. Photon Aura VM 五轮优化后（§10.106-109）从基线 95425ms → 5206ms
+   （fib28 累计 **18.3×**），vs Seed VM 差距从 102× 压缩到 **5.6×**。
+3. 进一步对齐需 AucAot（.auc 直译机器码）——翻译器源码已完成（§10.112），
+   集成路径已入档。
