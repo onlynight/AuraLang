@@ -433,6 +433,60 @@ fn resolve_receiver_type(e: &Expr) -> Option<String> {
             }
         }
     }
+    // `局部变量.<字段>`（如 `mir.types`）→ 先取局部/参数的声明类型，
+    // 再沿继承链查该类的字段声明类型。
+    //
+    // ⚠️ P411（2026-10-07）：缺这一条时 `mir.types.kindOf(typeId)` 的接收者
+    // 类型为空 ⇒ `resolve_method_owner` 落到末尾「全表唯一候选」兜底（2.6），
+    // 而那个 `cands` 来自 `CLASS_TABLE.iter()` —— Rust 的 `HashMap` 迭代顺序
+    // **每个进程随机化** ⇒ **同一份源码两次构建解析到不同的类**：
+    // 实测 `HatSerializer.typeName` 在 `TypeRegistry_kindOf`（正确）与
+    // `Hir_kindOf`（错误）之间漂移 ⇒ 驱动二进制 md5 不确定 ⇒ 用它编译的
+    // 宿主五门 0~2/5。这是 `aura build --aot` 非确定构建的根因。
+    //
+    // `field_receiver_method`（步骤 1.5）只处理 `this.<字段>` 与类内裸字段，
+    // 不覆盖「局部变量/参数的字段访问」，故在此补齐。
+    if let Expr::MemberAccess {
+        object: inner,
+        name: field,
+        ..
+    } = e
+    {
+        if let Expr::Ident(v, _) = inner.as_ref() {
+            if let Some(vt) = lookup_local_type(v) {
+                if !vt.is_empty() {
+                    let base = vt
+                        .split('<')
+                        .next()
+                        .unwrap_or(vt.as_str())
+                        .trim()
+                        .to_string();
+                    if !base.is_empty() {
+                        let table = CLASS_TABLE.with(|t| t.borrow().clone());
+                        let mut cur: Option<String> = Some(base);
+                        let mut guard = 0;
+                        while let Some(cn) = cur {
+                            guard += 1;
+                            if guard > 64 {
+                                break;  // 继承环护栏
+                            }
+                            match table.get(&cn) {
+                                Some(entry) => {
+                                    if let Some(fty) = entry.field_types.get(field) {
+                                        if let Some(tn) = hir_type_base_name(fty) {
+                                            return Some(tn);
+                                        }
+                                    }
+                                    cur = entry.superclass.clone();
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     // 回退到 sema
     sema_expr_class(e).filter(|t| !t.is_empty())
 }
@@ -1060,6 +1114,14 @@ fn resolve_method_owner(
         .filter(|(_, e)| !e.is_interface && e.methods.contains(method))
         .map(|(n, _)| n.clone())
         .collect();
+    // ⚠️ P411（2026-10-07）：**必须排序**。`table` 是 `HashMap`，
+    // `HashMap::iter` 的顺序在 Rust 中**每进程随机**（RandomState）——
+    // 不排序时下面 2.6 的「取第一个」在两次构建里会取到不同的类，
+    // 表现为「同一份源码产出不同机器码」（`aura build --aot` 非确定构建）。
+    // 排序把「随机取一个」变成「确定取字典序最小」，保证构建可复现。
+    // 真正的语义修复在 `resolve_receiver_type` 的 `局部变量.<字段>` 分支，
+    // 本排序是**兜底护栏**：即使仍有未被覆盖的歧义形态，也不会导致构建漂移。
+    cands.sort();
     
     // 2.0) 多候选时，先用接收者类型过滤（sema 或 lookup_expr_type 可能给出类型）
     if cands.len() > 1 {
