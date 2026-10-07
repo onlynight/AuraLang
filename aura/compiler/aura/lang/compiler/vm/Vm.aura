@@ -51,9 +51,7 @@ class Vm {
     private var arg0Ints: List<Int> = arrayListOf<Int>()
     private var arg1Ints: List<Int> = arrayListOf<Int>()
     private var argNoneMark: Int = 2147483647
-    private var dbgLcCount: Int = 0
     /// P379：collectArgs 弹出值诊断专用计数（不与 [LC]/[P7v] 共享，防饿死）。
-    private var caDiag: Int = 0
     // locals 帧池：调用帧局部表复用（retire 重置 / pop 取用），热身后零分配。
     private var localsPool: List<VmLocals> = arrayListOf<VmLocals>()
 
@@ -587,13 +585,8 @@ class Vm {
             val sv: Any = this.stack.pop()
             this.locals.putSlot(slot, sv)
         } else if (op == 5) {
-            // 诊断（前 3 次）：常量池行是否完好（2026-10-06 装载链追踪）
-            if (this.dbgLcCount < 3) {
-                this.dbgLcCount = this.dbgLcCount + 1
-                val lcIdx: String = this.argStrOf(0)
-                println("[LC] n=" + toStr(this.dbgLcCount) + " idxArg=[" + lcIdx
-                        + "] poolLine=[" + this.getConst(lcIdx) + "]")
-            }
+            // P404：[LC] 装载链诊断探针摘除（2026-10-06 追踪用，git 历史
+            // 可考）——逐指令 field 读 + 分支的热路径税。
             this.stack.push(toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))))
         } else if (op == 51) {
             val cond: Any = this.stack.pop()
@@ -886,15 +879,7 @@ class Vm {
             if (this.argCountOf() >= 2) {
                 argc2 = VmOps.toI32(this.argStrOf(1))
             }
-            // P380：CALL 参数计数诊断
-            if (this.caDiag < 24) {
-                this.caDiag = this.caDiag + 1
-                val base: Int = (this.ip - 1) * 3
-                println("[62] fn=[" + fname + "] argc=" + toStr(argc2)
-                    + " cnt=" + toStr(this.argCountOf())
-                    + " a0=[" + this.argStrs.get(base) + "] a1=[" + this.argStrs.get(base + 1) + "]"
-                    + " ip=" + toStr(this.ip))
-            }
+            // P404：[62] CALL 参数诊断探针摘除（P380 追踪用）。
             this.callOrBuiltin(fname, argc2)
         } else if (op == 63) {
             val idx: Int = VmOps.toI32(this.argStrOf(0))
@@ -1154,11 +1139,6 @@ class Vm {
 
     /// 调用内置函数或用户函数。
     private fun callOrBuiltin(funcName: String, argc: Int): Unit {
-        // P379：CALL 分派诊断
-        if (this.caDiag < 12) {
-            this.caDiag = this.caDiag + 1
-            println("[CB] fn=[" + funcName + "] argc=" + toStr(argc))
-        }
         // ── P393：用户函数快速路径（缓存命中时跳过内建名 if-else 链）──
         //
         // 内建分派是一条数十臂的 `funcName == "…"` 链（每臂一次 streq
@@ -1934,15 +1914,7 @@ class Vm {
         while (i >= 0) {
             val v: Any = this.stack.pop()
             val s: String = VmOps.toStrAny(v)
-            // P379：值类型诊断（专用计数器）
-            if (this.caDiag < 12) {
-                this.caDiag = this.caDiag + 1
-                val vBits: Long = v as Long
-                println("[CA] tagged=" + toStr(VmOps.isTaggedInt(v))
-                    + " str=" + toStr(VmOps.isString(v))
-                    + " sLen=" + toStr(s.length)
-                    + " bits=" + toStr(vBits))
-            }
+            // P404：[CA] 值类型诊断探针摘除（P379 追踪用）。
             if (result == "") {
                 result = s
             } else {
