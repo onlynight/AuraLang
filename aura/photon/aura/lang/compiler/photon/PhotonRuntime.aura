@@ -2400,17 +2400,17 @@ object PhotonRuntime {
         // 系列 import）。
         //
         // 栈布局（`push rbp; sub rsp, 0x50` ⇒ rsp = rbp - 0x50）：
-        //   size            = [rbp-0x48] = [rsp+0x08]  非影子
-        //   baseAddress     = [rbp-0x40] = [rsp+0x10]  非影子
-        //   allocateTypeSrc = [rbp-0x38] = [rsp+0x18]  非影子
-        //   arg5 PAGE_READWRITE = [rbp-0x10] = [rsp+0x40] ← 栈参数起
-        //   arg6 0                = [rbp-0x08] = [rsp+0x48]
-        //   arg7 0 (OptionalData) = [rbp-0x00..rbp+8] ← 与 [rbp+8] 的
-        //                                              返回地址冲突，不写；
-        //                                              内核读 OptionalData
-        //                                              时按 NULL 处理（对齐
-        //                                              由 push rbp 保证 8 字
-        //                                              节边界）。
+        //   size      = [rbp-0x48] = [rsp+0x08]  非影子
+        //   baseAddress = [rbp-0x40] = [rsp+0x10]  非影子
+        //   （原 arg3 &allocationType 槽位不再使用，r8 现在放 ZeroBits 常数）
+        //   arg5 AllocationType = [rbp-0x30] = [rsp+0x20]  ← 栈参数起
+        //   arg6 Protect        = [rbp-0x28] = [rsp+0x28]
+        //   arg7 Extended       = [rbp-0x20] = [rsp+0x30]
+        //
+        // ⚠️ 早期版本把 arg5/arg6 错放在 [rbp-0x10]/[rbp-0x08]（= [rsp+0x40]/
+        // [rsp+0x48]），落在了**被调者的影子空间之外**——被调者从 [rsp+0x20]
+        // 读到的还是未初始化的栈槽，NtAllocateVirtualMemory 收到垃圾参数 →
+        // 返回 STATUS_INVALID_... → 扩容分支恒不进「采纳」。
         //
         // ⚠️ 与 `Memory_mmap` 的区别：`Memory_mmap` 用裸 syscall 0x18，
         // 在驱动内跑同样段错误；本函数走 IAT 导入 `NtAllocateVirtualMemory`
@@ -2431,12 +2431,36 @@ object PhotonRuntime {
         enc.emitNotRR("rax")
         enc.emitMovRR("rcx", "rax")
         enc.emitLeaStack("rdx", -0x40)            // arg2 &baseAddress
-        enc.emitStackStore(-0x40, 0)              // *baseAddress = 0（任意对齐）
-        enc.emitLeaStack("r8", -0x48)             // arg3 &allocateSize
-        enc.emitLeaStack("r9", -0x38)             // arg4 &allocationType
-        enc.emitStoreImm32Stack(-0x38, 0x1000)    // MEM_COMMIT (0x1000)
-        enc.emitStoreImm32Stack(-0x10, 0x04)      // arg5 PAGE_READWRITE（[rsp+0x40]）
-        enc.emitStoreImm32Stack(-0x08, 0)         // arg6 0（[rsp+0x48]）
+        // ⚠️ 用 emitStoreImm32Stack 而不是 emitStackStore(-0x40, 0)：
+        // 后者第二个参数是寄存器名，"0" 被 regNum 判到默认 rax，
+        // 实际编成 `mov [rbp-0x40], rax`——把刚写好的 -1（ProcessHandle）
+        // 塞回 baseAddress 槽，NtAllocateVirtualMemory 读到 BaseAddress=-1
+        // → STATUS_INVALID_PARAMETER。
+        enc.emitStoreImm32Stack(-0x40, 0)         // *baseAddress = 0（任意对齐）
+        // ⚠️ 参数顺序（NTDDK 官方）：
+        //   rcx = ProcessHandle（-1）
+        //   rdx = *BaseAddress
+        //   r8  = ZeroBits  ← **常数 0**，非指针
+        //   r9  = *Size     ← **指向 size 的指针**，非 *AllocationType
+        //   [rsp+0x20] = AllocationType（MEM_COMMIT = 0x1000）
+        //   [rsp+0x28] = Protect（PAGE_READWRITE = 4）
+        //   [rsp+0x30] = ExtendedAllocationParameters（NULL 即可）
+        // 旧实现把 r8/r9 搞反（r8 = &size、r9 = &allocationType），
+        // NtAllocateVirtualMemory 读到 ZeroBits=非零 → STATUS_INVALID_...，
+        // 扩容分支恒不进「采纳」。
+        enc.emitXorRR("r8", "r8")                 // arg3 ZeroBits = 0
+        enc.emitLeaStack("r9", -0x48)             // arg4 &allocateSize
+        // ⚠️ 栈参数的正确偏移：Win64 ABI 要求 arg5 位于**调用方**在
+        // `call` 指令前的 `[rsp+0x20]`。本函数 `push rbp; mov rbp,rsp;
+        // sub rsp,0x50` 后 rsp = rbp-0x50，故 arg5 落在 [rbp-0x30]、
+        // arg6 落在 [rbp-0x28]、arg7 落在 [rbp-0x20]。
+        // 早期版本错把 arg5/arg6 放到 [rbp-0x10]/[rbp-0x08]（= [rsp+0x40]/
+        // [rsp+0x48]），落在被调者的「影子空间」之外——被调者从 [rsp+0x20]
+        // 读到的还是未初始化的栈槽，NtAllocateVirtualMemory 收到垃圾参数
+        // → 返回 STATUS_INVALID_PARAMETER → 扩容分支恒不进「采纳」。
+        enc.emitStoreImm32Stack(-0x30, 0x3000)    // arg5 AllocationType = MEM_RESERVE|MEM_COMMIT (0x3000)
+        enc.emitStoreImm32Stack(-0x28, 0x04)      // arg6 Protect = PAGE_READWRITE (0x04)
+        enc.emitStoreImm32Stack(-0x20, 0)         // arg7 Extended = NULL
         enc.emitCallImport("NtAllocateVirtualMemory")  // rax = NTSTATUS
         enc.emitTestRR("rax", "rax")
         enc.emitJccLabel("ne", "hm_fail")         // 非 0 = NTSTATUS 错误
@@ -2608,19 +2632,14 @@ object PhotonRuntime {
         enc.emitCallRel("toInt")
         enc.emitCmpRI("rax", 64)
         enc.emitJccLabel("le", "hi_done")
-        // ── 扩容：bytes = mb << 20；p = Memory_mmap(0, bytes, 3, 34, -1, 0) ──
-        //   ⚠️ 旧实现只传了 addr/length 两个参数（prot/flags/fd/offset 缺失）→
-        //   mmap 收到未初始化的值，返回 -1（MAP_FAILED）；却只判 `test rax,rax;
-        //   jz`（非 0 即认成功）→ 把 -1 当有效基址采纳 → 首分配解引用 -1 段错误。
-        //   这里补齐 6 个参数，并把失败判定改为 `cmp rax,0; jle`（≤0 含 -1/0）。
+        // ── 扩容：bytes = mb << 20；p = Heap_mmap(bytes) ──
+        // Heap_mmap 是本项目自封装的 NtAllocateVirtualMemory IAT 包装，签名
+        // 只有 `rcx=length`（详见 emitHeapMmap 注释）。旧实现误当 Memory_mmap
+        // 用（6 参数 mmap 式），把 addr=0 塞进 rcx 而 length 落在 rdx——Heap_mmap
+        // 只读 rcx，长度 0 直接失败或返回 0，导致扩容分支恒不进「采纳」。
         enc.emitShlRI("rax", 20)
         enc.emitStackStore(-0x10, "rax")          // bytes 暂存 [rbp-0x10]
-        enc.emitXorRR("rcx", "rcx")               // arg1 addr   = 0
-        enc.emitStackLoad("rdx", -0x10)           // arg2 length = bytes
-        enc.emitMovRI32("r8d", 3)                 // arg3 prot   = PROT_READ|PROT_WRITE
-        enc.emitMovRI32("r9d", 34)                // arg4 flags  = MAP_PRIVATE|MAP_ANONYMOUS
-        enc.emitStoreImm32Stack(-0x20, -1)        // arg5 fd     = -1   ([rsp+0x20])
-        enc.emitStoreImm32Stack(-0x18, 0)         // arg6 offset = 0    ([rsp+0x28])
+        enc.emitStackLoad("rcx", -0x10)           // arg1 length = bytes
         enc.emitCallRel("Heap_mmap")              // rax = 新区指针 或 0（失败）
         enc.emitCmpRI("rax", 0)
         enc.emitJccLabel("le", "hi_done")         // ≤0（含 -1 / 0）⇒ 保持默认 64MiB
@@ -3058,7 +3077,6 @@ object PhotonRuntime {
         enc.emitImulRI("rdx", 10)
         enc.emitSubRI("rax", '0')
         enc.emitAddRR("rdx", "rax")
-
         enc.emitIncRR("rcx")
         enc.emitJmpLabel("int_loop")
 

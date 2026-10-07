@@ -196,10 +196,24 @@ class X86Encoder {
     /// 编码 IMUL r/m64, imm32（REX.W 0F AF /r id，3-操作数形式）。
     fun emitImulRI(dst: String, imm: Int): Unit {
         val d: Int = this.regNum(dst)
-        this.writeByte(this.rexByte(true, 0, d))
-        this.writeByte(0x0F)
-        this.writeByte(0xAF)
-        this.writeByte(0xC0 + (d & 7))
+        // ⚠️ 两个坑，都实测过：
+        //
+        // 1) `IMUL r/m64, imm32` 的 opcode 是 `REX.W 69 /r id imm32`，
+        //    **不是** `0F AF /r id`——`0F AF` 只有寄存器-寄存器形式
+        //    (`IMUL r/m64, r64`)，无立即数。CPU 会把 0F AF 后面的 4 字节
+        //    立即数当下一条指令解码：`0A 00 00 00` 变成 `or al,[rax];
+        //    add [rax],al; ...`，首次解引用未初始化的 rax 段错误。
+        //
+        // 2) `IMUL r/m, imm` 是**单操作数**形式，Intel 惯例把 ModRM 的
+        //    reg 和 r/m 两个字段**都填成**目标寄存器（reg 字段被硬件
+        //    忽略、但装配器/GCC/objdump 都按此约定写）。旧实现只填了
+        //    r/m（`0xC0 + d`，reg=0），于是 `48 69 C2 0A...` 被 CPU 解成
+        //    `imul rax, rdx, 10`（reg=0 决定目标=rax），结果 rax 被覆写、
+        //    rdx 不变——toInt 的 `rdx = rdx*10 + digit` 变成无意义运算。
+        //    正确写法：ModRM = `0xC0 + (d<<3) + d`，reg 与 r/m 同为 d。
+        this.writeByte(this.rexByte(true, d, d))
+        this.writeByte(0x69)
+        this.writeByte(0xC0 + ((d & 7) << 3) + (d & 7))
         this.writeInt(imm)
     }
 
