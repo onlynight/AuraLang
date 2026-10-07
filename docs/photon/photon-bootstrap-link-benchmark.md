@@ -4645,3 +4645,110 @@ List.size() 调用），可能绕开影子读的触发布局。
 第 5 步: 优化 5 (跳转表)          ← 需 Aura 原语支持
 第 6 步: 优化 6 (融合恢复)        ← 需 P277 根因修复
 ```
+
+### 10.116 会话 XXVIII：六步方案实施——P400 落地 1.11×，P401 保留，P402/P403 负结果与四类新陷阱定案（2026-10-08 续）
+
+按 §10.115 六步方案顺序实施。基线复现：fib28 中位 5231ms（与 §10.113
+的 5206.7ms 吻合，管线可复现）。工具链口径不变：seed AOT 构建驱动
+（PhotonHatCompile.exe）→ 驱动编译 auc_vm_runner 宿主 → lld-link
+runtime → current.exe 跑 build/vm/current.auc；fib28 5 轮中位。
+
+#### 步骤 1（P400，已提交 0bdbfa3）：emitCall 内联 Memory read64/write64 —— **1.11×**
+
+X86Emitter.emitCall 识别 `Memory_read64/read32/read16` → 发射
+`mov rax,[rcx]`（48 8B 01），`Memory_write64/write32/write16` → 发射
+`mov [rcx],rdx`——与 PhotonRuntime.emitMemoryRead64/Write64 函数体逐字
+节一致，纯发射器、零语义变化（write 家族 rax 不定、落槽行为与真实调用
+一致）。重建后 current.obj 的 Memory_read64/write64 重定位引用清零；
+Vm_arg0IntOf 等热点每次 Memory 操作 8 条（call+序言结语）→ 1 条 mov。
+
+**fib28：5231 → 4694ms（1.11×）；banner 全流程 PASS（与 seed 参考逐字
+节一致）。** 全模块 1305+ 处受益（宿主 + 一切 Photon 编译程序）。
+
+#### 步骤 2（P401，保留）：instructionCount 周期检查 —— 单项 ≈1%
+
+逐条 `this.instructionCount += 1`（2 次 field 读 + 1 次 field 写，~7 条
+x86）改为局部 icAcc 累加、每 2^20 条批量刷回 + 一次上限检查；循环所有
+出口都刷回余量，getInstructionCount() 在 run() 返回后仍精确（上限触发
+最迟 2^20 条后生效，护栏语义不变）。**单项实测 4685 vs 4694ms（噪声
+内）——循环头 `running`/`mcValid` 字段读的固定开销稀释了它。保留：消除
+逐指令 field 写， fib28 复测 4655ms（+1%）。**
+
+#### 步骤 3（P402，提交后回退 251384e）：dispatch 内联进 run() —— 微型 guest 回归
+
+dispatch() 仅 run() 一处调用，~140 臂 if-else 链机械移入 while 循环体。
+提交（6d8ef36）时 fib28 4550ms（1.03×）、banner、loop1M 全绿；本轮补做
+**微型 guest 验证**时发现回归：
+
+```
+micro2.aura:  fun main() { val x: Int = 7
+                          println("m2=" + toStr(x)) }   // HEAD: m2=7
+```
+
+P402 宿主打 `m2=0`（toStr 收到 null → LOAD 空 → toAny(0) 兜底）——
+内联后 run() 的取参链路在微型程序上取参错位。fib28/banner/loop1M 均未
+踩中。**处置：恢复 dispatch 独立函数 + 调用**（从 6d8ef36^ 干净重建 +
+手工重加 P401，避免机械拼接二次损伤）。属 **P44/§7.3「加行即坏、减行
+即好」布局敏感雷家族**——ISA 无害改动令特定程序错乱，本轮再次坐实。
+
+#### 步骤 4（P403，负结果全回退）：热臂手动内联 —— 四类新陷阱定案
+
+计划：把热臂（10/11/51/20/21/32）中的 arg0IntOf / locals.getSlot /
+stack.push 内联为直读直写（去 private 跨对象字段 + ip 快照 + mcOk 快径
++ 增长慢路径回落原方法）。**逐一触发并定位了四类此前未定案的
+发射器/编译器缺陷（全部经 micro guest + 反汇编坐实）**：
+
+| # | 陷阱 | 症状 | 定案证据 |
+|---|---|---|---|
+| T1 | **if/else 分支重复声明 val**（`val b` 在快/慢两分支各一次） | 静默错值（loop1M acc 空） | 20/21/32 改唯一命名（a20_/s21_/l32_ 前缀）后 loop1M 立即恢复正确——Aura 函数级作用域提升 + photon 管线对重复声明的静默坏码（§10.109「var 提升未初始化」的 val 版） |
+| T2 | **悬浮读块**：`val ip0 = this.ip` 与后续 field 写无数据依赖时，加载基本块可被放置到非逐迭代路径（疑似仅循环首迭代执行） | ip0 陈旧 → 取参错位 | 反汇编：ip0 加载块（0x348ef）与回边目标（0x34527）分属不同区域，回边路径不经过 ip0 块 |
+| T3 | **局部 RHS 的 field 写对被调不可见**：`this.ip = ipPre + 1`（写消费局部）之后，被调 arg0IntOf 读 `this.ip` 取到**递增前值** → 取参错一格 | STORE 写错槽（micro2 m2=0） | arg0IntOf 改回原方法取参后仍错 → 唯一差异是循环头写法；字段 RHS 原形（`this.ip = this.ip + 1`）恢复后 micro 全绿。**跨 call 的 field 写可见性不可依赖（P366/P395 同根，此处是第三例）** |
+| T4 | **布局敏感雷（P44 家族）**：P402 内联本身在微型 guest 上取参错位 | micro2 m2=0（HEAD m2=7） | 三基准全绿 + micro 即坏；加行即坏减行即好 |
+
+**micro 验证对**（新增回归门，2 个 3-5 行 guest，各 <1s）：
+
+```
+micro1.aura:  fun main() { val x: Int = 7
+                          val y: Int = x + 3
+                          println("m1=" + toStr(y)) }   // 期望 m1=10
+micro2.aura:  见步骤 3                                     // 期望 m2=7
+```
+
+**方法教训（对齐 §10.105-110 的三轮负结果）**：三基准（fib28/banner/
+loop1M）的指令覆盖不足以守护解释器热路径重构——微型 guest 把单一臂
+隔离出来，几秒定位一个本需数小时的回归。后续一切解释器/发射器改动
+必须过 micro1/micro2 + banner + fib28 + loop1M 五门。
+
+**P403 最终状态：全部回退**（VmStack.aura 恢复 private，Vm.aura =
+P400 + P401）。热臂内联的三层收益（消 arg0/getSlot/push 调用）在
+photon 当前发射器下**不可安全表达**——T1-T4 与 P366/P395/P397 同根：
+**CSE/失效语义 + 布局稳定性是发射器级根因（P398），解释器侧无解**。
+
+#### 附带发现：loop25M 在 HEAD 基线上即段错误（立卡待查）
+
+bench_loop.aura（5000×5000 = 25M 次嵌套循环，`as Long` 累加）在
+**HEAD 基线**（无任何本轮改动）上 6.7s 处 rc=139。§10.113 已标注该
+基准「Photon Aura VM 未测」——从未跑通过，非本轮回归。loop1M（同构
+1M 次）全绿 → 体量/时长依赖（§10.106 的 GB 级增长家族或嵌套循环
+特有路径）。下一轮 P-ticket：先在 HEAD 定位崩溃点（ip≈8779 的
+aura_cast 附近），再谈 25M 入榜。
+
+#### 本轮终态
+
+| 基准 | §10.113 基线 | 本轮 | 加速 |
+|---|---|---|---|
+| fib28（5 轮中位） | 5231 ms | **4655 ms** | **1.12×** |
+| banner | PASS | PASS（逐字节一致） | — |
+| loop1M | PASS | PASS（acc=999998000000 精确） | — |
+| micro1/micro2 | — | **新增回归门，全绿** | — |
+
+**四方对比更新（fib28，相对 LLVM 7.9ms / Seed VM 930ms）**：Photon
+Aura VM 4655ms = 589× LLVM / **5.0× Seed VM**（原 5.6×）。
+
+**六步方案结账**：步骤 1（1.11×）+ 步骤 2（+1%）落地；步骤 3/4 负
+结果并产出四类陷阱定案；步骤 5（跳转表）/6（融合）依赖的 Aura 原语
+与 P277 根因未动。**解释器路径在 photon 当前编译模型下的可达点判定为
+P400+P401 ≈ 1.12×（累计 20.8× vs §10.105 基线，vs Seed VM 5.0×）**——
+继续对齐 Rust VM 的全部路径收束到 §10.110 的两项发射器前置
+（P398 槽影子读根治 + field 失效语义），本轮 T1-T4 为其补充了四个
+可复现最小见证（micro guest + 反汇编锚点）。
