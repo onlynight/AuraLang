@@ -4879,3 +4879,50 @@ probe 组永久保留为回归资产。下一轮排序：
 **教训**：三层嵌套缺陷（前端泄漏 → 源码将错就错 → 后端 phi 缺陷）
 的解法是「微型探针 + SSA 铁证 + 规范化 diff」三件套——本轮 15+ 次
 构建迭代全部收敛在证据链上，没有一次靠猜。
+
+### 10.119 会话 XXXI：四方基准复测——P400+P401 增益确认 1.12×（2026-10-08 续）
+
+口径：PowerShell .NET Process（ProcessStartInfo，fresh 进程，重定向
+捕获），5 轮中位，逐轮输出校验（fib(28)=317811、loop1M
+acc=999998000000、loop25M acc=124950000000 精确）。⚠️ Git Bash
+`date +%s%N` 口径有 ~45ms spawn 开销、PS Start-Process cmdlet 有
+~1s 常量等待——统一改用 .NET Process API 后数字与 §10.113 对齐
+（LLVM fib28 8ms ≈ 文档 7.9ms ✓）。
+
+**fib(28)（632K 次递归调用）**：
+
+| 执行链 | 中位 | 相对 LLVM | vs Seed VM |
+|---|---|---|---|
+| LLVM IR AOT | **8 ms** | 1× | — |
+| Photon AOT | 10 ms | 1.25× | — |
+| Seed VM（Rust） | 936 ms | 117× | 1× |
+| **Photon Aura VM** | **4637 ms** | **580×** | **4.95×** |
+
+**loop 100 万次（Long 累加，含 MUL/SUB/cast）**：
+
+| 执行链 | 中位 | 相对 LLVM | vs Seed VM |
+|---|---|---|---|
+| LLVM IR AOT | **7 ms** | 1× | — |
+| Photon AOT | 10 ms | 1.43× | — |
+| Seed VM | 1313 ms | 188× | 1× |
+| **Photon Aura VM** | **7100 ms** | **1014×** | **5.41×** |
+
+**loop 2500 万次（5000×5000 嵌套，三方）**：
+
+| 执行链 | 中位 | 相对 LLVM |
+|---|---|---|
+| LLVM IR AOT | **25 ms** | 1× |
+| Photon AOT | 149 ms | 6.0× |
+| Seed VM | 33090 ms | 1324× |
+| Photon Aura VM | **段错误 @6.3s（§10.117 立卡，HEAD 即崩）** | — |
+
+**本轮增益对账（fib28，Photon Aura VM）**：§10.113 基线 5207ms →
+**4637ms = 1.12×**（P400 emitCall 内联 1.11× + P401 探针/周期计数
+~1%）；vs Seed VM 差距 5.6× → **4.95×**。Photon AOT 双基准无回归
+（10ms/10ms，文档 9.4-9.9ms 同水平）。loop1M：7100 vs 文档 4057ms
+——**口径差**：本轮程序含 MUL/SUB/cast（文档版为纯累加），不可直接
+比；同程序跨轮对照以 build/p398probes 体系的留档为准。
+
+**方法学留档**：`build/bench/timeit.ps1`（.NET ProcessAPI 计时器）
++ `build/bench/llvm|photon/*.exe`（三份 AOT 产物）+ `tests/photon/P5`
+（正确性探针）。四方复测一条命令可重放。
