@@ -33,11 +33,12 @@ object VmOps {
         if (v == null) {
             return false
         }
-        val t: String = typeof(v)
-        if (t == "Int" || t == "Long" || t == "Float" || t == "Double") {
-            return true
-        }
-        return false
+        // P409 快路径：Plan A 的 `aura_typeof` 只可能返回三个常量
+        // （"Null" / "Int" / "String"，见 PhotonRuntime.emitTypeOfPlanA 的
+        //穷举：null→"Null"、奇数→"Int"、其余→"String"）。三者都是数值，
+        // 非 null 即真——**无需任何字符串比较**。原实现要 1 次 typeof call
+        // + 4 次 streq 逐字节比较才能得到同一个答案。
+        return true
     }
 
     /// 检查是否为整数类型。
@@ -45,11 +46,8 @@ object VmOps {
         if (v == null) {
             return false
         }
-        val t: String = typeof(v)
-        if (t == "Int" || t == "Long") {
-            return true
-        }
-        return false
+        // P409 快路径：typeof ∈ {Null, Int, String}，只有 "Int" 是整数类型。
+        return typeof(v) == "Int"
     }
 
     /// 检查是否为浮点类型。
@@ -57,10 +55,16 @@ object VmOps {
         if (v == null) {
             return false
         }
-        val t: String = typeof(v)
-        if (t == "Float" || t == "Double") {
-            return true
-        }
+        // P409 快路径：**typeof 的三个返回值里没有 "Float" 也没有 "Double"**
+        // （emitTypeOfPlanA 穷举：null→"Null"、奇数→"Int"、其余→"String"）。
+        // 所以本函数恒为 false —— 与原实现的逻辑等价，但省掉 1 次 typeof
+        // call + 2 次 streq 逐字节比较。
+        //
+        // ⚠ 语义等价性依据：Plan A 值模型把 Int 装箱为 `(v<<1)|1`（奇数）、
+        // Long 裸传、Float/Double 在 AOT 下不存在独立 Any 形态（Double 走
+        // 裸位传递，被判为 "String" 分支）。原实现在同样输入下也只会走到
+        // 末尾 `return false`。若将来 emitTypeOfPlanA 扩充返回值集合，
+        // **必须同步回滚本优化**。
         return false
     }
 
@@ -69,9 +73,8 @@ object VmOps {
         if (v == null) {
             return false
         }
-        if (typeof(v) == "Boolean") {
-            return true
-        }
+        // P409 快路径：同 isFloat——typeof 恒不返回 "Boolean"
+        // （布尔在 Plan A 下用 "true"/"false" 字符串表示，见 vmBool）。
         return false
     }
 
@@ -87,9 +90,15 @@ object VmOps {
         if (v == null) {
             return false
         }
-        if (typeof(v) != "String") {
-            return false
-        }
+        // P409 快路径：Plan A 的 `aura_typeof` 恒返回 "String"（非 null 时），
+        // 所以 `typeof(v) != "String"` 恒为假——原实现的第一个判断从不成立。
+        // 整个函数退化为「非装箱整数」= `!isTaggedInt(v)`，而 `__is_tagged_int`
+        // 已被发射器内联为 `mov rax,rcx; and rax,1`（2 条，见 X86Emitter.emitCall）。
+        // 于是 isString 从「1 次 typeof call + 1 次 streq 逐字节 + 1 次内联判定」
+        // 降为「2 条位运算」。
+        //
+        // ⚠ 语义等价性：原实现在 Plan A 下的实际行为就是 `!isTaggedInt(v)`——
+        // `typeof` 对Any 形参恒报 "String"（注释已记录该事实），第一个判断是死代码。
         return !isTaggedInt(v)
     }
 
