@@ -2277,24 +2277,31 @@ object PhotonRuntime {
     /// Windows: NtAllocateVirtualMemory。
     ///
     /// ⚠️ **本函数有两条已知错误，暂时保留原样**：
-    /// (1) **服务号是错的**——写成 `0x18`。独立 clang 探针（`/d/tmp/probe/`，
-    ///     与宿主同机同调用约定）实测：`svc=0x18` 返回 `0xC0000005`
-    ///     （ACCESS_VIOLATION），内核在错误服务槽里把 r8 当首参解引用，
-    ///     **进程直接段错误**。这是 P0-2b「AURA_HEAP_MB>64 段错误」的直接
-    ///     原因。扫描 0x00–0xFF 后仍未标定出 NtAllocateVirtualMemory 的正确号
-    ///     （`0x1B` 给 `0xC0000008`、`0x2C` 是 NtTerminateProcess、`0x3B`
-    ///     返回 0 但 base=0）。
+    /// (1) **arg1 没复制到 r10**——Win64 syscall 内核从 r10 读 arg1，
+    ///     ntdll 自己的 stub 首条指令是 `mov r10, rcx`（字节 `4C 8B D1`）。
+    ///     本函数直接 `emitSyscall`，`emitSyscall` 只写 `eax` 不写 `r10`，
+    ///     于是 r10 残留调用方的值（通常是任意寄存器），内核按它当进程句柄
+    ///     解引用 ⇒ `0xC0000005`（ACCESS_VIOLATION），**进程段错误**。
+    ///     这是 P0-2b「AURA_HEAP_MB>64 段错误」的直接原因，也解释了为什么
+    ///     上轮把服务号改成 `0x1B` 仍段错误——号是对的，缺的是 `r10`。
     /// (2) **arg5/arg6 槽位错**——写在 `[rbp-0x68]`/`[rbp-0x60]`，而正确槽位是
     ///     `[rbp-0x70]`/`[rbp-0x68]`（`prologue(0x90)` 下 Win64 的 arg5/arg6）。
     ///
-    /// **P0-2b 暂不走本函数**：`emitHeapInit` 的扩容路径仍调本函数，但因
-    /// 服务号错、mmap 必失败（且以段错误形式失败），`AURA_HEAP_MB>64`
-    /// 当前**既不生效也不安全**（崩溃而非回落）。要修复需先标定服务号，
-    /// 再二选一：改本函数，或启用 `emitHeapMmap`（槽位已写对）。
-    /// 本函数保持不动的原因：其历史调用方（guest arena 分配器）依赖当前
-    /// 「失败返回 0」行为，改了行为面；且 `scripts/photon/vmopt.sh` 头部
-    /// 记载了 `aura build --aot` 对特定源码态产出坏驱动的陷阱，最小改动面
-    /// 最安全。
+    /// **服务号 `0x18` 本身是对的**。2026-10-08 用 `ntdll` 导出表 + 反汇编
+    /// 实测确认（证据：`build/prof2/ntdll_stub_disasm.c` +
+    /// `ntdll_export_table.c`）：内核加载的 ntdll 里
+    /// `NtAllocateVirtualMemory` stub 的字节序列是
+    /// `4C 8B D1  B8 18 00 00 00  F6 04 25 08 03 FE 7F 01 75 03  0F 05  C3  CD 2E  C3`
+    /// —— 即 `mov r10,rcx; mov eax,0x18; syscall`，**服务号确实是 0x18**。
+    /// 上轮记录的「0x18 返回 ACCESS_VIOLATION、应改 0x1B」是**探针自身的 bug**：
+    /// 探针没写 `mov r10,rcx`，所以内核拿残留 r10 当句柄，看起来像号错了。
+    /// 项目文档 `docs/photon/implementation-deviation-analysis.md` 记的
+    /// 「0x1B」是另一个 OS build 上的历史观察，**本机 build 26300 不适用**。
+    ///
+    /// **P0-2b 修复路径**：让 `emitSyscall` 或调用方补 `mov r10, rcx`，
+    /// 再把 arg5/arg6 槽位改对。最小改动是启用 `emitHeapMmap`（已写好
+    /// `mov r10, rcx` + 正确槽位）并把 `emitHeapInit` 指向它；但本函数
+    /// 的历史调用方（guest arena 分配器）也要一并修，否则它们同样段错误。
     fun emitMemoryMmap(enc: X86Encoder): Unit {
         enc.emitPrologue(0x90)
         enc.emitStackStore(-0x70, "rbx")
@@ -2348,9 +2355,9 @@ object PhotonRuntime {
     /// 编码 `Heap_mmap(rcx=length) rax=ptr|0`（P0-2b 旁路，自包含 syscall）。
     ///
     /// ⚠️ **本函数当前未被调用**（`emitHeapInit` 仍走 `Memory_mmap`）。
-    /// 保留它的目的是：P0-2b 的扩容路径需要一个**槽位正确**的 mmap 入口，
-    /// 而 `emitMemoryMmap` 的 arg5/arg6 槽位是错的（见其上方注释）。
-    /// 本函数把槽位写对，作为标定完成后的备用入口。
+    /// 它是 P0-2b 修复的**接近正确**的实现：服务号 `0x18` 对、arg5/arg6 槽位对、
+    /// 且补了 `mov r10, rcx`（Win64 syscall 内核从 r10 读 arg1）。
+    /// 但**仍未跑通**——见下方「剩余阻塞」。
     ///
     /// 参数落位（Win64 syscall 约定，arg1 复制到 r10）：
     ///   r10/rcx=NtCurrentProcess, rdx=&baseAddress, r8=&allocateSize,
@@ -2360,28 +2367,30 @@ object PhotonRuntime {
     ///
     /// 返回值：成功为对齐后的基址（`*baseAddress`），失败为 0。
     ///
-    /// ⚠️ **P0-2b 的真正阻塞点仍未消除（2026-10-08 实测）**。独立 clang
-    /// 探针（`/d/tmp/probe/probe*.c`，与宿主同一台机、同一调用约定）的结论：
-    ///   - `svc=0x18`（`emitMemoryMmap` 与 `Syscalls.aura:150` 都用这个号）
-    ///     → `0xC0000005`（ACCESS_VIOLATION），进程直接段错误。这是
-    ///     P0-2b「AURA_HEAP_MB>64 段错误」的直接原因。
-    ///   - `svc=0x1B`（项目文档记载的「实际号」）→ `0xC0000008`
-    ///     （STATUS_INVALID_HANDLE），仍未分配。
-    ///   - 扫描 0x00–0xFF：只有 `0x2C` 和 `0x3B` 返回 `0x00000000`，
-    ///     但 `0x2C` 是 NtTerminateProcess（会杀进程），`0x3B` 返回 0 却
-    ///     base=0。以 `ntdll` 导出的 `NtWriteFile` 为参照（本机 `0x08`
-    ///     返回 `0xc0000008` 但 iosb.Status=0，能工作）可推断：本机内核的
-    ///     syscall 号表与项目假设的号表**确实不一致**，`0x18` 不是
-    ///     NtAllocateVirtualMemory 的号，但用本文件当前的参数布局也尚未
-    ///     标定出正确的号。
-    /// 下一步：按 `NtWriteFile=0x08` 这条已知可用的参照，用
-    /// `ntdll` 导出函数逐个反查 Nt* 服务号，标定出 NtAllocateVirtualMemory
-    /// 的真实号，再决定是改 `emitMemoryMmap` 还是启用本函数。
+    /// **服务号 `0x18` 的标定证据**（2026-10-08，本机 build 26300）：
+    /// 反汇编内核加载的 ntdll 里 `NtAllocateVirtualMemory` 的 stub，字节序列为
+    /// `4C 8B D1  B8 18 00 00 00  F6 04 25 08 03 FE 7F 01 75 03  0F 05  C3  CD 2E  C3`
+    /// —— `mov r10,rcx; mov eax,0x18; syscall`，**服务号确实是 0x18**。
+    /// 上一轮误判「0x18 错、应改 0x1B」，根因是探针没写 `mov r10,rcx`，
+    /// 内核拿残留 r10 当进程句柄解引用，看起来像号错。
+    /// 证据源码：`build/prof2/ntdll_stub_disasm.c`、`ntdll_export_table.c`。
+    ///
+    /// ⚠️ **剩余阻塞（仍未跑通，2026-10-08）**：启用本函数后宿主段错误，
+    /// 段错误点**早于 syscall 指令本身**——在 `Heap_mmap` 入口写诊断标记
+    /// （`mov [rdx], 0x212E2D` 到 oomMsg+16）后，仍无任何输出。说明崩溃不
+    /// 在 syscall，而在调用 `Heap_mmap` 之前/之内的某个早步骤。候选原因：
+    ///   (a) `emitPrologue(0x50)` 后 `rsp = rbp-0x50` 是 8-aligned 而非 16-aligned
+    ///       （Win64 syscall 要求 16-aligned），应改用 `0x48`；
+    ///   (b) `Heap_init` 调 `Heap_mmap` 之前/之后的某个寄存器/栈帧状态冲突；
+    ///   (c) `emitStoreImm32Stack` 对负偏移的编码在本 prologue 尺寸下有问题。
+    /// 定位需逐字节对比 `emitExit`（`emitSyscall(0x2C)` 已知可用）的栈帧布局，
+    /// 或改用 ntdll 导出的 `NtAllocateVirtualMemory` 而非裸 syscall。
     fun emitHeapMmap(enc: X86Encoder): Unit {
         enc.emitPrologue(0x50)
         // 入参：rcx = length
         enc.emitStackStore(-0x58, "rcx")          // size 暂存（栈上）
         enc.emitMovRI("rcx", -1)                  // arg1 NtCurrentProcess
+        enc.emitMovRR("r10", "rcx")               // ← 内核从 r10 读 arg1
         enc.emitLeaStack("rdx", -0x50)            // arg2 &baseAddress
         enc.emitStackStore(-0x50, 0)              // *baseAddress = 0（任意对齐）
         enc.emitLeaStack("r8", -0x58)             // arg3 &allocateSize
@@ -2389,7 +2398,7 @@ object PhotonRuntime {
         enc.emitStoreImm32Stack(-0x10, 0x1000)    // MEM_COMMIT (0x1000)
         enc.emitStoreImm32Stack(-0x18, 0x04)      // arg5 PAGE_READWRITE
         enc.emitStoreImm32Stack(-0x20, 0)         // arg6 = 0
-        SyscallEmitter.emitSyscall(enc, 0x1B)     // NtAllocateVirtualMemory 候选（待标定）
+        SyscallEmitter.emitSyscall(enc, 0x18)     // NtAllocateVirtualMemory（已标定）
         enc.emitTestRR("rax", "rax")
         enc.emitJccLabel("ne", "hm_fail")         // 非 0 = NTSTATUS 错误
         enc.emitStackLoad("rax", -0x50)           // 成功：rax = *baseAddress
