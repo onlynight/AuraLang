@@ -4415,3 +4415,152 @@ LLVM 58.8ms / Photon AOT 58.5ms（1.00×）/ Seed VM 14100.4ms（240×）。
    （fib28 累计 **18.3×**），vs Seed VM 差距从 102× 压缩到 **5.6×**。
 3. 进一步对齐需 AucAot（.auc 直译机器码）——翻译器源码已完成（§10.112），
    集成路径已入档。
+
+### 10.114 深度分析：Photon Aura VM vs Rust VM 5.5× 差距的逐层定案（2026-10-08）
+
+**核心结论**：5.5× 差距不是单一 bug，而是 **photon 编译模型的系统性
+开销**——每条 guest 指令的解释成本 = 多层 Aura 方法调用的**序言/结语
+固定开销**的复利叠加。以下逐层定案（不修改代码，纯分析）。
+
+---
+
+#### 第 1 层：photon 函数调用的 22 条固定序言/结语
+
+photon 每个函数（无论多简单）的调用约定：
+```
+push rbx,rsi,rdi,r12,r13,r14,r15   ← 7 条（P226 固定 7 push 契约）
+push rbp                            ← 1 条
+mov rsp,rbp                         ← 1 条
+sub rsp,frame                       ← 1 条
+... 函数体 ...
+leave                               ← 1 条
+pop r15,r14,r13,r12,rdi,rsi,rbx    ← 7 条
+ret                                 ← 1 条
+```
+**固定开销 = 20 条**，加上参数装载 ~2 条 = **22 条/call**。
+
+对比 Rust：叶函数只做 `sub rsp,N` + 函数体 + `ret` ≈ **2-5 条**。
+Rust 编译器还会内联小函数，许多调用直接消失。
+
+**影响**：解释器每条 guest 指令调用 3-8 个 Aura 方法（arg0IntOf、
+locals.getSlot、stack.push 等），每次 22 条序言/结语 = **66-176 条
+纯序言指令/guest 指令**。这就是 5.5× 的主体。
+
+---
+
+#### 第 2 层：Memory.read64/write64 也是函数调用
+
+`Memory.read64(addr)` 虽然函数体只是一条 `mov rax,[rcx]`，但 photon
+编译模型将其发射为**真实函数调用**：
+```
+mov rcx, addr          ← 参数装载
+call Memory_read64     ← 函数调用
+  → prologue(0): push rbp + mov rsp,rbp (2条)
+  → mov rax,[rcx]     (1条)
+  → leave + ret       (2条)
+```
+**每次 Memory.read64 = 8 条指令**（含 call + 被调序言/结语），
+而 Rust/LLVM 的等价操作是 **1 条 mov**（8× 开销）。
+
+解释器大量使用 Memory 读写（P392 将 opCodes/locals/栈全部 Memory 化），
+每次操作都有这个 8× 的调用开销。
+
+---
+
+#### 第 3 层：多层 Aura 方法调用的复合效应
+
+以 fib28 最热的 LOAD_LOCAL 指令为例：
+```
+op 10: locals.getSlot(arg0IntOf()) → stack.push(v)
+```
+展开为 photon 调用链：
+```
+1. dispatch()          ← 22 条序言/结语 + if-else 链跳转
+2. arg0IntOf()         ← 22 条 + Memory.read64 call(8) = 30
+3. locals.getSlot()    ← 22 条 + 2× Memory.read64 call(16) = 38
+4. stack.push()        ← 22 条 + Memory.write64 call(8) = 30
+合计 ≈ 120 条 x86 指令
+```
+Rust VM 等价操作：
+```
+OP_LOAD_LOCAL: stack.push(locals[arg0])
+编译后 ≈ 5-8 条指令（LLVM 内联 match 臂 + 数组索引）
+```
+**单条指令比值 = 120/8 = 15×**。混合平均（简单跳转臂便宜）≈ 5.5× ✓
+与实测吻合。
+
+---
+
+#### 第 4 层：无内联能力
+
+photon 编译器**没有内联 pass**——所有 Aura 方法调用（无论函数体多
+简单）都发射真实的 x86 call。这是与 LLVM -O2 的根本差距：
+LLVM 会对小于阈值的函数自动内联，消除了调用开销 + 打开了后续优化
+（常量传播、死代码消除、寄存器提升）。
+
+Rust（rustc + LLVM）自动获得这些优化。photon 缺失全部。
+
+---
+
+#### 第 5 层：field 读写模型的 CSE 风险
+
+P366/P395 的教训：photon 的 field 读写没有内存序语义——`this.sp`
+的读可能被 CSE 到 `field_set` 之前（跨 call 边界也不保证重读）。
+这意味着**无法安全地在 Aura 层做状态镜像或字段缓存**——任何优化都
+可能被 CSE 静默破坏。
+
+---
+
+#### 解决方案路线图（三层递进，总目标 ≤1× Rust VM）
+
+**Layer 1：photon 编译器——轻量函数调用协议**（预期 2-3× 加速）
+1. **按需 callee-saved**：只 push 函数实际使用的 callee-saved 寄存器
+   （P270 全栈槽后大多数函数用 0 个）。纯计算函数（arg0IntOf、getSlot）
+   序言从 20 条 → **2 条**（push rbp + sub rsp）。
+   * P396 失败的根因已定位（栈参判定不完备），需精确扫描所有 5+ 参
+     调用点。风险：遗漏任何一处 = 野写。
+2. **Memory 读写内联**：将 `Memory.read64/write64` 从函数调用改为
+   **发射期直接内联单条 mov**。发射器知道 rcx/rdx 的值来源，可以直接
+   生成 `mov rax,[rcx]` 而非 `call Memory_read64`。
+   * 这消除每次 Memory 操作的 8 条调用开销 → 变成 1 条。
+3. **小函数内联**：对函数体 < 20 条指令的函数做调用点内联。这消除
+   arg0IntOf/getSlot/putSlot 等 trivially inlinable 函数的调用开销。
+   * 需要处理变量重命名、作用域提升。
+
+**Layer 2：解释器结构优化**（预期 2-3×，与 Layer 1 相乘）
+1. **dispatch 内联到 run()**：消除每指令一次的 dispatch() 调用。
+   代价：代码膨胀（140 个 if-else 臂内联），收益：消 22 条/指令。
+2. **locals/栈/参数的零调用访问**：将 `locals.getSlot(slot)` 替换为
+   直接 Memory 读写（当前 P392 已做了部分），并**在 run() 函数内**
+   做所有状态管理（不跨函数边界）。
+   * P395 失败的根因是跨函数 field CSE——**在单函数内**（run 循环
+     里）field 读写是安全的。
+3. **指令预解码合并**：将相邻指令在装载期合并为复合指令（当前
+   fuseHotPairs 已有框架但因 P277 禁用），如 LOAD_LOCAL + ADD +
+   STORE_LOCAL → 单一 INC_LOCAL 指令。
+
+**Layer 3：直接执行**（终极方案，消除解释器）
+1. **AucAot 字节码直译 x86**（已写 ~430 行翻译器）——.auc 字节码
+   → 机器码，guest 递归 = 原生 call/ret。当前阻塞在宿主闭包集成。
+2. **写独立 AucAotCompiler.aura**——只 import AucLoader + X86Encoder
+   + PhotonObjectWriter + PhotonSystemLinker（不含解释器 Vm/VmStack），
+   由 seed AOT 编译为编译器 exe。这绕开宿主闭包问题。
+3. guest 程序性能接近 Photon AOT（≈ LLVM 1×）——**超越 Rust VM
+   100×**。
+
+---
+
+#### 优先排序与依赖关系
+
+```
+Layer 1.2 (Memory 内联)  ←── 独立可做，收益最大（消除 8× call 开销）
+Layer 1.1 (按需 saved)   ←── 独立可做，收益中等（省 14 条/call）
+Layer 1.3 (小函数内联)   ←── 依赖 1.1/1.2 先行
+Layer 2.x (解释器优化)   ←── 与 Layer 1 相乘，但受 field 模型限制
+Layer 3   (AucAot 直接执行) ←── 终极方案，不受 field 模型限制
+```
+
+**预期**：
+* Layer 1 全部完成后：解释器 5.5× → **1.5-2×**
+* Layer 2 叠加：→ **0.8-1.2×**（与 Rust VM 持平）
+* Layer 3 完成：→ **0.01×**（超越 100×）
