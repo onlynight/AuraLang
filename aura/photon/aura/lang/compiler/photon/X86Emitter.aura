@@ -64,6 +64,18 @@ class X86Emitter {
     /// P388 诊断：当前发射函数名（函数边界处捕获）。
     private var curEmitFuncName: String = ""
 
+    // ── P413 peephole 状态：最近一次落槽的「四重快照 + 槽 + 寄存器」 ──
+    //
+    // 用于消除「`mov [rbp+X], r` 紧接 `mov r, [rbp+X]`（同槽同寄存器）」
+    // 这一对互为 no-op 的指令（实测占静态指令 5.1%，961 对/10 个热点函数）。
+    // `lastStLen == -1` 表示「无有效快照」（任何其它发射都会置 -1）。
+    private var lastStOff: Int = 0
+    private var lastStReg: String = ""
+    private var lastStLen: Int = -1
+    private var lastStRels: Int = -1
+    private var lastStLabels: Int = -1
+    private var lastStJumps: Int = -1
+
     /// 字符串常量表（逗号分隔）。
     private var strConsts: String = ""
 
@@ -665,7 +677,8 @@ class X86Emitter {
             // `s.charCodeAt(垃圾)` 越界 ⇒ `0xC0000005`（实测崩在 `CEA-2` 之后）。
             if (this.isStackRef(dstRaw)) {
                 this.enc.emitMovRI("r10", imm)
-                this.enc.emitStackStore(this.stackOffsetOf(dstRaw), "r10")
+                // P413：走 storeDstReg 以记录 peephole 状态（见 emitSetcc 同款说明）
+                this.storeDstReg(dstRaw, "r10")
             } else {
                 this.enc.emitMovRI(dstRaw, imm)
             }
@@ -686,9 +699,11 @@ class X86Emitter {
                 val src: String = this.resolveToReg(srcRaw, "r10")
                 // 目的操作数可能是栈槽（同 `emitMovImm`）：必须真的写槽，
                 // 否则 `emitMovRR("stack:-N", src)` 会被解析成 `mov src, %rax`。
+                // P413：栈槽分支走 `storeDstReg` 以记录 peephole 状态。
                 if (this.isStackRef(dst)) {
-                    this.enc.emitStackStore(this.stackOffsetOf(dst), src)
+                    this.storeDstReg(dst, src)
                 } else {
+                    this.lastStLen = -1
                     this.enc.emitMovRR(dst, src)
                 }
             }
@@ -716,17 +731,50 @@ class X86Emitter {
     /// `and`/`or` / `ret`），这两个函数用于收尾其余全部同类项。
     private fun loadDstReg(dstRaw: String, tmpReg: String): String {
         if (this.isStackRef(dstRaw)) {
-            this.enc.emitStackLoad(tmpReg, this.stackOffsetOf(dstRaw))
+            val off: Int = this.stackOffsetOf(dstRaw)
+            // ── P413 peephole：紧邻的 store→load 同槽同寄存器是纯 no-op ──
+            //
+            // 形态（反汇编实证，见 docs/photon/photon-vm-cost-analysis-p412.md）：
+            //   mov  [rbp+X], r10      ; 上一条指令把结果落槽（storeDstReg）
+            //   mov  r10,   [rbp+X]    ; 本条又要读回同一槽到同一寄存器
+            // 两条合起来对 r10 与内存都无净效果 ⇒ 可整对删除。
+            //
+            // 「紧邻」的判定用**四重计数快照**（字节数 / 重定位数 / 标签数 /
+            // 待回填跳转数），任一变化即视为不紧邻 ⇒ 不优化。这样即使中间发生了
+            // 不发射字节的登记动作（emitLabel 只记偏移不写字节），也不会误删。
+            if (this.lastStLen == this.enc.byteLen()
+                    && this.lastStRels == this.enc.relocCount()
+                    && this.lastStLabels == this.enc.labelCount()
+                    && this.lastStJumps == this.enc.pendingJumpCount()
+                    && this.lastStOff == off
+                    && this.lastStReg == tmpReg) {
+                this.enc.rollback(7)   // emitStackStore 定长 7 字节
+                this.lastStLen = -1
+                return tmpReg           // 寄存器里已是该值
+            }
+            this.lastStLen = -1
+            this.enc.emitStackLoad(tmpReg, off)
             return tmpReg
         }
+        this.lastStLen = -1
         return dstRaw
     }
 
     /// 把寄存器 `srcReg` 写入目的操作数（可能是栈槽 `stack:-N`）。
     private fun storeDstReg(dstRaw: String, srcReg: String): Unit {
         if (this.isStackRef(dstRaw)) {
-            this.enc.emitStackStore(this.stackOffsetOf(dstRaw), srcReg)
+            val off: Int = this.stackOffsetOf(dstRaw)
+            this.enc.emitStackStore(off, srcReg)
+            // P413：记录本次落槽的「四重快照 + 槽 + 寄存器」，供紧随其后的
+            // `loadDstReg` 判定是否构成可消除的纯冗余对。
+            this.lastStOff = off
+            this.lastStReg = srcReg
+            this.lastStLen = this.enc.byteLen()
+            this.lastStRels = this.enc.relocCount()
+            this.lastStLabels = this.enc.labelCount()
+            this.lastStJumps = this.enc.pendingJumpCount()
         } else if (dstRaw != srcReg) {
+            this.lastStLen = -1
             this.enc.emitMovRR(dstRaw, srcReg)
         }
     }
@@ -839,7 +887,11 @@ class X86Emitter {
             if (this.isStackRef(dstRaw)) {
                 this.enc.emitSetcc("r10", instr.cond)
                 this.enc.emitMovzxRegReg8("r10", "r10")
-                this.enc.emitStackStore(this.stackOffsetOf(dstRaw), "r10")
+                // P413：走 `storeDstReg` 而非直接 emitStackStore——后者绕过
+                // peephole 状态记录，导致紧随其后的 `resolveToReg` 读回
+                // 无法识别「同槽同寄存器」的纯冗余对（实测 961 对里的
+                // 主体就是 `emitSetcc` 落槽 + `emitCmpImm` 读回）。
+                this.storeDstReg(dstRaw, "r10")
             } else {
                 this.enc.emitSetcc(dstRaw, instr.cond)
                 this.enc.emitMovzxRegReg8(dstRaw, dstRaw)
@@ -1365,13 +1417,17 @@ class X86Emitter {
     /// 返回实际的寄存器名。
     private fun resolveToReg(v: String, tmpReg: String): String {
         if (this.isStackRef(v)) {
-            var offset: Int = this.stackOffsetOf(v)
+            val offset: Int = this.stackOffsetOf(v)
             // ⚠️ **不再**把偏移 0 改写成 `-8`：那会让不同值的读侧共用 `-8`
             //（与写侧塌成同一槽同源，见 `regOfNode`）。正常路径的槽都由
             // `slotForNode` 分配为负值，不会为 0。
             this.cdMark("ld-resolv", offset)
-            this.enc.emitStackLoad(tmpReg, offset)
-            return tmpReg
+            // P413：统一走 `loadDstReg`（语义与原直接 `emitStackLoad` 等价），
+            // 以便命中那里的 store→load peephole。
+            // 实测：本函数是「相邻存→读同槽」对的主要读侧来源（`emitSetcc`
+            // 落槽 → `emitCmpImm` 经本函数读回），旧实现**直接**发射 load
+            // 绕过了 peephole，只消除了 17/961 对。
+            return this.loadDstReg(v, tmpReg)
         }
         return v
     }

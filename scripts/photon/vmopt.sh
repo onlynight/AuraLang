@@ -32,6 +32,7 @@ RT_OBJ="build/hat-vmhost/aura_runtime.obj"
 AUC="build/vm/current.auc"
 DRV="build/hat-native/PhotonHatCompile.exe"
 LLD="D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc/bin/lld-link.exe"
+SEED_CLI="$(pwd)/rust/target/release/aura.exe"
 LOG="build/tmpwork"
 
 mkdir -p "$LOG" build/vm
@@ -42,6 +43,30 @@ mkdir -p "$LOG" build/vm
 # 标记名一旦变化，用 `grep -n` 重新定位——宁可空跑也不要误判。
 guest_out() {
   awk '/^\[winC2\] post-loadPredecoded$/{seen=1; next} seen' | grep -vE '^\s*$'
+}
+
+# 重建驱动（PhotonHatCompile.exe）——**改 X86Emitter / InstructionSelection /
+# PhotonRuntime 等发射器侧代码后必须执行**，否则宿主仍用旧发射器。
+#
+# 依赖 seed Rust 编译器：`rust/target/release/aura.exe`，必须带 `llvm` feature
+# （否则 `codegen::aot` 被 cfg 掉、build 子命令不可用）：
+#   cd seed && CARGO_TARGET_DIR=../rust/target cargo build --release --bin aura --features llvm
+#
+# ⚠️ P411（2026-10-07）后前端已确定：同一份源码多次构建的 .ll/.obj 完全一致，
+# .exe 仅差 PE TimeDateStamp 一字节。若再次出现「两次构建 .ll 不同」，
+# 说明又引入了 HashMap 迭代顺序依赖——查 `resolve_method_owner` 类兜底路径。
+do_driver() {
+  echo "=== 重建驱动 ==="
+  if [ ! -x "$SEED_CLI" ]; then echo "FATAL: seed CLI 缺失 $SEED_CLI"; return 1; fi
+  timeout 900 "$SEED_CLI" build --aot \
+    aura/photon/aura/lang/compiler/photon/PhotonHatCompile.aura \
+    --output "$DRV" > "$LOG/driver.log" 2>&1
+  local rc=$?
+  if [ $rc -ne 0 ] || ! grep -q "built" "$LOG/driver.log"; then
+    echo "FATAL: 驱动构建失败 rc=$rc"; tail -20 "$LOG/driver.log"; return 1
+  fi
+  echo "  驱动: $(stat -c%s "$DRV") bytes"
+  echo "DRIVER OK"
 }
 
 do_build() {
@@ -164,9 +189,11 @@ do_bench() {
 
 case "${1:-all}" in
   build)   do_build ;;
+  driver)  do_driver ;;
   regress) do_regress "${2:-}" ;;
   bench)   do_bench ;;
   all)     do_build && do_regress; do_bench ;;
+  full)    do_driver && do_build && do_regress; do_bench ;;
   regressonly) do_regress "${2:-}" ;;
-  *)       echo "用法: $0 {build|regress|bench|all}"; exit 2 ;;
+  *)       echo "用法: $0 {build|driver|regress|bench|all|full}"; exit 2 ;;
 esac

@@ -53,6 +53,50 @@ class X86Encoder {
         this.pendingJumps = arrayListOf<String>()
     }
 
+    // ── P413：peephole 支持（长度探测 + 安全回滚）──
+
+    /// 已发射字节数（下标即下一次写入的偏移）。
+    fun byteLen(): Int {
+        return this.offset
+    }
+
+    /// 已登记的重定位项数。
+    fun relocCount(): Int {
+        return this.relocations.size()
+    }
+
+    /// 已登记的函数内标签数。
+    fun labelCount(): Int {
+        return this.labels.size()
+    }
+
+    /// 待回填的局部跳转项数。
+    fun pendingJumpCount(): Int {
+        return this.pendingJumps.size()
+    }
+
+    /// 回滚最近 `n` 个字节。
+    ///
+    /// ⚠️ **仅供 X86Emitter 的 store→load peephole 使用**，且调用方必须保证
+    /// 这 `n` 个字节：
+    ///   ① 是刚发射的 `mov [rbp+disp32], reg`（定长 7 字节，无重定位）；
+    ///   ② 期间**没有**任何新重定位 / 新标签 / 新待回填跳转被登记
+    ///      （三项计数由 `relocCount`/`labelCount`/`pendingJumpCount` 校验）。
+    /// 否则回滚会让已登记的偏移错位（标签指向错误位置 → 跳转跑飞）。
+    /// 本函数自身不做校验——校验在调用方一次性完成。
+    fun rollback(n: Int): Unit {
+        var k: Int = 0
+        while (k < n) {
+            val sz: Int = this.byteHex.size()
+            if (sz <= 0) {
+                return
+            }
+            this.byteHex.removeAt(sz - 1)
+            this.offset = this.offset - 1
+            k = k + 1
+        }
+    }
+
     // ── 基础写入 ──
 
     /// 写入一个字节。
