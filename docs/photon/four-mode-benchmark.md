@@ -1,5 +1,10 @@
 # 四模式基准对比（2026-10-07）
 
+> ⚠️ **已扩展为五模式**：同日补上「⑤ Photon AOT」（Photon 后端直出原生码），
+> 并新增「AOT 后端斜率实验」（消启动开销）。**请优先看**
+> [`five-mode-benchmark.md`](./five-mode-benchmark.md)。
+> 本文保留为当时的四模式记录。
+
 > 脚本：`scripts/photon/bench-4way.sh [轮数]`（默认 5 轮取 min）
 > 基准：`bench_fib28`（fib(28) 递归）、`bench_loop1m`（5000×5000 双循环）
 > 四种模式跑**同一份 Aura 源码**，四条完全不同的执行链。

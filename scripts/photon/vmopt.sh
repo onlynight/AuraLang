@@ -37,6 +37,14 @@ LOG="build/tmpwork"
 
 mkdir -p "$LOG" build/vm
 
+# 基准源归档恢复：build/ 在 .gitignore 中，五门基准源归档于
+# tools/photon-prof/bench-src/（缺失时才复制，不覆盖本地改动）。
+mkdir -p build/bench
+for _f in tools/photon-prof/bench-src/*.aura; do
+  _b="build/bench/$(basename "$_f")"
+  [ -f "$_b" ] || { cp "$_f" "$_b"; echo "  恢复基准源: $_b"; }
+done
+
 # guest 输出 = 装载期最后一个探针标记 `[winC2] post-loadPredecoded` **之后**的所有行。
 # 该标记之前的内容全是Vm.aura 装载期的诊断探针（[DC]/[T32]/[FLAT*]/[OC]/[CL2]/…），
 # 它们本身也会污染 stdout（println 的实参被先一步打印成裸值），不能当 guest 输出。

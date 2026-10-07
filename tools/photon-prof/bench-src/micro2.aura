@@ -1,0 +1,4 @@
+fun main() {
+    val x: Int = 7
+    println("m2=" + toStr(x))
+}
