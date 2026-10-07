@@ -752,6 +752,11 @@ class X86Emitter {
                 this.lastStLen = -1
                 return tmpReg           // 寄存器里已是该值
             }
+            // 附注（P413 实测负结果）：曾扩展为「异寄存器时改用 `mov rB, rA`
+            // 代替内存读回」。**只触发 19 次、7 轮交替 A/B 仅 0.09%（噪声内）**
+            // ——因为剩余 622 对异寄存器读数**不经本函数**（主要来自
+            // `emitCall` 直接用 `enc.emitStackStore(..., "rax")` 落槽，
+            // 未登记本 peephole 的状态快照）。已回退，避免死代码。
             this.lastStLen = -1
             this.enc.emitStackLoad(tmpReg, off)
             return tmpReg
