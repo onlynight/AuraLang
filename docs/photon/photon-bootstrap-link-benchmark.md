@@ -4814,3 +4814,68 @@ micro1=10/micro2=7/banner 逐字节/fib28=317811 全绿。
 P405 复现）**。下一轮唯一高杠杆动作是发射器根治（P398）；其验收
 标准现成：micro1/micro2 + banner + fib28 + loop1M 五门 + P405 的
 「204 检查启用」布局扰动探针。
+
+### 10.118 会话 XXX：P398 破案——「槽影子读」真根因 = SsaBuilder else 分支版本泄漏（修复已验证、部署被后端 phi 缺陷阻塞，2026-10-08 续）
+
+#### 破案过程：14 行微型程序复现 P277
+
+按「最小复现 → 反汇编 → SSA 对照」三步走。新建影子读探针组
+（tests/photon/P5/probe1-5.aura + run-probes.sh，photon 编译 → 运行 →
+与 seed 参考自动对比）：
+
+**probe2（循环变量双写点，14 行）在 photon 宿主上死循环**（seed 正确
+输出 p2=714）。反汇编 main：else 臂的 `i = i + 1` 从 **then 臂中间值
+槽（-0x130）** 装载 i，而 i 的真身槽是 -0xb0——影子槽陈旧读现行。
+对照 .hat SSA 铁证：
+
+```
+bb bb87: (then)  @t558 = @add(@t547, 3)     ← i+3 ✓
+bb bb88: (else)  @t563 = @add(@t558, 1)     ← ★ else 读 then 的 i+3！应为 @t547
+```
+
+#### 根因：SsaBuilder.buildIf 的 else 分支版本表泄漏（P406）
+
+`buildIf` 只在 `thenSelfTerm`（then 以 continue/break/return 结束）时
+回滚 varMap（P326）；**fall-through 时 else 直接继承 then 之后的
+varMap**——支配关系违规，else 臂引用 then 臂的 SSA 值。修复（一行）：
+else 构建前**无条件** `this.varMap = varMapBefore`。
+
+**修复验证**：驱动重建后五探针全绿（probe2 = 714 ✓）。**P277/P366/
+P397「槽影子读」的真根因不是发射器，是前端分支版本泄漏**——循环内
+if/else 的 else 臂读到 then 臂版本 → 上一轮迭代残渣 → 「r 恒 55」/
+「sp/cap 陈旧」/「fuseHotPairs 循环变量不推进」全部同源。
+
+#### 部署被后端 phi 缺陷阻塞（下一个 P-ticket）
+
+修复后宿主（auc_vm_runner，943 函数）编译成功但运行静默坏（guest 打
+"0" 而非 "m2=7"）。逐层排除：mc 缓冲完美（[MC] n=23 ops ✓）、参数
+完美（逐指令 arg0 轨迹 ✓）、常量池完美（[POOL] c0="7" ✓）、执行轨迹
+完整（23 条全跑 ✓）。对宿主 .hat 做规范化 per-function diff
+（vid 重编号归零后）：**仅 9 个函数结构变化**——Vm_dispatch（巨型
+else-if 链的冗余 phi 在修复后正确消失）、Vm_loadArgsFlat、
+readBytecode、String_toInt、String_toFloat、String_split、
+StringBuilder_reset、Vm_freeRegistered、ClosureManager_setUpvalue。
+
+**双重真相**：①基线 SSA 的泄漏曾让 String_toInt「无负号时从下标 1
+开始解析」等**源级错误被意外掩盖**——宿主源码已在被污染的语义上
+调稳；②修复后 SSA 变正确，Vm_dispatch 的 phi 形态变化触发**后端
+（LIR→DAG→发射器）对 phi 合并形态的处理缺陷**（T2 悬浮读块/T3 局部
+RHS field 写不可见同族）。即：前端修一行，后端欠的债浮出水面。
+
+#### 处置与重启路径
+
+SsaBuilder 修复**暂回退**（宿主可用性优先；修复本体一行：
+buildIf 的 else 构建前 `this.varMap = varMapBefore`，随档本节）。
+probe 组永久保留为回归资产。下一轮排序：
+
+1. **P407：后端 phi 合并形态缺陷**——以 Vm_dispatch 新 SSA 为测试
+   用例（5 万行宿主中仅 9 函数结构变化，diff 即靶图）；修好后
+   SsaBuilder 修复即可落地。
+2. 落地后连锁解锁：probe2/probe 全绿（已验证）→ P277 根治 →
+   P405 融合重启门 → 融合/镜像内联收益叠加。
+3. 宿主源码级审计：String_toInt 类「被泄漏掩盖的源级错误」随修复
+   逐一暴露，需按 9 函数清单复核。
+
+**教训**：三层嵌套缺陷（前端泄漏 → 源码将错就错 → 后端 phi 缺陷）
+的解法是「微型探针 + SSA 铁证 + 规范化 diff」三件套——本轮 15+ 次
+构建迭代全部收敛在证据链上，没有一次靠猜。

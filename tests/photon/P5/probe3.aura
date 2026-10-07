@@ -1,0 +1,14 @@
+// 影子读探针 3：步长变量在循环体内分支赋值（P405 遍 1 形态）
+fun main() {
+    var i: Int = 0
+    var count: Int = 0
+    while (i < 500) {
+        var step: Int = 1
+        if (i - (i / 9) * 9 == 0) {
+            step = 4
+        }
+        i = i + step
+        count = count + 1
+    }
+    println("p3=" + toStr(count))
+}

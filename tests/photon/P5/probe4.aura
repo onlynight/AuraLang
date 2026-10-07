@@ -1,0 +1,14 @@
+// 影子读探针 4：嵌套循环 + 内层写外层读
+fun main() {
+    var total: Int = 0
+    var outer: Int = 0
+    while (outer < 20) {
+        var inner: Int = 0
+        while (inner < outer) {
+            total = total + inner
+            inner = inner + 1
+        }
+        outer = outer + 1
+    }
+    println("p4=" + toStr(total))
+}

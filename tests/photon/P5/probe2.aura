@@ -1,0 +1,14 @@
+// 影子读探针 2：循环变量双写点（continue 形态，P277 触发家族）
+fun main() {
+    var i: Int = 0
+    var n: Int = 0
+    while (i < 1000) {
+        if (i - (i / 7) * 7 == 0) {
+            i = i + 3
+        } else {
+            i = i + 1
+        }
+        n = n + 1
+    }
+    println("p2=" + toStr(n))
+}
