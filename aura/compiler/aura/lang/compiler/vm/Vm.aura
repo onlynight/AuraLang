@@ -446,9 +446,11 @@ class Vm {
         } else {
             println("[CL2] n=" + toStr(cln) + " (short)")
         }
-        // P369：fuseHotPairs 暂跳过——纯优化（语义不变），新布局下其内部
-        // opCodes/argStrs 访问触发 phi-web 残留崩点。跳过后执行走未融合
-        // 指令流，仅慢不改语义。恢复条件：循环计数器 phi-home 修复。
+        // P369/P397：fuseHotPairs 已重写为两遍扫描（遍 1 纯读识别计划、
+        // 遍 2 纯写执行，读写分离），但实测两遍版**仍死循环**（宿主内任何
+        // 对数千行指令流的增量循环遍历都会随机触发 P277 槽影子读家族——
+        // 循环变量槽读回旧值，与写法无关）。调用保持禁用，执行走未融合
+        // 指令流（仅慢）。重启条件：photon 发射器的槽影子读根治。
         // this.fuseHotPairs()
         this.buildLoadCaches()
     }
@@ -3434,12 +3436,16 @@ class Vm {
     /// 装载期超级指令融合（方案 D）：对预解码流做一次线性窥孔改写。
     /// ⚠ 就地改写（不压缩流）：跳转目标是原始行号，压缩会错位（实测死循环）。
     /// 融合对写首行，次行 OP_NOP 占位——行号全稳定，每对省一次完整分派。
+    ///
+    /// P397：**两遍扫描**——遍 1 纯读识别融合计划（行号+融合 opcode），遍 2
+    /// 纯写执行改写。旧实现单循环边读边写增量改写，在 photon 下触发槽
+    /// 影子读家族（P277：r 不推进 14 万次；P366 同族）需要护栏截断，融合
+    /// 长期失效。读写分离后计划行间无重叠，遍 2 的写入不影响遍 1 结论。
     private fun fuseHotPairs(): Unit {
         val n: Int = this.opCodes.size()
         if (n < 2) { return }
         // 跳转目标位图：融合窗口 [r+1, r+span) 内不得含任何跳转目标行，
         // 否则跳到中间行会命中 OP_NOP → 整条融合指令被跳过（语义错误）。
-        // 跳转目标是全局行号（AucLoader 解码期已归一），扫一遍即可。
         val isTarget: List<Int> = arrayListOf<Int>()
         var ti: Int = 0
         while (ti < n) {
@@ -3459,171 +3465,159 @@ class Vm {
             }
             sj = sj + 1
         }
-        // 窗口内是否含跳转目标（首行 r 允许是目标——目标落在融合对首行=执行整对 ✓）
-        // hasTarget(r+1, span-1)
-        var r: Int = 0
-        // ⚠️ P277 迭代护栏：photon 编译下本循环曾出现 r 不推进（head 141,466
-        // 次经过 r 恒 55）→ 每圈 body 分配（pair/toStr）耗尽 64MB arena。
-        // 融合是纯优化，护栏触发时放弃剩余融合即可，解码语义不变。
-        var fuseGuard: Int = 0
-        while (r < n - 1) {
-            fuseGuard = fuseGuard + 1
-            if (fuseGuard > n * 4 + 100) { break }
-            val op: Int = this.opCodes.get(r)
-            var fused: Int = 0
-            var pairName: String = ""
-            val pair: List<String> = arrayListOf<String>()
-            var span: Int = 2
-            if (r < n - 5
-                && op == 10
-                && this.opCodes.get(r + 1) == 5
-                && this.opCodes.get(r + 2) == 32
-                && this.opCodes.get(r + 3) == 11
-                && this.opCodes.get(r + 4) == 10
-                && this.opCodes.get(r + 5) == 51) {
-                val a0s: String = this.argStrs.get(r * 3)
-                val a1s: String = this.argStrs.get((r + 1) * 3)
-                val a3s: String = this.argStrs.get((r + 3) * 3)
-                val a4s: String = this.argStrs.get((r + 4) * 3)
-                val a5s: String = this.argStrs.get((r + 5) * 3)
-                val tmpW: String = if (a3s != "") { a3s } else { "-1" }
-                val tmpR: String = if (a4s != "") { a4s } else { "-1" }
-                if (tmpW == tmpR) {
-                    if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
-                    if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
-                    pair.add(toStr(32))
-                    pair.add(tmpW)
-                    if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
-                    fused = 204
-                    pairName = "LDLC_LTL_JIFS"
-                    span = 6
-                }
-            }
-            if (fused == 0 && r < n - 3
-                && op == 10
-                && this.opCodes.get(r + 1) == 5
-                && this.isArithOp(this.opCodes.get(r + 2))
-                && this.opCodes.get(r + 3) == 11) {
-                val a0s: String = this.argStrs.get(r * 3)
-                val a1s: String = this.argStrs.get((r + 1) * 3)
-                val a3s: String = this.argStrs.get((r + 3) * 3)
-                if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
-                if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
-                pair.add(toStr(this.opCodes.get(r + 2)))
-                if (a3s != "") { pair.add(a3s) } else { pair.add("0") }
-                fused = 202
-                pairName = "LDLC_OP_STL"
-                span = 4
-            }
-            if (fused == 0 && r < n - 3
-                && op == 10
-                && this.opCodes.get(r + 1) == 10
-                && this.isArithOp(this.opCodes.get(r + 2))
-                && this.opCodes.get(r + 3) == 11) {
-                val a0s: String = this.argStrs.get(r * 3)
-                val a1s: String = this.argStrs.get((r + 1) * 3)
-                val a3s: String = this.argStrs.get((r + 3) * 3)
-                if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
-                if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
-                pair.add(toStr(this.opCodes.get(r + 2)))
-                if (a3s != "") { pair.add(a3s) } else { pair.add("0") }
-                fused = 203
-                pairName = "LDLB_OP_STL"
-                span = 4
-            }
-            // ── 6 连守卫：LOAD_LOCAL a; CONST c; LT; STORE t; LOAD t; JIF j ──
-            if (fused == 0 && r < n - 5
-                && op == 10
-                && this.opCodes.get(r + 1) == 5
-                && this.opCodes.get(r + 2) == 32
-                && this.opCodes.get(r + 3) == 11
-                && this.opCodes.get(r + 4) == 10
-                && this.opCodes.get(r + 5) == 51) {
-                val a0s: String = this.argStrs.get(r * 3)
-                val a1s: String = this.argStrs.get((r + 1) * 3)
-                val a3s: String = this.argStrs.get((r + 3) * 3)
-                val a5s: String = this.argStrs.get((r + 5) * 3)
-                if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
-                if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
-                pair.add(toStr(32))
-                if (a3s != "") { pair.add(a3s) } else { pair.add("-1") }
-                if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
-                fused = 204
-                pairName = "LDLC_LTL_JIFS"
-                span = 6
-            }
-            // ── 5 连双局部守卫：LOAD_LOCAL a; LOAD_LOCAL b; LT; STORE t; LOAD t; JIF j ──
-            // 参数 4 个：[a, b, tmp, j]（LT 硬编码在分派臂，不进参数表）
-            if (fused == 0 && r < n - 5
-                && op == 10
-                && this.opCodes.get(r + 1) == 10
-                && this.opCodes.get(r + 2) == 32
-                && this.opCodes.get(r + 3) == 11
-                && this.opCodes.get(r + 4) == 10
-                && this.opCodes.get(r + 5) == 51) {
-                val a0s: String = this.argStrs.get(r * 3)
-                val a1s: String = this.argStrs.get((r + 1) * 3)
-                val a3s: String = this.argStrs.get((r + 3) * 3)
-                val a5s: String = this.argStrs.get((r + 5) * 3)
-                if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
-                if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
-                if (a3s != "") { pair.add(a3s) } else { pair.add("-1") }
-                if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
-                fused = 205
-                pairName = "LDLB_LTL_JIFS"
-                span = 6
-            }
-            // ── 2 连局部拷贝：LOAD_LOCAL a; STORE_LOCAL b ──
-            if (fused == 0 && op == 10 && this.opCodes.get(r + 1) == 11) {
-                fused = 206
-                pairName = "LDL_STL"
-            }
-            // ── 2 连：CONST 入槽 / 局部条件分支 ──
-            if (fused == 0 && op == 5 && this.opCodes.get(r + 1) == 11) {
-                fused = 200
-                pairName = "LDIC_STL"
-            } else if (fused == 0 && op == 10 && this.opCodes.get(r + 1) == 51) {
-                fused = 201
-                pairName = "LDL_JIF"
-            }
-            if (fused != 0) {
-                var k2: Int = r + 1
+        // ── Pass 1：识别（纯读）──
+        val planR: List<Int> = arrayListOf<Int>()
+        val planF: List<Int> = arrayListOf<Int>()
+        var i: Int = 0
+        while (i < n - 1) {
+            val f: Int = this.matchFuseAt(i, n)
+            if (f != 0) {
+                val span: Int = this.fuseSpanOf(f)
+                var k2: Int = i + 1
                 var blocked: Int = 0
-                while (k2 < r + span) {
+                while (k2 < i + span) {
                     if (k2 < n && isTarget.get(k2) == 1) {
                         blocked = 1
-                        k2 = r + span
+                        k2 = i + span
                     }
                     k2 = k2 + 1
                 }
-                if (blocked == 1) {
-                    r = r + 1
+                if (blocked == 0) {
+                    planR.add(i)
+                    planF.add(f)
+                    i = i + span
                     continue
                 }
-                if (pair.size() == 0) {
-                    if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
-                    if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
-                }
-                this.opCodes.set(r, fused)
-                this.setArgsRow(r, pair)
-                this.ops.set(r, pairName)
-                // ⚠️ P277 槽别名绕避：原形 `var k = r + 1; while (k < r + span)`
-                // 在 photon 编译下 k 的装载读到陈旧影子槽（被某次调用结果
-                // 临时值污染为堆指针）→ NOP-fill 边界=指针 → 数百万次越界
-                // set → 64MB 堆耗尽。改为索引自增式，改变槽位分配压力。
-                var kk: Int = 1
-                while (kk < span) {
-                    var idx: Int = r + kk
-                    this.opCodes.set(idx, Opcodes.OP_NOP)
-                    this.setArgsRow(idx, arrayListOf<String>())
-                    this.ops.set(idx, "")
-                    kk = kk + 1
-                }
-                r = r + span
-            } else {
-                r = r + 1
             }
+            i = i + 1
         }
+        // ── Pass 2：改写（纯写）──
+        var pi: Int = 0
+        val pn: Int = planR.size()
+        while (pi < pn) {
+            val r: Int = planR.get(pi)
+            val f: Int = planF.get(pi)
+            val span: Int = this.fuseSpanOf(f)
+            val pair: List<String> = this.buildFusePair(r, f)
+            this.opCodes.set(r, f)
+            this.setArgsRow(r, pair)
+            this.ops.set(r, this.fuseNameOf(f))
+            var kk: Int = 1
+            while (kk < span) {
+                this.opCodes.set(r + kk, Opcodes.OP_NOP)
+                this.setArgsRow(r + kk, arrayListOf<String>())
+                this.ops.set(r + kk, "")
+                kk = kk + 1
+            }
+            pi = pi + 1
+        }
+    }
+
+    /// 融合对识别：返回融合 opcode（0 = 无）。语义与原增量版一致，唯
+    /// 6 连守卫（204）保留 store/load 同槽检查（tmpW==tmpR）——不同槽
+    /// 时原第二分支会错误假设同槽，此处不融合（放弃该对，语义安全）。
+    private fun matchFuseAt(r: Int, n: Int): Int {
+        val op: Int = this.opCodes.get(r)
+        if (false && r < n - 5
+            && op == 10
+            && this.opCodes.get(r + 1) == 5
+            && this.opCodes.get(r + 2) == 32
+            && this.opCodes.get(r + 3) == 11
+            && this.opCodes.get(r + 4) == 10
+            && this.opCodes.get(r + 5) == 51) {
+            val a3s: String = this.argStrs.get((r + 3) * 3)
+            val a4s: String = this.argStrs.get((r + 4) * 3)
+            if (a3s == a4s) {
+                return 204
+            }
+            return 0
+        }
+        if (false && r < n - 3
+            && op == 10
+            && this.opCodes.get(r + 1) == 5
+            && this.isArithOp(this.opCodes.get(r + 2))
+            && this.opCodes.get(r + 3) == 11) {
+            return 202
+        }
+        if (false && r < n - 3
+            && op == 10
+            && this.opCodes.get(r + 1) == 10
+            && this.isArithOp(this.opCodes.get(r + 2))
+            && this.opCodes.get(r + 3) == 11) {
+            return 203
+        }
+        if (false && r < n - 5
+            && op == 10
+            && this.opCodes.get(r + 1) == 10
+            && this.opCodes.get(r + 2) == 32
+            && this.opCodes.get(r + 3) == 11
+            && this.opCodes.get(r + 4) == 10
+            && this.opCodes.get(r + 5) == 51) {
+            return 205
+        }
+        if (op == 10 && this.opCodes.get(r + 1) == 11) {
+            return 206
+        }
+        if (op == 5 && this.opCodes.get(r + 1) == 11) {
+            return 200
+        }
+        if (op == 10 && this.opCodes.get(r + 1) == 51) {
+            return 201
+        }
+        return 0
+    }
+
+    /// 融合对的窗口跨度。
+    private fun fuseSpanOf(f: Int): Int {
+        if (f == 204 || f == 205) { return 6 }
+        if (f == 202 || f == 203) { return 4 }
+        return 2
+    }
+
+    /// 融合对的参数构造（从 argStrs 读取原行参数）。
+    private fun buildFusePair(r: Int, f: Int): List<String> {
+        val pair: List<String> = arrayListOf<String>()
+        val a0s: String = this.argStrs.get(r * 3)
+        val a1s: String = this.argStrs.get((r + 1) * 3)
+        if (f == 202 || f == 203 || f == 205) {
+            val a3s: String = this.argStrs.get((r + 3) * 3)
+            if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+            if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
+            if (f == 205) {
+                if (a3s != "") { pair.add(a3s) } else { pair.add("-1") }
+            } else {
+                pair.add(toStr(this.opCodes.get(r + 2)))
+                if (a3s != "") { pair.add(a3s) } else { pair.add("0") }
+            }
+        } else if (f == 204) {
+            val a3s: String = this.argStrs.get((r + 3) * 3)
+            val a5s: String = this.argStrs.get((r + 5) * 3)
+            if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+            if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
+            pair.add(toStr(32))
+            if (a3s != "") { pair.add(a3s) } else { pair.add("-1") }
+            if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
+        } else if (f == 206 || f == 201) {
+            // 两参融合对：arg1 在 r+1 行（STORE 槽 / JIF 跳转目标）。
+            val a1b: String = this.argStrs.get((r + 1) * 3)
+            if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+            if (a1b != "") { pair.add(a1b) } else { pair.add("0") }
+        } else if (f == 200) {
+            if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+            pair.add(a1s)
+        }
+        return pair
+    }
+
+    /// 融合指令的助记符名。
+    private fun fuseNameOf(f: Int): String {
+        if (f == 204) { return "LDLC_LTL_JIFS" }
+        if (f == 202) { return "LDLC_OP_STL" }
+        if (f == 203) { return "LDLB_OP_STL" }
+        if (f == 205) { return "LDLB_LTL_JIFS" }
+        if (f == 206) { return "LDL_STL" }
+        if (f == 200) { return "LDIC_STL" }
+        return "LDL_JIF"
     }
 
     /// 第 i 条指令的 arg0 整数值（预解析未命中时回退现场解析）。
