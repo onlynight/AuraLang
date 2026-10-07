@@ -129,7 +129,7 @@ PYEOF
   MSYS2_ARG_CONV_EXCL="*" timeout 600 "$LLD" \
     "$HOST_OBJ" "$RT_OBJ" \
     "/OUT:$HOST_EXE" "/SUBSYSTEM:CONSOLE" "/ENTRY:main" \
-    "/MACHINE:X64" "/NODEFAULTLIB" "KERNEL32.lib" \
+    "/MACHINE:X64" "/NODEFAULTLIB" "KERNEL32.lib" "NTDLL.LIB" \
     > "$LOG/link.log" 2>&1
   rc=$?
   if [ $rc -ne 0 ]; then echo "FATAL: 链接 rc=$rc"; tail -20 "$LOG/link.log"; return 1; fi

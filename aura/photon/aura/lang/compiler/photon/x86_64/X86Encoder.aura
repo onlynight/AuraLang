@@ -344,6 +344,26 @@ class X86Encoder {
         this.emitBinOp(dst, src, 0x31)
     }
 
+    /// 编码 NOT r/m64（REX.W F7 /2）。
+    ///
+    /// ⚠️ 与 emitMovRI 组合产生字节流歧义时（如 `mov rcx, -1` 紧跟
+    /// `call [rip+disp32]`）用 xor+not 组合替代，避免 `ff 15` 被误读。
+    /// 用 F7 二字节指令，ModRM 字节里 `reg` 字段 = 2（NOT 的 opcode_ext）。
+    fun emitNotRR(reg: String): Unit {
+        val r: Int = this.regNum(reg)
+        this.writeByte(this.rexByte(true, 0, r))
+        this.writeByte(0xF7)
+        this.writeByte(0xC0 + ((2 & 7) << 3) + (r & 7))
+    }
+
+    /// 编码 NEG r/m64（REX.W F7 /3）。
+    fun emitNegRR(reg: String): Unit {
+        val r: Int = this.regNum(reg)
+        this.writeByte(this.rexByte(true, 0, r))
+        this.writeByte(0xF7)
+        this.writeByte(0xC0 + ((3 & 7) << 3) + (r & 7))
+    }
+
     /// 编码 CMP reg, reg。
     fun emitCmpRR(dst: String, src: String): Unit {
         this.emitBinOp(dst, src, 0x39)

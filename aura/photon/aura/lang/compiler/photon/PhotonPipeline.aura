@@ -513,7 +513,7 @@ class PhotonPipeline {
         val k32Lib: String = Env.get("AURA_K32LIB",
                 "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/kernel32.lib")
         if (k32Lib != "") {
-            linker.libs = k32Lib
+            linker.libs = k32Lib + ",C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ntdll.lib"
         }
         // P2: runtime 使用 syscall 直接调用 Nt*，不再需要 kernel32 导入
         // linker.libs = ""  // 零依赖：无 DLL 导入
@@ -833,7 +833,7 @@ class PhotonPipeline {
         val k32Lib2: String = Env.get("AURA_K32LIB",
                 "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/kernel32.lib")
         if (k32Lib2 != "") {
-            linker.libs = k32Lib2
+            linker.libs = k32Lib2 + ",C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ntdll.lib"
         }
         linker.outputName = this.outDir + "/" + this.moduleName
         val linkCmd = linker.buildCommand()

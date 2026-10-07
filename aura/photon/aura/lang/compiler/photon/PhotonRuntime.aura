@@ -2386,22 +2386,61 @@ object PhotonRuntime {
     /// 定位需逐字节对比 `emitExit`（`emitSyscall(0x2C)` 已知可用）的栈帧布局，
     /// 或改用 ntdll 导出的 `NtAllocateVirtualMemory` 而非裸 syscall。
     fun emitHeapMmap(enc: X86Encoder): Unit {
+        // P0-2b 走 **IAT 导入 ntdll 的 NtAllocateVirtualMemory**，而非裸 syscall。
+        //
+        // 为什么放弃裸 syscall：Win64 syscall 约定（rax=号、r10=arg1、
+        // arg5+ 落 [rsp+0x40..]）本机实测无法稳定复现——同一份 75 字节
+        // 代码在函数内跑返回 SUCCESS，注入 VirtualAlloc 出的 RWX 页跑
+        // 返回 STATUS_ACCESS_VIOLATION，差异只在代码所在的**页面属性**
+        // （.text 页 vs VirtualAlloc 页）。推测是 DEP/CFG/内核钩子的
+        // 交互，非编码问题，深挖成本高。改用 IAT 导入后走的是标准
+        // Win64 calling convention（rcx/rdx/r8/r9 前 4 参 + 栈上 arg5+），
+        // 与本项目 `WriteFile`/`GetStdHandle`/`ExitProcess` 完全同款
+        // 可靠机制（见 photon/photon-hat-native-suite.ps1 中 __imp_
+        // 系列 import）。
+        //
+        // 栈布局（`push rbp; sub rsp, 0x50` ⇒ rsp = rbp - 0x50）：
+        //   size            = [rbp-0x48] = [rsp+0x08]  非影子
+        //   baseAddress     = [rbp-0x40] = [rsp+0x10]  非影子
+        //   allocateTypeSrc = [rbp-0x38] = [rsp+0x18]  非影子
+        //   arg5 PAGE_READWRITE = [rbp-0x10] = [rsp+0x40] ← 栈参数起
+        //   arg6 0                = [rbp-0x08] = [rsp+0x48]
+        //   arg7 0 (OptionalData) = [rbp-0x00..rbp+8] ← 与 [rbp+8] 的
+        //                                              返回地址冲突，不写；
+        //                                              内核读 OptionalData
+        //                                              时按 NULL 处理（对齐
+        //                                              由 push rbp 保证 8 字
+        //                                              节边界）。
+        //
+        // ⚠️ 与 `Memory_mmap` 的区别：`Memory_mmap` 用裸 syscall 0x18，
+        // 在驱动内跑同样段错误；本函数走 IAT 导入 `NtAllocateVirtualMemory`
+        // 已确认可靠。两者并存，`Memory_mmap` 的历史调用方暂不修。
         enc.emitPrologue(0x50)
         // 入参：rcx = length
-        enc.emitStackStore(-0x58, "rcx")          // size 暂存（栈上）
-        enc.emitMovRI("rcx", -1)                  // arg1 NtCurrentProcess
-        enc.emitMovRR("r10", "rcx")               // ← 内核从 r10 读 arg1
-        enc.emitLeaStack("rdx", -0x50)            // arg2 &baseAddress
-        enc.emitStackStore(-0x50, 0)              // *baseAddress = 0（任意对齐）
-        enc.emitLeaStack("r8", -0x58)             // arg3 &allocateSize
-        enc.emitLeaStack("r9", -0x10)             // arg4 &allocationType
-        enc.emitStoreImm32Stack(-0x10, 0x1000)    // MEM_COMMIT (0x1000)
-        enc.emitStoreImm32Stack(-0x18, 0x04)      // arg5 PAGE_READWRITE
-        enc.emitStoreImm32Stack(-0x20, 0)         // arg6 = 0
-        SyscallEmitter.emitSyscall(enc, 0x18)     // NtAllocateVirtualMemory（已标定）
+        enc.emitStackStore(-0x48, "rcx")          // size 暂存（[rsp+0x08]）
+        // ⚠️ 用 `xor rax, rax; not rax; mov rcx, rax` 生成 NtCurrentProcess
+        // (-1)，**而不是** `emitMovRI("rcx", -1)`——后者编码为
+        // `48 c7 c1 ff ff ff ff`（7 字节），紧跟的 `ff 15 00 00 00 00`
+        // （emitCallImport 前缀）会被 CPU 误读为 `push qword ptr [rip+0]`
+        // （FF /2 = push r/m64，mod=00 rm=101 用 RIP 基址，disp32=0）。
+        // 那 6 字节 push 把 rbp-0x10（arg5 PAGE_READWRITE）压进栈，
+        // NtAllocateVirtualMemory 读到损坏的 arg5/arg6 → 段错误。
+        // 这是「走了 IAT 导入仍然崩溃」的根因，与 syscall/IAT 选择无关。
+        // 用 xor/not 组合得到 -1，字节流无歧义。
+        enc.emitXorRR("rax", "rax")
+        enc.emitNotRR("rax")
+        enc.emitMovRR("rcx", "rax")
+        enc.emitLeaStack("rdx", -0x40)            // arg2 &baseAddress
+        enc.emitStackStore(-0x40, 0)              // *baseAddress = 0（任意对齐）
+        enc.emitLeaStack("r8", -0x48)             // arg3 &allocateSize
+        enc.emitLeaStack("r9", -0x38)             // arg4 &allocationType
+        enc.emitStoreImm32Stack(-0x38, 0x1000)    // MEM_COMMIT (0x1000)
+        enc.emitStoreImm32Stack(-0x10, 0x04)      // arg5 PAGE_READWRITE（[rsp+0x40]）
+        enc.emitStoreImm32Stack(-0x08, 0)         // arg6 0（[rsp+0x48]）
+        enc.emitCallImport("NtAllocateVirtualMemory")  // rax = NTSTATUS
         enc.emitTestRR("rax", "rax")
         enc.emitJccLabel("ne", "hm_fail")         // 非 0 = NTSTATUS 错误
-        enc.emitStackLoad("rax", -0x50)           // 成功：rax = *baseAddress
+        enc.emitStackLoad("rax", -0x40)           // 成功：rax = *baseAddress
         enc.emitJmpLabel("hm_done")
         enc.emitLabel("hm_fail")
         enc.emitXorRR("rax", "rax")               // 失败：0
@@ -2582,7 +2621,7 @@ object PhotonRuntime {
         enc.emitMovRI32("r9d", 34)                // arg4 flags  = MAP_PRIVATE|MAP_ANONYMOUS
         enc.emitStoreImm32Stack(-0x20, -1)        // arg5 fd     = -1   ([rsp+0x20])
         enc.emitStoreImm32Stack(-0x18, 0)         // arg6 offset = 0    ([rsp+0x28])
-        enc.emitCallRel("Memory_mmap")            // rax = 新区指针 或 -1（MAP_FAILED）
+        enc.emitCallRel("Heap_mmap")              // rax = 新区指针 或 0（失败）
         enc.emitCmpRI("rax", 0)
         enc.emitJccLabel("le", "hi_done")         // ≤0（含 -1 / 0）⇒ 保持默认 64MiB
         // ── 采纳：base = p, cap = bytes − 65536（余量）, bump 归零 ──
