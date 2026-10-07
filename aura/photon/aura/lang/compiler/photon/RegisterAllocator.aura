@@ -233,7 +233,11 @@ class RegisterAllocator {
             //   * 不跨标签 ⇒ 天然避开「跨块覆写」与「phi 区间不可靠」
             //   * 区间短 ⇒ 干扰集小，冲突概率低，布局敏感性影响面小
             // 跨块值（含 phi）继续走 slotForNode 栈槽，行为与 P270 一致。
-            if (node.kind == "Value" || node.kind == "Reg" || node.kind == "Const") {
+            // P414e：**`Const` 完全排除**（含 span==0）。
+            // 二分依据：把 Const 从「跨指令」放开为「仅 span==0」当且仅当
+            // 其余条件已全绿时，反而重新破坏五门（fib28 段错误）⇒
+            // Const 无论跨度如何都不参与着色。
+            if (node.kind == "Value" || node.kind == "Reg") {
                 if (this.isColorableLocal(i)) {
                     this.tryColorLocal(i)
                 }
@@ -1092,7 +1096,7 @@ class RegisterAllocator {
     ///
     /// 区间越短 ⇒ 同时活着的节点越少 ⇒ 干扰集越小 ⇒ 冲突概率越低，
     /// 且布局位移的影响面越小。刻意取保守值，先拿「短寿命临时量」这一块。
-    private val COLOR_MAX_SPAN: Int = 0
+    private val COLOR_MAX_SPAN: Int = 1000000
 
     /// 基本块入口指令索引表（惰性构建一次）。
     private var blockStarts: List<Int> = arrayListOf<Int>()
@@ -1136,6 +1140,15 @@ class RegisterAllocator {
             val b: Int = this.blockStarts[k]
             if (b > f && b <= l) { return false }
             k = k + 1
+        }
+        // P414c：区间内**含调用**的节点一律不着色 —— 实测**必需**。
+        // 二分依据：其余条件不变、仅去掉本排除 ⇒ 立刻段错误。
+        // `call %func` 边界上除 ABI 易失寄存器外，还有发射器自身的实参装载
+        // （rcx/rdx/r8/r9）与返回值搬运（rax），跨调用保持的着色值会被踩。
+        var t: Int = f
+        while (t <= l) {
+            if (this.dag.instrOf(t).template == "call %func") { return false }
+            t = t + 1
         }
         return true
     }
