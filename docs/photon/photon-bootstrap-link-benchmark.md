@@ -4564,3 +4564,84 @@ Layer 3   (AucAot 直接执行) ←── 终极方案，不受 field 模型限�
 * Layer 1 全部完成后：解释器 5.5× → **1.5-2×**
 * Layer 2 叠加：→ **0.8-1.2×**（与 Rust VM 持平）
 * Layer 3 完成：→ **0.01×**（超越 100×）
+
+### 10.115 VM 提速精确方案——110 条指令逐项定量分解（2026-10-08 续）
+
+**不做架构改造（保留解释器），纯发射器+解释器结构优化。**
+
+---
+
+#### 当前每条 guest 指令 = 110 条 x86（以 LOAD_LOCAL 为例）
+
+| 类别 | 指令数 | 说明 |
+|---|---|---|
+| A. 函数序言/结语 | 60 | dispatch(20) + arg0IntOf(10) + getSlot(10) + pushStk(10) + 内部 read64×2(20) |
+| B. Memory 参数装载 | 12 | mov rcx/rdx 等 |
+| C. 实际有用工作 | 8 | load slot + stack push（**Rust VM 的全部**） |
+| D. 解释器簿记 | 10 | instructionCount + ip 递增 + NOP 检查 |
+| E. if-else 链跳转 | 15 | op 10 到达前平均经过 5 个 Int 比较 |
+| **总计** | **110** | |
+
+---
+
+#### 六项优化逐项定量
+
+| # | 优化 | 消除 | 累计 | 加速 |
+|---|---|---|---|---|
+| 1 | **Memory.read64/write64 发射期内联**——emitCall 识别 Memory_read/write64 符号，直接生成 `mov rax,[rcx]` / `mov [rcx],rdx` 而非 call | A 中的 4× 内部 call 序言(20) + B 中的部分(6) = 26 | 84 | 1.31× |
+| 2 | **dispatch 内联到 run()**——if-else 链放进 while 循环体 | A 中 dispatch 序言/结语(20) | 64 | 1.72× |
+| 3 | **arg0IntOf/getSlot/putSlot/pushStk 内联**——热臂中的方法调用改为直接 Memory 读写（在 run() 函数内，field CSE 不适用） | A 中剩余序言/结语(30) | 34 | 3.24× |
+| 4 | **instructionCount 移到周期性检查**——每 65536 条检查一次而非每条 | D 中 7 条 | 27 | 4.07× |
+| 5 | **跳转表替代 if-else 链**——将 op→handler 映射编译为跳转表 | E 中的 15→3 | 15 | 7.33× |
+| 6 | **超算符融合恢复**——LOAD_LOCAL+ADD+STORE_LOCAL → 单条三合一指令 | 减少指令数 ~40% | 有效 ~9 条 | **12.2×** |
+
+**预期终态：每条 guest 指令 ~9-15 条 x86，接近/超越 Rust VM 的 8 条。**
+
+---
+
+#### 每项优化的实施细节
+
+**优化 1（最高优先，纯发射器改动，零语义风险）**：
+X86Emitter.emitCall() 识别被调名 `Memory_read64` / `Memory_write64` /
+`Memory_read32` 等，直接发射函数体指令而非 call：
+* `Memory_read64` → `mov rax, [rcx]`（1 条替代 call+prologue+epilogue）
+* `Memory_write64` → `mov [rcx], rdx`（1 条）
+所有现有 Aura 代码不变——发射器层自动优化。全模块 1305+ 处受益。
+
+**优化 2（解释器结构改动，需验证 field CSE 安全性）**：
+将 dispatch() 的 if-else 链移入 run() 的 while 循环体内。
+消除每指令一次的 dispatch() call 序言/结语。
+⚠️ 需验证：140 个臂在 run() 内不会因函数过大导致寄存器压力/代码缓存问题。
+
+**优化 3（热臂手动内联，需要 P395 的教训校准）**：
+将 `this.arg0IntOf()` / `this.locals.getSlot(slot)` / `this.pushStk(v)`
+在热臂中替换为直接 Memory 读写。
+⚠️ P395 失败原因是跨函数 field CSE——**在 run() 函数内部**（同一函数
+作用域内）的 field 读写是安全的，因为 field_set → field_read 在同一
+DAG 内有序。需要重验。
+
+**优化 5（跳转表）**：
+Aura 没有函数指针/computed goto，但可以用以下替代：
+* 将 op → dispatch offset 预计算为 Memory 表
+* 用 Memory.read64 查表 + 间接跳转
+* 或者：按 opcode 分成 2-3 组，每组一个 if，组内再用小 if 链
+
+**优化 6（超算符融合）**：
+P397 两遍扫描框架已写好，调用已注释。死循环根因是 P277 槽影子读。
+两种解法：①修发射器槽影子读根因；②融合循环用「数组首元素 + 计数器」
+替代「递增游标」——改写 fuseHotPairs 内部循环结构为
+`for (idx = 0; idx < planCount; idx++)`（planCount 为局部 Int 而非
+List.size() 调用），可能绕开影子读的触发布局。
+
+---
+
+#### 实施排序（按风险/收益比）
+
+```
+第 1 步: 优化 1 (Memory 内联)     ← 纯发射器，零风险，全局受益
+第 2 步: 优化 4 (instructionCount) ← 解释器一行改动
+第 3 步: 优化 2 (dispatch 内联)   ← 需验证函数大小影响
+第 4 步: 优化 3 (热臂内联)        ← 需 P395 教训校准
+第 5 步: 优化 5 (跳转表)          ← 需 Aura 原语支持
+第 6 步: 优化 6 (融合恢复)        ← 需 P277 根因修复
+```
