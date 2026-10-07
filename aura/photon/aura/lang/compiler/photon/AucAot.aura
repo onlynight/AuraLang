@@ -1,0 +1,432 @@
+// P399: .auc bytecode -> native machine code AOT compiler (bytecode frontend).
+// Rationale: interpreter per-instruction floor (photon call ~= Memory call).
+// Compiling bytecode to x86-64 eliminates interpretation; guest recursion
+// becomes native call/ret. Expected near Photon-AOT speed.
+//
+// photon-lex note: backslash escapes are NOT supported by the photon lexer.
+// Never use backslash literals in this file; use numeric char codes.
+
+import aura.lang.std.String
+import aura.lang.native.Memory
+import aura.lang.compiler.serialize.AucLoader
+import aura.lang.compiler.vm.VmOps
+import aura.lang.std.fs.FileUtils
+import aura.lang.compiler.photon.x86_64.X86Encoder
+import aura.lang.compiler.photon.PhotonObjectWriter
+import aura.lang.compiler.photon.PhotonSystemLinker
+
+object AucAotUtils {
+
+    private var enc: X86Encoder = X86EncoderUtils.emptyEncoder()
+    private var writer: PhotonObjectWriter = PhotonObjectWriter()
+    private var constLines: List<String> = arrayListOf<String>()
+    private var strConstCsv: String = ""
+    private var strConstCount: Int = 0
+    private var isTargetCsv: String = ","
+
+    private var opDepth: Int = 0
+    private var opMax: Int = 0
+    private var locMax: Int = 0
+
+    private var guestFnCsv: String = ","
+
+    private fun markTarget(line: Int): Unit {
+        this.isTargetCsv = this.isTargetCsv + toStr(line) + ","
+    }
+
+    private fun isTarget(line: Int): Boolean {
+        return this.isTargetCsv.indexOf("," + toStr(line) + ",") >= 0
+    }
+
+    private fun ftNameAt(line: String): String {
+        var i: Int = 0
+        val n: Int = line.length
+        while (i < n) {
+            if (line.charCodeAt(i) == 124) { return line.substring(0, i) }
+            i = i + 1
+        }
+        return line
+    }
+
+    private fun ftOffAt(line: String): Int {
+        var i: Int = 0
+        var start: Int = -1
+        val n: Int = line.length
+        while (i < n) {
+            if (line.charCodeAt(i) == 124) {
+                if (start < 0) { start = i + 1 } else { return VmOps.toI32(line.substring(start, i)) }
+            }
+            i = i + 1
+        }
+        return 0
+    }
+
+    private fun ftPcAt(line: String): Int {
+        var i: Int = line.length - 1
+        var last: Int = -1
+        while (i >= 0) {
+            if (line.charCodeAt(i) == 124) { last = i; i = -1 } else { i = i - 1 }
+        }
+        if (last >= 0) { return VmOps.toI32(line.substring(last + 1, line.length)) }
+        return 0
+    }
+
+    fun compileAuc(aucPath: String, outObjPath: String): Int {
+        val mod = AucLoaderUtils.loadModule(aucPath)
+        println("[AucAot] loadModule n=" + toStr(mod.numOpCodes.size()) + " fns=" + toStr(mod.funcTable.length) + " err=[" + mod.error + "]")
+        if (mod.error != "") {
+            println("[AucAot] load failed")
+            return 1
+        }
+        this.constLines = mod.constLines
+        this.strConstCsv = ""
+        this.strConstCount = 0
+        this.isTargetCsv = ","
+        this.guestFnCsv = ","
+
+        val fnNames: List<String> = arrayListOf<String>()
+        val fnOffs: List<Int> = arrayListOf<Int>()
+        val fnPcs: List<Int> = arrayListOf<Int>()
+        val ft: String = mod.funcTable
+        var pos: Int = 0
+        val ftN: Int = ft.length
+        while (pos < ftN) {
+            var e: Int = pos
+            while (e < ftN && ft.charCodeAt(e) != 10) { e = e + 1 }
+            if (e > pos) {
+                val ln: String = ft.substring(pos, e)
+                fnNames.add(this.ftNameAt(ln))
+                fnOffs.add(this.ftOffAt(ln))
+                fnPcs.add(this.ftPcAt(ln))
+                this.markTarget(this.ftOffAt(ln))
+                this.guestFnCsv = this.guestFnCsv + this.ftNameAt(ln) + ","
+            }
+            pos = e + 1
+        }
+
+        val total: Int = mod.numOpCodes.size()
+        var li: Int = 0
+        while (li < total) {
+            val op: Int = mod.numOpCodes.get(li)
+            if (op == 50 || op == 51 || op == 52) {
+                val t: Int = VmOps.toI32(mod.numArgsFlat.get(li * 3))
+                if (t >= 0 && t < total) { this.markTarget(t) }
+            }
+            li = li + 1
+        }
+
+        var fi: Int = 0
+        while (fi < fnNames.size()) {
+            val name: String = fnNames.get(fi)
+            val off: Int = fnOffs.get(fi)
+            var end: Int = total
+            var nj: Int = fi + 1
+            while (nj < fnNames.size()) {
+                if (fnOffs.get(nj) > off) { end = fnOffs.get(nj); nj = fnNames.size() } else { nj = nj + 1 }
+            }
+            this.translateFunction(name, off, end, fnPcs.get(fi), mod)
+            fi = fi + 1
+        }
+
+        this.writer.dataSymbolName = ""
+        val coff: String = this.writer.buildCoffFile()
+        FileUtils.writeText(outObjPath, coff)
+        println("[AucAot] guest obj written strConsts=" + toStr(this.strConstCount))
+        return 0
+    }
+
+    private fun opOff(d: Int): Int {
+        return 0 - (this.locMax * 8 + (d + 1) * 8)
+    }
+
+    private fun locOff(slot: Int): Int {
+        return 0 - (slot + 1) * 8
+    }
+
+    private fun translateFunction(name: String, off: Int, end: Int, params: Int, mod: AucModule): Unit {
+        this.enc = X86EncoderUtils.emptyEncoder()
+        this.opDepth = 0
+        this.opMax = 0
+        this.locMax = params
+
+        if (params > 0) { this.enc.emitStackStore(this.locOff(0), "rcx") }
+        if (params > 1) { this.enc.emitStackStore(this.locOff(1), "rdx") }
+        if (params > 2) { this.enc.emitStackStore(this.locOff(2), "r8") }
+        if (params > 3) { this.enc.emitStackStore(this.locOff(3), "r9") }
+
+        var li: Int = off
+        var depth: Int = 0
+        while (li < end) {
+            val op: Int = mod.numOpCodes.get(li)
+            if (op == 10 || op == 2 || op == 5 || op == 7 || op == 0 || op == 1 || op == 112) {
+                depth = depth + 1
+                if (depth > this.opMax) { this.opMax = depth }
+            } else if (op == 11 || op == 13) {
+                depth = depth - 1
+            } else if (op == 20 || op == 21 || op == 22 || op == 23 || op == 24 || op == 30 || op == 31 || op == 32 || op == 33 || op == 34 || op == 35) {
+                depth = depth - 1
+            } else if (op == 60 || op == 62) {
+                val argc: Int = this.callArgc(mod, li)
+                depth = depth - argc + 1
+                if (depth > this.opMax) { this.opMax = depth }
+                if (depth < 0) { depth = 0 }
+            }
+            if (op == 11 || op == 12) {
+                val sl: Int = VmOps.toI32(mod.numArgsFlat.get(li * 3))
+                if (sl >= this.locMax) { this.locMax = sl + 1 }
+            }
+            li = li + 1
+        }
+
+        var frame: Int = (this.locMax + this.opMax) * 8 + 8
+        if (frame % 16 != 0) { frame = frame + (16 - frame % 16) }
+
+        this.enc.emitPush("rbp")
+        this.enc.writeByte(0x48)
+        this.enc.writeByte(0x89)
+        this.enc.writeByte(0xE5)
+        if (frame > 0) {
+            if (frame <= 4096) {
+                this.enc.emitSubRI("rsp", frame)
+            } else {
+                var rem: Int = frame
+                while (rem > 0) {
+                    val step: Int = if (rem > 4096) { 4096 } else { rem }
+                    this.enc.emitSubRI("rsp", step)
+                    this.enc.emitCmpByteMemImm8("rsp", 0)
+                    rem = rem - step
+                }
+            }
+        }
+
+        li = off
+        while (li < end) {
+            if (this.isTarget(li)) {
+                this.enc.emitLabel("L" + toStr(li))
+            }
+            this.translateInstr(li, mod, name)
+            li = li + 1
+        }
+        this.enc.emitXorRR("eax", "eax")
+        this.enc.emitLeave()
+        this.enc.emitRet()
+
+        val hex: String = this.enc.toHex()
+        val relocs: String = PhotonObjectWriterUtils.joinRelocRecords(this.enc.getRelocations())
+        this.writer.appendFunction(hex, "aucfn_" + name, relocs)
+    }
+
+    private fun callArgc(mod: AucModule, li: Int): Int {
+        val sl: String = mod.numArgsFlat.get(li * 3 + 1)
+        if (sl == "") { return 0 }
+        return VmOps.toI32(sl)
+    }
+
+    private fun callFnName(mod: AucModule, li: Int): String {
+        return mod.numArgsFlat.get(li * 3)
+    }
+
+    private fun translateInstr(li: Int, mod: AucModule, fnName: String): Unit {
+        val op: Int = mod.numOpCodes.get(li)
+        val a0s: String = mod.numArgsFlat.get(li * 3)
+        val a0: Int = VmOps.toI32(a0s)
+
+        if (op == 10) {
+            this.enc.emitStackLoad("rax", this.locOff(a0))
+            this.emitPushRax()
+            this.bump(1)
+        } else if (op == 11) {
+            this.emitPopRax()
+            this.enc.emitStackStore(this.locOff(a0), "rax")
+            this.bump(-1)
+        } else if (op == 12) {
+            this.enc.emitXorRR("eax", "eax")
+            this.enc.emitStackStore(this.locOff(a0), "rax")
+        } else if (op == 13) {
+            this.emitPopRax()
+            this.bump(-1)
+        } else if (op == 0 || op == 5 || op == 2 || op == 7 || op == 1) {
+            this.emitConstLoad(a0)
+            this.emitPushRax()
+            this.bump(1)
+        } else if (op == 20 || op == 21 || op == 22 || op == 23 || op == 24) {
+            val dB: Int = this.opDepth - 1
+            val dA: Int = this.opDepth - 2
+            val offB: Int = this.opOff(dB)
+            val offA: Int = this.opOff(dA)
+            this.enc.emitStackLoad("rbx", offB)
+            this.enc.emitStackLoad("rax", offA)
+            if (op == 20) {
+                this.enc.emitAddRR("rax", "rbx")
+            } else if (op == 21) {
+                this.enc.emitSubRR("rax", "rbx")
+            } else if (op == 22) {
+                this.enc.emitImulRR("rax", "rbx")
+            } else {
+                this.enc.emitCdq()
+                this.enc.emitIdiv("rbx")
+                if (op == 24) { this.enc.emitMovRR("rax", "rdx") }
+            }
+            this.enc.emitStackStore(offA, "rax")
+            this.opDepth = dA + 1
+        } else if (op >= 30 && op <= 35) {
+            val dB: Int = this.opDepth - 1
+            val dA: Int = this.opDepth - 2
+            val offB: Int = this.opOff(dB)
+            val offA: Int = this.opOff(dA)
+            this.enc.emitStackLoad("rbx", offB)
+            this.enc.emitStackLoad("rax", offA)
+            this.enc.emitCmpRR("rax", "rbx")
+            var cnd: String = "e"
+            if (op == 31) { cnd = "ne" }
+            if (op == 32) { cnd = "l" }
+            if (op == 33) { cnd = "g" }
+            if (op == 34) { cnd = "le" }
+            if (op == 35) { cnd = "ge" }
+            this.enc.emitSetcc("rax", cnd)
+            this.enc.emitMovzxRegReg8("rax", "rax")
+            this.enc.emitStackStore(offA, "rax")
+            this.opDepth = dA + 1
+        } else if (op == 50) {
+            this.enc.emitJmpLabel("L" + a0s)
+        } else if (op == 51) {
+            this.emitPopRax()
+            this.enc.emitCmpRI("rax", 0)
+            this.enc.emitJccLabel("e", "L" + a0s)
+            this.bump(-1)
+        } else if (op == 60 || op == 62) {
+            this.translateCall(li, mod)
+        } else if (op == 65) {
+            this.emitPopRax()
+            this.enc.emitLeave()
+            this.enc.emitRet()
+            this.bump(-1)
+        } else if (op == 66) {
+            this.enc.emitXorRR("eax", "eax")
+            this.enc.emitLeave()
+            this.enc.emitRet()
+        } else if (op == 112 || op == 113 || op == 114) {
+            // ARC: no-op (AOT has no GC)
+        } else {
+            println("[AucAot] unsupported opcode " + toStr(op) + " at line " + toStr(li) + " fn=" + fnName)
+        }
+    }
+
+    private fun bump(d: Int): Unit {
+        this.opDepth = this.opDepth + d
+        if (this.opDepth > this.opMax) { this.opMax = this.opDepth }
+    }
+
+    private fun emitPushRax(): Unit {
+        this.enc.emitStackStore(this.opOff(this.opDepth - 1), "rax")
+    }
+
+    private fun emitPopRax(): Unit {
+        this.enc.emitStackLoad("rax", this.opOff(this.opDepth - 1))
+    }
+
+    private fun emitConstLoad(idx: Int): Unit {
+        val v: String = this.constLines.get(idx)
+        if (this.isAllDigits(v)) {
+            this.enc.emitMovRI("rax", VmOps.toI32(v))
+        } else {
+            val sym: String = this.internStr(v)
+            this.enc.emitLeaRIP("rax", sym)
+        }
+    }
+
+    private fun isAllDigits(v: String): Boolean {
+        if (v == "") { return false }
+        var i: Int = 0
+        val n: Int = v.length
+        var digits: Int = 0
+        while (i < n) {
+            val c: Int = v.charCodeAt(i)
+            if (c == 45 && i == 0) { i = i + 1; continue }
+            if (c < 48 || c > 57) { return false }
+            digits = digits + 1
+            i = i + 1
+        }
+        return digits > 0
+    }
+
+    private fun internStr(v: String): String {
+        val sym: String = "@str." + toStr(this.strConstCount)
+        this.strConstCount = this.strConstCount + 1
+        if (this.strConstCsv != "") {
+            this.strConstCsv = this.strConstCsv + ","
+        }
+        val q: String = String.fromCharCode(34)
+        this.strConstCsv = this.strConstCsv + q + v + q
+        return sym
+    }
+
+    private fun translateCall(li: Int, mod: AucModule): Unit {
+        val callee: String = this.callFnName(mod, li)
+        val argc: Int = this.callArgc(mod, li)
+        var i: Int = 0
+        while (i < argc && i < 4) {
+            val d: Int = this.opDepth - argc + i
+            if (i == 0) {
+                this.enc.emitStackLoad("rcx", this.opOff(d))
+            } else if (i == 1) {
+                this.enc.emitStackLoad("rdx", this.opOff(d))
+            } else if (i == 2) {
+                this.enc.emitStackLoad("r8", this.opOff(d))
+            } else {
+                this.enc.emitStackLoad("r9", this.opOff(d))
+            }
+            i = i + 1
+        }
+        this.opDepth = this.opDepth - argc
+
+        val target: String = this.mapCallee(callee)
+        this.enc.emitCallRel(target)
+        this.enc.emitStackStore(this.opOff(this.opDepth - 1), "rax")
+        this.opDepth = this.opDepth + 1
+    }
+
+    private fun mapCallee(name: String): String {
+        if (this.guestFnCsv.indexOf("," + name + ",") >= 0) {
+            return "aucfn_" + name
+        }
+        if (name == "println" || name == "aura.lang.std.println" || name == "aura.lang.std.IO.println") { return "println" }
+        if (name == "print" || name == "aura.lang.std.print") { return "print" }
+        if (name == "toStr" || name == "aura.lang.std.toStr") { return "toStr" }
+        if (name == "strcat") { return "strcat" }
+        if (name == "strlen") { return "strlen" }
+        if (name == "streq") { return "streq" }
+        if (name == "abs") { return "abs" }
+        if (name == "sqrt") { return "sqrt" }
+        if (name == "pow") { return "pow" }
+        if (name == "clock") { return "clock" }
+        if (name == "charCodeAt") { return "charCodeAt" }
+        return name
+    }
+}
+
+object AucAotMainUtils {
+
+    fun main(): Int {
+        val rc: Int = AucAotUtils.compileAuc("build/vm/current.auc", "build/aucat/guest.obj")
+        if (rc != 0) { return 1 }
+        val linker = PhotonSystemLinkerUtils.defaultLinker()
+        linker.setOutputType("exe")
+        linker.objectFiles = "build/aucat/guest.obj build/hat-vmhost/aura_runtime.obj"
+        linker.addFlag("/SUBSYSTEM:CONSOLE")
+        linker.addFlag("/ENTRY:main")
+        linker.addFlag("/MACHINE:X64")
+        linker.addFlag("/NODEFAULTLIB")
+        linker.addFlag("/STACK:16777216")
+        linker.useDefaultLibs = false
+        linker.libs = "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/kernel32.lib"
+        linker.outputName = "build/aucat/guest"
+        linker.link(linker.objectFiles, linker.outputName, "exe")
+        println("[AucAot] linked build/aucat/guest.exe")
+        return 0
+    }
+}
+// top-level entry (seed build --aot resolves a top-level main)
+fun main(): Int {
+    return AucAotMainUtils.main()
+}

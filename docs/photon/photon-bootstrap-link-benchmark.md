@@ -4339,3 +4339,46 @@ fuseHotPairs 自身）——**两遍版换掉增量改写形态后仍触发 P277
 或 scanFunctionMaxSlots 的 range 计算（P394 修复后已缩小但仍存在某类
 污染）。根治后：融合恢复（指令数 -30-50%）+ P395 镜像内联重启
 + P396 按需保存重试——三层收益叠加，对齐 Rust VM 可期。
+
+### 10.112 会话 XXVII：AucAot（.auc→机器码 AOT）——翻译器完成、宿主集成受阻（P399，2026-10-08）
+
+**新目标**：超越 Rust VM（不止对齐）。分析结论：解释器架构的每指令
+开销有**硬下限**（photon 函数调用 = Memory 读写 call，每 guest 指令
+6-10 次 ≈ 500-1500 周期；Rust VM = 原生索引 ≈ 50-100 周期）——纯解释
+器优化无法超越。唯一路径 = **消灭解释本身**：.auc 字节码直译 x86-64。
+
+**AucAot.aura 完成**（~430 行，photon 编译通过）：
+* loadModule 读 .auc → funcTable 纯字符解析（P388 家族规避）
+* 逐函数逐指令翻译到 X86Encoder（栈消解：操作数栈编译期追踪 → rbp
+  负偏移直读写，零运行时栈指针）；支持 op 0/1/2/5/7/10/11/12/13/
+  20-24/30-35/50/51/60/62/65/66/112-114
+* CALL：guest 内链（aucfn_ 前缀）+ runtime 外链（println/toStr/strcat…）
+* 常量字符串 → @str.N 数据段（fromCharCode(34) 构造引号——photon lex
+  不支持反斜杠转义）
+* COFF 写出（PhotonObjectWriter）+ runtime 链接（PhotonSystemLinker）
+
+**发现并修复的两个 photon 编译器 bug**（AucLoader 缓存失效后暴露）：
+1. **photon lex 不支持反斜杠转义**（`"\\"` / `'\n'` char literal）——
+   seed lex 支持但 photon 独立实现不支持。AucLoader 的 `"\\"` 已改
+   String.fromCharCode(92)；`"\n"` photon 支持无需改。
+2. **Memory.mmap 调用元数错误**（AucSerializer 用 5 参、声明 6 参）
+   ——补 offset=0。
+
+**集成受阻（诚实记录）**：AucAot 编译进宿主闭包后宿主 SIGSEGV——
+两类原因：①photon lex 反斜杠（已修 AucLoader，可能还有别的文件）；
+②**AucAot 闭包拉入 X86Encoder/PhotonObjectWriter/PhotonSystemLinker
+等发射器类**——这些类的 vtable 不在宿主 runtime 的 dataSymbolName
+表里 ⇒ 链接期/运行期不匹配。**回退到 18.57× 基线**（cb2761b），
+AucAot.aura 源码保留为独立文件（未入宿主闭包）。
+
+**下一步（明确排序）**：
+1. **AucAot 独立驱动**——不用 auc_vm_runner/PhotonHatCompile 宿主，
+   写独立的 `AucAotCompiler.aura`（只 import AucLoader + X86Encoder +
+   ObjectWriter + SystemLinker + FileUtils，不含 Vm/VmStack/解释器），
+   由 seed AOT 编译为 `aucat.exe`。这一步绕开宿主闭包问题——编译器
+   自身只需读 .auc + 发射，不需跑 guest。当前 AucAot.aura 已接近此
+   形态（主要问题是 auc_vm_runner 的 467 行解释器调用把它拉进了解
+   释器闭包——**拆成独立文件即解**）。
+2. guest.exe 运行验证 → fib28 → banner → 全量。
+3. 性能：guest 指令 = 3-8 条原生指令（无解释 dispatch），fib28 预期
+   **< 100ms**——超越 Rust VM（937ms）10×+。
