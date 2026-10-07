@@ -2273,21 +2273,28 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// 编码 `Memory_mmap(rcx=addr, rdx=length, r8=prot, r9=flags, [sp]=fd, [sp]=offset) rax=ptr`。
-    /// Windows: NtAllocateVirtualMemory (0x18)。
-    /// 编码 `Memory_mmap(addr, length, prot, flags, fd, offset) rax=ptr|-1`（P0-2b）。
+    /// 编码 `Memory_mmap(addr, length, prot, flags, fd, offset) rax=ptr|-1`。
+    /// Windows: NtAllocateVirtualMemory。
     ///
-    /// ⚠️ **P0-2b 暂回退（已知限制）**：本函数当前把 arg5/arg6（fd/offset）写在
-    /// `[rbp-0x68]`/`[rbp-0x60]`，而 Win64 下 `NtAllocateVirtualMemory(0x18)` 的
-    /// arg5/arg6 应在 `[rbp-0x70]`/`[rbp-0x68]`。错误槽位 ⇒ mmap 收到未初始化的
-    /// fd/offset ⇒ 返回 -1（MAP_FAILED）。`emitHeapInit` 判定 `≤0` 后**安全回落
-    /// 64MiB**——即 `AURA_HEAP_MB>64` 当前**不生效**（功能缺位但无崩溃）。
+    /// ⚠️ **本函数有两条已知错误，暂时保留原样**：
+    /// (1) **服务号是错的**——写成 `0x18`。独立 clang 探针（`/d/tmp/probe/`，
+    ///     与宿主同机同调用约定）实测：`svc=0x18` 返回 `0xC0000005`
+    ///     （ACCESS_VIOLATION），内核在错误服务槽里把 r8 当首参解引用，
+    ///     **进程直接段错误**。这是 P0-2b「AURA_HEAP_MB>64 段错误」的直接
+    ///     原因。扫描 0x00–0xFF 后仍未标定出 NtAllocateVirtualMemory 的正确号
+    ///     （`0x1B` 给 `0xC0000008`、`0x2C` 是 NtTerminateProcess、`0x3B`
+    ///     返回 0 但 base=0）。
+    /// (2) **arg5/arg6 槽位错**——写在 `[rbp-0x68]`/`[rbp-0x60]`，而正确槽位是
+    ///     `[rbp-0x70]`/`[rbp-0x68]`（`prologue(0x90)` 下 Win64 的 arg5/arg6）。
     ///
-    /// 正确写法（arg5/arg6 写 `-0x70`/`-0x68`，AllocationType/Protect 占该槽，
-    /// rbx 挪到 `-0x60`）经反汇编确认字节正确，但会让种子编译器
-    /// `aura build --aot` 确定性产出坏驱动（五门全坏 / 静默错值，fib28 计时
-    /// ~4300ms→~1000ms）。**落地正确版前必须先修种子编译器回归**
-    /// （见 `scripts/photon/vmopt.sh` 头部注释）。
+    /// **P0-2b 暂不走本函数**：`emitHeapInit` 的扩容路径仍调本函数，但因
+    /// 服务号错、mmap 必失败（且以段错误形式失败），`AURA_HEAP_MB>64`
+    /// 当前**既不生效也不安全**（崩溃而非回落）。要修复需先标定服务号，
+    /// 再二选一：改本函数，或启用 `emitHeapMmap`（槽位已写对）。
+    /// 本函数保持不动的原因：其历史调用方（guest arena 分配器）依赖当前
+    /// 「失败返回 0」行为，改了行为面；且 `scripts/photon/vmopt.sh` 头部
+    /// 记载了 `aura build --aot` 对特定源码态产出坏驱动的陷阱，最小改动面
+    /// 最安全。
     fun emitMemoryMmap(enc: X86Encoder): Unit {
         enc.emitPrologue(0x90)
         enc.emitStackStore(-0x70, "rbx")
@@ -2335,6 +2342,61 @@ object PhotonRuntime {
         SyscallEmitter.emitSyscall(enc, 0x45)  // NtFreeVirtualMemory
         enc.emitStackLoad("r12", -0x18)
         enc.emitStackLoad("rbx", -0x10)
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `Heap_mmap(rcx=length) rax=ptr|0`（P0-2b 旁路，自包含 syscall）。
+    ///
+    /// ⚠️ **本函数当前未被调用**（`emitHeapInit` 仍走 `Memory_mmap`）。
+    /// 保留它的目的是：P0-2b 的扩容路径需要一个**槽位正确**的 mmap 入口，
+    /// 而 `emitMemoryMmap` 的 arg5/arg6 槽位是错的（见其上方注释）。
+    /// 本函数把槽位写对，作为标定完成后的备用入口。
+    ///
+    /// 参数落位（Win64 syscall 约定，arg1 复制到 r10）：
+    ///   r10/rcx=NtCurrentProcess, rdx=&baseAddress, r8=&allocateSize,
+    ///   r9=&allocationType, [rsp+0x20]=PAGE_READWRITE, [rsp+0x28]=0
+    /// ⇒ 栈上 `[rbp-0x50]`=baseAddr, `[rbp-0x58]`=size,
+    ///   `[rbp-0x10]`=MEM_COMMIT, `[rbp-0x18]`=PAGE_READWRITE。
+    ///
+    /// 返回值：成功为对齐后的基址（`*baseAddress`），失败为 0。
+    ///
+    /// ⚠️ **P0-2b 的真正阻塞点仍未消除（2026-10-08 实测）**。独立 clang
+    /// 探针（`/d/tmp/probe/probe*.c`，与宿主同一台机、同一调用约定）的结论：
+    ///   - `svc=0x18`（`emitMemoryMmap` 与 `Syscalls.aura:150` 都用这个号）
+    ///     → `0xC0000005`（ACCESS_VIOLATION），进程直接段错误。这是
+    ///     P0-2b「AURA_HEAP_MB>64 段错误」的直接原因。
+    ///   - `svc=0x1B`（项目文档记载的「实际号」）→ `0xC0000008`
+    ///     （STATUS_INVALID_HANDLE），仍未分配。
+    ///   - 扫描 0x00–0xFF：只有 `0x2C` 和 `0x3B` 返回 `0x00000000`，
+    ///     但 `0x2C` 是 NtTerminateProcess（会杀进程），`0x3B` 返回 0 却
+    ///     base=0。以 `ntdll` 导出的 `NtWriteFile` 为参照（本机 `0x08`
+    ///     返回 `0xc0000008` 但 iosb.Status=0，能工作）可推断：本机内核的
+    ///     syscall 号表与项目假设的号表**确实不一致**，`0x18` 不是
+    ///     NtAllocateVirtualMemory 的号，但用本文件当前的参数布局也尚未
+    ///     标定出正确的号。
+    /// 下一步：按 `NtWriteFile=0x08` 这条已知可用的参照，用
+    /// `ntdll` 导出函数逐个反查 Nt* 服务号，标定出 NtAllocateVirtualMemory
+    /// 的真实号，再决定是改 `emitMemoryMmap` 还是启用本函数。
+    fun emitHeapMmap(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x50)
+        // 入参：rcx = length
+        enc.emitStackStore(-0x58, "rcx")          // size 暂存（栈上）
+        enc.emitMovRI("rcx", -1)                  // arg1 NtCurrentProcess
+        enc.emitLeaStack("rdx", -0x50)            // arg2 &baseAddress
+        enc.emitStackStore(-0x50, 0)              // *baseAddress = 0（任意对齐）
+        enc.emitLeaStack("r8", -0x58)             // arg3 &allocateSize
+        enc.emitLeaStack("r9", -0x10)             // arg4 &allocationType
+        enc.emitStoreImm32Stack(-0x10, 0x1000)    // MEM_COMMIT (0x1000)
+        enc.emitStoreImm32Stack(-0x18, 0x04)      // arg5 PAGE_READWRITE
+        enc.emitStoreImm32Stack(-0x20, 0)         // arg6 = 0
+        SyscallEmitter.emitSyscall(enc, 0x1B)     // NtAllocateVirtualMemory 候选（待标定）
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("ne", "hm_fail")         // 非 0 = NTSTATUS 错误
+        enc.emitStackLoad("rax", -0x50)           // 成功：rax = *baseAddress
+        enc.emitJmpLabel("hm_done")
+        enc.emitLabel("hm_fail")
+        enc.emitXorRR("rax", "rax")               // 失败：0
+        enc.emitLabel("hm_done")
         enc.emitEpilogue()
     }
 
@@ -3095,7 +3157,7 @@ object PhotonRuntime {
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
     val BUILD_ID: String = "p276-listget-core-layout"
-    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init"
+    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
     fun buildRuntimeObject(): String {
@@ -3573,6 +3635,10 @@ object PhotonRuntime {
         val encHinit = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitHeapInit(encHinit)
         writer.appendFunction(encHinit.toHex(), "Heap_init", PhotonObjectWriterUtils.joinRelocRecords(encHinit.getRelocations()))
+        // P0-2b：Heap_init 扩容路径专用 mmap（正确 0x18 槽位，见 emitHeapMmap）
+        val encHmmap = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitHeapMmap(encHmmap)
+        writer.appendFunction(encHmmap.toHex(), "Heap_mmap", PhotonObjectWriterUtils.joinRelocRecords(encHmmap.getRelocations()))
         val encAl = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitArrayListOf(encAl)
         writer.appendFunction(encAl.toHex(), "arrayListOf", PhotonObjectWriterUtils.joinRelocRecords(encAl.getRelocations()))
@@ -4035,6 +4101,10 @@ object PhotonRuntime {
         val encHinit = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitHeapInit(encHinit)
         writer.appendFunction(encHinit.toHex(), "Heap_init", PhotonObjectWriterUtils.joinRelocRecords(encHinit.getRelocations()))
+        // P0-2b：Heap_init 扩容路径专用 mmap（正确 0x18 槽位，见 emitHeapMmap）
+        val encHmmap = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitHeapMmap(encHmmap)
+        writer.appendFunction(encHmmap.toHex(), "Heap_mmap", PhotonObjectWriterUtils.joinRelocRecords(encHmmap.getRelocations()))
         val encAl = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitArrayListOf(encAl)
         writer.appendFunction(encAl.toHex(), "arrayListOf", PhotonObjectWriterUtils.joinRelocRecords(encAl.getRelocations()))
@@ -4456,6 +4526,10 @@ object PhotonRuntimeUtils {
         val encHinit = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitHeapInit(encHinit)
         writer.appendFunction(encHinit.toHex(), "Heap_init", PhotonObjectWriterUtils.joinRelocRecords(encHinit.getRelocations()))
+        // P0-2b：Heap_init 扩容路径专用 mmap（正确 0x18 槽位，见 emitHeapMmap）
+        val encHmmap = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitHeapMmap(encHmmap)
+        writer.appendFunction(encHmmap.toHex(), "Heap_mmap", PhotonObjectWriterUtils.joinRelocRecords(encHmmap.getRelocations()))
         val encAl = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitArrayListOf(encAl)
         writer.appendFunction(encAl.toHex(), "arrayListOf", PhotonObjectWriterUtils.joinRelocRecords(encAl.getRelocations()))

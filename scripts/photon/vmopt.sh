@@ -92,7 +92,10 @@ do_build() {
   # ===LINK===/===RESULT=== 尾标，须只取「紧跟 marker 的第一行」（与
   # build-photon-hat.ps1 的 Write-HexFile 同款口径）。驱动自身不落盘 obj。
   echo "=== [2/3] 提取 COFF hex -> obj ==="
-  python3 - "$LOG/build.log" "$HOST_OBJ" "$RT_OBJ" << 'PYEOF'
+  # python3 在本机可能是 WindowsApps 的空 stub（exit 49）——优先用 python。
+  PY=$(command -v python || command -v python3)
+  if [ -z "$PY" ]; then echo "FATAL: 缺 python 解释器"; return 1; fi
+  "$PY" - "$LOG/build.log" "$HOST_OBJ" "$RT_OBJ" << 'PYEOF'
 import sys
 log, main_obj, rt_obj = sys.argv[1], sys.argv[2], sys.argv[3]
 M_MAIN, M_RT = '===COFF-MAIN===', '===COFF-RUNTIME==='
