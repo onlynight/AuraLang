@@ -4923,6 +4923,8 @@ acc=999998000000、loop25M acc=124950000000 精确）。⚠️ Git Bash
 ——**口径差**：本轮程序含 MUL/SUB/cast（文档版为纯累加），不可直接
 比；同程序跨轮对照以 build/p398probes 体系的留档为准。
 
-**方法学留档**：`build/bench/timeit.ps1`（.NET ProcessAPI 计时器）
-+ `build/bench/llvm|photon/*.exe`（三份 AOT 产物）+ `tests/photon/P5`
+**方法学留档**：`scripts/photon/timeit.ps1`（.NET ProcessAPI 计时器，
+用法 `powershell -NoProfile -File scripts/photon/timeit.ps1 -Exe <exe>
+[-ArgsStr "<args>"] [-Runs 5]`，输出 times/median/last-line）+ AOT 产物
+经 `aura build --aot` / PhotonHatCompile 驱动一键重建 + `tests/photon/P5`
 （正确性探针）。四方复测一条命令可重放。
