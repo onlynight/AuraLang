@@ -889,6 +889,17 @@ class X86Emitter {
             } else if (funcName == "Memory_write") {
                 this.enc.emitMovByteMemReg("rcx", "rdx")
                 this.enc.emitXorRR("eax", "eax")
+            } else if (funcName == "Memory_read64" || funcName == "Memory_read32" || funcName == "Memory_read16") {
+                // P400：mov rax,[rcx]——read64/32/16 的 runtime 函数体本就
+                // 是这条 64 位 mov（read16/32 的高位语义由调用者处理），发射期
+                // 直接内联消掉 call + 被调序言/结语（8 条 → 1 条）。指令序列
+                // 与 PhotonRuntime.emitMemoryRead64 逐字节一致（48 8B 01）。
+                this.enc.writeByte(0x48); this.enc.writeByte(0x8B); this.enc.writeByte(0x01)
+            } else if (funcName == "Memory_write64" || funcName == "Memory_write32" || funcName == "Memory_write16") {
+                // P400：mov [rcx],rdx——write16/32/64 的 runtime 函数体都是
+                // 全 64 位 store，同款内联。无返回值语义不变（rax 不定，
+                // 落槽行为与真实调用一致——被调同样不写 rax）。
+                this.enc.emitStoreMemDisp32("rcx", 0, "rdx")
             } else if (funcName == "__is_tagged_int") {
                 // P363：rax = rcx & 1——Plan A 装箱判定。调用窗误判（偶数
                 // 字符串指针被判 tagged）→ toStrAny 走拆箱分支打印指针十进制。
