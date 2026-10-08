@@ -1,0 +1,168 @@
+// aura:///build/hat-vmhost/jit_vmhost.aura
+// ═══════════════════════════════════════════════════════════════
+// P1-3：Photon 编译的**原生 VM 宿主**（JIT 原生验证专用）。
+//
+// 架构定位（docs/pure_aura_jit/07 §2.3）：JIT 是 **VM 运行时优化**——
+// Photon AOT 的对象是 VM 自身；用户程序以 .auc 字节码交给 VM 执行，
+// 热点代码在 VM 进程内被 JitBackend 编译进 W^X 内存并经 JitExec
+// 间接调用。本宿主 = build/hat-vmhost/current.aura 的参数化版：
+//
+//   * AURA_VM_AUC      被测 .auc 路径（默认 build/vm/current.auc）
+//   * AURA_VM_SELFTEST =1 时先跑内建 JIT 自检（见下），再执行 .auc
+//
+// ── 内建 JIT 自检（AURA_VM_SELFTEST=1）──
+//
+// 自检代码是**宿主原生代码**（非 .auc）：直接驱动 JitBackend 的完整
+// 原生链——allocRW（低地址 W^X 区）→ writeCode（真实字节写入）→
+// setExecutable（VirtualProtect RX）→ executeNative（JitExec 间接
+// call）→ 返回值校验；另覆盖多函数跨段 call rel32 回填与数据段读写。
+// 这是 P1-2/P1-4/2.1 的原生验收：所有写与执行都不是模拟。
+//
+// ⚠️ 为什么自检不放 .auc 字节码侧：.auc→VM 分派的值编排存在**通用既
+//   有缺口**（Int 装箱 (v<<1)|1 与裸 Long 双形态、`as Int` 不重装箱、
+//   字面量多参调用正确而方法内多参错位、 natives 结果裸值入栈被
+//   toStrAny 当指针解引用）——在 P5 补齐 VM 值模型之前，.auc 侧只能
+//   验证守卫路径（p12/p13，种子与原生 VM 皆绿）；原生验证由本自检
+//   承载。缺口清单见 docs/pure_aura_jit/09 §七。
+// ═══════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import aura.lang.std.Env
+import aura.lang.native.Memory
+import aura.lang.native.JitExec
+import aura.lang.compiler.photon.JitBackend
+import "../../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
+
+var stPass: Int = 0
+var stFail: Int = 0
+
+fun stOk(name: String, got: Int, want: Int): Unit {
+    if (got == want) {
+        stPass = stPass + 1
+        println("[PASS] " + name + "  got=" + toStr(got) + " want=" + toStr(want))
+    } else {
+        stFail = stFail + 1
+        println("[FAIL] " + name + "  got=" + toStr(got) + " want=" + toStr(want))
+    }
+}
+
+/// 内建 JIT 原生自检。机器码均为手工编码（x86_64 / Win64 ABI：
+/// rcx = 第 1 参，rax = 返回值；入口自行 `mov rax, rcx` 装载）。
+/// 直连 runtime 的 `veh_install`（AddVectoredExceptionHandler 包装）：
+/// 无体 fun 被发射器降级为外部符号引用（同 `Memory.alloc` 模式）。
+/// 段错误时 handler 向 stderr 打印 RIP/错误地址/寄存器现场——JIT 自检
+/// 漂移崩点（P5 缺口①）的定位通道。
+fun jitVehInstall(): Int
+
+fun jitSelfTest(): Unit {
+    println("=== P1-3 NATIVE JIT SELFTEST (in native VM host) ===")
+    // VEH 转储默认关闭：handler 不过滤异常码，first-chance 风暴会干扰
+    // 正常执行（/FIXED 构建实测挂在 allocRW）。需要现场时 AURA_VEH=1。
+    if (Env.get("AURA_VEH", "") == "1") {
+        jitVehInstall()
+        println("[VEH] crash-dump handler installed")
+    }
+
+    val be = JitBackend()
+    be.enableNativeExec()
+    stOk("enableNativeExec 关闭 VM 模拟", be.isVmMode() as Int, 0)
+
+    // ── 1. 单函数（P1-2 路径）：add5(a) = a + 5 ──
+    //   55 4889E5          push rbp; mov rbp,rsp
+    //   4889C8             mov rax, rcx     入口装 rax（Win64 首参在 rcx）
+    //   480505000000       add rax, 5
+    //   5DC3               pop rbp; ret
+    val add5Hex: String = "554889E54889C84805050000005DC3"
+    println("[ST] before emitFunction")
+    val entryA = be.emitFunction("add5", add5Hex)
+    println("[ST] after emitFunction entry=" + toStr(entryA))
+    var wantEntry: Int = 1
+    if (entryA == 0) { wantEntry = 0 }
+    stOk("emitFunction 返回非零入口", wantEntry, 1)
+    println("[ST] before exec1")
+    val rr = be.executeNative(entryA, 20)
+    println("[ST] after exec1 r=" + toStr(rr))
+    stOk("add5(20) = 25", rr, 25)
+    stOk("add5(100) = 105", be.executeNative(entryA, 100), 105)
+
+    // ── 2. 多函数跨段调用（P1-2 回填 + 连续块布局）：手工 blob ──
+    //   double(a)=2a   tri(n)=3n   main(a)=double(a)+tri(7)=2a+21
+    //   布局（字节偏移）：
+    //     0..9    double  55 4889E5 4889C8 4801C0 5DC3
+    //     16..31  tri     55 4889E5 4889C8 4801C0 4801C8 5DC3
+    //     32..70  main
+    //   main 内两条 call rel32（disp = target − 指令结束地址）：
+    //     call tri    @46..51 → 16−51 = −35 (0xFFFFFFDD)
+    //     call double @60..65 →  0−65 = −65 (0xFFFFFFBF)
+    val doubleHex: String = "554889E54889C84801C05DC3"
+    val triHex: String = "554889E54889C84801C04801C85DC3"
+    val mainHex: String = "554889E54889CE48C7C107000000E8DDFFFFFF4889C24889F1488BC1E8BFFFFFFF4801D05DC3"
+    // 布局核对：double=12B(0..12)，pad 4B → tri@16(15B)，pad 1B → main@32(38B)。
+    val blob: String = doubleHex + "00000000" + triHex + "00" + mainHex
+
+    // ⚠️ 必须走 allocRW（低地址提示）：Memory.mmap(0,…) 由内核挑高地址，
+    // `as Int` 截断后写/执行都会落到错误位置（2026-10-08 实测即崩于此）。
+    val codeAddr = JitExec.allocRW(8192)
+    val codeInt: Int = codeAddr as Int
+    var wantAddr: Int = 1
+    if (codeInt == 0) { wantAddr = 0 }
+    stOk("mmap 代码区非零", wantAddr, 1)
+    be.writeCode(codeInt, 0, blob)
+    Memory.mprotect(codeAddr, 8192, 32)   // PAGE_EXECUTE_READ
+
+    val mainEntry: Int = codeInt + 32
+    stOk("main_jit(6) = double(6)+tri(7) = 33", be.executeNative(mainEntry, 6), 33)
+    stOk("main_jit(0) = 21", be.executeNative(mainEntry, 0), 21)
+    stOk("main_jit(100) = 221", be.executeNative(mainEntry, 100), 221)
+
+    // ── 3. 数据段（Phase 2.1）──
+    val db = be.allocateDataMemory(256)
+    var wantDb: Int = 1
+    if (db == 0) { wantDb = 0 }
+    stOk("allocateDataMemory 非零", wantDb, 1)
+    stOk("writeDataSection 返回 8", be.writeDataSection("4200000000000000"), 8)
+    stOk("getDataUsed = 8", be.getDataUsed(), 8)
+    stOk("数据段读回 = 66", Memory.read64(db) as Int, 66)
+    var sepGot: Int = 0
+    if (be.getDataBase() != be.codeBase) { sepGot = 1 }
+    stOk("dataBase 与 codeBase 分离", sepGot, 1)
+
+    println("[INFO] layout: " + be.getJitCodeLayout())
+    println("=== SELFTEST-RESULT pass=" + toStr(stPass) + " fail=" + toStr(stFail) + " ===")
+    if (stFail > 0) {
+        println("=== SELFTEST-FAIL ===")
+    } else {
+        println("=== SELFTEST-ALL-PASS ===")
+    }
+}
+
+fun main(): Int {
+    // P0-2b：堆初始化——必须在任何分配之前（VmRunner 构造即会分配）。
+    Heap.init()
+    // ⚠ .auc 路径在 VmRunner 构造**之前**读取：规避「Env.get 与 VmRunner
+    // 大规模内联共存取值异常」的历史问题面（本宿主为 Photon 原生，
+    // env_get = 真 GetEnvironmentVariableA）。
+    val aucPath: String = Env.get("AURA_VM_AUC", "build/vm/current.auc")
+    val selftest: String = Env.get("AURA_VM_SELFTEST", "")
+
+    if (selftest == "1") {
+        jitSelfTest()
+        if (stFail > 0) {
+            return 1
+        }
+    }
+
+    // 自检后默认只验证 JIT（.auc 与 JIT 自检共享进程内堆/arena，组合
+    // 跑法留待 P5；需要组合时显式 AURA_VM_RUNAUC=1）。
+    if (selftest == "1") {
+        return 0
+    }
+    val vm = VmRunner()
+    vm.loadAucAndRun(aucPath)
+    val err: String = vm.getError()
+    if (err.length > 0) {
+        println("VM-ERROR=" + err)
+        return 1
+    }
+    return vm.getExitCode()
+}

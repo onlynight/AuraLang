@@ -153,7 +153,18 @@ class PhotonSystemLinker {
     }
 
     /// 执行链接器命令，返回退出码。
+    ///
+    /// ⚠️ 2026-10-08 P1-3：`AURA_PHOTON_SKIP_LINK=1` 短路本函数，返回 0
+    /// 而不实际调用 lld-link。JIT 原生验证（scripts/photon/jit-native-verify.ps1）
+    /// 需要「前端只产出 COFF hex、由外部脚本链接并注入 ntdll.lib」的形态——
+    /// 前端管线内部链接会失败（`TokenUtils_keywordLookup` 等前端专用模块的
+    /// 裸符号未导出），把 `===RESULT===` 打成 fail；跳过之后 driver 只负责
+    /// 产出 `===COFF-MAIN===` / `===COFF-RUNTIME===`，linker 步骤交给外部。
     fun runLinker(command: String): Int {
+        if (Env.get("AURA_PHOTON_SKIP_LINK", "") == "1") {
+            println("    [linker] SKIP (AURA_PHOTON_SKIP_LINK=1) cmd=" + command)
+            return 0
+        }
         // 去除尾部空格，避免 cmd.exe /c 解析异常
         var cmd: String = command
         while (cmd.endsWith(" ")) {

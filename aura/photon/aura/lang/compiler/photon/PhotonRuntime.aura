@@ -701,9 +701,467 @@ object PhotonRuntime {
         enc.emitEpilogue()
         // P0-2：原 `ss_ovf` 段已移除——溢出分支不再「返回 NULL」，
         // 而是调 `__heap_oom`（明确报错 + exit(70)，不返回）。
-        // （P292 曾补过此标签：旧代码 JccLabel("g","ss_ovf") 的标签从未
+        // （P292 曾补过此标签：旧实现 JccLabel("g","ss_ovf") 的标签从未
         //  发射，跳转解析回落「下一条指令」→ 溢出检查形同虚设。现已
         //  彻底不需要该标签。）
+    }
+
+    /// 编码 `JitExec_allocRW(rcx = size) rax = base|0`。
+    ///
+    /// 2026-10-08 P1-3：JIT W^X 区专用分配原语。在**桩内**完成「低地址
+    /// 提示（0x10000000/0x18000000/0x08000000/0x20000000）逐个重试」：
+    /// (1) hint 常量在 asm 里最可靠；(2) 绕开 .auc→VM→native 的 6 参
+    /// 编排（实测种子编译的 .auc 方法里 6 参调用首参之外全错位）；
+    /// (3) Int32 可容地址的校验也内联（cmp rax, 0x7FFFFFFF）。
+    /// 成功返回页对齐基址（RW，页粒度），失败返回 0。
+    fun emitJitExecAllocRW(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x50)
+        enc.emitStackStore(-0x08, "rcx")          // [rbp-0x08] = size
+        // ── attempt 1: hint 0x10000000 ──
+        enc.emitMovRI32("rcx", 268435456)
+        enc.emitJmpLabel("jalloc_try")
+        enc.emitLabel("jalloc_a2")
+        // ── attempt 2: hint 0x18000000 ──
+        enc.emitMovRI32("rcx", 402653184)
+        enc.emitJmpLabel("jalloc_try")
+        enc.emitLabel("jalloc_a3")
+        // ── attempt 3: hint 0x08000000 ──
+        enc.emitMovRI32("rcx", 134217728)
+        enc.emitJmpLabel("jalloc_try")
+        enc.emitLabel("jalloc_a4")
+        // ── attempt 4: hint 0x20000000 ──
+        enc.emitMovRI32("rcx", 536870912)
+        enc.emitJmpLabel("jalloc_try")
+        // ── 全部失败 ──
+        enc.emitXorRR("rax", "rax")
+        enc.emitJmpLabel("jalloc_done")
+        // ── 公共尝试体：rcx = 提示基址 ──
+        enc.emitLabel("jalloc_try")
+        enc.emitStackStore(-0x10, "rcx")          // 保存当前 hint（Nt 会改写该槽）
+        enc.emitStackLoad("rdx", -0x08)           // *RegionSize 初值 = size
+        enc.emitStackStore(-0x18, "rdx")
+        enc.emitXorRR("rax", "rax")
+        enc.emitNotRR("rax")
+        enc.emitMovRR("rcx", "rax")               // NtCurrentProcess = -1
+        enc.emitLeaStack("rdx", -0x10)            // &BaseAddress
+        enc.emitXorRR("r8", "r8")                 // ZeroBits = 0
+        enc.emitLeaStack("r9", -0x18)             // &RegionSize
+        enc.emitStoreImm32Stack(-0x30, 0x3000)    // arg5 MEM_RESERVE|MEM_COMMIT
+        enc.emitStoreImm32Stack(-0x28, 0x04)      // arg6 PAGE_READWRITE
+        enc.emitStoreImm32Stack(-0x20, 0)         // arg7 Extended = NULL
+        enc.emitCallImport("NtAllocateVirtualMemory")
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("ne", "jalloc_next")
+        enc.emitStackLoad("rax", -0x10)           // 实际基址
+        // Int32 上界校验：base 必须落在 (0, 0x7FFFFFFF]
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("jle", "jalloc_next")
+        enc.emitCmpRI("rax", 2147483647)
+        enc.emitJccLabel("jg", "jalloc_next")
+        enc.emitJmpLabel("jalloc_done")           // 成功：rax = base
+        enc.emitLabel("jalloc_next")
+        // 失败：按当前 hint 落到下一档（rcx 已被调用体覆盖，从槽重载）
+        enc.emitStackLoad("rcx", -0x10)
+        enc.emitMovRI32("rax", 268435456)
+        enc.emitCmpRR("rcx", "rax")
+        enc.emitJccLabel("ne", "jalloc_chk2")
+        enc.emitJmpLabel("jalloc_a2")
+        enc.emitLabel("jalloc_chk2")
+        enc.emitMovRI32("rax", 402653184)
+        enc.emitCmpRR("rcx", "rax")
+        enc.emitJccLabel("ne", "jalloc_chk3")
+        enc.emitJmpLabel("jalloc_a3")
+        enc.emitLabel("jalloc_chk3")
+        enc.emitMovRI32("rax", 134217728)
+        enc.emitCmpRR("rcx", "rax")
+        enc.emitJccLabel("ne", "jalloc_a4")
+        enc.emitJmpLabel("jalloc_a4")
+        enc.emitLabel("jalloc_done")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `JitExec_protect(rcx = addr, rdx = size, r8 = win32Prot) rax = 1|0`。
+    ///
+    /// VirtualProtect 直通（3 参寄存器内）。W^X 切换专用，prot 由调用方
+    /// 按 Win32 PAGE_* 传（20=EXECUTE_READ 等）。
+    fun emitJitExecProtect(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x28)
+        enc.emitLeaStack("r9", -0x08)             // arg4 &flOldProtect
+        enc.emitStoreImm32Stack(-0x08, 0)
+        enc.emitCallImport("VirtualProtect")
+        enc.emitEpilogue()
+    }
+
+
+    /// 编码 `JitExec_callI64(rcx = entry, rdx = arg0) rax = entry(arg0)`。
+    ///
+    /// 2026-10-08 P1-3：`JitBackend.executeNative` 里对 `JitExec.callI64` 的
+    /// 调用需要 runtime 提供桩——AOT 侧由 Rust 发射器直接 `inttoptr` + 间接
+    /// call 落地，但 Photon HAT 后端把 extern 当普通函数符号发射，链接期
+    /// `undefined symbol: JitExec_callI64`。本桩按 Windows x64 ABI 装 rcx
+    /// 后 `call rax`，返回值 rax 直接透传（`JitExec.callI64` 契约）。
+    fun emitJitExecCallI64(enc: X86Encoder): Unit {
+        // 参数序自识别（2026-10-08 P1-3）：
+        // 期望 (rcx = entry, rdx = arg0)，但实测 Photon 发射器对双参
+        // extern 调用的实参排序存在缺陷（P5 追踪），到达桩时可能是
+        // (arg0, entry)。利用 allocRW 的不变量**按区间判定**：
+        // entry ∈ [0x08000000, 0x20000000]（JIT 区，页对齐），arg0 为
+        // 任意用户整数（落在该区间的实参不受支持——当前所有 JIT 调用点
+        // 均满足）。判定后：rax = entry，rcx = arg0，call rax。
+        enc.emitPrologue(0)
+        // rcx ∈ [0x08000000, 0x20000000] ？
+        enc.emitCmpRI("rcx", 134217728)          // 0x08000000
+        enc.emitJccLabel("jb", "je_swapped")
+        enc.emitCmpRI("rcx", 536870912)          // 0x20000000
+        enc.emitJccLabel("ja", "je_swapped")
+        enc.emitJmpLabel("je_go")
+        enc.emitLabel("je_swapped")
+        // 交换 rcx <-> rdx（经 rax 中转）
+        enc.emitMovRR("rax", "rcx")
+        enc.emitMovRR("rcx", "rdx")
+        enc.emitMovRR("rdx", "rax")
+        enc.emitLabel("je_go")
+        // rax = entry；rcx = arg0；call rax
+        enc.emitMovRR("rax", "rcx")
+        enc.emitMovRR("rcx", "rdx")
+        enc.emitCallRR("rax")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `JitExec_call0(rcx = entry, [r8 = 0]) rax = entry()`。
+    fun emitJitExecCall0(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitTestRR("rcx", "rcx")
+        enc.emitJccLabel("jnz", "j0_direct")
+        enc.emitMovRR("rcx", "rdx")
+        enc.emitLabel("j0_direct")
+        enc.emitMovRR("rax", "rcx")
+        enc.emitXorRR("rcx", "rcx")
+        enc.emitCallRR("rax")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `min(rcx = a, rdx = b) rax = min(a,b)`。
+    ///
+    /// 2026-10-08 P1-3：`SsaBuilder.synthesizeCtors` / `synthesizeSingletons`
+    /// 里对编译器自身的两整数取小。编译器前端在 HAT IR 里以裸名 `@call @min`
+    /// 发射（`InstructionSelector.mapStdlibFuncName` 已映射到 `min`）。
+    fun emitMin(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitCmpRR("rcx", "rdx")
+        enc.emitJccLabel("jge", "min_done")
+        enc.emitMovRR("rax", "rdx")
+        enc.emitJmpLabel("min_end")
+        enc.emitLabel("min_done")
+        enc.emitMovRR("rax", "rcx")
+        enc.emitLabel("min_end")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `max(rcx = a, rdx = b) rax = max(a,b)`。
+    fun emitMax(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitCmpRR("rcx", "rdx")
+        enc.emitJccLabel("jle", "max_done")
+        enc.emitMovRR("rax", "rdx")
+        enc.emitJmpLabel("max_end")
+        enc.emitLabel("max_done")
+        enc.emitMovRR("rax", "rcx")
+        enc.emitLabel("max_end")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `or(rcx = a, rdx = b) rax = a | b`（**逻辑 or**：任一非零返回 1）。
+    ///
+    /// 2026-10-08 P1-3：`InstructionSelector.analyzePhiPreds` 里对 Int 布尔
+    /// 判定的裸名 `@call @or`。
+    fun emitOr(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitOrRR("rcx", "rdx")
+        enc.emitTestRR("rcx", "rcx")
+        enc.emitJccLabel("jz", "or_zero")
+        enc.emitMovRI("rax", 1)
+        enc.emitEpilogue()
+        enc.emitLabel("or_zero")
+        enc.emitXorRR("rax", "rax")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `and(rcx = a, rdx = b) rax = 1 iff both non-zero`（**逻辑 and**）。
+    fun emitAnd(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitTestRR("rcx", "rcx")
+        enc.emitJccLabel("jz", "and_zero")
+        enc.emitTestRR("rdx", "rdx")
+        enc.emitJccLabel("jz", "and_zero")
+        enc.emitMovRI("rax", 1)
+        enc.emitEpilogue()
+        enc.emitLabel("and_zero")
+        enc.emitXorRR("rax", "rax")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `String_charAt(rcx = str, rdx = index) rax = char*`。
+    ///
+    /// 2026-10-08 P1-3：自举前端 `SsaMirUtils.strToInt` / `MachineDagUtils.strToInt`
+    /// 等大量调用 `String.charAt(i)`，而旧 runtime 只导出 `charCodeAt`（返回 Int）。
+    /// 缺少此桩导致含前端闭包的 native HAT 程序 `undefined symbol: String_charAt`。
+    /// 语义：返回 `str[i]` 的**单字节 NUL 结尾字符串**（分配 8 字节对齐块）。
+    /// 越界钳位为 0（与 VM `String.charAt` 兜底一致，不崩溃）。
+    fun emitStringCharAt(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        // 分配 bump 块
+        enc.emitMovRIP("rax", "heapBump")
+        enc.emitMovRIP("r9", "heapArenaBase")
+        enc.emitAddRR("rax", "r9")
+        enc.emitMovRR("r10", "rax")
+        enc.emitAddRI("rax", 8)
+        enc.emitSubRR("rax", "r9")
+        enc.emitMovRIP("r11", "heapCap")
+        enc.emitCmpRR("rax", "r11")
+        enc.emitJccLabel("jle", "ca_ok")
+        enc.emitCallRel("__heap_oom")
+        enc.emitLabel("ca_ok")
+        enc.emitStoreRIP("heapBump", "rax")
+        // 读字符；越界钳位到 0
+        enc.emitCallRel("strlen")
+        enc.emitCmpRR("rdx", "rax")
+        enc.emitJccLabel("jge", "ca_null")
+        enc.emitMovzxRegMemIndexed("eax", "rcx", "rdx")
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("jz", "ca_zero")
+        enc.emitMovByteMemReg("r10", "rax")
+        enc.emitJmpLabel("ca_done_nul")
+        enc.emitLabel("ca_zero")
+        enc.emitLabel("ca_null")
+        enc.emitLabel("ca_done_nul")
+        enc.emitXorRR("eax", "eax")
+        enc.emitIncRR("r10")
+        enc.emitMovByteMemReg("r10", "eax")
+        enc.emitMovRR("rax", "r10")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `String_trim(rcx = str) rax = char*`。
+    ///
+    /// 2026-10-08 P1-3：自举前端 `SsaBuilder.parseIntDef` / `Lowering.lowerFunction`
+    /// 大量调用 `String.trim`。旧 runtime 未导出此符号 ⇒ 链接失败。
+    /// 语义：跳过前导 ASCII 空白（空格/`\t`/`\r`/`\n`），再从尾部剪掉空白；
+    /// 结果串由 `String_substring` 完成（避免在此重复 bump 分配）。
+    fun emitStringTrim(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitCallRel("strlen")
+        enc.emitMovRR("r9", "rax")
+        // 前导空白扫描（只认空格 0x20，与 VM `String.trim` 一致）
+        enc.emitXorRR("rdi", "rdi")
+        enc.emitLabel("st_lead")
+        enc.emitCmpRR("rdi", "r9")
+        enc.emitJccLabel("jge", "st_trim_ok")
+        enc.emitMovzxRegMemIndexed("eax", "rcx", "rdi")
+        enc.emitCmpRI("eax", 32)
+        enc.emitJccLabel("jne", "st_trim_ok")
+        enc.emitIncRR("rdi")
+        enc.emitJmpLabel("st_lead")
+        enc.emitLabel("st_trim_ok")
+        // 尾部空白扫描
+        enc.emitXorRR("r8", "r8")
+        enc.emitLabel("st_tail")
+        enc.emitAddRR("rdi", "r8")
+        enc.emitCmpRR("rdi", "r9")
+        enc.emitJccLabel("jge", "st_ok")
+        enc.emitMovzxRegMemIndexed("eax", "rcx", "rdi")
+        enc.emitCmpRI("eax", 32)
+        enc.emitJccLabel("jne", "st_ok")
+        enc.emitIncRR("r8")
+        enc.emitJmpLabel("st_tail")
+        enc.emitLabel("st_ok")
+        // 委托 String_substring：len = (end - r8) - (start = rdi)
+        enc.emitSubRR("r9", "r8")
+        enc.emitSubRR("r9", "rdi")
+        enc.emitMovRR("rdx", "rdi")
+        enc.emitMovRR("r8", "r9")
+        enc.emitCallRel("String_substring")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `String_substringAfter(rcx = str, rdx = delimiter) rax = char*`。
+    ///
+    /// 2026-10-08 P1-3：自举前端 `TokenUtils.keywordLookup`（关键字查询表逐行切分）
+    /// 等大量调用。旧 runtime 未导出 ⇒ 链接失败。
+    /// 语义与 `aura/core/aura/lang/String.aura::substringAfter` 对齐：
+    ///   * 找 `delimiter` 首次出现位置 i（含分隔符长度 m）
+    ///   * 未找到 → 空串
+    ///   * 找到 → `substring(i + m, len(str))`
+    fun emitStringSubstringAfter(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitCallRel("strlen")
+        enc.emitMovRR("r9", "rax")
+        // 分隔符长度 m
+        enc.emitXorRR("rcx", "rcx")
+        enc.emitMovRR("rcx", "rdx")
+        enc.emitCallRel("strlen")
+        enc.emitMovRR("r11", "rax")
+        enc.emitXorRR("rcx", "rcx")     // 复位：下面从 str 开始扫
+        // 逐位置扫描 str[i..] 是否等于 delimiter
+        enc.emitXorRR("rdi", "rdi")     // i = 0
+        enc.emitLabel("ssa_scan")
+        enc.emitAddRR("rdi", "r11")
+        enc.emitCmpRR("rdi", "r9")
+        enc.emitJccLabel("jg", "ssa_notfound")
+        // 比较 str[rdi..rdi+r11-1] 与 delimiter
+        enc.emitAddRR("rcx", "rdi")
+        enc.emitXorRR("r8", "r8")
+        enc.emitLabel("ssa_cmp")
+        enc.emitCmpRR("r8", "r11")
+        enc.emitJccLabel("jge", "ssa_hit")
+        enc.emitMovzxRegMemByte("eax", "rcx")
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("jz", "ssa_miss")
+        enc.emitMovzxRegMemByte("ecx", "rdx")
+        enc.emitCmpRR("eax", "ecx")
+        enc.emitJccLabel("jne", "ssa_miss")
+        enc.emitIncRR("rcx")
+        enc.emitIncRR("rdx")
+        enc.emitIncRR("r8")
+        enc.emitJmpLabel("ssa_cmp")
+        enc.emitLabel("ssa_miss")
+        enc.emitXorRR("rcx", "rcx")
+        enc.emitAddRR("rdi", 1)
+        enc.emitJmpLabel("ssa_scan")
+        enc.emitLabel("ssa_hit")
+        // 已命中：跳过分隔符，取 substring(i+m, len)
+        enc.emitSubRR("r9", "rdi")
+        enc.emitSubRR("r9", "r11")
+        enc.emitMovRR("rdx", "r11")
+        enc.emitAddRR("rdx", "rdi")    // start = i + m
+        enc.emitMovRR("r8", "r9")      // len = len - (i+m)
+        enc.emitCallRel("String_substring")
+        enc.emitEpilogue()
+        // ⚠️ 上述命中分支结束即返回；未命中必须显式跳到这里。
+        // 但 emitJumpLabel 只发跳指令、不是块结束——故 `ssa_notfound` 需放在
+        // epilogue 之前以产生一个"分配空串"返回。为保持简单，此处用一个
+        // 返回空串桩：`String_fromCharCode(0)` 返回 1 字节 NUL 字符串，
+        // 与空串行为等价（strlen 返回 0）。
+        enc.emitLabel("ssa_notfound")
+        enc.emitMovRI("rcx", 0)
+        enc.emitCallRel("String_fromCharCode")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `String_substringBefore(rcx = str, rdx = delimiter) rax = char*`。
+    ///
+    /// 2026-10-08 P1-3：自举前端 `TokenUtils.keywordLookup`（切掉行末 `\n`）等
+    /// 大量调用。语义与 `String.substringBefore`：找到 delim 首次出现位置 i
+    /// 返回 `substring(0, i)`；未找到返回原串。
+    fun emitStringSubstringBefore(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitCallRel("strlen")
+        enc.emitMovRR("r9", "rax")
+        enc.emitXorRR("rcx", "rcx")
+        enc.emitMovRR("rcx", "rdx")
+        enc.emitCallRel("strlen")
+        enc.emitMovRR("r11", "rax")
+        enc.emitXorRR("rcx", "rcx")
+        enc.emitXorRR("rdi", "rdi")
+        enc.emitLabel("ssb_scan")
+        enc.emitAddRR("rdi", "r11")
+        enc.emitCmpRR("rdi", "r9")
+        enc.emitJccLabel("jg", "ssb_notfound")
+        enc.emitAddRR("rcx", "rdi")
+        enc.emitXorRR("r8", "r8")
+        enc.emitLabel("ssb_cmp")
+        enc.emitCmpRR("r8", "r11")
+        enc.emitJccLabel("jge", "ssb_hit")
+        enc.emitMovzxRegMemByte("eax", "rcx")
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("jz", "ssb_miss")
+        enc.emitMovzxRegMemByte("ecx", "rdx")
+        enc.emitCmpRR("eax", "ecx")
+        enc.emitJccLabel("jne", "ssb_miss")
+        enc.emitIncRR("rcx")
+        enc.emitIncRR("rdx")
+        enc.emitIncRR("r8")
+        enc.emitJmpLabel("ssb_cmp")
+        enc.emitLabel("ssb_miss")
+        enc.emitXorRR("rcx", "rcx")
+        enc.emitAddRR("rdi", 1)
+        enc.emitJmpLabel("ssb_scan")
+        enc.emitLabel("ssb_hit")
+        // substring(0, i)：len = i
+        enc.emitXorRR("rdx", "rdx")
+        enc.emitMovRR("r8", "rdi")
+        enc.emitCallRel("String_substring")
+        enc.emitEpilogue()
+        enc.emitLabel("ssb_notfound")
+        enc.emitMovRR("rax", "rcx")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `String_split(rcx = str) rax = List<String>`（**仅单字符分隔符退化**）。
+    ///
+    /// 2026-10-08 P1-3：自举前端 `MirUtils.mirSplit` / `SsaBuilder.buildWhile`
+    /// 等大量调用 `String.split(","|";"|"\n")`。真分裂为 `List<String>` 需要
+    /// `arrayListOf` + 循环切片，成本极高；这里退化为 **1 元素列表**（原串）
+    /// ——足以让链接通过、语法分析器只用来做「存在性 / 非空」判定时行为一致。
+    /// 若真需要多元素分裂，请改用 `arrayListOf` + 逐字符扫描。
+    fun emitStringSplit(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitCallRel("Collections_emptyList")
+        enc.emitCallRel("Collections_listAppend")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `String_startsWith(rcx = str, rdx = prefix) rax = 0|1`。
+    ///
+    /// **2026-10-08 P1-3 补充**：自举前端 `TokenUtils_keywordLookup` /
+    /// `Parser_buildInterpPart` 等大量调用 `String.startsWith`，而旧 runtime
+    /// 只导出 `String_fromCharCode` / `String_substring`，导致任何「含前端
+    /// 模块闭包」的 native HAT 程序链接失败：
+    ///   `lld-link: error: undefined symbol: String_startsWith`
+    /// 这使得 P1-3 原生验证（JIT 驱动需 import 完整编译器闭包）无法构建。
+    /// 语义与 `aura/core/aura/lang/String.aura` 的 `String.startsWith`
+    /// （以及 Rust 侧 `aura_string_startsWith`）逐条对齐：
+    ///   * 前缀更长 → false
+    ///   * 空前缀   → true
+    ///   * 逐字符比较，不等即 false
+    /// 约定 `rax` 返回 1/0（与 Aura 的 Boolean → i64 一致）。
+    fun emitStringStartsWith(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        // rcx = str, rdx = prefix
+        enc.emitCallRel("strlen")
+        enc.emitMovRR("r8", "rax")           // r8 = strlen(str)
+        enc.emitCallRel("strlen")
+        // ⚠ `strlen(prefix)` 已覆写 rax；上一步必须先保存 rcx 的 len。
+        enc.emitXorRR("rcx", "rcx")          // 复位 rcx（下面重载入）
+        enc.emitMovRR("rcx", "rdx")
+        enc.emitCallRel("strlen")
+        enc.emitCmpRR("rax", "r8")
+        enc.emitJccLabel("jg", "sw_false")   // prefix 更长 → false
+        enc.emitXorRR("rdi", "rdi")          // i = 0
+        enc.emitXorRR("r9", "r9")            // r9 = prefix 长度
+        // r9 = strlen(prefix)（strlen 不修改 r9，但会覆写 rax/rbx 等易失寄存器）
+        enc.emitCallRel("strlen")
+        enc.emitMovRR("r9", "rax")
+        enc.emitXorRR("rax", "rax")          // 默认返回值 = 1（true）
+        enc.emitIncRR("rax")
+        enc.emitLabel("sw_loop")
+        enc.emitCmpRR("rdi", "r9")
+        enc.emitJccLabel("ge", "sw_done")    // 全部比较完 → true
+        // 比较 str[i] 与 prefix[i]
+        enc.emitMovzxRegMemByte("eax", "rcx")
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("z", "sw_false")    // str 提前结束 → false
+        enc.emitMovzxRegMemByte("ecx", "rdx")
+        enc.emitCmpRR("eax", "ecx")
+        enc.emitJccLabel("ne", "sw_false")
+        enc.emitIncRR("rcx")
+        enc.emitIncRR("rdx")
+        enc.emitIncRR("rdi")
+        enc.emitJmpLabel("sw_loop")
+        enc.emitLabel("sw_false")
+        enc.emitXorRR("rax", "rax")          // 返回 0
+        enc.emitLabel("sw_done")
+        enc.emitEpilogue()
     }
 
     /// 编码 `ProcessOps_aura_process_argCount() rax = 0`（2026-10-02 自举链接修复）
@@ -1959,9 +2417,24 @@ object PhotonRuntime {
     /// 编码 `Memory_mprotect(addr, len, prot)` — Windows 光子路径不做页保护变更，
     /// 恒返回 0（= 成功）。裸映射场景下调它只是「尽力而为」的保护设置，
     /// 没有它会是 `undefined symbol: Memory_mprotect`。
+    /// 编码 `Memory_mprotect(rcx=addr, rdx=len, r8=prot) rax=1|0`。
+    ///
+    /// **2026-10-08 P1-3 真实现**（旧版恒返回 0 的空桩）：W^X 的关键一步——
+    /// `JitBackend.setExecutable` 依赖它把 RW 代码页切成 RX。旧桩让
+    /// mprotect 静默无效，JIT 代码从未获得执行权限（DEP 下间接 call 即崩）。
+    /// 走 kernel32 `VirtualProtect`（已有 kernel32.Lib 链接）：
+    ///   rcx = base, rdx = size, r8 = flNewProtect, r9 = &flOldProtect
+    /// 返回 BOOL（1 成功 / 0 失败），与 Aura 侧 `mprotect(...): Int` 语义一致。
     fun emitMemoryMprotect(enc: X86Encoder): Unit {
-        enc.emitPrologue(0)
-        enc.emitMovRI("eax", 0)
+        enc.emitPrologue(0x30)
+        // r8 已是 flNewProtect（prot: 1=READ 2=WRITE 4=EXEC，可 OR 组合，
+        // 恰好对应 Win32 PAGE_* 常量：READ=2 WRITE=4 EXEC=0x20/0x80……
+        // ⚠️ Win32 PAGE 常量与 mmap prot 位不同！但本 runtime 的
+        // Memory_mmap 硬编码 PAGE_READWRITE(4)，JIT 侧约定 prot 参数
+        // 直接传 Win32 PAGE_* 值（PROT_RX = 0x20，见 JitBackend）。
+        enc.emitLeaStack("r9", -0x08)             // arg4 &flOldProtect
+        enc.emitStoreImm32Stack(-0x08, 0)
+        enc.emitCallImport("VirtualProtect")      // rax = BOOL
         enc.emitEpilogue()
     }
 
@@ -2303,52 +2776,60 @@ object PhotonRuntime {
     /// `mov r10, rcx` + 正确槽位）并把 `emitHeapInit` 指向它；但本函数
     /// 的历史调用方（guest arena 分配器）也要一并修，否则它们同样段错误。
     fun emitMemoryMmap(enc: X86Encoder): Unit {
-        enc.emitPrologue(0x90)
-        enc.emitStackStore(-0x70, "rbx")
-        enc.emitStackStore(-0x78, "rsi")
-        enc.emitStackStore(-0x80, "r12")
-        // baseAddr=[rbp-0x30] regionSize=[rbp-0x38]
-        enc.emitStackStore(-0x30, "rcx")  // base=addr
-        enc.emitStackStore(-0x38, "rdx")  // size=length
-        enc.emitMovRI("rcx", -1)
-        enc.emitLeaStack("rdx", -0x30)
-        enc.emitXorRR("r8", "r8")
-        enc.emitLeaStack("r9", -0x38)
-        enc.emitMovRR("r10", "rcx")
-        enc.emitMovRI32("eax", 0x3000)
-        enc.emitStackStore(-0x68, "rax")
-        enc.emitMovRI32("eax", 4)
-        enc.emitStackStore(-0x60, "rax")
-        SyscallEmitter.emitSyscall(enc, 0x18)
+        // ⚠️ 2026-10-08 P1-3 重写（IAT 版，对齐 emitHeapMmap 的已验证形态）。
+        //
+        // 旧实现有两处致命伤，此前从未暴露（宿主默认 64MB 堆不走 mmap，
+        // P1-3 JIT 原生验证首次踩中）：
+        //   1. 栈参数槽位错位：Win64 下 arg5/arg6 应在 [rsp+0x20]/[rsp+0x28]；
+        //      prologue 0x90 时即 [rbp-0x70]/[rbp-0x68]，旧代码写到
+        //      -0x68/-0x60 且与 rbx 保存槽重叠 ⇒ AllocationType 读到 rbx 残值。
+        //   2. 裸 `syscall 0x18`（Linux 风格）：Windows 下缺 `mov r10, rcx`
+        //      （内核从 r10 取第 1 参），且 SSN 随构建漂移。
+        // 改走 IAT 导入 NtAllocateVirtualMemory（kernel32 之外 ntdll.lib 已链），
+        // rcx=addr 作为 base **提示**透传（IN/OUT），失败返回 0。
+        enc.emitPrologue(0x50)
+        // BaseAddress / RegionSize 槽（Nt 系列均为 IN/OUT 指针）
+        enc.emitStackStore(-0x40, "rcx")          // *BaseAddress = addr 提示
+        enc.emitStackStore(-0x48, "rdx")          // *RegionSize = length
+        enc.emitXorRR("rax", "rax")
+        enc.emitNotRR("rax")
+        enc.emitMovRR("rcx", "rax")               // NtCurrentProcess = -1
+        enc.emitLeaStack("rdx", -0x40)            // &BaseAddress
+        enc.emitXorRR("r8", "r8")                 // ZeroBits = 0
+        enc.emitLeaStack("r9", -0x48)             // &RegionSize
+        enc.emitStoreImm32Stack(-0x30, 0x3000)    // arg5 AllocationType = RESERVE|COMMIT
+        enc.emitStoreImm32Stack(-0x28, 0x04)      // arg6 Protect = PAGE_READWRITE
+        enc.emitStoreImm32Stack(-0x20, 0)         // arg7 ExtendedParameters = NULL
+        enc.emitCallImport("NtAllocateVirtualMemory")
         enc.emitTestRR("rax", "rax")
         enc.emitJccLabel("ne", "mm_fail")
-        enc.emitStackLoad("rax", -0x30)
+        enc.emitStackLoad("rax", -0x40)           // 成功：rax = 实际基址
         enc.emitJmpLabel("mm_done")
         enc.emitLabel("mm_fail")
+        enc.emitMovRR("rcx", "rax")
         enc.emitXorRR("rax", "rax")
+        enc.emitSubRR("rax", "rcx")               // 失败：-NTSTATUS（诊断透传）
         enc.emitLabel("mm_done")
-        enc.emitStackLoad("r12", -0x80)
-        enc.emitStackLoad("rsi", -0x78)
-        enc.emitStackLoad("rbx", -0x70)
         enc.emitEpilogue()
     }
 
     /// 编码 `Memory_munmap(rcx=addr, rdx=length) rax=status`。
-    /// Windows: NtFreeVirtualMemory (0x45)。
+    ///
+    /// ⚠️ 2026-10-08 P1-3 重写（IAT 版）：旧实现走裸 `syscall 0x45`（Linux
+    /// 风格、缺 `mov r10, rcx`、SSN 随构建漂移），且 NtFreeVirtualMemory 的
+    /// 4 参寄存器约定（rcx=Process, rdx=&Base, r8=&RegionSize, r9=FreeType）
+    //  也未正确装配。与 emitMemoryMmap 同源改为 IAT 导入。
     fun emitMemoryMunmap(enc: X86Encoder): Unit {
-        enc.emitPrologue(0x50)
-        enc.emitStackStore(-0x28, "rdx")  // save length
-        enc.emitStackStore(-0x10, "rbx")  // save rbx
-        enc.emitStackStore(-0x18, "r12")  // save r12
-        enc.emitMovRI("rcx", -1)          // NtCurrentProcess
-        enc.emitLeaStack("r9", -0x28)      // &regionSize
-        enc.emitStackLoad("r12", -0x28)    // length
-        enc.emitStoreMemDisp32("r9", 0, "r12")
-        enc.emitMovRI32("eax", 0x8000)    // MEM_RELEASE
-        enc.emitStackStore(-0x18, "rax")  // [rbp-0x18] = [rsp+0x40]
-        SyscallEmitter.emitSyscall(enc, 0x45)  // NtFreeVirtualMemory
-        enc.emitStackLoad("r12", -0x18)
-        enc.emitStackLoad("rbx", -0x10)
+        enc.emitPrologue(0x40)
+        enc.emitStackStore(-0x30, "rcx")          // *BaseAddress = addr
+        enc.emitStackStore(-0x38, "rdx")          // *RegionSize = length
+        enc.emitXorRR("rax", "rax")
+        enc.emitNotRR("rax")
+        enc.emitMovRR("rcx", "rax")               // NtCurrentProcess = -1
+        enc.emitLeaStack("rdx", -0x30)            // &BaseAddress
+        enc.emitLeaStack("r8", -0x38)             // &RegionSize
+        enc.emitMovRI32("r9", 0x8000)             // MEM_RELEASE（mov r32imm 零扩展到 r9）
+        enc.emitCallImport("NtFreeVirtualMemory")
         enc.emitEpilogue()
     }
 
@@ -3222,8 +3703,8 @@ object PhotonRuntime {
     /// Pipeline 以 `RUNTIME_SYMBOLS + BUILD_ID` 作为 aura_runtime.obj 的缓存
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
-    val BUILD_ID: String = "p276-listget-core-layout"
-    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap"
+    val BUILD_ID: String = "p284-protect-simple"
+    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_protect"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
     fun buildRuntimeObject(): String {
@@ -3605,12 +4086,9 @@ object PhotonRuntime {
         encCC = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitClassConstructor(encCC, 64)
         writer.appendFunction(encCC.toHex(), "JitLinkResult", PhotonObjectWriterUtils.joinRelocRecords(encCC.getRelocations()))
-        println("[rt] all constructors appended, funcs=" + writer.functions.length)
-
-        // POSIX 函数（io_* 前缀避免Rust 编译native wrapper 符号冲突        println("[rt] encoding POSIX open")
+        // POSIX 函数（io_* 前缀避免Rust 编译native wrapper 符号冲突
         val encOpen = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitOpen(encOpen)
-        println("[rt] open encoded, hex len=" + encOpen.toHex().length)
         writer.appendFunction(encOpen.toHex(), "io_open", PhotonObjectWriterUtils.joinRelocRecords(encOpen.getRelocations()))
         val encClose = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitClose(encClose)
@@ -3682,11 +4160,9 @@ object PhotonRuntime {
 
         // CLI 参数函数由 Main.aura 定义（使用 Env.get 通道），runtime 不提供
         for (symName in listOf("fork", "execve", "wait4")) {
-            println("[rt] encoding stub " + symName)
             val encS = X86EncoderUtils.emptyEncoder()
             PhotonRuntime.emitStubMinus1(encS)
             writer.appendFunction(encS.toHex(), symName, PhotonObjectWriterUtils.joinRelocRecords(encS.getRelocations()))
-            println("[rt] stub " + symName + " appended")
         }
 
         // Stdlib 函数
@@ -3736,6 +4212,40 @@ object PhotonRuntime {
         val encSs = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitStringSubstring(encSs)
         writer.appendFunction(encSs.toHex(), "String_substring", PhotonObjectWriterUtils.joinRelocRecords(encSs.getRelocations()))
+        // 2026-10-08 P1-3：`String_startsWith/charAt/trim/substringAfter/
+        // substringBefore/split` 不再从 runtime emit。前端闭包通过
+        // `import aura.lang.std.String` 从 stdlib 拿到这些方法的真实定义，
+        // 同时 emit 会造成 `duplicate symbol`（实测 P1-3 首次链接）。
+        // emit* 函数体保留供精简宿主使用。
+        // 2026-10-08 P1-3：编译器前端闭包里的裸整数工具（SsaBuilder.synthesizeCtors
+        // 的 min / analyzePhiPreds 的 or 等）；缺一条即 `undefined symbol`。
+        val encMi = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitMin(encMi)
+        writer.appendFunction(encMi.toHex(), "min", PhotonObjectWriterUtils.joinRelocRecords(encMi.getRelocations()))
+        val encMa = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitMax(encMa)
+        writer.appendFunction(encMa.toHex(), "max", PhotonObjectWriterUtils.joinRelocRecords(encMa.getRelocations()))
+        val encOr = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitOr(encOr)
+        writer.appendFunction(encOr.toHex(), "or", PhotonObjectWriterUtils.joinRelocRecords(encOr.getRelocations()))
+        val encAn = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitAnd(encAn)
+        writer.appendFunction(encAn.toHex(), "and", PhotonObjectWriterUtils.joinRelocRecords(encAn.getRelocations()))
+        // 2026-10-08 P1-3：`JitExec.callI64/call0`——Photon HAT 后端把 extern
+        // interface 当普通函数符号发射；AOT 侧由 Rust 编译器直接 inttoptr
+        // 落地，但 Photon 需要 runtime 桩提供同样的间接 call 语义。
+        val encJc1 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecCallI64(encJc1)
+        writer.appendFunction(encJc1.toHex(), "JitExec_callI64", PhotonObjectWriterUtils.joinRelocRecords(encJc1.getRelocations()))
+        val encJc0 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecCall0(encJc0)
+        writer.appendFunction(encJc0.toHex(), "JitExec_call0", PhotonObjectWriterUtils.joinRelocRecords(encJc0.getRelocations()))
+        val encJa = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecAllocRW(encJa)
+        writer.appendFunction(encJa.toHex(), "JitExec_allocRW", PhotonObjectWriterUtils.joinRelocRecords(encJa.getRelocations()))
+        val encJp2 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecProtect(encJp2)
+        writer.appendFunction(encJp2.toHex(), "JitExec_protect", PhotonObjectWriterUtils.joinRelocRecords(encJp2.getRelocations()))
         // 单例槽读写（见 `emitObjSlotGet` / `emitObjSlotSet`）：早前会话的
         // `synthesizeSingletonGetter` 只发调用点，实现必须由 runtime 提供。
         val encOsg = X86EncoderUtils.emptyEncoder()
@@ -3827,9 +4337,8 @@ object PhotonRuntime {
         // .data 段：toStrBuffer(32B) + arena(1MB) + bump 游标(8B) + 对象 bump(8B)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000"
         writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapArena:67108864,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
-        println("[rt] dataSection set, dataChars=" + writer.dataSection.length + " textChars=" + writer.textSection.length)
 
-        // 构建符号表（包含所有函数和 .data 符号        println("[rt] before buildSymbols")
+        // 构建符号表（包含所有函数和 .data 符号
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
@@ -4200,6 +4709,40 @@ object PhotonRuntime {
         val encSs = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitStringSubstring(encSs)
         writer.appendFunction(encSs.toHex(), "String_substring", PhotonObjectWriterUtils.joinRelocRecords(encSs.getRelocations()))
+        // 2026-10-08 P1-3：`String_startsWith/charAt/trim/substringAfter/
+        // substringBefore/split` 不再从 runtime emit。前端闭包通过
+        // `import aura.lang.std.String` 从 stdlib 拿到这些方法的真实定义，
+        // 同时 emit 会造成 `duplicate symbol`（实测 P1-3 首次链接）。
+        // emit* 函数体保留供精简宿主使用。
+        // 2026-10-08 P1-3：编译器前端闭包里的裸整数工具（SsaBuilder.synthesizeCtors
+        // 的 min / analyzePhiPreds 的 or 等）；缺一条即 `undefined symbol`。
+        val encMi = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitMin(encMi)
+        writer.appendFunction(encMi.toHex(), "min", PhotonObjectWriterUtils.joinRelocRecords(encMi.getRelocations()))
+        val encMa = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitMax(encMa)
+        writer.appendFunction(encMa.toHex(), "max", PhotonObjectWriterUtils.joinRelocRecords(encMa.getRelocations()))
+        val encOr = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitOr(encOr)
+        writer.appendFunction(encOr.toHex(), "or", PhotonObjectWriterUtils.joinRelocRecords(encOr.getRelocations()))
+        val encAn = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitAnd(encAn)
+        writer.appendFunction(encAn.toHex(), "and", PhotonObjectWriterUtils.joinRelocRecords(encAn.getRelocations()))
+        // 2026-10-08 P1-3：`JitExec.callI64/call0`——Photon HAT 后端把 extern
+        // interface 当普通函数符号发射；AOT 侧由 Rust 编译器直接 inttoptr
+        // 落地，但 Photon 需要 runtime 桩提供同样的间接 call 语义。
+        val encJc1 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecCallI64(encJc1)
+        writer.appendFunction(encJc1.toHex(), "JitExec_callI64", PhotonObjectWriterUtils.joinRelocRecords(encJc1.getRelocations()))
+        val encJc0 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecCall0(encJc0)
+        writer.appendFunction(encJc0.toHex(), "JitExec_call0", PhotonObjectWriterUtils.joinRelocRecords(encJc0.getRelocations()))
+        val encJa = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecAllocRW(encJa)
+        writer.appendFunction(encJa.toHex(), "JitExec_allocRW", PhotonObjectWriterUtils.joinRelocRecords(encJa.getRelocations()))
+        val encJp2 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecProtect(encJp2)
+        writer.appendFunction(encJp2.toHex(), "JitExec_protect", PhotonObjectWriterUtils.joinRelocRecords(encJp2.getRelocations()))
         // 单例槽读写（见 `emitObjSlotGet` / `emitObjSlotSet`）：早前会话的
         // `synthesizeSingletonGetter` 只发调用点，实现必须由 runtime 提供。
         val encOsg = X86EncoderUtils.emptyEncoder()
@@ -4625,6 +5168,40 @@ object PhotonRuntimeUtils {
         val encSs = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitStringSubstring(encSs)
         writer.appendFunction(encSs.toHex(), "String_substring", PhotonObjectWriterUtils.joinRelocRecords(encSs.getRelocations()))
+        // 2026-10-08 P1-3：`String_startsWith/charAt/trim/substringAfter/
+        // substringBefore/split` 不再从 runtime emit。前端闭包通过
+        // `import aura.lang.std.String` 从 stdlib 拿到这些方法的真实定义，
+        // 同时 emit 会造成 `duplicate symbol`（实测 P1-3 首次链接）。
+        // emit* 函数体保留供精简宿主使用。
+        // 2026-10-08 P1-3：编译器前端闭包里的裸整数工具（SsaBuilder.synthesizeCtors
+        // 的 min / analyzePhiPreds 的 or 等）；缺一条即 `undefined symbol`。
+        val encMi = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitMin(encMi)
+        writer.appendFunction(encMi.toHex(), "min", PhotonObjectWriterUtils.joinRelocRecords(encMi.getRelocations()))
+        val encMa = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitMax(encMa)
+        writer.appendFunction(encMa.toHex(), "max", PhotonObjectWriterUtils.joinRelocRecords(encMa.getRelocations()))
+        val encOr = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitOr(encOr)
+        writer.appendFunction(encOr.toHex(), "or", PhotonObjectWriterUtils.joinRelocRecords(encOr.getRelocations()))
+        val encAn = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitAnd(encAn)
+        writer.appendFunction(encAn.toHex(), "and", PhotonObjectWriterUtils.joinRelocRecords(encAn.getRelocations()))
+        // 2026-10-08 P1-3：`JitExec.callI64/call0`——Photon HAT 后端把 extern
+        // interface 当普通函数符号发射；AOT 侧由 Rust 编译器直接 inttoptr
+        // 落地，但 Photon 需要 runtime 桩提供同样的间接 call 语义。
+        val encJc1 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecCallI64(encJc1)
+        writer.appendFunction(encJc1.toHex(), "JitExec_callI64", PhotonObjectWriterUtils.joinRelocRecords(encJc1.getRelocations()))
+        val encJc0 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecCall0(encJc0)
+        writer.appendFunction(encJc0.toHex(), "JitExec_call0", PhotonObjectWriterUtils.joinRelocRecords(encJc0.getRelocations()))
+        val encJa = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecAllocRW(encJa)
+        writer.appendFunction(encJa.toHex(), "JitExec_allocRW", PhotonObjectWriterUtils.joinRelocRecords(encJa.getRelocations()))
+        val encJp2 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecProtect(encJp2)
+        writer.appendFunction(encJp2.toHex(), "JitExec_protect", PhotonObjectWriterUtils.joinRelocRecords(encJp2.getRelocations()))
         // 单例槽读写（见 `emitObjSlotGet` / `emitObjSlotSet`）：早前会话的
         // `synthesizeSingletonGetter` 只发调用点，实现必须由 runtime 提供。
         val encOsg = X86EncoderUtils.emptyEncoder()

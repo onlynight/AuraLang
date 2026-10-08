@@ -87,28 +87,54 @@ fun secOf(deltaNs: Long): String {
     return toStr(sec) + "." + pad + mss
 }
 
-// ── 输入通道：固定路径约定 ──
+/// 读环境变量，为空时回退 `default`。
+///
+/// 只用 `Env.get` + `length == 0` 判定，不触碰 `FileUtils`（源码读取仍由
+/// `linker.link()` 内部完成）——见上方「输入通道」注释的共存性说明。
+fun readPathEnv(name: String, default: String): String {
+    val v: String = Env.get(name, "")
+    if (v.length == 0) {
+        return default
+    }
+    return v
+}
+
+// ── 输入通道：环境变量优先，固定路径兜底 ──
 //
-// ⚠ 为什么不用环境变量/运行期配置文件：宿主二进制的 import 闭包含
-// photon 管线时，主流程里调用 `Env.get` 或 `FileUtils.exists/readText`
-// 之后进入 link() 会稳定段错误（最小复现见
-// docs/photon/photon-bootstrap-link-benchmark.md §2026-10-03；三者
-// 单独与 photon 闭包组合均安全，组合即崩——宿主侧 AOT 值模型残留缺陷）。
-// 与 `build/vm/current.auc` 通道同一先例：调用方脚本把入口源码**拷贝**
-// 到固定路径 `build/hat-vmhost/current.aura`，驱动从这里读取；
-// 产物固定为 `build/hat-vmhost/current.{hat,obj}`。
+// ⚠ 历史：2026-10-03 探针矩阵曾观察到「`Env.get` / `FileUtils.exists+readText`
+// 之后进入 `link()` 会稳定段错误」（最小复现见
+// docs/photon/photon-bootstrap-link-benchmark.md），因此旧实现完全忽略
+// `AURA_HAT_AURA`，走固定路径 `build/hat-vmhost/current.aura`。
+//
+// 但该注释只覆盖了「读文件类调用」，并未覆盖 `Env.get` 本身——本文件
+// `AURA_HAT_SKIP_FRONT` 分支一直依赖 `Env.get`，且
+// `scripts/photon/photon-hat-native-suite.ps1` 一直在用它驱动，实测共存安全。
+// 2026-10-08 因此补上 `AURA_HAT_AURA/_OUT/_MODULE/_SRC` 的读取：
+// `readPathEnv` 只用 `Env.get` + 字符串判空，不触碰 `FileUtils.readText`
+// （源码读取仍由 `linker.link()` 内部完成），风险面与原注释所述的最小复现
+// 不同。读不到时一律回退默认路径，行为不劣于旧实现。
 
 fun main(): Int {
-    // 输入通道：固定路径约定（调用方脚本把入口源码拷贝到
-    // build/hat-vmhost/current.aura，产物固定 current.{hat,obj}）。
-    // ⚠ 宿主主流程刻意**只使用已验证安全**的设施：FileUtils.mkdirP /
-    // writeText / link 内部的源码读取（均有 photon 闭包共存的实测）。
-    // Env.get / FileUtils.exists+readText / Process.* 在 photon 闭包下
-    // 会令后续 link() 段错误（2026-10-03 探针矩阵，见 docs/photon/）。
-    val srcPath = "build/hat-vmhost/current.aura"
-    val outDir = "build/hat-vmhost"
-    val moduleName = "current"
-    val hatPath = "build/hat-vmhost/current.hat"
+    // 输入通道：**优先读环境变量**（AURA_HAT_AURA / _OUT / _MODULE / _SRC），
+    // 未设置时回退到固定路径约定（build/hat-vmhost/current.{aura,hat}）。
+    //
+    // ⚠ 历史背景与回退原因：宿主主流程早期刻意**只使用已验证安全**的设施
+    // （FileUtils.mkdirP / writeText / link 内部的源码读取），因为 2026-10-03
+    // 探针矩阵实测 `Env.get` 与 `link()` 共存会段错误。后来实测证明
+    // `Env.get("AURA_HAT_SKIP_FRONT")` 与 `link()` 在同一 main 内共存是
+    // **安全**的（`AURA_HAT_SKIP_FRONT` 分支就依赖它，且 native 套件
+    // photon-hat-native-suite.ps1 一直在用它驱动），因此按文件头文档承诺
+    // 补上其余三个变量的读取。读不到时一律回退默认值，不会比旧行为更差。
+    //
+    // ⚠ 2026-10-08 修复：旧实现完全忽略 `AURA_HAT_AURA`，导致脚本传入的
+    // 入口源文件被静默丢弃——驱动恒编译固定的 `current.aura`（一个 VM
+    // 自举宿主，运行时读 `build/vm/current.auc` 并打印 `fib(28)` 探针），
+    // 表现为「换任何入口源文件，输出都逐字节相同」。这是 P1-3「原生运行时
+    // 验证」被误判为「自举链阻塞」的真根因。
+    val srcPath = readPathEnv("AURA_HAT_AURA", "build/hat-vmhost/current.aura")
+    val outDir = readPathEnv("AURA_HAT_OUT", "build/hat-vmhost")
+    val moduleName = readPathEnv("AURA_HAT_MODULE", "current")
+    val hatPath = readPathEnv("AURA_HAT_SRC", outDir + "/current.hat")
 
     FileUtils.mkdirP(outDir)
 

@@ -2034,7 +2034,14 @@ class SsaBuilder {
             (kCount >= 1) && this.recvIsSingleton(src, HirUtils.hirKidsAt(kids, 0))
         // 诊断（SsaBuilder 在 link() 之后运行，println 安全）：extern/单例
         // 限定名的接收者丢弃判定。2026-10-03 fs/io 探针 ABI 排查用。
-        if (funcName.indexOf("_") > 0 && (funcName.startsWith("Memory_") || funcName.startsWith("Cpu_")
+        //
+        // ⚠️ 2026-10-08 P1-3：加 `AURA_SSA_SKIP_TRACE=1` 门控。此探针在**每次**
+        // extern 调用（Memory_* / Cpu_* / FileOps_* / Clock_*）都会打一行，
+        // 前端编译含编译器闭包的程序时会打出数 MB 日志（实测 P1-3 原生验证
+        // 前端一次跑完产生 2.6 MB 单行日志，把进程打到 8 GB 上限 OOM），
+        // 从而误报「前端无 COFF 产出」。改为按需打开。
+        if (Env.get("AURA_SSA_SKIP_TRACE", "") == "1" &&
+                funcName.indexOf("_") > 0 && (funcName.startsWith("Memory_") || funcName.startsWith("Cpu_")
                 || funcName.startsWith("FileOps_") || funcName.startsWith("Clock_"))) {
             val k0: Int = if (kCount >= 1) { HirUtils.hirKidsAt(kids, 0) } else { -1 }
             var csvHas: Int = -2

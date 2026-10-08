@@ -379,8 +379,14 @@ class X86Emitter {
                 this.extraSlotCount = 0
                 this.curSpillBase = spillBase
                 this.curIdRange = rangeCap
-                println("[FSZ] " + toStr(this.canaryFuncIdx) + "|" + instrFunc
-                        + " range=" + toStr(rangeCap) + " frame=" + toStr(frame))
+                // ⚠️ 2026-10-08 P1-3：诊断探针默认静默（`AURA_X86_TRACE=1` 打开）。
+                // 每函数打印一次，含编译器完整闭包时 ~1400 条，累积字符串分配
+                // 会让 `PhotonHatCompile.exe` 打到 8 GB 上限 OOM，进而「前端
+                // 无 COFF-RUNTIME 产出」。
+                if (Env.get("AURA_X86_TRACE", "") == "1") {
+                    println("[FSZ] " + toStr(this.canaryFuncIdx) + "|" + instrFunc
+                            + " range=" + toStr(rangeCap) + " frame=" + toStr(frame))
+                }
                 this.curEmitFuncName = instrFunc
                 if (srParts.size % 2 == 1) { frame = frame + 8 }
                 // ⚠️ 为发射器额外分配的调用结果槽留余量（见 `extraSlotCount`）。
@@ -397,7 +403,9 @@ class X86Emitter {
                 this.enc.emitPrologue(frame)
                 this.canaryFrameSize = frame
                 this.canaryFuncIdx = this.canaryFuncIdx + 1
-                println("[FUNCLIST] " + toStr(this.canaryFuncIdx) + "|" + instrFunc)
+                if (Env.get("AURA_X86_TRACE", "") == "1") {
+                    println("[FUNCLIST] " + toStr(this.canaryFuncIdx) + "|" + instrFunc)
+                }
                 currentFunc = instrFunc
                 needPrologue = false
                 // 函数级重定位探针：区分「发射时就没进表」与「进表后被
@@ -934,7 +942,8 @@ class X86Emitter {
             // 诊断：`call %func` 模板里 `nodes[0]` 若非数字，`strToInt` 返回 -1 ⇒
             // 所有调用结果都退到共用兜底槽 `-8`（实测反汇编：每条 call 后都是
             // `movq %rax, -0x8(%rbp)`）。有界打印，定位调用结果的节点号到底长什么样。
-            if (nodeId < 0 && this.slotDiagCount < 40) {
+            // ⚠️ 2026-10-08 P1-3：默认静默（`AURA_X86_TRACE=1` 打开）。
+            if (Env.get("AURA_X86_TRACE", "") == "1" && nodeId < 0 && this.slotDiagCount < 40) {
                 this.slotDiagCount = this.slotDiagCount + 1
                 var s: String = ""
                 var j: Int = 0
@@ -999,7 +1008,8 @@ class X86Emitter {
             // 里 strcat 的第二个实参读成第一个实参的寄存器；println 拿不到实参）。
             val dst: String = this.regOfNode(node)
             // 诊断：打印调用结果的落点决策（有界）。
-            if (this.slotDiagCount < 200) {
+            // ⚠️ 2026-10-08 P1-3：默认静默（`AURA_X86_TRACE=1` 打开）。
+            if (Env.get("AURA_X86_TRACE", "") == "1" && this.slotDiagCount < 200) {
                 // P388：限定 escapeConstValue 内的 strcat/println——跨调用存活的落槽取证。
                 if ((funcName == "strcat" || funcName == "println")
                         && this.curEmitFuncName == "AucLoaderUtils_escapeConstValue") {
@@ -1306,6 +1316,9 @@ class X86Emitter {
 
     private fun cdMark(tag: String, off: Int): Unit {
         if (this.cdCount >= 20) { return }
+        // ⚠️ 2026-10-08 P1-3：默认静默（`AURA_X86_TRACE=1` 打开）——含编译器
+        // 完整闭包时会打出数千条，把进程推到 8 GB OOM。
+        if (Env.get("AURA_X86_TRACE", "") != "1") { return }
         this.cdCount = this.cdCount + 1
         println("[cd] " + tag + " off=" + toStr(off))
     }
@@ -1332,7 +1345,8 @@ class X86Emitter {
             }
         }
         if (nodeId < 0) {
-            if (this.slotDiagCount < 12) {
+            // ⚠️ 2026-10-08 P1-3：默认静默（`AURA_X86_TRACE=1` 打开）。
+            if (Env.get("AURA_X86_TRACE", "") == "1" && this.slotDiagCount < 12) {
                 this.slotDiagCount = this.slotDiagCount + 1
                 println("[slot] id=-1 → -8")
             }
@@ -1347,7 +1361,8 @@ class X86Emitter {
             this.setNodeSlot(nodeId, s)
             // P321 越界金丝雀：新槽序号超过 ID 区间预算 = 发射触达了扫描闭包外的
             // 节点，槽已越过帧底（下一个 call 即踩）。有界打印，一次构建最多 40 条。
-            if (this.extraSlotCount > this.curIdRange && this.slotOvrCount < 40) {
+            if (Env.get("AURA_X86_TRACE", "") == "1"
+                    && this.extraSlotCount > this.curIdRange && this.slotOvrCount < 40) {
                 this.slotOvrCount = this.slotOvrCount + 1
                 println("[FSOVR] k=" + toStr(this.extraSlotCount)
                         + " range=" + toStr(this.curIdRange)
@@ -1355,7 +1370,7 @@ class X86Emitter {
                         + " off=" + toStr(s))
             }
         }
-        if (this.slotDiagCount < 12) {
+        if (Env.get("AURA_X86_TRACE", "") == "1" && this.slotDiagCount < 12) {
             this.slotDiagCount = this.slotDiagCount + 1
             println("[slot] id=" + toStr(nodeId) + " ra=" + toStr(ra) + " sp=" + toStr(sp)
                     + " → " + toStr(s))
@@ -1464,7 +1479,8 @@ class X86Emitter {
     private fun regOfNode(node: DagNode): String {
         val r: String = this.regOfNodeRaw(node)
         // 只在**返回栈引用**时打印（这正是共享兜底槽的来源），限次。
-        if (r.startsWith("stack:") && this.rnCount < 12) {
+        // ⚠️ 2026-10-08 P1-3：默认静默（`AURA_X86_TRACE=1` 打开）。
+        if (Env.get("AURA_X86_TRACE", "") == "1" && r.startsWith("stack:") && this.rnCount < 12) {
             this.rnCount = this.rnCount + 1
             var id: String = "null"
             var rg: String = ""

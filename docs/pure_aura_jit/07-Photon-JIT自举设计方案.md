@@ -136,7 +136,22 @@ Stage-3: aura-compiler-native2.exe 编译用户程序（含 @native FFI）
 | 分派表 | Rust 侧全局 HashMap | Aura 侧 `JitBackend.dispatchTable` |
 | 原生执行 | Rust 侧 `transmute` 调用 | Aura 侧 `JitExec.callI64` |
 | 自举集成 | JIT 不参与自举 | JIT 基础设施随自举编译 |
-| vmMode 锁死 | 默认 true（模拟） | 自举后可 enableNativeExec |
+| vmMode 锁死 | 默认 true（模拟） | 自举后可 enableNativeExec ✅ P1-3 已验证（2026-10-08） |
+
+> **P1-3 原生验证补充（2026-10-08）**：本表所述「自举后可
+> enableNativeExec」已在原生运行时实测成立。验证架构与 §2.3 一致——
+> JIT 是 VM 运行时优化，验证载体是「Photon 编译的原生 VM 宿主
+> （`build/hat-vmhost/jit_vmhost.aura`）+ 内建 JIT 自检
+> （`AURA_VM_SELFTEST=1`）」：`allocRW`（专用低地址 W^X 区）→
+> `writeCode`（真实写入）→ `protect`（VirtualProtect RX）→
+> `executeNative`（JitExec 间接 call）14/14 断言全绿，含多函数跨段
+> call rel32 回填与数据段读写。实施细节、修复的原生链缺陷与 P5 遗留
+> 缺口（VM 值模型 / 单例初始化 / 布局漂移）见
+> `09-P1-2实施报告.md` §七。
+> 工程约束备忘：JIT 代码区必须住**独立 mmap 区**且地址落在 Int32 正
+> 范围（JitBackend 的地址字段为 Int；堆 arena 地址 >2^31 会被截断，
+> 堆页整页 mprotect 也会波及同页堆对象）——`JitExec_allocRW`
+> 桩内完成低地址提示重试。
 
 ---
 

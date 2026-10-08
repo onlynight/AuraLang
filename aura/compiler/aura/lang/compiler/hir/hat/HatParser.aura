@@ -1261,15 +1261,27 @@ class HatParser {
     }
 
     /// 添加警告。
+    ///
+    /// ⚠️ 2026-10-08 P1-3：HAT 前端解析**每一条**未解析值都会打一行 WARN；
+    /// 编译含完整编译器闭包的入口文件时，日志可达 130 MB、把进程推到 8 GB
+    /// 上限 OOM。默认静默，`AURA_HAT_TRACE=1` 打开。
     private fun addWarning(msg: String): Unit {
         this.warnCount = this.warnCount + 1
-        println("[WARN] hat_parse: " + msg)
+        if (Env.get("AURA_HAT_TRACE", "") == "1") {
+            println("[WARN] hat_parse: " + msg)
+        }
     }
 
     /// 添加错误。
+    ///
+    /// ⚠️ 2026-10-08 P1-3：错误必须保留（编译失败时诊断不可少），但为避免
+    /// 「错误路径本身把日志打爆」，同样只在 `AURA_HAT_TRACE=1` 下打印。
+    /// 调用方仍可查 `getErrCount()`。
     private fun addError(msg: String): Unit {
         this.errCount = this.errCount + 1
-        println("[ERROR] hat_parse: " + msg)
+        if (Env.get("AURA_HAT_TRACE", "") == "1") {
+            println("[ERROR] hat_parse: " + msg)
+        }
     }
 
     /// 获取警告计数。

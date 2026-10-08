@@ -285,6 +285,22 @@ object VmOps {
         return tagged as Any
     }
 
+    /// Any -> Long（**地址/整值统一入口**，2026-10-08 P1-3）。
+    ///
+    /// Memory.* / JitExec.* 等原生臂的实参在 Any 槽里有两种形态：
+    ///   * .auc 侧 Int 实参 → Plan A 装箱（(v<<1)|1，恒奇）→ `intOf` 拆箱；
+    ///   * .auc 侧 Long 实参 → 裸字传递（偶）→ `toI64(toStr(v))` 十进制还原
+    ///    （运行时 toStr 是纯整数实现，对裸 Long 恰好打全值十进制）。
+    /// 旧臂一律 `toI64(toStr(v))`——种子 VM 值未装箱故恰好可用；原生 VM
+    /// 下 Int 实参带着 tag 进 native（实测 mmap 收到 n=1 / ln=8193），
+    /// 地址整体翻倍 +1。JIT 原生验证（P1-3）首次踩中。
+    fun addrOf(v: Any): Long {
+        if (isTaggedInt(v)) {
+            return intOf(v) as Long
+        }
+        return toI64(toStr(v))
+    }
+
     // ═══════════════════════════════════════════════════════════
     //  算术运算（if-else-if 优化）
     // ═══════════════════════════════════════════════════════════

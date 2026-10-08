@@ -46,6 +46,24 @@
 | `vmMode=true` 默认 | 种子 VM 无法解析 `Memory`/`JitExec` extern | 自举完成后调用 `enableNativeExec()` |
 | JIT 仅原生运行时可用 | `Memory.alloc`/`mprotect`/`JitExec.callI64` 需真实内存操作 | Stage-2+ 自举产物 |
 
+> **状态更新（2026-10-08，P1-3）**：缺口一～五已在 P1-2/P1-3 实现
+> （重定位收集/修正/跨段回填/数据段），且在原生运行时通过 14/14 断言
+> 验证——验证载体为「Photon 编译的原生 VM 宿主 + 内建 JIT 自检」
+> （`scripts/photon/jit-native-verify.ps1`），见 `09-P1-2实施报告.md`
+> §七。两条工程约束：
+>
+> 1. **JIT 代码区必须是独立低地址 mmap 区**（`JitExec_allocRW` 桩内
+>    完成 0x08000000–0x20000000 提示重试）——不能用堆 arena（地址
+>    超 Int32 截断 + 整页 mprotect 波及同页堆对象）。
+> 2. **P5 新增缺口**（原生验证暴露，阻塞 .auc 侧 JIT 集成）：
+>    ① 发射器实参装载顺序随布局漂移（同源码不同构建崩点迁移）；
+>    ② VM 值模型双形态（装箱 Int / 裸 Long）未统一，.auc 消费
+>    native 返回值不可靠；③ Aura 版 VmRunner 缺单例初始化
+>    （`create_singletons`/`run_singleton_initializers`）；④
+>    AucLoader 对宿主闭包尺寸脆弱；⑤ `compileBatch` 原生路径依赖
+>    `String.substring`（3 参方法调用接收者错位）。
+>    详见 `09-P1-2实施报告.md` §7.4。
+
 ---
 
 ## 二、逐项缺口详解

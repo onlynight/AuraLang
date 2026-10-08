@@ -175,6 +175,15 @@ class JitBackend {
         this.dataUsed = 0
         this.lastBatchResult = BatchRelocResult()
         this.lastStubBase = 0
+        // ⚠️ 2026-10-08 P1-3：曾试过在这里读 `AURA_JIT` 环境变量做「同一份
+        // .auc 两种跑法」的参数化——已撤。原因：.auc 字节码侧的 `Env.get`
+        // 走的是 stdlib 的 Env **单例对象**（含 `all: HashMap` 字段），而
+        // Aura 版 VmRunner 尚未实现 Rust VM 的
+        // `create_singletons` + `run_singleton_initializers`（见
+        // seed/compiler/src/vm/mod.rs:1265）——单例字段恒 Null，
+        // HashMap 内部对 0 指针解引用 ⇒ 原生 VM 下直接段错误。模式切换
+        // 因此只保留显式 `enableNativeExec()` 通道（原生验证程序专用）；
+        // 字节码侧参数化等单例初始化补齐后再接（P5 候选）。
     }
 
     /// 启用原生执行：关闭 VM 模拟，真实分配 W^X 内存并写入机器码。
@@ -206,6 +215,11 @@ class JitBackend {
         if (this.vmMode || entry == 0) {
             return 0
         }
+        // ⚠️ 2026-10-08 P1-3：曾实测双参 extern 调用到达桩时 (rcx,rdx) 与
+        // 源序不符（发射器/前端实参排序缺陷，P5 追踪）。桩
+        // `JitExec_callI64` 因此做成**参数序自识别**：entry 必然落在
+        // allocRW 的 JIT 区间 [0x08000000, 0x20000000)，arg0 为任意小整数，
+        // 桩按区间判定后装载，源序无需（也不能）在此补偿。
         val r: Long = JitExec.callI64(entry as Long, arg0 as Long)
         return r as Int
     }
@@ -215,6 +229,7 @@ class JitBackend {
         if (this.vmMode || entry == 0) {
             return 0
         }
+        // 反序补偿说明同 executeNative（单参调用无此问题，保持源序）。
         val r: Long = JitExec.call0(entry as Long)
         return r as Int
     }
@@ -223,10 +238,11 @@ class JitBackend {
 
     /// 分配 W^X 可执行内存。
     ///
-    /// Windows: VirtualAlloc(NULL, size, MEM_COMMIT, PAGE_READWRITE)
-    /// Unix:    mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
-    ///
-    /// 返回基址地址（0 表示失败）。
+    /// VM 模式：模拟分配（`simNextAddr` 计数器），绝不触碰 Memory/JitExec。
+    /// 原生模式：走单参原语 `JitExec.allocRW`——独立 mmap 区（低地址提示
+    /// 重试 + Int32 可容校验内联在运行时桩），与堆物理隔离（2026-10-08
+    /// P1-3 根治：旧 `Memory.alloc` 的堆地址 >Int32 会被截断成垃圾，且
+    /// mprotect 整页粒度会波及同页堆对象）。
     fun allocateExecMemory(size: Int): Int {
         // 对齐到页粒度
         val alignedSize: Int = this.alignToPage(size)
@@ -239,8 +255,9 @@ class JitBackend {
             return base
         }
 
-        // AOT / 自举模式：真实调用 Memory
-        val base: Int = Memory.alloc(alignedSize as Long) as Int
+        println("[ST2] before allocRW size=" + toStr(alignedSize))
+        val baseL: Long = JitExec.allocRW(alignedSize as Long)
+        val base: Int = baseL as Int
         if (base == 0) {
             return 0
         }
@@ -251,29 +268,48 @@ class JitBackend {
 
     /// 释放可执行内存。
     ///
-    /// Windows: VirtualFree(base, size, MEM_RELEASE)
-    /// Unix:    munmap(base, size)
+    /// 原生模式：mmap 区归还内核（NtFreeVirtualMemory / Memory_munmap）。
+    /// 旧实现 `Memory.free` 是 bump 分配器的 no-op——对 mmap 区等于泄漏。
     fun freeExecMemory(base: Int, size: Int): Unit {
         if (base == 0) {
             return
         }
         if (!this.vmMode) {
-            Memory.free(base as Long)
+            Memory.munmap(base as Long, size as Long)
         }
         this.allocatedSize = this.allocatedSize - size
+    }
+
+    /// mmap 风格 prot 位（PROT_*）→ Win32 PAGE_* 常量。
+    ///
+    /// ⚠️ 两套常量数值不同（mmap: R=1 W=2 X=4；Win32: NOACCESS=1
+    /// READONLY=2 READWRITE=4 EXECUTE=0x10 EXECUTE_READ=0x20…），
+    /// 必须翻译后才能传给 runtime 的 `Memory_mprotect`（VirtualProtect）。
+    private fun protToWin32(prot: Int): Int {
+        if (prot == (this.PROT_READ + this.PROT_EXEC)) { return 32 }        // PAGE_EXECUTE_READ
+        if (prot == (this.PROT_READ + this.PROT_WRITE + this.PROT_EXEC)) { return 64 } // PAGE_EXECUTE_READWRITE
+        if (prot == (this.PROT_READ + this.PROT_WRITE)) { return 4 }        // PAGE_READWRITE
+        if (prot == this.PROT_READ) { return 2 }                            // PAGE_READONLY
+        if (prot == this.PROT_EXEC) { return 16 }                           // PAGE_EXECUTE
+        return 4
     }
 
     /// 将内存标记为可执行（只读+执行）。
     ///
     /// Windows: VirtualProtect(base, size, PAGE_EXECUTE_READ)
     /// Unix:    mprotect(base, size, PROT_READ|PROT_EXEC)
+    ///
+    /// ⚠️ 2026-10-08 P1-3：runtime 的 `Memory_mprotect` 旧为恒 0 空桩——
+    /// 本调用曾长期静默无效，JIT 代码从未真正获得执行权限。现已是
+    /// VirtualProtect 真实现；本处负责 prot 位翻译。
     fun setExecutable(base: Int, size: Int): Unit {
-        // Windows: Memory.virtualProtect(base, size, Memory.PageExecuteRead)
-        // Unix:    Memory.mprotect(base, size, Memory.ProtRead|Memory.ProtExec)
         if (this.vmMode) {
             return
         }
-        Memory.mprotect(base as Long, size as Long, PROT_READ | PROT_EXEC)
+        val pok: Int = JitExec.protect(base as Long, size as Long,
+                this.protToWin32(this.PROT_READ + this.PROT_EXEC))
+                + " prot=" + toStr(this.protToWin32(this.PROT_READ + this.PROT_EXEC))
+                + " -> " + toStr(pok))
     }
 
     /// 将内存标记为可写（读+写，不可执行）。
@@ -281,12 +317,11 @@ class JitBackend {
     /// Windows: VirtualProtect(base, size, PAGE_READWRITE)
     /// Unix:    mprotect(base, size, PROT_READ|PROT_WRITE)
     fun setWritable(base: Int, size: Int): Unit {
-        // Windows: Memory.virtualProtect(base, size, Memory.PageReadWrite)
-        // Unix:    Memory.mprotect(base, size, Memory.ProtRead|Memory.ProtWrite)
         if (this.vmMode) {
             return
         }
-        Memory.mprotect(base as Long, size as Long, PROT_READ | PROT_WRITE)
+        JitExec.protect(base as Long, size as Long,
+                this.protToWin32(this.PROT_READ + this.PROT_WRITE))
     }
 
     /// 将机器码写入可执行内存。
@@ -302,14 +337,25 @@ class JitBackend {
             return
         }
         // 将 hex 字符串转换为字节数组并写入内存
+        //
+        // ⚠ 用 `bytes.charCodeAt(i) as Int` 而不是索引访问 `bytes[i]`：
+        // 裸字符索引在 Photon 原生闭包下返回 Any（非 Char），传入
+        // `hexToNibble(text: String)` 时 `c.charCodeAt(0)` 解析到 Any 的
+        // 默认分支而恒返回 0 ⇒ 所有机器码字节被写成 00。实测 P1-3 原生
+        // 验证：`emitFunction` 写出的整段代码全为 00 字节，`executeNative`
+        // 返回 0 而非期望值（2026-10-08 探针，详见 p13 阶段报告 §八）。
+        // 同一模式下必须 `as Int` 再与数字比较（见 HatGetPatchUtils 注释）。
         val hexLen: Int = bytes.length
         var i: Int = 0
         while (i < hexLen) {
-            // 逐字节写入（简化实现）
-            val hi: Int = JitBackendUtils.hexToNibble(bytes[i])
+            // 逐字节写入。⚠️ hex 解析必须走 `charCodeAt(idx)`
+            // （`hexToNibbleAt`）——`substring(idx, idx+1)` 是 3 参方法
+            // 调用，Photon 原生路径接收者错位（stub 收到 str=0 即崩，
+            // 实测 P1-3 三次构建稳定复现；14/14 自检全绿形态即本循环）。
+            val hi: Int = JitBackendUtils.hexToNibbleAt(bytes, i)
             i = i + 1
             if (i < hexLen) {
-                val lo: Int = JitBackendUtils.hexToNibble(bytes[i])
+                val lo: Int = JitBackendUtils.hexToNibbleAt(bytes, i)
                 Memory.write((base + offset + (i - 1) / 2) as Long, ((hi << 4) | lo) as Byte)
             }
             i = i + 1
@@ -532,7 +578,9 @@ class JitBackend {
         val entry: Int = base + offset
 
         // 写入机器码（VM 模式下 writeCode 内部跳过）。
+        println("[ST2] before writeCode base=" + toStr(base))
         this.writeCode(base, offset, machineCode)
+        println("[ST2] after writeCode")
 
         // P1-2：回填重定位。
         //
@@ -551,7 +599,9 @@ class JitBackend {
         }
 
         // 切换为可执行权限（VM 模式下 setExecutable 内部跳过）。
+        println("[ST2] before setExecutable")
         this.setExecutable(base, this.codeSize)
+        println("[ST2] after setExecutable")
 
         // 16 字节对齐追加。
         this.usedSize = offset + codeBytes
@@ -1096,6 +1146,27 @@ object JitBackendUtils {
     }
 
     /// 将 hex 字符转换为 0-15 的数值。
+    /// 十六进制字符（按索引取）→ 0..15。
+    ///
+    /// ⚠️ 2026-10-08 P1-3：刻意走 `charCodeAt(idx)` 而不是
+    /// `substring(idx, idx+1)` + `hexToNibble`——Photon 原生路径上
+    /// **3 参方法调用 `String.substring` 的接收者没有正确落到 rcx**
+    /// （stub 收到 str=0 → 解引用即崩；实测 P1-3 自检 writeCode 首字符
+    /// 即崩，charCodeAt 形态正常）。顺带消除每字符一次的堆分配。
+    fun hexToNibbleAt(s: String, idx: Int): Int {
+        val code: Int = s.charCodeAt(idx) as Int
+        if (code >= 48 && code <= 57) { // '0' - '9'
+            return code - 48
+        }
+        if (code >= 65 && code <= 70) { // 'A' - 'F'
+            return code - 55
+        }
+        if (code >= 97 && code <= 102) { // 'a' - 'f'
+            return code - 87
+        }
+        return 0
+    }
+
     fun hexToNibble(c: String): Int {
         val code: Int = c.charCodeAt(0)
         if (code >= 48 && code <= 57) { // '0' - '9'

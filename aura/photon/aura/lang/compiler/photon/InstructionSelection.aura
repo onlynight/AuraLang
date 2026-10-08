@@ -2520,6 +2520,51 @@ class InstructionSelector {
         // 2026-10-02：String.substring → runtime 的 String_substring
         //（heapArena bump 副本，越界钳位；薄 VM 宿主链接修复）
         if (name == "substring" || name == "String.substring") { return "String_substring" }
+        // 2026-10-08 P1-3：前端闭包里其余 String 成员——TokenUtils / SsaBuilder
+        // / MirUtils / Lowering 等大量使用，前端发射**裸名**（见 verify.hat 的
+        // `@call @startsWith(@table, ...)`）⇒ 需要在这里按裸名映射到
+        // runtime 的 `String_*` 扁平符号。缺一条就 `undefined symbol`。
+        if (name == "startsWith" || name == "String.startsWith") { return "String_startsWith" }
+        if (name == "charAt" || name == "String.charAt") { return "String_charAt" }
+        if (name == "trim" || name == "String.trim") { return "String_trim" }
+        // 宿主显式安装 VEH 崩溃转储（jit_vmhost 自检用）。无体 fun 的
+        // 裸名映射到 runtime 的 veh_install。
+        if (name == "jitVehInstall") { return "veh_install" }
+        if (name == "substringBefore" || name == "String.substringBefore") { return "String_substringBefore" }
+        if (name == "split" || name == "String.split") { return "String_split" }
+        // ── `length()` / `size()` 无接收者显式类型的裸名兜底 ──
+        //
+        // Hir.aura `calleeNm.length()` / 类似 `str.length()` 在 recvTy 丢失时
+        // （recvTy == "Basic" 或 ""）落到裸名 `@call @length(@str, @memTok)`
+        // 形式；上面 `recvTy == "String"` 分支不会命中，链接期报
+        // `undefined symbol: length`（实测 verify.hat 内 `HirLowerer_lowerValDecl`）。
+        // 编译器前端里所有无类型标注的 `length` 都是对 String 的方法调用
+        // （Hir/Span/Ast/Mir 的 length 都是 String 或 Span 的 .length），
+        // 直接映射到 `strlen`。若将来有非 String 的裸 `length` 需求，需要
+        // 在此按 argCount 或末实参类型分流。
+        if (name == "length" || name == "size") { return "strlen" }
+        // ── `min(a, b)` / `max(a, b)` 静态工具：编译器前端各处私有实现 ──
+        // SsaBuilder / PhotonPipeline 各有一份同名 `min` 私有函数；HirLowerer
+        // 与 Lowering 里的裸名 `@call @min` 通常都是**两整数取小**。runtime 提供
+        // 一个扁平 `min`/`max` 供这些前端调用落地。
+        if (name == "min") { return "min" }
+        if (name == "max") { return "max" }
+        // ── `or` / `and`：`InstructionSelector.analyzePhiPreds` 里的裸布尔 ──
+        // HirLowerer 里的 `or` / `and` 都是 Int / Bool 位运算（编译器前端
+        // 内部用整数表示布尔），runtime 提供扁平 `or`/`and` 桩即可。
+        if (name == "or") { return "or" }
+        if (name == "and") { return "and" }
+        // ── `emitFunction` 裸名 → `X86Emitter_emitFunction` ──
+        //
+        // `PhotonPipeline.compileEncodeOnly` 里 `emitter.emitFunction(dag, moduleName)`
+        // 在 HAT IR 中落成 `@call @emitFunction(@this, @dag, @moduleName, @MemToken)`
+        // （4 参，末参为内存链 token，由 mapStdlibFuncName 的 lastIsMem 分流）。
+        // 与 `add` 的三参形态同理——按元数 + 末参是 MemToken 判定：
+        //   * 4 参且末为 MemToken → X86Emitter 方法调用（this + 2 实参 + mem）
+        // 若不映射，链接期报 `undefined symbol: emitFunction`。
+        if (name == "emitFunction" && argCount >= 3 && lastIsMem) {
+            return "X86Emitter_emitFunction"
+        }
         // ── 列表创建统一到 core 包（[count][cap][itemsPtr@0x10]，push 几何增长；
         // 与 getAt/listAppend 同源，根除两套布局交叉读写——2026-10-06）──
         if (name == "arrayListOf" || name == "mutableListOf") { return "Collections_emptyList" }
@@ -2547,6 +2592,12 @@ class InstructionSelector {
             if (name == "equals") { return "streq" }
             if (name == "toString") { return "toString" }
             if (name == "charCodeAt") { return "charCodeAt" }
+            if (name == "charAt") { return "String_charAt" }
+            if (name == "startsWith") { return "String_startsWith" }
+            if (name == "trim") { return "String_trim" }
+            if (name == "substringAfter") { return "String_substringAfter" }
+            if (name == "substringBefore") { return "String_substringBefore" }
+            if (name == "split") { return "String_split" }
         }
         // 堆列表：`arr[i] = v` 由 HIR 降级为 `.Collections.set(arr, i, v)`
         //（返回容器本身），对应 runtime 的 `__list_setat`。
