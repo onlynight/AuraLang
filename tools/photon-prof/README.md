@@ -73,17 +73,37 @@ python tools/photon-prof/auc-disasm.py <x.auc> --disasm main # 逐条反汇编
 ### 7. `memprof.py` — 进程内存采样器（2026-10-07 新增）
 ```
 <python> tools/photon-prof/memprof.py --runs 3 --label <标签> -- <命令...>
+<python> tools/photon-prof/memprof.py --quiet -- <命令...>   # 转发宿主输出（抓 [MEMPROBE]）
 ```
-启动目标进程、5 ms 间隔采样，输出 peak_wset / peak_private / peak_vms。
-配合 VM 内建 `AURA_VM_LOADONLY=1` 可分离「装载期」与「执行期」内存。
+启动目标进程、5 ms 间隔采样，输出 peak_wset / peak_private / peak_vms；
+JSON 汇总恒为最后一行（`--quiet` 模式下宿主输出在前）。配合 VM 内建
+`AURA_VM_LOADONLY=1` 可分离「装载期」与「执行期」内存。
+⚠ peak_wset 是峰值快照，**回答不了「运行中是否回收了」**——回收判定看
+`[MEMPROBE]`（见 §8b）或 `mem-reclaim-matrix.sh`。
 
 ### 8. `mem-matrix.sh` — 内存对比矩阵
 `micro1/fib28/loop1m` × {Rust VM, Photon Aura VM} + 纯编译对照。
 **关键结论**（详见 `docs/photon/vm-memory-comparison.md`）：
 - Photon 固定提交 66.6 MB = 64 MiB 静态堆 BSS（`.data` 段）；工作集仅 8.7 MB
-- 执行期**线性增长**：`as Long` ≈62.5 B/次、函数调用 ≈35.6 B/次，**从不回收**
-- **64 MiB 硬上限**：Long 操作 ~1.02M 次即耗尽 → **SIGSEGV**（N=1.0M 正常 / 1.1M 崩）
-- 对照：Rust VM 同负载**零增长**（ARC + 空闲链表复用）
+- ~~执行期线性增长：`as Long` ≈62.5 B/次、函数调用 ≈35.6 B/次，从不回收~~
+  **P0-2c（`7a7c32d`）已根治**：MEMPROBE 实测 slope=7≈8 B/采样点（探针自身
+  开销），全场景 `capGrow=1`（值栈零倍增）——「从不回收」不复存在
+- ~~64 MiB 硬上限：Long 操作 ~1.02M 次即耗尽 → SIGSEGV~~ 泄漏消失后 10⁶ 量级
+  全绿；loop1100m 的 exit≠0 是 2×10⁹ **指令上限**（`VM-ERROR=Instruction
+  limit`），非内存
+- 对照：Rust VM 同负载零增长（ARC + 空闲链表复用）
+
+### 8b. `mem-reclaim-matrix.sh` — 回收判定矩阵（2026-10-08 新增）
+```
+bash tools/photon-prof/mem-reclaim-matrix.sh
+```
+外部 RSS 与 VM 内部 `[MEMPROBE]` 并排输出 + 自动判定。`[MEMPROBE]` 是
+`Vm.run` 内建的常驻水位探针（挂 P401 的 2²⁰ 指令刷回窗口，热路径零开销，
+结束时一行汇总）：`slope` = arena 每采样点净增字节（8=零泄漏）、`capGrow` =
+值栈倍增次数（1=健康）、`capLast` = 栈末容量。**exit≠0 先查 `VM-ERROR=`**——
+Instruction limit 是守卫非内存。判读详见 `vm-memory-comparison.md` §十.4。
+⚠ 已知：宿主对布局/ASLR 敏感（§10.111 家族），偶发装载后早崩（~1/4 概率，
+重跑即好）——脚本已内置一次重试。
 
 ## 关键测量结论（2026-10-07）
 

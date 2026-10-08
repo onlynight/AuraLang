@@ -26,6 +26,8 @@ class VmStack {
     private var mc: Long = 0
     private var sp: Int = 0
     private var cap: Int = 0
+    // P1-RETAIN 诊断：倍增次数（旧缓冲被丢弃的累计次数）。
+    private var capGrow: Int = 0
 
     fun push(v: Any): Unit {
         // P366: read sp/cap into locals once (photon CSE hazard).
@@ -44,6 +46,12 @@ class VmStack {
             this.mc = nb
             this.cap = newCap
             Memory.write64(this.mc + sp0 * 8, v as Long)
+            // P1-RETAIN 诊断（2026-10-08）：记录每次倍增的旧容量，
+            // 供 [MEMPROBE] 汇总报告——「倍增次数」是栈顶单调上升的直接信号。
+            // 旧实现每次倍增后丢弃旧缓冲指针、仅更新 this.cap，外部只能
+            // 看到最终容量，看不出增长过程。此处把旧 cap 写入递增计数器。
+            val grow: Int = this.capGrow
+            this.capGrow = grow + 1
         }
         this.sp = sp0 + 1
     }
@@ -67,6 +75,17 @@ class VmStack {
 
     fun size(): Int {
         return this.sp
+    }
+
+    /// 当前容量（已倍增到的槽数）。P1-RETAIN 诊断用：容量应受活跃深度约束，
+    /// 若无限倍增即栈顶单调上升（RETAIN 未配对 RELEASE）。
+    fun cap(): Int {
+        return this.cap
+    }
+
+    /// 倍增次数（旧缓冲被丢弃的累计次数）。P1-RETAIN 诊断用。
+    fun capGrow(): Int {
+        return this.capGrow
     }
 
     fun vmSlotAt(i: Int): Any {

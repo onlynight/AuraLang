@@ -155,6 +155,33 @@ class Vm {
     // 指令计数
     private var instructionCount: Int = 0
 
+    // ── 运行期 arena 水位 / 值栈容量探针（P1-RETAIN 诊断，2026-10-08）──
+    //
+    // 外部 memprof.py 只能读进程 RSS——它是**不可回收的**：bump arena 是 64 MiB
+    // 静态 .data，倍增后的旧值栈缓冲留在 arena 上、物理页不触碰就不计入 wset，
+    // 于是 10⁹ 次迭代的泄漏在 wset 上完全不可见（loop1100m 恒 4.3 MB 却 exit 非 0）。
+    // 回收与否必须从 VM 内部量：
+    //   arenaHi   = Memory.alloc 的水位（单调不减——bump 分配器无回收）；
+    //   stackCap  = 值栈容量（应受活跃深度约束，只增不降）。
+    // 两者在「回收正常」时都应收敛到常数；线性增长即泄漏。
+    //
+    // ⚠ 成本纪律：探针挂在 run() 已有的 2^20 周期窗口里（P401 的 icAcc 刷回点），
+    // **每 2^20 条指令才碰一次 Memory 与 VmStack**，热路径零额外开销——这与
+    // P239 时代的「每次调用都 println」探针不同，后者会污染测量（曾把 loop1m
+    // 推进 OOM）甚至触发 §10.111 的布局敏感误值。探针用累加器求均值后一次性
+    // 打印，不在循环内分配字符串。
+    // ⚠ 探针会调用 Memory.alloc（推进 bump 指针）——这是诊断固有副作用，
+    //   每个采样点消耗 arena 的常数空间（含 256 槽计数表 ≈184 KB），不影响
+    //   「是否单调增长」的判定，但会使绝对水位略高于纯净运行。
+    // 探针缓冲惰性初始化（arenaProbe 非 0 即就绪），避免在字段初始化时
+    // 调 Memory.alloc——此时 Heap_init 尚未执行。
+    private var arenaProbe: Long = 0
+    private var arenaHi: Long = 0
+    private var stackPeak: Int = 0
+    private var probeCount: Int = 0
+    private var arenaSum: Long = 0
+    private var capSum: Int = 0
+
     // 异常处理器栈
     private var handlerStack: VmStrStack = VmStrStack()
 
@@ -482,6 +509,7 @@ class Vm {
                     this.running = false
                     break
                 }
+                this.probeArena()
             }
 
             // P392：热路径读 Memory 裸缓冲（值域 < 2^31，read64 as Int 无损）。
@@ -501,7 +529,88 @@ class Vm {
         }
         this.instructionCount = this.instructionCount + icAcc
 
+        this.probeReport()
+
         return this.returnValue
+    }
+
+    /// 周期性 arena 水位 / 值栈容量采样（P1-RETAIN 诊断，见字段注释）。
+    ///
+    /// 调用点在 run() 的 icAcc 2^20 刷回窗口内——每 2^20 条指令一次，
+    /// 热路径零额外开销。用累加器求均值、不在此打印（P239 时代的探针就是
+    /// 在循环内 println 把 loop1m 推进 OOM 的）。
+    ///
+    /// 水位采样原理：bump 指针单调不减，故「本次 alloc 返回的绝对地址 +
+    /// 其大小」是当时高水位的**下界**——不会高估，用于斜率判定足够。
+    ///
+    /// 表大小 2^20 槽 × 8 B = 8 MB（落在 bump arena 上）。MAX_INSTRUCTIONS =
+    /// 2×10⁹ ⇒ 最多 ~1908 个采样点，表充裕。⚠ 8 MB 是探针固有开销，会使
+    /// 绝对水位比纯净运行高 8 MB+；但「是否收敛」的斜率判定不受影响。
+    private fun probeArena(): Unit {
+        if (this.arenaProbe == 0) {
+            this.arenaProbe = Memory.alloc(2097152 + 16)
+        }
+        val n: Int = this.instructionCount / 1048576 + 1
+        val slot: Long = this.arenaProbe + 8 + n * 8
+        val mark: Long = Memory.alloc(8)
+        val level: Long = mark + 8
+        Memory.write64(slot, level)
+        val hi: Long = this.arenaHi
+        if (level > hi) {
+            this.arenaHi = level
+        }
+        val cap: Int = this.stack.cap()
+        if (cap > this.stackPeak) {
+            this.stackPeak = cap
+        }
+        this.probeCount = this.probeCount + 1
+        this.arenaSum = this.arenaSum + level
+        this.capSum = this.capSum + cap
+    }
+
+    /// run() 结束后一次性打印采样汇总（唯一一条 println，不在循环内）。
+    ///
+    /// 水位以「采样表起始点为基线 0」的相对偏移表示——绝对地址受 ASLR
+    /// 影响每次不同、减法结果巨大且不可比；相对偏移（≈2×2²⁰ 量级）之间的
+    /// 减法安全且可直接判读。
+    ///
+    /// 判读（详见 docs/photon/vm-memory-comparison.md §十.4）：
+    ///   slope ≈ 8            ⇒  正常——arena 只按探针自身 alloc(8)/采样点增长；
+    ///   slope >> 8           ⇒  线性泄漏（bump 单调，无回收）；
+    ///   capGrow 恒定 / capLast=64  ⇒  值栈无倍增（栈账目平衡）；
+    ///   capGrow 持续上涨 / capLast 巨大  ⇒  栈顶单调上升。
+    private fun probeReport(): Unit {
+        if (this.probeCount <= 0) {
+            return
+        }
+        val p: Int = this.probeCount
+        val base: Long = this.arenaProbe
+        // ⚠ 首个采样写的是槽 2（probeArena 的 n = ic/2²⁰+1，ic 刷回后已 ≥2²⁰），
+        // 槽 1 从未写入（bump 内存为零页）——读槽 1 当 first 会得到 -base 的
+        // 垃圾差值（本轮实测 delta 报 140 万亿量级即此）。
+        val first: Long = Memory.read64(base + 8 + 2 * 8)
+        val last: Long = Memory.read64(base + 8 + p * 8)
+        val hiRel: Long = this.arenaHi - base
+        val firstRel: Long = first - base
+        val lastRel: Long = last - base
+        val avgRel: Long = this.arenaSum / p - base
+        val delta: Long = lastRel - firstRel
+        var slope: Long = 0
+        if (p > 1) {
+            slope = delta / (p - 1)
+        }
+        println("[MEMPROBE] samples=" + toStr(p)
+            + " hiRel=" + toStr(hiRel)
+            + " lastRel=" + toStr(lastRel)
+            + " avgRel=" + toStr(avgRel)
+            + " delta=" + toStr(delta)
+            + " slope=" + toStr(slope)
+            + " capPeak=" + toStr(this.stackPeak)
+            + " capAvg=" + toStr(this.capSum / p)
+            + " capLast=" + toStr(this.stack.cap())
+            + " capGrow=" + toStr(this.stack.capGrow())
+            + " depth=" + toStr(this.stack.size())
+            + " calls=" + toStr(this.callStack.size()))
     }
 
     /// 加载期预处理：把字节码切成行并缓存 `opcode` 助记符 / **数值编号** / 参数表

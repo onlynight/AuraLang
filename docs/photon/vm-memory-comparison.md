@@ -353,54 +353,73 @@ RETAIN **消费**栈顶。Photon VM 的 `retain()`/`release()` 却是 `incRef()`
 **修复**：`retain()`/`release()` 改为消费语义（pop 后不回压；tagged 快路径直通；
 对象/箱按 rc±1，归零走 `freeRegistered`）。
 
-> **⚠️ 本轮复核（反汇编事实）——发射端约定本身就有问题。**
-> 用 `auc-disasm.py` 反汇编 longstep 主循环，`as Long` 的真实字节码是
-> `LoadVar;LoadVar;CallNativeArgs;StoreVar;LoadVar;Retain;LoadVar;Retain;LoadVar;StoreVar`
-> ——**4 次 RETAIN、4 次 LoadVar、2 次 StoreVar**，即每迭代净增 **+1 槽**（不是
-> 「RETAIN 每对 +1」那种成对关系，也没有对应的 RELEASE/DropRef：本 guest 里
-> `Retain×N` 与 `StoreVar×N` 不配对，栈顶持续单调上升）。这解释了长尾症状：
-> P0-2c 修完后 longstep 的峰值 wset 已是 4.3 MB，但**内存并未收敛为常数**——
-> 1.1×10⁹ 次迭代压测（`loop1100m`，204s）仍 exit 非 0。
->
-> 因此 §十 的两个判断需要修正：
-> 1. 「RETAIN 回压」不是主因，**发射端的 `LoadVar;RETAIN` 未配 `DropRef`** 才是
->    栈单调上升的结构性来源；`retain()` 的消费语义只是让倍增速度变慢；
-> 2. 根治路径在**发射器侧**（`RETAIN` 应成对发射 `RETAIN`/`RELEASE`，或改为窥视语义），
->    VM 侧无法单方面对齐。该工作项已归档为 §十一 的 **P1-RETAIN**。
+> **✅ 探针复核（2026-10-08 晚，MEMPROBE）——修复后栈账目完全平衡，「+1 槽/迭代」
+> 的推断不成立。**
+> `Vm.run` 内建了周期水位探针（见 §十.4），实测 longstep 1M 次 `as Long`：
+> `capGrow=1`（值栈除初始分配外**零倍增**）、`capLast=64` 槽、arena 斜率
+> slope=7≈8 B/采样点（即探针自身开销，逐迭代净分配为零）。逐指令核算也一致：
+> `LoadVar +1; RETAIN −1; LoadVar +1; RETAIN −1; LoadVar +1; StoreVar −1`，
+> 循环体净值为 0——本节此前「发射端 `LoadVar;RETAIN` 未配 `DropRef` 导致
+> 每迭代净 +1 槽」的推断是**错的**，当时的依据（loop1100m exit≠0）实为
+> **2×10⁹ 指令上限**（见 §10.3 注①），与内存无关。
+> 遗留的开放问题收窄为：**堆对象**（object/box/list）的 RETAIN/RELEASE 配对
+> 仍未审计——tagged 整数走快路径直通，紧循环测不出真对象的引用计数问题。
+> 归档为 §十一 的 P1-RETAIN（重新表述）。
 
-### 10.3 修复后内存矩阵（memprof 3 轮取峰）
+### 10.3 修复后内存矩阵（memprof 3 轮取峰 + MEMPROBE 回收判定）
 
-| 场景 | 修复前 wset | 修复后 wset | 修复前行为 | 修复后行为 |
-|---|---|---|---|---|
-| longstep 1M | 71.2 MB | **4.3 MB** | +62.5MB 线性增长 | 见下注① |
-| loop1m | 71.2 MB | **4.3 MB** | +62.5MB | 常数（该 guest 无 `as Long`） |
-| loop1100k 默认（无 AURA_HEAP_MB） | OOM exit 70 | **4.3 MB** | [OOM] HEAP FULL | **exit 0 正确输出** |
-| loop1100m（1.1×10⁹，压测） | — | **4.3 MB** | — | **exit 非 0**（见下注①） |
-| fib28 | — | **8.8 MB** | +37.8B/调用 | 常数 |
+| 场景 | 修复前 wset | 修复后 wset | slope | 栈倍增 | 回收判定 |
+|---|---|---|---|---|---|
+| smallstep 1.5M（纯计数） | 71.2 MB | 6.3 MB | 7 | ×1 | ✓ 回收正常 |
+| intloop 1M（Int 累加） | — | 6.3 MB | 7 | ×1 | ✓ 回收正常 |
+| longstep 1M（1 次 `as Long`/迭代） | 71.2 MB | 6.3 MB | 7 | ×1 | ✓ 回收正常 |
+| loop1m / loop1100k / loop2m | 71.2 MB | 6.3 MB | 7 | ×1 | ✓ 回收正常 |
+| loop1100m（1.1×10⁹，压测） | — | 6.3 MB | 7 | ×1 | ⚠ exit≠0＝指令上限（注①），内存无泄漏 |
+| fib28 | — | 10.9 MB | 7 | ×1 | ✓ 回收正常 |
 
-① **峰值 wset 是常数，但进程并非无泄漏**：`peak_wset` 恒定 4.3 MB 是因为倍增
-   后的旧缓冲仍挂在 bump arena 上、而 arena 是 64 MiB 静态 `.data` 段（物理页
-   不触碰则不计入 wset）——真正的信号是 **exit 码**，不是 wset。loop1100k
-   （1.1×10⁶ 次）已越过 arena 预算而 segfault（exit 139，输出仍正确），
-   loop1100m 同样 exit 非 0。故「常数」只成立于 10⁶ 量级；10⁹ 量级会复现旧症状。
+判读口径：**slope** = arena 每采样点（2²⁰ 指令）净增长字节数，8 = 探针自身
+`alloc(8)` 开销即零泄漏；**栈倍增** = VmStack 扩容次数，1 = 仅初始分配。
+修复前的对照：`as Long` ≈62.5 B/迭代 ⇒ longstep 1M 的 slope 应为
+~65,000,000——实测 7，**「从不回收」已根治**。wset 列的 +2MB 是探针常驻
+采样表（2 MiB，落在 arena 上且被触碰）。
+
+① **loop1100m 的 exit≠0 是指令上限，不是内存**：`VM-ERROR=Instruction limit
+   exceeded (2000000000)`。该 guest ~52 指令/迭代，1.1×10⁹ 次需 ~5.7×10¹⁰
+   条指令，是上限的 ~29 倍；进程在 ~2×10⁹ 条（约 3.8% 进度）被守卫终止，
+   此时 arena 相对水位仅 +15 KB（斜率与 10⁶ 场景完全一致）。因此 10⁹ 量级的
+   内存问题已被**间接但可靠地**回答：逐迭代净分配为零，规模不改变结论。
+   （此前「10⁹ 复现旧症状 / wset 看不出来」的表述有误——修复前的真实泄漏
+   wset 是看得见的：71.2 MB 即证据。）
 
 - loop1100k **不再需要 AURA_HEAP_MB**（AURA_HEAP_MB=128 回归 ✓，private 提交
-  193.0 MB 恒定线性）；但如注①，扩容治标不治本——P0-2a 守卫与 P0-2b 扩容保留
-  作为兜底通道。
-- fib28 计时中位 3353→3268ms（**-2.5%**，值栈不再频繁倍增搬运）。
+  193.0 MB 恒定线性）；P0-2a 守卫与 P0-2b 扩容保留作为「真实存活集超限」兜底。
+- fib28 计时中位 3353→3138ms（**-6.4%**，值栈不再频繁倍增搬运）。
 - 语义探针（`x=100 as Long; y=x+1; ...` 五值）与五门回归全绿。
 
 ### 10.4 方法论注记
 
-本轮定位靠三个可复用工具/手段（均已入库）：
+本轮定位靠四个可复用工具/手段（均已入库）：
 
 1. **`tools/photon-prof/auc-disasm.py`**：.auc 反汇编器（seed serialize v7 格式，
    natives/函数/操作码全解析）——直接看 guest 字节码里到底有什么；
-2. **`HeapDiag.heapbump()`（extern `aura_heapbump`）**：arena 水位探针，配合
-   「指令数 → 水位」曲线（`[IC]` 探针）一眼识别**倍增跳变 vs 线性泄漏**；
+2. **`[MEMPROBE]` 常驻水位探针（2026-10-08 晚新增，取代已删除的 `HeapDiag`
+   extern）**：挂在 `Vm.run` 已有的 2²⁰ 指令刷回窗口（P401），每采样点记录
+   bump 水位与值栈容量，`run()` 结束时一行汇总打印（累加器均值，循环内零
+   分配零 println）。回答「**运行中是否回收了**」：`slope≈8` 即 arena 只按
+   探针自身增长（零泄漏）；`capGrow` 即值栈倍增次数。外部 RSS 回答不了这个
+   问题——它是峰值快照，且 bump arena 的已触碰页在 64 MiB `.data` 内。
+   一键矩阵：`bash tools/photon-prof/mem-reclaim-matrix.sh`（RSS 与 MEMPROBE
+   并排 + 自动判定）；
 3. **可变探针最小化原则**：println 探针本身经同一 bump arena 分配，会污染测量
-   （本轮 [CN] 探针曾把 loop1m 推进 OOM）——探针要么一次性（前 N 次）、要么用
-   累加器均值。
+   （P0-2c 轮的 [CN] 探针曾把 loop1m 推进 OOM）——探针要么一次性（前 N 次）、
+   要么用累加器均值，MEMPROBE 即按此纪律实现；
+4. **exit 码必须与内存数字一起读**：exit≠0 先查 `VM-ERROR=` 行——本轮
+   loop1100m 的「10⁹ 崩溃」实为 2×10⁹ 指令上限，与内存无关（注①）。
+
+**坑：`probeReport` 读「首个采样」必须读槽 2**。`probeArena` 的槽号
+`n = instructionCount/2²⁰ + 1` 在首次调用时已是 2（ic 刚刷回到 2²⁰），
+槽 1 从未写入（bump 零页）——读槽 1 当基线会得到 `-base` 的垃圾差值
+（实测 delta 报 140 万亿量级，一度误判为「Long 减法溢出」）。
 
 ### 10.5 装载期探针已全部清除（2026-10-08）
 
@@ -434,19 +453,19 @@ RETAIN **消费**栈顶。Photon VM 的 `retain()`/`release()` 却是 `incRef()`
 
 | 编号 | 工作项 | 状态 | 预期收益 / 备注 |
 |---|---|---|---|
-| **P1-RETAIN** | 发射端 `as T` 的 `LoadVar;RETAIN` 未配 `RELEASE`/`DropRef`，栈顶单调上升（§10.2 复核） | ⛔ **P0-2c 遗留，本轮新增** | 根治值栈无上界倍增；10⁹ 量级复现旧症状。改动在 seed 发射器 |
+| **P1-RETAIN** | **堆对象**（object/box/list）的 RETAIN/RELEASE 配对审计 | ⚠️ 重新表述（2026-10-08 晚） | MEMPROBE 证实**紧循环栈账目平衡**（capGrow=1 贯穿 10⁶ 迭代），旧表述「栈顶单调上升、10⁹ 复现」已被探针证伪——loop1100m 的 exit≠0 是指令上限（§10.3 注①）。真对象引用计数需要 heapKinds 增长探针（对象注册数/释放数），未做 |
 | **P1-64MB** | 66.6 MB 固定提交：arena 在 `.data` ⇒ 文件 64 MB + 全 commit | ❌ 未实施 | 方案 a/b/c 见 §七；省 ~60 MB commit/进程 |
-| **P1-ALLOC** | 调用路径 ~34 B/次残余（`as Int` 与 `as Long` 对照同量级） | ⚠️ 部分失效 | RETAIN 修复已吃掉大部分；未逐行归因 |
-| **P2-USE** | arena 使用率自检探针 | ❌ 未实施 | 方向已调整：不宜驻留装载期（§10.5），改用一次性定位法 |
+| **P1-ALLOC** | 调用路径 ~34 B/次残余（`as Int` 与 `as Long` 对照同量级） | ⚠️ 已被探针否定 | MEMPROBE slope=7 贯穿全部场景——调用路径**无可测净分配**；§五的 35.6 B/次 归因于已修复的 RETAIN 回压 |
+| **P2-USE** | arena 使用率自检探针 | ✅ 已实施（MEMPROBE） | 见 §10.4；装载期仍一行 println 不许留（§10.5） |
 | **P2-GC** | `GC.collect()` 空壳（`aura/core/aura/lang/native/GC.aura`） | ❌ 未处理 | `docs/advance/内存模型对比分析与ARC增强路线.md` L115 早已建议删除 |
 | **P2-AOT-C** | AOT-C 后端 lambda 占位 `(void*)0` | ❌ 未处理 | `c_backend.rs:325-327`，见 `docs/规划-游戏领域发展路线规划.md` L127 |
-| **P3-回归门** | Long 密集压力门（loop1100k）纳入五门 | ❌ 未固化 | guest 已入库 `tools/photon-prof/prof-src/` |
+| **P3-回归门** | Long 密集压力门（loop1100k）纳入五门 | ❌ 未固化 | guest 已入库 `tools/photon-prof/prof-src/`；回收判定门 `mem-reclaim-matrix.sh` 已可入 CI |
 
 **已完成（本轮）**：P0-2a OOM 守卫、P0-2b `AURA_HEAP_MB` 扩容、P0-2c 双根因修复、
 §七 P0-1 四方案判定作废、§10.5 装载期探针清零、`auc-disasm.py` 入库、
-分离实验 guest 入库。
+分离实验 guest 入库、MEMPROBE 常驻水位探针 + 回收判定矩阵。
 
 **§七 P0-1 的四方案（水位重置/同槽回收/自由链表/值模型特化）为何作废**：
 它们的前提是「`as Long` 走 `boxAlloc` 且 box 永不回收」。实测当前 `.auc` 里
 `as Long` = `CALL_NATIVE_ARGS("aura_cast", 2)`，`BoxAlloc` 计数为 0——
-前提不成立，四项方案无从下手。真正该做的是 P1-RETAIN。
+前提不成立，四项方案无从下手。MEMPROBE 进一步证实修复后 arena 净增长为零。

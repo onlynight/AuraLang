@@ -165,7 +165,7 @@ run_case() {
   if ! gen_auc "$src"; then echo "  [$name] 生成 .auc 失败"; return 1; fi
   cp "${src%.aura}.auc" "$AUC"
   local out
-  out=$(timeout 300 "$exe" 2>/dev/null | guest_out)
+  out=$(timeout 300 "$exe" 2>/dev/null | guest_out | grep -vE '^\[MEMPROBE\]')
   if echo "$out" | grep -qE "$expect"; then
     echo "  [$name] PASS  <<< $(echo "$out" | tr '\n' '|')"
     return 0
