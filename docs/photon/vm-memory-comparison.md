@@ -277,3 +277,67 @@ P0-2b（`AURA_HEAP_MB` 环境变量扩容，commit `9a32e7d`）落地后重跑�
    其原生分配器**逐次回收**被覆写的 Long 装箱；Photon bump arena 只增不减，
    62.5B/次 × 1.1M ≈ 68MB 全部滞留。AURA_HEAP_MB 是**绕开**（买更大的
    一次性 arena），不是**修复**（回收）；P1 方向仍是 §七的空闲链表/区间回收。
+
+---
+
+## 十、P0-2c：`as Long` 「从不回收」真根因与修复（2026-10-08）
+
+§七 P0-1 的四个候选方案（水位重置/同槽回收/自由链表/值模型特化）**全部未采用**——
+深挖后发现 §4.2 的「boxAlloc + heapKinds」链路是**陈旧描述**：当前 .auc 里 `as Long`
+编译为 `CALL_NATIVE_ARGS("aura_cast", 2)`，真正的泄漏是**两处与装箱无关的解释器 bug**：
+
+### 10.1 根因 1：`aura_cast` 臂对类型名做 `toStr(指针)`（≈32B/次）
+
+```aura
+val targetTy: String = toStr(this.stack.pop())   // 弹出的是 "Long" 字符串指针！
+```
+
+photon 运行时 `toStr` 是**纯整数**打印器（P347）：对字符串指针打出**指针值的十进制**
+（≈14 位数字，66B 临时串、永不回收）。后果双重：
+
+1. 泄漏：longstep 1M 次 `as Long` 实测 arena **+66.0MB**（§四的「62.5B/次」即此）；
+2. 更严重——`targetTy` 是垃圾数字，`== "Long"` 等比较**全部失败**，恒走 else
+   **透传**：`as Long` 从未真正转换过（Plan A 下 Int/Long 本就同为 64 位 tagged，
+   透传碰巧语义正确，掩盖了 bug 本身）。
+
+**修复**：类型名改 `VmOps.toStrAny`（真实字符串原样返回，零分配）；`as Long` 走
+显式恒等 `push(cv)`（Plan A 无窄化/加宽，恒等即正确语义）。
+
+### 10.2 根因 2：`RETAIN`/`RELEASE` 回压栈顶（值栈 +2 槽/迭代，无上界倍增）
+
+发射端约定（seed interp.rs 2026-10-02 已修的同款）：`LoadVar src; RETAIN` ——
+RETAIN **消费**栈顶。Photon VM 的 `retain()`/`release()` 却是 `incRef()`/`decRef()`——
+**pop 后又 push 回去**，每对净增 1 个栈槽。紧密循环里每次调用后都插有 ARC 指令，
+值栈按 ~16B/迭代**无上界倍增**：longstep 1M 次实测 VmStack cap 涨到
+**2,097,088 槽**，各代旧缓冲（8B/槽）累计 ≈31MB 全部滞留 bump arena。
+种子侧同一 bug 当时的症状是「8 秒涨到 7GB」。
+
+**修复**：`retain()`/`release()` 改为消费语义（pop 后不回压；tagged 快路径直通；
+对象/箱按 rc±1，归零走 `freeRegistered`）。
+
+### 10.3 修复后内存矩阵（memprof 3 轮取峰）
+
+| 场景 | 修复前 wset | 修复后 wset | 修复前行为 | 修复后行为 |
+|---|---|---|---|---|
+| longstep 1M | 71.2 MB | **4.2 MB** | +62.5MB 线性增长 | 常数 |
+| loop1m | 71.2 MB | **4.3 MB** | +62.5MB | 常数 |
+| loop1100k 默认（无 AURA_HEAP_MB） | OOM exit 70 | **4.3 MB** | [OOM] HEAP FULL | **exit 0 正确输出** |
+| fib28 | — | **8.9 MB** | +37.8B/调用 | 常数 |
+
+- loop1100k **不再需要 AURA_HEAP_MB**：泄漏消失后默认 64MiB 静态 arena 足以容纳
+  （真实存活数据只有常数级）；P0-2a 的 OOM 守卫与 P0-2b 的扩容机制保持原样，
+  作为「真实存活集」超限时 的兜底/扩容通道（AURA_HEAP_MB=128 回归 ✓）。
+- fib28 计时中位 3353→3288ms（**-2%**，值栈不再频繁倍增搬运）。
+- 语义探针（`x=100 as Long; y=x+1; ...` 五值）与五门回归全绿。
+
+### 10.4 方法论注记
+
+本轮定位靠三个可复用工具/手段（均已入库）：
+
+1. **`tools/photon-prof/auc-disasm.py`**：.auc 反汇编器（seed serialize v7 格式，
+   natives/函数/操作码全解析）——直接看 guest 字节码里到底有什么；
+2. **`HeapDiag.heapbump()`（extern `aura_heapbump`）**：arena 水位探针，配合
+   「指令数 → 水位」曲线（`[IC]` 探针）一眼识别**倍增跳变 vs 线性泄漏**；
+3. **可变探针最小化原则**：println 探针本身经同一 bump arena 分配，会污染测量
+   （本轮 [CN] 探针曾把 loop1m 推进 OOM）——探针要么一次性（前 N 次）、要么用
+   累加器均值。

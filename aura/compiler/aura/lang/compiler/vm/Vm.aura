@@ -114,6 +114,7 @@ class Vm {
     /// P391：CALL 目标单槽缓存（按函数名记忆 offset/参数个数，见 callOrBuiltin）。
     /// P393：cfIsUser=1 表示该名是用户函数（快速路径跳过内建 if-else 链）。
     private var cfName: String = ""
+
     private var cfTarget: Int = 0
     private var cfPc: Int = 0
     private var cfIsUser: Int = 0
@@ -1225,10 +1226,23 @@ class Vm {
             return
         } else if (funcName == "aura_cast" || funcName == "aura_cast_safety") {
             // `x as T` 的运行时转换（与 AOT emit 的 aura_cast 分支同语义）。
-            val targetTy: String = toStr(this.stack.pop())
+            //
+            // P0-2c（2026-10-08）：旧实现 `toStr(弹出的类型名)` 有双重缺陷——
+            //   1) photon 运行时 toStr 是**纯整数**打印器（P347），对 "Long"
+            //      字符串指针会打出一串**指针值十进制**（≈66B 临时串且永不
+            //      回收——longstep 1M 次 `as Long` 实测 arena +66.0MB/1M 次，
+            //      严丝合缝）；
+            //   2) 打出来的 targetTy 是垃圾数字，`== "Long"` 等比较**全部
+            //      失败**，恒走 else 透传——`as Long` 实际从未按 Long 转换过。
+            // 改为 VmOps.toStrAny（真实字符串原样返回，零分配），并让
+            // `as Long` 走显式恒等：Plan A 下 Int/Long 同为 64 位 tagged
+            // 值（无窄化/加宽），恒等透传即正确语义、零分配。行为与修复
+            // 前实际生效的「透传」一致，唯一差别是不再泄漏临时串。
+            val tyRaw: Any = this.stack.pop()
             val cv: Any = this.stack.pop()
+            val targetTy: String = VmOps.toStrAny(tyRaw)
             if (targetTy == "Long") {
-                this.stack.push(VmOps.toI64(VmOps.toStrAny(cv)))
+                this.stack.push(cv)
             } else if (targetTy == "Int") {
                 this.stack.push(VmOps.intOf(cv))
             } else if (targetTy == "Float" || targetTy == "Double") {
@@ -2564,14 +2578,59 @@ class Vm {
         }
     }
 
-    /// 保留（别名 incRef，语义更显式）。
+    /// 保留（RETAIN，op 112）——**消费**栈顶，不回压。
+    ///
+    /// P0-2c 栈约定对齐（2026-10-08）：emit 端模式是 `LoadVar src; RETAIN`
+    /// （压栈后由本指令消费）。旧实现 `this.incRef()` pop 后又 push 回去，
+    /// 每对净增 1 个栈槽——紧密循环里值栈按 ~16B/迭代无上界倍增（longstep
+    /// 1M 次 `as Long` 实测 VmStack cap 涨到 2,097,088 槽 ≈34MB，各代旧缓冲
+    /// 累计 ≈31MB 全部滞留 bump arena）。与种子 interp.rs 2026-10-02 的同名
+    /// 修复同根因（当时症状：8 秒涨到 7GB）。
     private fun retain(): Unit {
-        this.incRef()
+        val v: Any = this.stack.pop()
+        if (v == null || !VmOps.isNumeric(v)) {
+            return
+        }
+        if (VmOps.isTaggedInt(v)) {
+            return
+        }
+        val key: String = VmOps.toStrAny(v)
+        val kind: String = this.heapKinds.getOrDefault(key, "")
+        if (kind == "object" || kind == "box") {
+            val ptr: Long = VmOps.toI64(key)
+            if (ptr > 0) {
+                val rc: Int = Memory.read32(ptr + 8)
+                if (rc > 0) {
+                    Memory.write32(ptr + 8, rc + 1)
+                }
+            }
+        }
     }
 
-    /// 释放（别名 decRef，语义更显式）。
+    /// 释放（RELEASE，op 113）——**消费**栈顶，不回压（同 retain 的栈约定）。
     private fun release(): Unit {
-        this.decRef()
+        val v: Any = this.stack.pop()
+        if (v == null || !VmOps.isNumeric(v)) {
+            return
+        }
+        if (VmOps.isTaggedInt(v)) {
+            return
+        }
+        val key: String = VmOps.toStrAny(v)
+        val kind: String = this.heapKinds.getOrDefault(key, "")
+        if (kind == "object" || kind == "box") {
+            val ptr: Long = VmOps.toI64(key)
+            val rc: Int = Memory.read32(ptr + 8)
+            val newRc: Int = rc - 1
+            if (newRc <= 0) {
+                this.freeRegistered(key, kind)
+            } else {
+                Memory.write32(ptr + 8, newRc)
+            }
+        } else if (kind != "") {
+            // 容器/资源：丢弃即释放（与 decRef 的同款约定）
+            this.freeRegistered(key, kind)
+        }
     }
 
     /// 丢弃引用：弹出并按注册类型回收（P1.5）。
