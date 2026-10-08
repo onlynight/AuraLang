@@ -453,6 +453,22 @@ class X86Emitter {
         return out
     }
 
+    /// 获取「名字 → 段内偏移」表（格式 "funcName|offset"，`;` 分隔）。
+    ///
+    /// 与 [`getFuncOffsets`] 的区别：后者是 `;;` 分隔的函数**组**（COFF 写入器
+    /// 按组 rebase 用），本方法是扁平表——JIT 装载时（`JitRelocation`）要用它
+    /// 把 `R_X86_64_REL32` 重定位的符号名解析为段内偏移，再换算为绝对地址。
+    fun getFuncNameOffsets(): String {
+        if (this.funcOffsetsList.size == 0) { return "" }
+        var out: String = this.funcOffsetsList[0]
+        var i: Int = 1
+        while (i < this.funcOffsetsList.size) {
+            out = out + ";" + this.funcOffsetsList[i]
+            i = i + 1
+        }
+        return out
+    }
+
     // ── 非易失寄存器保存/恢复 ──
 
     /// 该寄存器是否为 Win64 非易失寄存器（需被调函数保留）。
@@ -1508,7 +1524,7 @@ class X86Emitter {
         return "rax"
     }
 
-    /// 连接重定位记录为 `|` 分隔字符串。
+    /// 连接重定位记录为 `;` 分隔字符串。
     ///
     /// ⚠️ 旧实现是 `out = out + relocs[i]` —— Aura 的 String 不可变，每拼一条
     /// 都要把**已累积的全部记录**整段拷贝 ⇒ O(记录数²)。自举 `Main.aura` 有
@@ -1519,11 +1535,18 @@ class X86Emitter {
     /// 现改为「先逐条入列表（含分隔符），再两两归并」：追加 O(1)，归并
     /// O(总长 · log 记录数)，与 `X86Encoder.joinBytes` / `PhotonObjectWriter.coffJoinList`
     /// 同一手法。
+    ///
+    /// 分隔符从 `|` 改为 `;`（P1-2）：单条记录本身以 `|` 分隔三个字段
+    /// （`offset|symbol|type`），用 `|` 做记录间分隔只能靠「字段数整除 3」
+    /// 反推切分——`PhotonObjectWriter.parseRelocEntries` 为此专门写了紧凑形式
+    /// 分支（`splitSemi <= 1` 才走 `|` 直连解析），且符号名一旦含 `|` 即崩。
+    /// `PhotonObjectWriterUtils.joinRelocRecords` 早以 `;` 为分隔符，JIT 路径
+    /// （`compileEncodeOnly`）产出的记录字符串必须与 COFF 写入器消费格式一致。
     private fun joinRelocRecords(relocs: List<String>): String {
         val parts: List<String> = arrayListOf<String>()
         var i: Int = 0
         while (i < relocs.size) {
-            if (i > 0) { parts.add("|") }
+            if (i > 0) { parts.add(";") }
             parts.add(relocs[i])
             i = i + 1
         }

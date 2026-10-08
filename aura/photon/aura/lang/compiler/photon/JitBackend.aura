@@ -55,6 +55,7 @@ import aura.lang.native.Memory
 import aura.lang.native.JitExec
 import aura.lang.compiler.hir.Hir
 import aura.lang.compiler.photon.PhotonPipeline
+import aura.lang.compiler.photon.JitRelocation
 
 // ─────────────────────────────────────────────────────────────
 // JitBackend — JIT 后端：W^X 内存 + 分派表
@@ -120,6 +121,12 @@ class JitBackend {
     /// 是否运行在原生（AOT / 自举）运行时。
     var nativeRuntime: Boolean = false
 
+    /// 最近一次 [`emitFunctionRelocated`] 的重定位应用结果（P1-2 诊断用）。
+    private var lastRelocResult: RelocApplyResult = RelocApplyResult()
+
+    /// 最近一次发射中跳过的重定位条目数（未知符号 / 偏移越界 / 数据段未分配）。
+    private var lastRelocSkipped: Int = 0
+
     /// vmMode 下用于模拟分配的假地址计数器（`0x100000` = 1048576）。
     ///
     /// **必须写十进制**：发射器把 `var` 字段初始值按原文写进 LLVM IR，
@@ -142,6 +149,8 @@ class JitBackend {
         this.vmMode = true
         this.nativeRuntime = false
         this.simNextAddr = 1048576
+        this.lastRelocResult = RelocApplyResult()
+        this.lastRelocSkipped = 0
     }
 
     /// 启用原生执行：关闭 VM 模拟，真实分配 W^X 内存并写入机器码。
@@ -281,6 +290,28 @@ class JitBackend {
             }
             i = i + 1
         }
+    }
+
+    /// 写入 32 位重定位值（小端）。
+    ///
+    /// P1-2 新增：`JitRelocation` 回填 `RIP32`/`PCREL32` 位移用。
+    /// `addr` 是**占位符首字节**的绝对地址（`codeBase + offset`）。
+    /// VM 模式下跳过实际写入（与 [`writeCode`] 一致）。
+    fun writeReloc32(addr: Int, value: Int): Unit {
+        if (addr == 0 || this.vmMode) {
+            return
+        }
+        Memory.write32(addr as Long, value)
+    }
+
+    /// 写入 64 位重定位值（绝对地址）。
+    ///
+    /// P1-2 新增：`JitRelocation` 回填 `R_X86_64_64` / 数据段引用用。
+    fun writeReloc64(addr: Int, value: Long): Unit {
+        if (addr == 0 || this.vmMode) {
+            return
+        }
+        Memory.write64(addr as Long, value)
     }
 
     // ── 分派表管理 ──
@@ -427,6 +458,26 @@ class JitBackend {
     ///
     /// VM 模式下地址为模拟值、写入被跳过；原生模式下真实 W^X 写入。
     fun emitFunction(funcName: String, machineCode: String): Int {
+        return this.emitFunctionRelocated(funcName, machineCode, "", "", 0)
+    }
+
+    /// 带重定位修正的函数发射（P1-2）。
+    ///
+    /// 与 [`emitFunction`] 的唯一区别是多三步：
+    ///   1. 分配后先**保持 RW** 写入机器码（不再立刻切 RX）；
+    ///   2. 调用 [`JitRelocationUtils.applyRelocations`] 回填占位符；
+    ///   3. 全部回填完成后再 `setExecutable` 切 RX（真正的 W^X）。
+    ///
+    /// 参数：
+    ///   `machineCode`    裸机器码 hex（含 `00 00 00 00` 占位符）；
+    ///   `relocRecords`   `offset|symbol|type` 条目、`;` 分隔（可为空）；
+    ///   `funcNameOffsets` `funcName|offset` 条目、`;` 分隔（可为空）；
+    ///   `dataBase`       数据段基址（0 = 未分配，`DATA_REF` 重定位被跳过）。
+    ///
+    /// 返回入口地址 `base + offset`；失败（空码 / 分配失败 / 越界）返回 0。
+    fun emitFunctionRelocated(funcName: String, machineCode: String,
+                              relocRecords: String, funcNameOffsets: String,
+                              dataBase: Int): Int {
         if (machineCode == "") {
             return 0
         }
@@ -459,6 +510,22 @@ class JitBackend {
         // 写入机器码（VM 模式下 writeCode 内部跳过）。
         this.writeCode(base, offset, machineCode)
 
+        // P1-2：回填重定位。
+        //
+        // 关键约定：`relocRecords` 与 `funcNameOffsets` 的 offset 都是
+        // **段内**字节偏移（`X86Emitter` 单次 `emitFunction` 调用的模块内偏移）。
+        // `applyRelocations` 收到的 `codeBase` 因此是本段起点 `base + offset`，
+        // 而**不是**共享内存基址——否则同一块内存里发射第二个函数时，
+        // 第一段的偏移语义与第二段错位（`base+off` 与 `base+offset+off`）。
+        // `funcNameOffsets` 的符号也按段内偏移解析，无需叠加。
+        if (relocRecords != "") {
+            val relocs: List<Relocation> = JitRelocationUtils.parseRelocs(relocRecords)
+            val res: RelocApplyResult = JitRelocationUtils.applyRelocations(
+                    this, base + offset, codeBytes, relocs, funcNameOffsets, dataBase)
+            this.lastRelocResult = res
+            this.lastRelocSkipped = res.skipped
+        }
+
         // 切换为可执行权限（VM 模式下 setExecutable 内部跳过）。
         this.setExecutable(base, this.codeSize)
 
@@ -483,9 +550,27 @@ class JitBackend {
     /// 注意：使用 `compileEncodeOnly` 而非 `compileHir`，
     /// 因为 JIT 不需要 COFF 目标文件组装和链接。
     fun compileMachineCode(hir: Hir, outDir: String, moduleName: String): String {
+        return this.compileMachineCodeResult(hir, outDir, moduleName).machineCodeHex
+    }
+
+    /// [`compileMachineCode`] 的完整结果版（P1-2）。
+    ///
+    /// 返回 `BackendResult`，除 `machineCodeHex` 外还带
+    /// `relocRecords` / `funcNameOffsets` / `funcOffsets` / `stringConsts`
+    /// / `relocationCount`——JIT 装载必需的重定位信息。
+    fun compileMachineCodeResult(hir: Hir, outDir: String, moduleName: String): BackendResult {
         val pipeline = PhotonPipeline()
-        val result = pipeline.compileEncodeOnly(hir, outDir, moduleName)
-        return result.machineCodeHex
+        return pipeline.compileEncodeOnly(hir, outDir, moduleName)
+    }
+
+    /// 最近一次 [`emitFunctionRelocated`] 的重定位应用统计。
+    fun lastRelocResult(): RelocApplyResult {
+        return this.lastRelocResult
+    }
+
+    /// 最近一次发射中跳过的重定位数（未知符号 / 越界 / 数据段未分配）。
+    fun lastRelocSkippedCount(): Int {
+        return this.lastRelocSkipped
     }
 
     /// 将函数注册到分派表，返回槽位索引。
@@ -572,6 +657,9 @@ class JitBackend {
         out = out + "dispatchTable=00000000 "
         out = out + "functionCount=" + this.intToStr(this.funcCount) + " "
         out = out + "mode=" + mode
+        if (this.lastRelocResult.total > 0) {
+            out = out + " " + JitRelocationUtils.formatApplyResult(this.lastRelocResult)
+        }
         return out
     }
 

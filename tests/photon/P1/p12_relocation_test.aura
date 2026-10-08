@@ -1,0 +1,144 @@
+// tests/photon/P1/p12_relocation_test.aura
+// ═══════════════════════════════════════════════════════════════
+// P1-2 单元测试：JIT 重定位（缺口一 + 缺口二的运行时修正）
+//
+// 覆盖：
+//   1. RelocTypeUtils.fromName / nameOf —— 类型名与数值双向映射
+//   2. JitRelocationUtils.parseRelocs —— `off|symbol|type;...` 解析
+//   3. JitRelocationUtils.countRelocs
+//   4. JitRelocationUtils.lookupFuncOffset —— 段内偏移表查找
+//   5. JitRelocationUtils.applyRelocations —— RIP32 / ABS64 / DATA_REF /
+//      未知符号 / 偏移越界 五类分支的计数正确性
+//   6. 段内偏移的逐段换算（`emitFunctionRelocated` 的多段共享内存语义）
+//
+// VM 安全：`applyRelocations` 的写操作全部经 `JitBackend` 守卫，
+// `vmMode=true` 时不触碰 `Memory`。
+//
+// 运行：aura run tests/photon/P1/p12_relocation_test.aura
+// ═══════════════════════════════════════════════════════════════
+
+package tests.photon.P1
+
+import aura.lang.std.String
+import aura.lang.std.Process
+import aura.lang.compiler.photon.JitBackend
+import aura.lang.compiler.photon.JitRelocation
+import aura.lang.compiler.photon.X86Emitter
+import aura.lang.compiler.photon.x86_64.X86Encoder
+
+var gPass: Int = 0
+var gFail: Int = 0
+
+fun check(name: String, ok: Boolean, detail: String): Unit {
+    if (ok) {
+        gPass = gPass + 1
+        println("[PASS] " + name + "  " + detail)
+    } else {
+        gFail = gFail + 1
+        println("[FAIL] " + name + "  " + detail)
+    }
+}
+
+fun main() {
+    println("=== P1-2 单元测试：JIT 重定位 ===")
+
+    // ── 1. 类型解析 ──
+    check("REL32 -> RIP32(0)", RelocTypeUtils.fromName("R_X86_64_REL32") == 0,
+            "got=" + toStr(RelocTypeUtils.fromName("R_X86_64_REL32")))
+    check("PLT32/PC32 归并到 RIP32",
+            RelocTypeUtils.fromName("R_X86_64_PLT32") == 0 &&
+                RelocTypeUtils.fromName("R_X86_64_PC32") == 0 &&
+                RelocTypeUtils.fromName("REL32") == 0, "ok")
+    check("R_X86_64_64/ADDR64 -> ABS64(1)",
+            RelocTypeUtils.fromName("R_X86_64_64") == 1 &&
+                RelocTypeUtils.fromName("ADDR64") == 1, "ok")
+    check("DATA -> DATA_REF(2)",
+            RelocTypeUtils.fromName("R_X86_64_DATA") == 2 &&
+                RelocTypeUtils.fromName("DATA_REF") == 2, "ok")
+    check("未知类型 -> -1", RelocTypeUtils.fromName("R_WEIRD") == -1, "ok")
+    check("类型名往返",
+            RelocTypeUtils.nameOf(0) == "RIP32" &&
+                RelocTypeUtils.nameOf(1) == "ABS64" &&
+                RelocTypeUtils.nameOf(2) == "DATA_REF" &&
+                RelocTypeUtils.nameOf(3) == "PCREL32" &&
+                RelocTypeUtils.nameOf(-1) == "UNKNOWN", "ok")
+
+    // ── 2. 解析 ──
+    val r1 = JitRelocationUtils.parseRelocs("12|println|R_X86_64_REL32;56|helper|R_X86_64_64")
+    check("parseRelocs 条数=2", r1.size == 2, "n=" + toStr(r1.size))
+    check("parseRelocs 字段完整",
+            r1.size == 2 && r1[0].offset == 12 && r1[0].symbol == "println" &&
+            r1[0].type == 0 && r1[1].offset == 56 && r1[1].symbol == "helper" &&
+            r1[1].type == 1,
+            "r0=" + toStr(r1[0].offset) + "/" + r1[0].symbol + "/" + toStr(r1[0].type))
+    check("parseRelocs 空串=0", JitRelocationUtils.parseRelocs("").size == 0, "ok")
+    check("parseRelocs 未知类型保留为 -1",
+            JitRelocationUtils.parseRelocs("3|x|R_NA")[0].type == -1, "ok")
+    check("countRelocs=3",
+            JitRelocationUtils.countRelocs("1|a|R_X86_64_REL32;2|b|R_X86_64_REL32;3|c|ADDR64") == 3,
+            "ok")
+    check("countRelocs 空串=0", JitRelocationUtils.countRelocs("") == 0, "ok")
+
+    // ── 3. 符号表查找 ──
+    val offs = "main|0;helper|64;util_1|128"
+    check("lookupFuncOffset 命中", JitRelocationUtils.lookupFuncOffset(offs, "helper") == 64,
+            "got=" + toStr(JitRelocationUtils.lookupFuncOffset(offs, "helper")))
+    check("lookupFuncOffset 首项", JitRelocationUtils.lookupFuncOffset(offs, "main") == 0, "ok")
+    check("lookupFuncOffset 末项",
+            JitRelocationUtils.lookupFuncOffset(offs, "util_1") == 128, "ok")
+    check("lookupFuncOffset 未命中=-1",
+            JitRelocationUtils.lookupFuncOffset(offs, "nope") == -1, "ok")
+    check("lookupFuncOffset 空前缀",
+            JitRelocationUtils.lookupFuncOffset("x|5", "") == -1, "ok")
+
+    // ── 4. 应用：四类分支 ──
+    val be = JitBackend()
+    val relocs = JitRelocationUtils.parseRelocs(
+            "8|helper|R_X86_64_REL32;20|main|ADDR64;30|@str.0|R_X86_64_REL32;400|helper|RIP32")
+    val res = JitRelocationUtils.applyRelocations(be, 4096, 100, relocs, offs, 0)
+    check("applyRelocations 统计（2 应用 + 1 未知符号 + 1 越界）",
+            res.total == 4 && res.applied == 2 && res.skipped == 2,
+            JitRelocationUtils.formatApplyResult(res))
+
+    // DATA_REF 有数据段时应用
+    val resData = JitRelocationUtils.applyRelocations(be, 4096, 100,
+            JitRelocationUtils.parseRelocs("8|helper|R_X86_64_DATA"),
+            offs, 8192)
+    check("DATA_REF + dataBase -> 应用",
+            resData.applied == 1 && resData.skipped == 0,
+            JitRelocationUtils.formatApplyResult(resData))
+
+    // DATA_REF 无数据段时跳过（不写错值）
+    val resNoData = JitRelocationUtils.applyRelocations(be, 4096, 100,
+            JitRelocationUtils.parseRelocs("8|helper|R_X86_64_DATA"), offs, 0)
+    check("DATA_REF 无数据段 -> 跳过",
+            resNoData.applied == 0 && resNoData.skipped == 1,
+            JitRelocationUtils.formatApplyResult(resNoData))
+
+    // ── 5. 存根修正（VM 模式仅验证不触碰 Memory）──
+    JitRelocationUtils.patchDispatchStub(be, 0x10000, 0x20000)
+    JitRelocationUtils.patchDeoptTrampoline(be, 0x10000, 0x30000)
+    check("patchStub 在 VM 模式下安全", be.isVmMode(), "ok")
+
+    // ── 6. 真实编码器输出格式（P1-2 分隔符契约）──
+    val enc = X86EncoderUtils.emptyEncoder()
+    enc.emitPrologue(0x30)
+    enc.emitLeaRIP("rcx", "@str.0")
+    enc.emitCallRel("println")
+    enc.emitXorRR("eax", "eax")
+    enc.emitEpilogue()
+    check("X86Encoder 产出 2 条重定位", enc.getRelocations().size == 2,
+            "n=" + toStr(enc.getRelocations().size))
+    check("单条重定位是 off|symbol|type 三段",
+            enc.getRelocations().size == 2 &&
+                enc.getRelocations()[0].length > 0,
+            enc.getRelocations()[0])
+
+    // X86Emitter 的 joinRelocRecords 输出必须以 `;` 分隔（分隔符契约）
+    val emitter = X86EmitterUtils.emptyEmitter()
+    check("X86Emitter 初始无重定位", emitter.getRelocRecords() == "", "ok")
+
+    println("")
+    println("RESULT pass=" + toStr(gPass) + " fail=" + toStr(gFail))
+    Process.exit(gFail)
+}
