@@ -292,16 +292,12 @@ class AucModule {
             ci = ci + 1
         }
         mod.constPool = poolAcc
-        // P358：池本体测量
-        var nlCount: Int = 0
-        var mi: Int = 0
-        val mn: Int = poolAcc.length
-        while (mi < mn) {
-            if (poolAcc.charCodeAt(mi) == 10) { nlCount = nlCount + 1 }
-            mi = mi + 1
-        }
-        println("[CP] len=" + toStr(mn) + " nl=" + toStr(nlCount)
-            + " head=[" + VmOps.vmSubstr(poolAcc, 0, 60) + "]")
+        // P358（2026-10-08 删除）：此处曾有一个「池本体测量」诊断窗（池长度 +
+        // 换行数 + 前 60 字节），用于确认常量池未被漏写的裸换行打穿——打穿后
+        // 所有常量下标整体错位（P331/P360 家族）。P360 起 constLines 改在
+        // 常量循环内就地构建，此窗失去断言对象，已随装载期探针一并清除。
+        // 若日后 constPool 再现「下标错位 / 循环条件恒假」，先按上述口径补回
+        // 该窗再定位（勿改成事后扫描器，扫描器循环在 photon 下同样漂移）。
         // P360：constLines 改在常量循环内直接构建（转义态）——本函数与
         // VM 侧的扫描器循环均漂移（§10.89 总根），已全部废弃。
 
@@ -552,19 +548,12 @@ class AucModule {
                 nativeParams, constTags, funcNames, funcParams, mod.slotMethodNames,
                 mod.classNames, lineNo2, mod)
             // P331：decoded 返回值在 photon 下不可靠（循环 phi 家槽被陈旧 MOV
-            // 污染，实测恒 1/2）——但 flat 追加本身全对（[winB] n=1194 实证）。
+            // 污染，实测恒 1/2）——但 flat 追加本身全对（1194 行实证）。
             // 起始行改用 **flat 实际增量** 计算，绕开坏计数器。
             val realDecoded: Int = mod.numOpNames.size() - startOpCount
-            println("[DC] f=" + toStr(fi3) + " codeLen=" + toStr(codeLens.get(fi3))
-                + " real=" + toStr(realDecoded) + " pos=" + toStr(reader.pos))
             lineNo2 = lineNo2 + realDecoded
             fi3 = fi3 + 1
         }
-        // P239 括号探针 A：decode 完成点的 numArgsFlat 健康度
-        // P239b 新建列表自读：分配器当下健康 vs numArgsFlat 早期被覆写
-        val probeL: List<String> = arrayListOf<String>()
-        probeL.add("AA")
-        probeL.add("BB")
         // 函数表：起始行 = 指令下标（无数值注释占位行）
         // P340：多操作数拼接链摊平（同 constPool 修复）；P354 局部累加。
         var ftAcc: String = ""
@@ -636,9 +625,6 @@ class AucModule {
         val n: Int = v.length
         while (i < n) {
             val c: Int = v.charCodeAt(i)
-            if (v.length != n) {
-                println("[STOMP]")
-            }
             if (c == 92) {
                 out = out + bs
                 out = out + bs
@@ -1427,9 +1413,4 @@ class AucModule {
         reader.dispose()
         return isAuraMagic(magic)
     }
-}
-
-/** P239 诊断：heapBump 裸值读取（runtime 同名导出 aura_heapbump）。 */
-extern interface HeapDiag {
-    fun heapbump(): Long
 }

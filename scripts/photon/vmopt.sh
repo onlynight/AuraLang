@@ -45,12 +45,20 @@ for _f in tools/photon-prof/bench-src/*.aura; do
   [ -f "$_b" ] || { cp "$_f" "$_b"; echo "  恢复基准源: $_b"; }
 done
 
-# guest 输出 = 装载期最后一个探针标记 `[winC2] post-loadPredecoded` **之后**的所有行。
-# 该标记之前的内容全是Vm.aura 装载期的诊断探针（[DC]/[T32]/[FLAT*]/[OC]/[CL2]/…），
-# 它们本身也会污染 stdout（println 的实参被先一步打印成裸值），不能当 guest 输出。
-# 标记名一旦变化，用 `grep -n` 重新定位——宁可空跑也不要误判。
+# guest 输出 = 装载完成标记 `[VMLOADOK]` 与执行完成标记 `[VMDONE]` **之间**的行。
+#
+# 历史（P239/P279 时代）：标记名为 `[winC2] post-loadPredecoded`，因为之前
+# Vm.aura 装载期有数十条诊断 println 会污染 stdout，必须靠标记切分。
+# 2026-10-08 已清掉全部装载期探针（loadPredecoded 内的 [winB]*/[FLAT*]/[AS]/
+# [hbB]*、[OC]、[CL2]、[BLC-ft]；AucLoader 的 [CP]/[DC]/[STOMP] 与整个
+# HeapDiag extern；VmOps.toI32 的 [T32] 首 4 次窗）。保留双标记切分而非直接
+# cat——它是防回归护栏：今后若有人再往装载期/收尾加 println，guest 输出仍
+# 会被正确切出。两个标记名各一行，改动时须同时更新本 awk 与 Vm.aura。
+#
+# 注意：`loadPredecoded` 是 photon 下对布局扰动最敏感的窗口（§10.111：任何
+# 扰动都可能让基准静默给错值），因此装载期**一行 println 都不许留**。
 guest_out() {
-  awk '/^\[winC2\] post-loadPredecoded$/{seen=1; next} seen' | grep -vE '^\s*$'
+  awk '/^\[VMLOADOK\]$/{seen=1; next} /^\[VMDONE\]$/{seen=0} seen' | grep -vE '^\s*$'
 }
 
 # 重建驱动（PhotonHatCompile.exe）——**改 X86Emitter / InstructionSelection /

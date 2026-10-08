@@ -32,9 +32,13 @@ echo "=== RustVM 纯编译（同源、不执行，用于拆分「编译 vs 执�
 M RustVM-build-fib28 rust/target/release/aura.exe build build/bench/bench_fib28.aura --output "$OUT/fib28_build.auc"
 M RustVM-build-loop1m rust/target/release/aura.exe build build/bench/bench_loop1m.aura --output "$OUT/loop1m_build.auc"
 
-echo "=== P0-2b：AURA_HEAP_MB 扩容矩阵（loop1100k 需 ≈68MB > 64MiB 默认）==="
+echo "=== P0-2b：AURA_HEAP_MB 扩容矩阵 ==="
+# ⚠ 历史（P0-2c 之前）：loop1100k 默认必 OOM（exit 70），扩容是刚需。
+#   P0-2c（commit 7a7c32d）修掉泄漏后默认即绿，扩容降级为「真实存活集超限」
+#   的兜底通道。本段保留用于回归扩容功能本身——勿删。
+#   见 docs/photon/vm-memory-comparison.md §九/§十一。
 # 环境变量经 Popen 继承传给宿主；OOM 场景 exit_ok=false 是预期（exit 70 = [OOM] HEAP FULL）。
-cp build/bench/bench_loop1100k.auc build/vm/current.auc
+cp build/prof2/loop1100k.auc build/vm/current.auc
 M PhotonVM-loop1100k-default build/hat-vmhost/current.exe
 for _mb in 64 128 256 512; do
   export AURA_HEAP_MB=$_mb

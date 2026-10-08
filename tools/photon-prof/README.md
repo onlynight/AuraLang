@@ -49,9 +49,26 @@ scripts/photon/bench-aot-slope.sh [N1] [N2] [轮数]     # 默认 600M/1000M
 用两档 N 的斜率消掉启动开销，实测 **Photon 后端 ≈ LLVM-O2 的 1/2.95 速**。
 ⚠ N ≤ 1.07e9（`i*2` 的 Int32 约束，见 five-mode-benchmark.md §五）。
 
-### 6. `bench-src/` — 基准源归档
+### 6. `bench-src/` — 五门基准源归档
 `build/` 被 .gitignore ⇒ 五个基准源（micro1/2/3、fib28、loop1m）归档于此。
 `vmopt.sh` 与 `bench-5way.sh` 启动时自动恢复缺失项（不覆盖本地改动）。
+
+### 6b. `prof-src/` — 分离实验 guest 归档（2026-10-08 新增）
+逐变量归因用的最小 guest（原先只存于 `build/prof2/`，随 `build/` 清理丢失）：
+`intloop`（Int 累加，无 Long 转换）、`longstep`（每次 1 次 `as Long` + store，
+量化装箱粒度）、`smallstep`（纯计数器，N=1.5e6）、`loop1100k`（1.1M 次，
+>64 MiB 预算 → 触发上限）、`loop2m`、`strcat_oom`。生成 `.auc` 见
+`docs/photon/vm-memory-comparison.md` §八。
+
+### 6c. `auc-disasm.py` — `.auc` 反汇编器（2026-10-08 新增）
+seed serialize v7 格式全解析（natives/常量/函数/操作码）：
+```
+python tools/photon-prof/auc-disasm.py <x.auc> --hist        # 按函数统计 opcode
+python tools/photon-prof/auc-disasm.py <x.auc> --disasm main # 逐条反汇编
+```
+**P0-2c 的决定性工具**——正是靠它实测出「当前 `.auc` 里 `as Long` 编译为
+`CALL_NATIVE_ARGS("aura_cast", 2)`、`BoxAlloc` 计数为 0」，推翻了
+`vm-memory-comparison.md` §4.2 的旧归因。
 
 ### 7. `memprof.py` — 进程内存采样器（2026-10-07 新增）
 ```

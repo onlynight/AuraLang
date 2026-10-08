@@ -137,13 +137,7 @@ object VmOps {
     // ═══════════════════════════════════════════════════════════
 
     /// Any -> Int（32 位）。
-    var toI32Diag: Int = 0
     fun toI32(s: String): Int {
-        // P351：len/charCodeAt 调用窗诊断（前 4 次）
-        if (this.toI32Diag < 4) {
-            this.toI32Diag = this.toI32Diag + 1
-            println("[T32] len=" + toStr(s.length) + " c0=" + toStr(s.charCodeAt(0)) + " out=" + toStr(toI32Raw(s)))
-        }
         return toI32Raw(s)
     }
 

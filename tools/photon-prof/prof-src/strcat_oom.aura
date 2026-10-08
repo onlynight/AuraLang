@@ -1,0 +1,10 @@
+// OOM 路径孤立测试：100K 次字符串拼接（累计分配远超 64MB）
+fun main() {
+    var s: String = ""
+    var i: Int = 0
+    while (i < 100000) {
+        s = s + "0123456789abcdef"
+        i = i + 1
+    }
+    println("len = " + toStr(s.length))
+}

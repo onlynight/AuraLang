@@ -1,0 +1,8 @@
+// 分离实验：小步长循环 N=1500000（>2^20=1048576，但总指令数仅 ~4.5M）
+fun main() {
+    var i: Int = 0
+    while (i < 1500000) {
+        i = i + 1
+    }
+    println("count = " + toStr(i))
+}

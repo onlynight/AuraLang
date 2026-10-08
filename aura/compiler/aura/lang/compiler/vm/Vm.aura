@@ -308,8 +308,9 @@ class Vm {
                 this.registerAucClasses(mod.classNames, mod.classParentIds)
                         this.loadPredecoded(mod.numOpNames, mod.numOpCodes, mod.numArgsFlat, mod.constPool,
                 mod.constLines, mod.funcTable, mod.exports, mod.imports)
-            println("[winC2] post-loadPredecoded")
+            println("[VMLOADOK]")
             val r: Any = this.run()
+            println("[VMDONE]")
             return r
         }
         // 遗留文本路径（数值模式失败时的回退）
@@ -366,21 +367,7 @@ class Vm {
         // CALL funcName 截断（Unknown function: p）。
         this.constPool = consts
         this.funcTable = funcs
-        // P239 括号探针 B：loadArgsFlat 消费点
-        println("[winB] n=" + toStr(args.size()))
-        println("[winB-0]=[" + args.get(0) + "]")
-        println("[hbB]=" + toStr(HeapDiag.heapbump()))
-        val probeL2: List<String> = arrayListOf<String>()
-        probeL2.add("CC")
-        probeL2.add("DD")
-        println("[winB3] fresh=[" + probeL2.get(0) + probeL2.get(1) + "]")
-        println("[hbB2]=" + toStr(HeapDiag.heapbump()))
-        println("[winB-2]=[" + args.get(2) + "]")
         this.loadArgsFlat(args)
-        // P279 flat 探针：loader 侧 args vs VM 侧 argStrs，定位 "p" 截断层
-        println("[FLAT0] [0]=[" + args.get(0) + "] [1]=[" + args.get(1) + "] [2]=[" + args.get(2) + "] [3]=[" + args.get(3) + "]")
-        println("[FLAT30] [30]=[" + args.get(30) + "] [31]=[" + args.get(31) + "] [32]=[" + args.get(32) + "]")
-        println("[AS] [30]=[" + this.argStrs.get(30) + "] [31]=[" + this.argStrs.get(31) + "] [32]=[" + this.argStrs.get(32) + "]")
         this.opCodes = arrayListOf<Int>()
         if (opCodesNum.size() == opNames.size() && opNames.size() > 0) {
             // P350：直接消费解码期数值 opcode（fromName 的字符串比较在 photon
@@ -397,11 +384,10 @@ class Vm {
                 i = i + 1
             }
         }
-        // P373：opcode 头部诊断
-        println("[OC] n=" + toStr(this.opCodes.size())
-            + " [0]=" + toStr(this.opCodes.get(0))
-            + " [1]=" + toStr(this.opCodes.get(1))
-            + " numN=" + toStr(opNames.size()) + " numC=" + toStr(opCodesNum.size()))
+        // P373（2026-10-08 删除）：此处曾有 opcode 头部诊断（长度 + 前两条 +
+        // 解码计数），用于定位「LOAD_CONST 全垃圾 / CALL 截断」家族。P350 起
+        // 直接消费解码期数值 opcode（fromName 字符串比较在 photon 下布局敏感
+        // 误配），该症状已消除，诊断窗一并清除。
         this.lines = arrayListOf<String>()
         this.ip = 0
         this.running = true
@@ -437,15 +423,6 @@ class Vm {
         // getConst 统一反转义）。拷贝循环的 listAppend/get 调用窗按布局
         // 崩/漂移——引用赋值零调用，VM 侧只读。
         this.constLines = constLinesIn
-        val clLines: List<String> = this.constLines
-        val cln: Int = clLines.size()
-        if (cln > 12) {
-            println("[CL2] n=" + toStr(cln)
-                + " [9]=[" + clLines.get(9) + "] [10]=[" + clLines.get(10) + "]"
-                + " L=" + toStr(clLines.get(9).length) + "," + toStr(clLines.get(10).length))
-        } else {
-            println("[CL2] n=" + toStr(cln) + " (short)")
-        }
         // P369/P397/P405：fuseHotPairs 两遍扫描 + 遍 1 单点递增形态 + 205
         // pair 漏参修复（执行臂 4 参 vs 旧构造 3 参）已就绪，但调用保持
         // 禁用：P277 槽影子读**与循环写法无关**——本轮实证仅启用 204 的
@@ -3480,7 +3457,6 @@ class Vm {
             i = i + 1
         }
         }
-        println("[BLC-ft] names=" + toStr(this.funcNamesL.size()))
         // P359：constLines 构建移至 loadPredecoded（消费解码端就地切分的
         // mod.constLines；本函数作用域无 constLinesIn，曾误置于此）。
         // P391：arg0Ints/arg1Ints **不再在此清空**——P271 跳过已解除：

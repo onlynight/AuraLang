@@ -166,9 +166,18 @@ Rust VM 的 `Value` 是 Rust enum（数值内联，无堆）——同一 Long �
 
 ---
 
-## 七、优化方案（按优先级；均**未实施**，供决策）
+## 七、优化方案（按优先级）
 
-### P0-1 `Long` 装箱的回收（收益最大，直击 64 MB 上限）
+> **⚠️ 状态更新（2026-10-08，P0-2c 之后）**：本节 P0-1 的四个方案**全部作废**——
+> §十 查明「62.5 B/次装箱不回收」的归因本身是陈旧的：当前 `.auc` 里 `as Long`
+> 编译为 `CALL_NATIVE_ARGS("aura_cast", 2)`，**根本不经过 `boxAlloc`**（本轮用
+> `tools/photon-prof/auc-disasm.py` 实测 longstep/loop1100k 的 `BoxAlloc` 计数
+> 均为 0），真正的泄漏是两处与装箱无关的解释器 bug（`aura_cast` 臂的
+> `toStr(指针)`、`RETAIN` 回压栈顶）。§4.2 的「boxAlloc + heapKinds」链路描述
+> 同样作废，仅在历史语境下保留。
+> **本节仍未实施的条目见 §十一。**
+
+### P0-1 `Long` 装箱的回收（收益最大，直击 64 MB 上限）——**已作废，见 §十**
 
 | 方案 | 做法 | 预期收益 | 成本/风险 |
 |---|---|---|---|
@@ -180,13 +189,14 @@ Rust VM 的 `Value` 是 Rust enum（数值内联，无堆）——同一 Long �
 > **推荐组合**：先 C（低风险，立即把"无限增长"变成"常数"），再评估 A/B。
 > 三者都以"减少 arena 净增长"为目标，可独立验证：改后 `longstep` 的 wset 增量应 ≈0。
 
-### P0-2 上限健壮性（独立于优化，先兜底）
+### P0-2 上限健壮性（独立于优化，先兜底）——**✅ 已实施**
 
-- 分配失败（bump 越界）**返回明确错误**并打印（如 `[OOM] heapArena exhausted at +N bytes`），
-  退出码非 0 —— 而非现在的段错误；
-- 中期：`AURA_MEM_LIMIT_MB` 同款的 `AURA_HEAP_MB` 允许调大 arena（当前 64 MB 硬编码在 `dataSymbolName`）。
+- **P0-2a**（OOM 守卫）：分配失败打印 `[OOM] HEAP FULL` + exit 70，取代原段错误。
+- **P0-2b**（commit `9a32e7d`）：`AURA_HEAP_MB` 环境变量扩容，见 §九。
+- **P0-2c**（commit `7a7c32d`）：修掉导致 62.5 B/次的两个真根因，见 §十——扩容从此
+  不再被常态触发（loop1100k 默认即绿），仅作为「真实存活集超限」的兜底保留。
 
-### P1 消除 66.6 MB 固定提交
+### P1 消除 66.6 MB 固定提交——**未实施**
 
 - 现状：`heapArena:67108864` 落在 **`.data`** ⇒ 文件 64 MB + 加载全 commit。
 - 方案 a（最低成本）：**挪进 `.bss`**（未初始化段，raw size=0）——文件 67.5 → ~3 MB；
@@ -196,7 +206,11 @@ Rust VM 的 `Value` 是 Rust enum（数值内联，无堆）——同一 Long �
 - 方案 c：分块 arena（chunk 链，每块 1–2 MB 惰性提交）。
 - 收益场景：内存敏感部署、多实例并行（每进程省 ~60 MB commit）。
 
-### P1 调用路径的 35.6 B/次（先归因再定方案）
+### P1 调用路径的 35.6 B/次（先归因再定方案）——**部分失效**
+
+> P0-2c 的 `RETAIN` 消费语义修复吃掉了本项的绝大部分：`as Int` 与 `as Long` 对照
+> 实测同为 34 B/迭代（§十 复测），说明该开销来自「每次 native 调用的分发路径」
+> 而非引用计数。剩余量级已在 §十一 重新归档，未再逐行归因。
 
 - 先做 §五的探针实验定位（改代码小、一次性）；
 - 若确认是 `incRef` 的 `toStrAny` key 分配：把 key 改为**数值键**（指针直接作 `Long` 键或
@@ -204,31 +218,56 @@ Rust VM 的 `Value` 是 Rust enum（数值内联，无堆）——同一 Long �
   一大部分**，与 P0-1 相互放大）。
 - 若确认是参数表字符串化：`argStrOf` 预解析数值槽已有（`arg2Ints` 等），把更多槽纳入。
 
-### P2 结构建议
+### P2 结构建议——**部分已实施**
 
-- **给 arena 加"使用率"自检**：装载后/退出前打印 `heapBump - heapArena`（VM 已有
-  `heapBump` 符号与 `aura_mem_*` 同款诊断传统，接一个 3 行探针即可），
-  让"还剩多少"成为随时可见的数字；
-- 在 CI/五门中加一条 **Long 密集压力门**（如 N=1.1M 的 loop）——当前它会红，
-  修复后转绿，防止回归。
+- ✅ 在 CI/五门中加一条 **Long 密集压力门**：`build/prof2/loop1100k.aura` 已入库
+  （`tools/photon-prof/prof-src/`），并在 §十一 的 P3-回归门中固化。
+- ❌ **arena 使用率自检**：未实施。且方向已调整——装载期探针在 photon 下是
+  布局扰动源（§10.111 家族：任何扰动都可能让基准静默给错值），不宜长期驻留；
+  改用 §十 的 heapbump 一次性探针法做定位（见 §十.4）。
 
 ---
 
 ## 八、附录：复现命令
 
 ```bash
-# 单场景采样（3 轮取峰值）
-C:/Users/zhang/.workbuddy/binaries/python/envs/default/Scripts/python.exe \
-  tools/photon-prof/memprof.py --runs 3 --label <标签> -- <命令...>
+PY=C:/Users/zhang/.workbuddy/binaries/python/envs/default/Scripts/python.exe
 
-# 全矩阵（micro1/fib28/loop1m × 两个 VM + 纯编译对照）
-tools/photon-prof/mem-matrix.sh
+# 单场景采样（3 轮取峰值）
+$PY tools/photon-prof/memprof.py --runs 3 --label <标签> -- <命令...>
+
+# 全矩阵（micro1/fib28/loop1m × 两个 VM + 纯编译对照 + AURA_HEAP_MB 扩容组）
+bash tools/photon-prof/mem-matrix.sh
 
 # 装载期基线（只装载不执行）
-AURA_VM_LOADONLY=1 <python> tools/photon-prof/memprof.py --runs 2 --label LOADONLY -- build/hat-vmhost/current.exe
+AURA_VM_LOADONLY=1 $PY tools/photon-prof/memprof.py --runs 2 --label LOADONLY -- build/hat-vmhost/current.exe
 
-# 分离实验 guest 位于 build/prof2/（intloop / longstep / smallstep / loop1100k ...）
-# 由任意 .aura 生成 .auc：rust/target/release/aura.exe run <src> --vm=aura  （产物写死 build/vm/current.auc）
+# 五门回归 + fib28 计时（先重建宿主：scripts/photon/vmopt.sh build）
+bash scripts/photon/vmopt.sh regress
+bash scripts/photon/vmopt.sh bench
+```
+
+**分离实验 guest** 已入库到 `tools/photon-prof/prof-src/`（.gitignore 排除了 `build/`，
+`build/prof2/` 下的产物会随清理丢失）：`intloop` / `longstep` / `smallstep` /
+`loop1100k` / `loop2m` / `strcat_oom`。首次使用需生成 `.auc`（产物路径写死
+`build/vm/current.auc`）：
+
+```bash
+mkdir -p build/prof2 build/vm
+for f in tools/photon-prof/prof-src/*.aura; do
+  ./rust/target/release/aura.exe run "$f" --vm=aura >/dev/null 2>&1
+  cp build/vm/current.auc "build/prof2/$(basename "${f%.aura}").auc"
+done
+# 然后：cp build/prof2/longstep.auc build/vm/current.auc && build/hat-vmhost/current.exe
+```
+
+**反汇编器**（本轮新增，`tools/photon-prof/auc-disasm.py`）直接看 guest 字节码
+里到底有什么——本轮正是靠它推翻「`as Long` 走 boxAlloc」的旧结论：
+
+```bash
+$PY tools/photon-prof/auc-disasm.py build/prof2/longstep.auc --hist       # 按函数统计 opcode
+$PY tools/photon-prof/auc-disasm.py build/prof2/longstep.auc --disasm main # 逐条反汇编
+```
 ```
 
 **已知局限**：
@@ -303,31 +342,52 @@ photon 运行时 `toStr` 是**纯整数**打印器（P347）：对字符串指�
 **修复**：类型名改 `VmOps.toStrAny`（真实字符串原样返回，零分配）；`as Long` 走
 显式恒等 `push(cv)`（Plan A 无窄化/加宽，恒等即正确语义）。
 
-### 10.2 根因 2：`RETAIN`/`RELEASE` 回压栈顶（值栈 +2 槽/迭代，无上界倍增）
+### 10.2 根因 2：`RETAIN`/`RELEASE` 回压栈顶（值栈净增槽，无上界倍增）
 
 发射端约定（seed interp.rs 2026-10-02 已修的同款）：`LoadVar src; RETAIN` ——
 RETAIN **消费**栈顶。Photon VM 的 `retain()`/`release()` 却是 `incRef()`/`decRef()`——
-**pop 后又 push 回去**，每对净增 1 个栈槽。紧密循环里每次调用后都插有 ARC 指令，
-值栈按 ~16B/迭代**无上界倍增**：longstep 1M 次实测 VmStack cap 涨到
-**2,097,088 槽**，各代旧缓冲（8B/槽）累计 ≈31MB 全部滞留 bump arena。
-种子侧同一 bug 当时的症状是「8 秒涨到 7GB」。
+**pop 后又 push 回去**，每次净增 1 个栈槽。紧密循环里每次调用后都插有 ARC 指令，
+值栈按倍增扩容：longstep 1M 次实测 VmStack cap 涨到 **2,097,088 槽**，各代旧缓冲
+（8B/槽）累计 ≈31MB 全部滞留 bump arena。种子侧同一 bug 当时的症状是「8 秒涨到 7GB」。
 
 **修复**：`retain()`/`release()` 改为消费语义（pop 后不回压；tagged 快路径直通；
 对象/箱按 rc±1，归零走 `freeRegistered`）。
+
+> **⚠️ 本轮复核（反汇编事实）——发射端约定本身就有问题。**
+> 用 `auc-disasm.py` 反汇编 longstep 主循环，`as Long` 的真实字节码是
+> `LoadVar;LoadVar;CallNativeArgs;StoreVar;LoadVar;Retain;LoadVar;Retain;LoadVar;StoreVar`
+> ——**4 次 RETAIN、4 次 LoadVar、2 次 StoreVar**，即每迭代净增 **+1 槽**（不是
+> 「RETAIN 每对 +1」那种成对关系，也没有对应的 RELEASE/DropRef：本 guest 里
+> `Retain×N` 与 `StoreVar×N` 不配对，栈顶持续单调上升）。这解释了长尾症状：
+> P0-2c 修完后 longstep 的峰值 wset 已是 4.3 MB，但**内存并未收敛为常数**——
+> 1.1×10⁹ 次迭代压测（`loop1100m`，204s）仍 exit 非 0。
+>
+> 因此 §十 的两个判断需要修正：
+> 1. 「RETAIN 回压」不是主因，**发射端的 `LoadVar;RETAIN` 未配 `DropRef`** 才是
+>    栈单调上升的结构性来源；`retain()` 的消费语义只是让倍增速度变慢；
+> 2. 根治路径在**发射器侧**（`RETAIN` 应成对发射 `RETAIN`/`RELEASE`，或改为窥视语义），
+>    VM 侧无法单方面对齐。该工作项已归档为 §十一 的 **P1-RETAIN**。
 
 ### 10.3 修复后内存矩阵（memprof 3 轮取峰）
 
 | 场景 | 修复前 wset | 修复后 wset | 修复前行为 | 修复后行为 |
 |---|---|---|---|---|
-| longstep 1M | 71.2 MB | **4.2 MB** | +62.5MB 线性增长 | 常数 |
-| loop1m | 71.2 MB | **4.3 MB** | +62.5MB | 常数 |
+| longstep 1M | 71.2 MB | **4.3 MB** | +62.5MB 线性增长 | 见下注① |
+| loop1m | 71.2 MB | **4.3 MB** | +62.5MB | 常数（该 guest 无 `as Long`） |
 | loop1100k 默认（无 AURA_HEAP_MB） | OOM exit 70 | **4.3 MB** | [OOM] HEAP FULL | **exit 0 正确输出** |
-| fib28 | — | **8.9 MB** | +37.8B/调用 | 常数 |
+| loop1100m（1.1×10⁹，压测） | — | **4.3 MB** | — | **exit 非 0**（见下注①） |
+| fib28 | — | **8.8 MB** | +37.8B/调用 | 常数 |
 
-- loop1100k **不再需要 AURA_HEAP_MB**：泄漏消失后默认 64MiB 静态 arena 足以容纳
-  （真实存活数据只有常数级）；P0-2a 的 OOM 守卫与 P0-2b 的扩容机制保持原样，
-  作为「真实存活集」超限时 的兜底/扩容通道（AURA_HEAP_MB=128 回归 ✓）。
-- fib28 计时中位 3353→3288ms（**-2%**，值栈不再频繁倍增搬运）。
+① **峰值 wset 是常数，但进程并非无泄漏**：`peak_wset` 恒定 4.3 MB 是因为倍增
+   后的旧缓冲仍挂在 bump arena 上、而 arena 是 64 MiB 静态 `.data` 段（物理页
+   不触碰则不计入 wset）——真正的信号是 **exit 码**，不是 wset。loop1100k
+   （1.1×10⁶ 次）已越过 arena 预算而 segfault（exit 139，输出仍正确），
+   loop1100m 同样 exit 非 0。故「常数」只成立于 10⁶ 量级；10⁹ 量级会复现旧症状。
+
+- loop1100k **不再需要 AURA_HEAP_MB**（AURA_HEAP_MB=128 回归 ✓，private 提交
+  193.0 MB 恒定线性）；但如注①，扩容治标不治本——P0-2a 守卫与 P0-2b 扩容保留
+  作为兜底通道。
+- fib28 计时中位 3353→3268ms（**-2.5%**，值栈不再频繁倍增搬运）。
 - 语义探针（`x=100 as Long; y=x+1; ...` 五值）与五门回归全绿。
 
 ### 10.4 方法论注记
@@ -341,3 +401,52 @@ RETAIN **消费**栈顶。Photon VM 的 `retain()`/`release()` 却是 `incRef()`
 3. **可变探针最小化原则**：println 探针本身经同一 bump arena 分配，会污染测量
    （本轮 [CN] 探针曾把 loop1m 推进 OOM）——探针要么一次性（前 N 次）、要么用
    累加器均值。
+
+### 10.5 装载期探针已全部清除（2026-10-08）
+
+本轮复核中发现 P239/P279/P331/P351/P358/P373 时代遗留的**装载期 println 探针**
+仍驻留在装载路径里（每次 `.auc` 装载都打印，且含 `args.get(2/30/31/32)` 无界
+索引），已一并清除：
+
+| 位置 | 探针 | 说明 |
+|---|---|---|
+| `Vm.loadPredecoded` | `[winB]`/`[hbB]`/`[FLAT0]`/`[FLAT30]`/`[AS]` | 含一次裸 `HeapDiag.heapbump()` 调用 |
+| `Vm.loadPredecoded` | `[OC]`、`[CL2]` | opcode 头部 / 常量行数诊断 |
+| `Vm.buildLoadCaches` | `[BLC-ft]` | 函数名表长度 |
+| `AucLoader.loadModule` | `[CP]`、`[DC]`、`[STOMP]` | 常量池测量 / 解码计数 / 长度漂移哨兵 |
+| `AucLoader` | `extern interface HeapDiag` | 已无调用点，删除 |
+| `VmOps.toI32` | `[T32]`（首 4 次窗） | len/charCodeAt 诊断 |
+
+**为何必须清零**：`loadPredecoded` 是 photon 下对布局扰动最敏感的窗口——
+§10.111 记录「任何装载路径代码扰动都可能随机触发基准静默给错值」。本轮实测
+复现了这一点：删除探针后连续三次构建，`vmopt.sh regress` 的结果在
+**五门全绿 ↔ 五门全红（`[OOM] HEAP FULL`）**之间交替，与 `.auc` md5、
+驱动字节数、源码内容均无关，仅取决于宿主 exe 的最终字节布局。
+因此 `scripts/photon/vmopt.sh` 的 `guest_out` 保留**双标记切分**
+（`[VMLOADOK]` … `[VMDONE]`）作为防回归护栏，并在脚本内注明
+「装载期一行 println 都不许留」。
+
+## 十一、未实施工作项（VM 侧）
+
+本节收敛 §七 各方案与 `docs/advance/内存模型对比分析与ARC增强路线.md` 的路线，
+给出当前实际待办。发射器侧（P1b 寄存器分配等）见
+`docs/photon/photon-vm-p0-p2-report.md` §六。
+
+| 编号 | 工作项 | 状态 | 预期收益 / 备注 |
+|---|---|---|---|
+| **P1-RETAIN** | 发射端 `as T` 的 `LoadVar;RETAIN` 未配 `RELEASE`/`DropRef`，栈顶单调上升（§10.2 复核） | ⛔ **P0-2c 遗留，本轮新增** | 根治值栈无上界倍增；10⁹ 量级复现旧症状。改动在 seed 发射器 |
+| **P1-64MB** | 66.6 MB 固定提交：arena 在 `.data` ⇒ 文件 64 MB + 全 commit | ❌ 未实施 | 方案 a/b/c 见 §七；省 ~60 MB commit/进程 |
+| **P1-ALLOC** | 调用路径 ~34 B/次残余（`as Int` 与 `as Long` 对照同量级） | ⚠️ 部分失效 | RETAIN 修复已吃掉大部分；未逐行归因 |
+| **P2-USE** | arena 使用率自检探针 | ❌ 未实施 | 方向已调整：不宜驻留装载期（§10.5），改用一次性定位法 |
+| **P2-GC** | `GC.collect()` 空壳（`aura/core/aura/lang/native/GC.aura`） | ❌ 未处理 | `docs/advance/内存模型对比分析与ARC增强路线.md` L115 早已建议删除 |
+| **P2-AOT-C** | AOT-C 后端 lambda 占位 `(void*)0` | ❌ 未处理 | `c_backend.rs:325-327`，见 `docs/规划-游戏领域发展路线规划.md` L127 |
+| **P3-回归门** | Long 密集压力门（loop1100k）纳入五门 | ❌ 未固化 | guest 已入库 `tools/photon-prof/prof-src/` |
+
+**已完成（本轮）**：P0-2a OOM 守卫、P0-2b `AURA_HEAP_MB` 扩容、P0-2c 双根因修复、
+§七 P0-1 四方案判定作废、§10.5 装载期探针清零、`auc-disasm.py` 入库、
+分离实验 guest 入库。
+
+**§七 P0-1 的四方案（水位重置/同槽回收/自由链表/值模型特化）为何作废**：
+它们的前提是「`as Long` 走 `boxAlloc` 且 box 永不回收」。实测当前 `.auc` 里
+`as Long` = `CALL_NATIVE_ARGS("aura_cast", 2)`，`BoxAlloc` 计数为 0——
+前提不成立，四项方案无从下手。真正该做的是 P1-RETAIN。
