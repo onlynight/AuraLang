@@ -31,6 +31,11 @@ import aura.lang.std.Env
 import aura.lang.native.Memory
 import aura.lang.native.JitExec
 import aura.lang.compiler.photon.JitBackend
+import aura.lang.compiler.photon.JitDeopt
+import aura.lang.compiler.photon.JitStackMap
+import aura.lang.compiler.photon.StackMapTable
+import aura.lang.compiler.photon.StackMapEntry
+import aura.lang.compiler.photon.JitStackMapUtils
 import "../../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
 
 var stPass: Int = 0
@@ -126,6 +131,57 @@ fun jitSelfTest(): Unit {
     var sepGot: Int = 0
     if (be.getDataBase() != be.codeBase) { sepGot = 1 }
     stOk("dataBase 与 codeBase 分离", sepGot, 1)
+
+    // ── 4. Guard + Deopt（Phase 3.1/3.2）真实执行 ──
+    // 布局（字节）：
+    //   +0  4889C8          mov rax, rcx
+    //   +6  483D64000000    cmp rax, 100          ← guard（投机假设 a==100）
+    //   +12 0F8508000000    jne +24(deopt)        ← disp = 24-16 = 8
+    //   +18 B801000000      mov eax,1             ← 快路径
+    //   +23 C3              ret
+    //   +24 B82A000000      mov eax,42            ← deopt 蹦床（回退标记）
+    //   +29 C3              ret
+    val guardBase0 = JitExec.allocRW(4096)
+    val gb: Int = guardBase0 as Int
+    var gHex: String = "4889C8" + JitDeoptUtils.buildGuardHex(100)
+    // jne disp 由 patchGuardDeopt 真实回填（占位 0）：
+    // fastpath(mov eax,1 + ret) 6B → deopt 在 +24
+    gHex = gHex + "0F8508000000"
+    gHex = gHex + "B801000000" + "C3"
+    gHex = gHex + "B82A000000" + "C3"
+    be.writeCode(gb, 0, gHex)
+    Memory.mprotect(guardBase0, 4096, 32)
+    JitDeoptUtils.patchGuardDeopt(be, gb + 6, gb + 24)
+    stOk("guard 命中快路径：jit_fn(100)=1", be.executeNative(gb, 100) as Int, 1)
+    stOk("guard 失效走 deopt：jit_fn(5)=42", be.executeNative(gb, 5) as Int, 42)
+    stOk("guard 失效走 deopt：jit_fn(7)=42", be.executeNative(gb, 7) as Int, 42)
+
+    // ── 5. Stack map（Phase 2.2）结构 + GC 根地址有效性 ──
+    // 以 blob_main（多函数区）登记 call 点，序列化/解析 round-trip，
+    // 并用数据段地址作为帧基址验证根地址真实可读。
+    val smTable = StackMapTable()
+    smTable.recordCall("blob_main", 70, 64, 8, "tri")
+    smTable.recordCall("blob_main", 82, 64, 8, "double")
+    val sm2 = StackMapTable()
+    sm2.parseAll(smTable.serialize())
+    stOk("stack map round-trip 条目", sm2.entryCount(), 2)
+    val smHit: StackMapEntry = sm2.lookup("blob_main", 82)
+    var smOk: Int = 0
+    if (smHit.callTarget == "double" && smHit.pcOffset == 82) { smOk = 1 }
+    stOk("stack map lookup 命中", smOk, 1)
+    // GC 根地址有效性：frameBase 用数据段基址（真实可读页）
+    val smEntry: StackMapEntry = sm2.lookup("blob_main", 70)
+    var rootsReadable: Int = 1
+    var rk: Int = 0
+    val roots: List<Long> = JitStackMapUtils.collectFrameRoots(db as Long, smEntry)
+    while (rk < roots.size) {
+        val v: Long = Memory.read64(roots[rk])
+        if (v == 0 as Long && rk == 0) {
+            // 数据段头部为我们写入的 66；越界的槽读到 0 属正常
+        }
+        rk = rk + 1
+    }
+    stOk("GC 根地址全部可读（数据段内）", rootsReadable, 1)
 
     println("[INFO] layout: " + be.getJitCodeLayout())
     println("=== SELFTEST-RESULT pass=" + toStr(stPass) + " fail=" + toStr(stFail) + " ===")

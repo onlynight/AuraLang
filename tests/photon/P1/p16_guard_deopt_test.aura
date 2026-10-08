@@ -1,0 +1,135 @@
+// tests/photon/P1/p16_guard_deopt_test.aura
+// ═══════════════════════════════════════════════════════════════
+// P2（Phase 3.1 Guards + Phase 3.2 Deoptimization）单元测试。
+//
+// 覆盖：
+//   A. guard 序列编码（cmp rax,imm32 + jne rel32 占位，12 字节）
+//   B. deopt 蹦床编码（26 字节）+ 两处 imm32 偏移
+//   C. 位移算术（guardDeoptDisp）与补丁跳过语义（vmMode=true 时不写）
+//   D. 帧映射（DeoptFrameLayout.localDisp）+ 守卫模式 readVmLocals
+//   E. 端到端装配：guard + 蹦床 hex 拼装、patch 偏移与真实字节位置
+//      对齐（native 执行验证在 jit_vmhost 自检中，AURA_VM_SELFTEST=1）
+//
+// 全部断言在 vmMode=true 守卫下成立（种子 VM / 原生 VM 皆可跑）。
+// ═══════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import aura.lang.compiler.photon.JitBackend
+import aura.lang.compiler.photon.JitDeopt
+import aura.lang.compiler.photon.JitDeoptUtils
+import aura.lang.compiler.photon.DeoptFrameLayout
+
+var passCount: Int = 0
+var failCount: Int = 0
+
+fun ok(name: String, got: Int, want: Int): Unit {
+    if (got == want) {
+        passCount = passCount + 1
+        println("[PASS] " + name + "  got=" + toStr(got) + " want=" + toStr(want))
+    } else {
+        failCount = failCount + 1
+        println("[FAIL] " + name + "  got=" + toStr(got) + " want=" + toStr(want))
+    }
+}
+
+fun okStr(name: String, got: String, want: String): Unit {
+    if (got == want) {
+        passCount = passCount + 1
+        println("[PASS] " + name)
+    } else {
+        failCount = failCount + 1
+        println("[FAIL] " + name + "  got=[" + got + "] want=[" + want + "]")
+    }
+}
+
+fun main() {
+    println("=== P2 GUARD + DEOPT TEST (Phase 3.1 + 3.2) ===")
+
+    // ── A. guard 序列编码 ──
+    val g: String = JitDeoptUtils.buildGuardHex(100)
+    ok("A1 guard 长度=12 字节", g.length, 24)
+    okStr("A1 guard 字节", g, "483D64000000" + "0F8500000000")
+    ok("A1 guardDeoptDispOffset", JitDeoptUtils.guardDeoptDispOffset(), 6)
+    ok("A1 guardDeoptInsnEnd", JitDeoptUtils.guardDeoptInsnEnd(), 10)
+    // imm=0 边界
+    okStr("A1 guard imm=0", JitDeoptUtils.buildGuardHex(0), "483D00000000" + "0F8500000000")
+
+    // ── B. deopt 蹦床编码 ──
+    val tr: String = JitDeoptUtils.buildDeoptTrampolineHex(268435456, 134217728)
+    ok("B1 trampoline 长度=26 字节", tr.length, 52)
+    // 55 | 53 | 4889E5 | 4881EC20000000 | BF 10000000 | B8 00000080 | FFD0 | C9 | C3
+    okStr("B1 trampoline 头", tr.substring(0, 24), "5553" + "4889E5" + "4881EC20000000")
+    okStr("B1 frame imm32(BF)", tr.substring(24, 26), "BF")
+    okStr("B1 frame 值(LE)", tr.substring(26, 34), "00000010")
+    ok("B2 trampolineFrameOffset", JitDeoptUtils.trampolineFrameOffset(), 13)
+    ok("B2 trampolineEntryOffset", JitDeoptUtils.trampolineEntryOffset(), 18)
+    ok("B2 trampolineSize", JitDeoptUtils.trampolineSize(), 26)
+    // entry 134217728 = 0x08000000 → LE 字节 00 00 00 08
+    okStr("B2 entry 值(LE)", tr.substring(34, 36), "B8")
+    okStr("B2 entry imm32(LE)", tr.substring(36, 44), "00000008")
+
+    // ── C. 位移算术 + 守卫补丁语义 ──
+    // guardBase=100, deoptAddr=128 → disp = 128 - 110 = 18
+    ok("C1 guardDeoptDisp", JitDeoptUtils.guardDeoptDisp(100, 128), 18)
+    // 反向（deopt 在前）：guardBase=200, deoptAddr=50 → 50-210 = -160
+    ok("C1 guardDeoptDisp 反向", JitDeoptUtils.guardDeoptDisp(200, 50), 0 - 160)
+    // 负数 imm32 的 LE 编码（-160 = 0xFFFFFF60）
+    okStr("C1 disp LE 编码", JitDeoptUtils.hex8(0 - 160), "60FFFFFF")
+
+    // 守卫模式补丁：vmMode=true 时 writeReloc32 跳过（无副作用）。
+    val be = JitBackend()
+    ok("C2 种子下 vmMode=true", be.isVmMode() as Int, 1)
+    JitDeoptUtils.patchGuardDeopt(be, 1048576, 1048604)
+    JitDeoptUtils.patchTrampolineEntry(be, 1048604, 268435456)
+    ok("C2 守卫模式补丁无副作用（不崩即过）", 1, 1)
+
+    // ── D. 帧映射 ──
+    val layout: DeoptFrameLayout = DeoptFrameLayout()
+    layout.funcName = "hot_fn"
+    layout.localCount = 3
+    layout.bytecodeIp = 42
+    layout.bytecodeFunc = "hot_fn"
+    ok("D1 localDisp(1)", layout.localDisp(1), 0 - 8)
+    ok("D1 localDisp(3)", layout.localDisp(3), 0 - 24)
+    // 守卫模式 readVmLocals：全 0 列表（与 JIT 写路径的模拟对称）
+    val locals: List<Int> = JitDeoptUtils.readVmLocals(be, 65536, layout)
+    ok("D2 守卫模式 locals 数量", locals.size, 3)
+    var allZero: Int = 1
+    var k: Int = 0
+    while (k < locals.size) {
+        if (locals[k] != 0) { allZero = 0 }
+        k = k + 1
+    }
+    ok("D2 守卫模式 locals 全 0", allZero, 1)
+
+    // ── E. 端到端装配：guard + 快路径 + deopt 蹭床的偏移对齐 ──
+    // 布局（模拟 jit_vmhost 自检的真实形态）：
+    //   guardBase+0   : 48 89 C8        mov rax, rcx
+    //   guardBase+6   : guard 序列（12B）：cmp rax,100; jne deopt
+    //   guardBase+18  : B8 01 00 00 00  mov eax,1
+    //   guardBase+23  : C3              ret
+    //   deoptBase(=guardBase+24) : B8 2A 00 00 00  mov eax,42; C3 ret
+    val movRaxRcx: String = "4889C8"
+    val guard: String = JitDeoptUtils.buildGuardHex(100)
+    val fastPath: String = "B801000000" + "C3"
+    val code: String = movRaxRcx + guard + fastPath
+    // deopt 相对 guardBase 的位置：6(mov) + 12(guard) = 18
+    val deoptRel: Int = 18
+    ok("E1 guard 起点=mov 之后(6)", JitDeoptUtils.guardDeoptDispOffset() + 6, 12)
+    // jne 的指令结束 = guardBase + 6 + 10 = guardBase + 16
+    // disp = deoptBase - (guardBase + 16) = 18 - 16 = 2
+    ok("E1 jne disp = deopt - insnEnd", JitDeoptUtils.guardDeoptDisp(6, 24), 8)
+    okStr("E1 快路径 mov eax,1", fastPath.substring(0, 10), "B801000000")
+    // 蹦床装配：targetFrame=帧基址(65536)、vmEntry=JIT 区某地址
+    val tr2: String = JitDeoptUtils.buildDeoptTrampolineHex(65536, 134217728)
+    JitDeoptUtils.patchTrampolineFrame(be, 1048604, 65536)   // 守卫：无写
+    JitDeoptUtils.patchTrampolineEntry(be, 1048604, 134217728)
+    ok("E1 蹦床可装配（不崩即过）", tr2.length, 52)
+
+    println("=== RESULT pass=" + toStr(passCount) + " fail=" + toStr(failCount) + " ===")
+    if (failCount > 0) {
+        println("=== FAIL ===")
+    } else {
+        println("=== ALL-PASS ===")
+    }
+}

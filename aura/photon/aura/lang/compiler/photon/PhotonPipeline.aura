@@ -71,6 +71,9 @@ class BackendResult {
     var funcOffsets: String = ""
     /// 字符串常量（`.rdata` 数据来源）。
     var stringConsts: String = ""
+    /// P1（Phase 2.2）：JIT 栈图（call 点 → GC 根候选列表）序列化文本。
+    /// 由 X86Emitter.getStackMaps() 填充，JIT 装载侧经 StackMapTable 解析。
+    var stackMaps: String = ""
     var relocationCount: Int = 0
     var functionCount: Int = 0
     var encodedByteCount: Int = 0
@@ -401,6 +404,8 @@ class PhotonPipeline {
         val relocRecords: String = emitter.getRelocRecords()
         result.machineCodeHex = machineCodeHex
         result.encodedByteCount = machineCodeHex.length / 2
+        // P1（Phase 2.2）：stack map 随机器码一起产出（GC 根枚举用）。
+        result.stackMaps = emitter.getStackMaps()
         this.vprintln("    机器码: " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
         this.vprintln("    字节数: " + result.encodedByteCount)
 
@@ -725,6 +730,8 @@ class PhotonPipeline {
         val relocRecords: String = emitter.getRelocRecords()
         result.machineCodeHex = machineCodeHex
         result.encodedByteCount = machineCodeHex.length / 2
+        // P1（Phase 2.2）：stack map 随机器码一起产出（GC 根枚举用）。
+        result.stackMaps = emitter.getStackMaps()
         this.vprintln("    机器码: " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
         this.vprintln("    字节数: " + result.encodedByteCount)
 
@@ -989,6 +996,8 @@ class PhotonPipeline {
         val stringConsts: String = selector.stringConstants
         result.machineCodeHex = machineCodeHex
         result.encodedByteCount = machineCodeHex.length / 2
+        // P1（Phase 2.2）：stack map 随机器码一起产出（GC 根枚举用）。
+        result.stackMaps = emitter.getStackMaps()
         // P1-2：JIT 路径必须与 AOT 路径一样收集重定位——否则 `emitFunction`
         // 把 `00 00 00 00` 占位符原样写进可执行内存（缺口一/缺口二的根源）。
         result.relocRecords = relocRecords

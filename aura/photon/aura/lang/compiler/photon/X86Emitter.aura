@@ -11,6 +11,7 @@ import aura.lang.std.String
 import aura.lang.std.Env
 import aura.lang.std.fs.FileUtils
 import aura.lang.compiler.photon.x86_64.X86Encoder
+import aura.lang.compiler.photon.JitStackMap
 import aura.lang.compiler.photon.MachineDag
 import aura.lang.compiler.photon.RegisterAllocator
 
@@ -98,6 +99,13 @@ class X86Emitter {
     /// 调用方跨调用存活的值会被悄悄改掉（实测 `"x = " + toStr(x)` 输出 `42`）。
     private var savedRegs: String = ""
 
+    /// P1（Phase 2.2）：本批次全部 call 点的 stack map（GC 根枚举用）。
+    /// ⚠️ **字符串增量存储**：类字段持有 StackMapTable 对象在种子 VM 下
+    /// 为 null（类类型字段初始化不可靠，call 被静默忽略），字符串字段
+    /// 则两种运行时都稳定。格式：
+    ///   funcName|pcOffset|slotCount|spillBase|callTarget(;...)*
+    var stackMapRecs: String = ""
+
     // ── 定位探针（有界截断，见 `xeProbe` 的说明）──
     private var probePath: String = ""
     private var probeStep: Int = 0
@@ -115,6 +123,9 @@ class X86Emitter {
         this.funcOffsets = ""
         this.funcOffsetsList = arrayListOf<String>()
         this.isMainFunc = false
+        // P1（Phase 2.2）：stack map 记录随批次重置（字符串字段，种子
+        // 下可靠）。
+        this.stackMapRecs = ""
     }
 
     // ── 主入口 ──
@@ -1001,6 +1012,20 @@ class X86Emitter {
             } else if (funcName != "" && funcName != "@imm") {
                 this.enc.emitCallRel(funcName)
             }
+            // P1（Phase 2.2）：记录 call 点 stack map。pcOffset = call 指令
+            // 结束偏移（返回地址落点）；保守根集合 = 本函数全部溢出槽
+            // （RA 溢出槽 curSpillBase/8 + 发射器兜底槽 extraSlotCount）。
+            // ⚠️ 字符串追加（类字段对象在种子下为 null，见字段说明）。
+            val smSeg: String = this.curEmitFuncName + "|" + toStr(this.enc.byteCount())
+                    + "|" + toStr(this.curSpillBase / 8 + this.extraSlotCount)
+                    + "|" + toStr(this.curSpillBase) + "|" + funcName
+            if (this.stackMapRecs == "") {
+                this.stackMapRecs = smSeg
+                println("[DBG-SMCALL] first=" + smSeg)
+            } else {
+                this.stackMapRecs = this.stackMapRecs + ";" + smSeg
+            }
+
             // ── 返回值落地（Win64：返回值固定放在 rax）──
             //
             // 调用结果必须显式搬到该节点被分配的寄存器/溢出槽，否则后续
@@ -1602,6 +1627,11 @@ class X86Emitter {
 
     fun getRelocRecords(): String {
         return this.relocRecords
+    }
+
+    /// 获取 stack map 序列化文本（Phase 2.2，call 点 → GC 根列表）。
+    fun getStackMaps(): String {
+        return this.stackMapRecs
     }
 
     fun getStringConsts(): String {

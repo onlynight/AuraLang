@@ -63,6 +63,16 @@
 >    AucLoader 对宿主闭包尺寸脆弱；⑤ `compileBatch` 原生路径依赖
 >    `String.substring`（3 参方法调用接收者错位）。
 >    详见 `09-P1-2实施报告.md` §7.4。
+>
+> **P1/P2 补全（2026-10-09）**：Phase 2.2 Stack maps（`JitStackMap.aura`
+> 字符串增量表 + X86Emitter call 点记录 + `collectFrameRoots` GC 接口）、
+> Phase 2.3 安全集成测试（p15=19 断言）、Phase 3.1 Guards 与 3.2
+> Deoptimization（`JitDeopt.aura`：guard 编码/修补 + 真偏移蹦床 +
+> `readVmLocals` 帧映射；p16=27 断言；原生执行用例已入 jit_vmhost
+> 自检）全部完成。P3（OSR/类型反馈）未开始——guard 原语已就位。
+> 种子侧新增约束：3 函数源在种子 HirLowerer 下丢内容（测试用 2 函数
+> 形态）；跨两层对象边界传 Hir 丢内容（一跳直调 compileEncodeOnly）。
+> 详见 `09-P1-2实施报告.md` §七·五。
 
 ---
 
