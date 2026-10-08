@@ -1021,7 +1021,6 @@ class X86Emitter {
                     + "|" + toStr(this.curSpillBase) + "|" + funcName
             if (this.stackMapRecs == "") {
                 this.stackMapRecs = smSeg
-                println("[DBG-SMCALL] first=" + smSeg)
             } else {
                 this.stackMapRecs = this.stackMapRecs + ";" + smSeg
             }

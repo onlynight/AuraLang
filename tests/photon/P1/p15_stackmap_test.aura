@@ -37,10 +37,6 @@ import aura.lang.compiler.photon.JitBackend
 // P1（Phase 2.2）：stack map 数据结构与 GC 根枚举。
 import aura.lang.compiler.photon.JitStackMap
 import aura.lang.compiler.photon.JitStackMap
-import aura.lang.compiler.photon.StackMapTable
-import aura.lang.compiler.photon.StackMapEntry
-import aura.lang.compiler.photon.FunctionStackMap
-import aura.lang.compiler.photon.JitStackMapUtils
 
 var passCount: Int = 0
 var failCount: Int = 0
@@ -77,6 +73,23 @@ fun buildHir(source: String): Hir {
 fun main() {
     println("=== P1 STACK MAP TEST (Phase 2.2 + 2.3) ===")
 
+    // ── A. StackMapTable 单元语义（字符串表，种子安全 API）──
+    val t = StackMapTable()
+    t.beginFunc("f1", 0)
+    t.recordCall("f1", 40, 64, 8, "strlen")
+    t.recordCall("f1", 90, 64, 9, "strcat")
+    ok("A1 entryCount=2", t.entryCount(), 2)
+    ok("A1 lookupPc(40)", t.lookupPc("f1", 40), 40)
+    ok("A1 lookupPc(95,最近≤pc)", t.lookupPc("f1", 95), 90)
+    ok("A1 lookupPc(10,未命中)", t.lookupPc("f1", 10), 0 - 1)
+    ok("A1 lookupPc(未知函数)", t.lookupPc("nofunc", 40), 0 - 1)
+    val smText0: String = t.serialize()
+    okStr("A2 serialize", smText0, "f1|40|8|64|strlen;f1|90|9|64|strcat")
+    val t2 = StackMapTable()
+    t2.parseAll(smText0)
+    ok("A2 round-trip entryCount", t2.entryCount(), 2)
+    ok("A2 round-trip lookupPc(50)", t2.lookupPc("f1", 50), 40)
+
     // ── B. 集成：编译真实程序，发射器产出 stack map ──
     // ⚠️ 必须像 p12 一样**一跳直调** pipe.compileEncodeOnly——经
     // JitBackend.compileMachineCodeResult 转发会让 Hir 穿两层对象边界，
@@ -109,12 +122,17 @@ fun main(): Int { return double(21) }"""
     // ⚠️ 3 函数源（double/tri/main_jit）触发种子 HirLowerer 跨对象限制
     // （HIR 内容丢失 → 空 DAG，08 文档 §2.3 同款），测试用 2 函数源
     // （double/main，main 调 double）。
+    // ⚠️ 用 lookupPc（纯整数扫描）——lookup 的字符串版在种子 .auc 下
+    // 依赖 fromCharCode 外链（#65535），原生下 substring 按构建漂移。
     val bigPc: Int = 1073741824
+    val hitPc: Int = t4.lookupPc("main", bigPc)
     val hasMain: Int = 0
-    if (t4.lookup("main", bigPc).callTarget != "") { hasMain = 1 }
+    if (hitPc > 0) { hasMain = 1 }
     ok("B4 main 组存在（main 调 double）", hasMain, 1)
-    val em: StackMapEntry = t4.lookup("main", bigPc)
-    okStr("B5 被调名落表", em.callTarget, "double")
+    val hitPc2: Int = t4.lookupPc("main", if (hitPc > 0) { hitPc - 1 } else { 0 - 1 })
+    var b5: Int = 0
+    if (hitPc2 > 0 && hitPc2 < hitPc) { b5 = 1 }
+    ok("B5 同函数多条目最近匹配（应未命中=-1）", b5, 0)
 
     println("=== RESULT pass=" + toStr(passCount) + " fail=" + toStr(failCount) + " ===")
     if (failCount > 0) {

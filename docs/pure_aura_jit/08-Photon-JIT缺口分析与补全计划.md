@@ -73,6 +73,14 @@
 > 种子侧新增约束：3 函数源在种子 HirLowerer 下丢内容（测试用 2 函数
 > 形态）；跨两层对象边界传 Hir 丢内容（一跳直调 compileEncodeOnly）。
 > 详见 `09-P1-2实施报告.md` §七·五。
+>
+> **P3 补全 + P5 推进（2026-10-09 第二轮）**：Phase 4.1 OSR 入口表
+> （OsrTable.aura）与 Phase 4.2 类型反馈（TypeFeedbackTable.aura，
+> 平铺段格式）落地（p17=27 断言）；P5-⑤ substring 种子路径全消除
+> （JitStackMap/TypeFeedbackTable/JitRelocation 区间化）；P6 热点
+> 集成决策链验证就绪（p18，原生用例）。种子侧新增：类名须与文件名
+> 一致（否则构造 #65535）；跨文件 object 方法在 .auc 链接不稳定
+> （工具函数并入类内私有方法）。详见 `09-P1-2实施报告.md` §七·六。
 
 ---
 

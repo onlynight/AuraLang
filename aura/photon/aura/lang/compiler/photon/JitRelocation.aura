@@ -141,10 +141,12 @@ object JitRelocationUtils {
         while (i < entries.size) {
             val entry: String = entries[i]
             if (entry != "") {
+                // 字段切分用区间索引（P5-⑤）：数字字段直接 parseIntRange，
+                // 符号字段保留 splitPipe 形态（需要字符串）。
                 val parts: List<String> = JitRelocationUtils.splitPipe(entry)
                 if (parts.size >= 3) {
                     val r: Relocation = Relocation(
-                            JitRelocationUtils.parseInt(parts[0]),
+                            JitRelocationUtils.parseIntRange(entry, 0, JitRelocationUtils.indexOf(entry, "|")),
                             parts[1],
                             RelocTypeUtils.fromName(parts[2]))
                     out.add(r)
@@ -171,7 +173,7 @@ object JitRelocationUtils {
             val idx: Int = JitRelocationUtils.indexOf(entry, "|")
             if (idx > 0) {
                 if (entry.substring(0, idx) == symbol) {
-                    return JitRelocationUtils.parseInt(entry.substring(idx + 1))
+                    return JitRelocationUtils.parseIntRange(entry, idx + 1, entry.length)
                 }
             }
             i = i + 1
@@ -294,6 +296,9 @@ object JitRelocationUtils {
     // ── 字符串 / 整数工具（不依赖 String stdlib，VM 与原生运行时均可用）──
 
     /// 按 `;` 切分。
+    ///
+    /// ⚠️ P5-⑤：段文本抽取走 `rangeText`（fromCharCode 裸名，种子 VM 与
+    /// 原生 runtime 均链接）而非 `String.substring`（原生按构建漂移）。
     private fun splitSemi(text: String): List<String> {
         val out: List<String> = arrayListOf<String>()
         if (text == "") { return out }
@@ -302,7 +307,7 @@ object JitRelocationUtils {
         val len: Int = text.length
         while (i <= len) {
             if (i == len || text.charCodeAt(i) == 59) {
-                out.add(text.substring(start, i))
+                out.add(JitRelocationUtils.rangeText(text, start, i))
                 start = i + 1
             }
             i = i + 1
@@ -310,7 +315,7 @@ object JitRelocationUtils {
         return out
     }
 
-    /// 按 `|` 切分。
+    /// 按 `|` 切分（rangeText 形态，同 splitSemi 说明）。
     private fun splitPipe(text: String): List<String> {
         val out: List<String> = arrayListOf<String>()
         if (text == "") { return out }
@@ -319,12 +324,40 @@ object JitRelocationUtils {
         val len: Int = text.length
         while (i <= len) {
             if (i == len || text.charCodeAt(i) == 124) {
-                out.add(text.substring(start, i))
+                out.add(JitRelocationUtils.rangeText(text, start, i))
                 start = i + 1
             }
             i = i + 1
         }
         return out
+    }
+
+    /// 区间转字符串（fromCharCode 裸名，两种运行时均链接）。
+    fun rangeText(text: String, start: Int, endEx: Int): String {
+        var out: String = ""
+        var i: Int = start
+        while (i < endEx && i < text.length) {
+            out = out + fromCharCode(text.charCodeAt(i) as Int)
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 区间解析整数（十进制，容错 0；支持负号）。
+    fun parseIntRange(text: String, start: Int, endEx: Int): Int {
+        if (start >= endEx) { return 0 }
+        var i: Int = start
+        var neg: Boolean = false
+        if (text.charCodeAt(i) as Int == 45) { neg = true; i = i + 1 }
+        var total: Int = 0
+        while (i < endEx) {
+            val c: Int = text.charCodeAt(i) as Int
+            if (c < 48 || c > 57) { return 0 }
+            total = total * 10 + (c - 48)
+            i = i + 1
+        }
+        if (neg) { total = 0 - total }
+        return total
     }
 
     /// 查找子串首次出现的索引（未找到返回 -1）。

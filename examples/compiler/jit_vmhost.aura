@@ -32,10 +32,11 @@ import aura.lang.native.Memory
 import aura.lang.native.JitExec
 import aura.lang.compiler.photon.JitBackend
 import aura.lang.compiler.photon.JitDeopt
-import aura.lang.compiler.photon.JitStackMap
+import aura.lang.compiler.photon.JitStackMap  # TypeFeedbackTable 亦在本文件
 import aura.lang.compiler.photon.StackMapTable
 import aura.lang.compiler.photon.StackMapEntry
-import aura.lang.compiler.photon.JitStackMapUtils
+import aura.lang.compiler.photon.JitStackMap  # TypeFeedbackTable 亦在本文件
+import aura.lang.compiler.photon.OsrTableUtils
 import "../../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
 
 var stPass: Int = 0
@@ -182,6 +183,22 @@ fun jitSelfTest(): Unit {
         rk = rk + 1
     }
     stOk("GC 根地址全部可读（数据段内）", rootsReadable, 1)
+
+    // ── 6. 类型反馈 + OSR（Phase 4.2/4.1）结构验证 ──
+    val tf = TypeFeedbackTable()
+    var tk: Int = 0
+    while (tk < 11) {
+        tf.recordType(7, 0)
+        tk = tk + 1
+    }
+    tf.recordType(7, 3)
+    stOk("type feedback 单态（11/12）", tf.isMonomorphic(7) as Int, 1)
+    stOk("type feedback 主型=Int", tf.dominantType(7), 0)
+    val osr = OsrTable()
+    osr.recordOsr("hot_loop", 20, 4096)
+    osr.recordOsr("hot_loop", 60, 4128)
+    stOk("osr lookup(25)=4096", osr.entryOffsetOf("hot_loop", 25), 4096)
+    stOk("osr lookup(100)=4128", osr.entryOffsetOf("hot_loop", 100), 4128)
 
     println("[INFO] layout: " + be.getJitCodeLayout())
     println("=== SELFTEST-RESULT pass=" + toStr(stPass) + " fail=" + toStr(stFail) + " ===")

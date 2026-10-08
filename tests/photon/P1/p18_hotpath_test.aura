@@ -1,0 +1,93 @@
+// tests/photon/P1/p18_hotpath_test.aura
+// ═══════════════════════════════════════════════════════════════
+// P6（热点集成闭环）：JitState 热点计数 → JitDispatch 决策 → 编译 →
+// 分派表注册 → NATIVE 派发。对应 07 §3.1 架构图「热点检测 → JIT 前端
+// → JIT 后端」链路的 Aura 侧闭环。
+//
+// 全部断言在 vmMode=true 守卫下成立（种子 VM / 原生 VM 皆可跑）。
+// ═══════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import aura.lang.compiler.jit.JitState
+import aura.lang.compiler.jit.JitDispatch
+import aura.lang.compiler.jit.JitDecide
+import aura.lang.compiler.photon.JitBackend
+
+var passCount: Int = 0
+var failCount: Int = 0
+
+fun ok(name: String, got: Int, want: Int): Unit {
+    if (got == want) {
+        passCount = passCount + 1
+        println("[PASS] " + name + "  got=" + toStr(got) + " want=" + toStr(want))
+    } else {
+        failCount = failCount + 1
+        println("[FAIL] " + name + "  got=" + toStr(got) + " want=" + toStr(want))
+    }
+}
+
+fun okStr(name: String, got: String, want: String): Unit {
+    if (got == want) {
+        passCount = passCount + 1
+        println("[PASS] " + name)
+    } else {
+        failCount = failCount + 1
+        println("[FAIL] " + name + "  got=[" + got + "] want=[" + want + "]")
+    }
+}
+
+fun main() {
+    println("=== P6 HOT-PATH INTEGRATION TEST (JitState → JitDispatch → NATIVE) ===")
+
+    // ── A. 热点计数 → 阈值 → shouldCompile ──
+    val st = JitState()
+    st.setThreshold(5)
+    ok("A1 初始 callCount=0", st.callCount(3), 0)
+    var k: Int = 0
+    while (k < 4) {
+        st.incCallCount(3)
+        k = k + 1
+    }
+    ok("A2 计数 4 未达阈值", st.reachThreshold(3) as Int, 0)
+    okStr("A2 决策=DEFER", JitDispatch.jitDecide(st, 3), JitDecide.DEFER)
+    st.incCallCount(3)
+    ok("A3 计数 5 达阈值", st.reachThreshold(3) as Int, 1)
+    ok("A3 shouldCompile=true", st.shouldCompile(3) as Int, 1)
+
+    // ── B. 编译注册 → NATIVE 派发 ──
+    val be = JitBackend()
+    // 手编 add5(a)=a+5（Win64：rcx 传参）
+    val add5Hex: String = "554889E54889C84805050000005DC3"
+    val entry: Int = be.emitFunction("add5_jit", add5Hex)
+    var b1: Int = 0
+    if (entry != 0) { b1 = 1 }
+    ok("B1 emitFunction 非零（守卫下为模拟地址）", b1, 1)
+    st.insert(3)
+    ok("B2 insert 后 isCompiled", st.isCompiled(3) as Int, 1)
+    okStr("B3 决策=NATIVE", JitDispatch.jitDecide(st, 3), JitDecide.NATIVE)
+    ok("B3 兜底原因=空", JitDispatch.jitFallbackReason(st, 3), "")
+
+    // ── C. SKIP 白名单路径 ──
+    st.skip(9, "opcode-not-whitelisted")
+    okStr("C1 决策=SKIP", JitDispatch.jitDecide(st, 9), JitDecide.SKIP)
+    okStr("C1 兜底原因", JitDispatch.jitFallbackReason(st, 9), "opcode-not-whitelisted")
+    ok("C1 skippedCount=1", st.skippedCount(), 1)
+
+    // ── D. 编译顺序（调用图后序）──
+    // funcs 格式与 JitState.plan 一致：idx|name;idx|name...
+    val order: String = JitState.jitCompileOrder("0|callee;1|caller", 1)
+    var d1: Int = 0
+    if (order.indexOf("callee") >= 0) { d1 = 1 }
+    ok("D1 编译顺序含 callee", d1, 1)
+
+    // ── E. 守卫模式下 executeNative 仍为 0（模拟对称性）──
+    val r: Long = be.executeNative(entry, 20)
+    ok("E1 守卫模式 executeNative=0", r, 0)
+
+    println("=== RESULT pass=" + toStr(passCount) + " fail=" + toStr(failCount) + " ===")
+    if (failCount > 0) {
+        println("=== FAIL ===")
+    } else {
+        println("=== ALL-PASS ===")
+    }
+}
