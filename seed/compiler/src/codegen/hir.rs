@@ -3395,11 +3395,15 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 ),
                 // `CString` 的逆操作：指针 / 地址 → Aura `String`。
                 // VM 侧由 `native_builtin_read_cstr` 按 NUL 结尾拷出真 `String`；
-                // AOT 侧恒等（`String ≡ i8*`）。签名与 `CStr` 同形（`Any` → `String`）。
+                // AOT 侧恒等（`String ≡ i8*`）。
+                // ⚠️ 参数类型 Any → **Long**（2026-10-09）：调用方（EmitBuffer/
+                // X86Encoder 的 build）传的都是 Long 缓冲地址——按 Any 传参在
+                // AOT 下走装箱路径，恒等返回的装箱指针被当 String 解引用 ⇒
+                // 段错误（实测 StringBuilder.build() 100% 复现）。
                 "ReadCStr" => (
                     vec![HirParam {
                         name: "p".into(),
-                        ty: Some(HirType::Named("Any".into())),
+                        ty: Some(HirType::Named("Long".into())),
                         default_value: None,
                         is_vararg: false,
                     }],

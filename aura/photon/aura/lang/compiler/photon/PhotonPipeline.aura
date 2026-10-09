@@ -58,6 +58,11 @@ class BackendResult {
     var executablePath: String = ""
     var machineCodeHex: String = ""
     var coffHex: String = ""
+    /// COFF **分片**列表（2026-10-09 内存回合）：emitPieces 的产出，与
+    /// coffHex 逐字节一致但**不做**单串归并——coffHex 仅在显式消费方
+    /// 出现时才由调用方自行拼接。驱动分片 print，writeObjectFilePieces
+    /// 分片落盘。
+    var coffPieces: List<String> = arrayListOf<String>()
     /// 重定位记录（`;` 分隔，每条 `offset|symbol|type`；偏移为**模块内**绝对偏移）。
     ///
     /// AOT 路径由 `emitter.getRelocRecords()` 填充并交给 COFF 写入器；JIT 路径
@@ -455,18 +460,27 @@ class PhotonPipeline {
         writer.buildSymbols(writer.functions, writer.stringConsts)
         this.peProbe("buildSymbols done symChars=" + toStr(writer.symbols.length) +
                 " relocChars=" + toStr(writer.relocs.length))
-        val coffHex: String = writer.emit()
-        this.peProbe("emit done coffChars=" + toStr(coffHex.length))
-        result.coffHex = coffHex
-        result.coffSize = coffHex.length / 2
+        // ⚠️ 分片模式（2026-10-09 内存回合）：emitPieces 跳过 writer 终归并
+        // （134M 字符级 = 内容 × log₂(片段数) 成对中间层，无 GC 全驻留），
+        // 落盘走 writeObjectFilePieces 逐片解码。
+        val coffPieces: List<String> = writer.emitPieces()
+        var coffChars: Int = 0
+        var px: Int = 0
+        while (px < coffPieces.size) {
+            coffChars = coffChars + coffPieces[px].length
+            px = px + 1
+        }
+        result.coffPieces = coffPieces
+        result.coffSize = coffChars / 2
+        this.peProbe("emit done coffChars=" + toStr(coffChars))
         this.vprintln("    COFF 大小: " + result.coffSize + " 字节")
 
         // 生成目标文件路径
         val objPath = this.outDir + "/" + this.moduleName + ".obj"
         result.objectFilePath = objPath
-        this.vprintln("    [pipe0] objPath=" + objPath + " coffHex.len=" + coffHex.length)
+        this.vprintln("    [pipe0] objPath=" + objPath + " coffChars=" + toStr(coffChars))
 
-        val wroteObj: Boolean = PhotonNativeWriter.writeObjectFile(objPath, coffHex)
+        val wroteObj: Boolean = PhotonNativeWriter.writeObjectFilePieces(objPath, coffPieces)
         this.vprintln("    [pipe1] wroteObj=" + wroteObj)
         if (!wroteObj) {
             println("    ⚠ 二进制落盘失败，回退 hex 文本（需外部脚本转换）：" + objPath + ".hex")
@@ -785,19 +799,26 @@ class PhotonPipeline {
         writer.buildSymbols(writer.functions, writer.stringConsts)
         this.peProbe("buildSymbols done symChars=" + toStr(writer.symbols.length) +
                 " relocChars=" + toStr(writer.relocs.length))
-        val coffHex: String = writer.emit()
-        this.peProbe("emit done coffChars=" + toStr(coffHex.length))
-        result.coffHex = coffHex
-        result.coffSize = coffHex.length / 2
+        // ⚠️ 分片模式（同 compileHir 处说明）：跳过终归并 + 分片落盘。
+        val coffPieces: List<String> = writer.emitPieces()
+        var coffChars2: Int = 0
+        var qx: Int = 0
+        while (qx < coffPieces.size) {
+            coffChars2 = coffChars2 + coffPieces[qx].length
+            qx = qx + 1
+        }
+        result.coffPieces = coffPieces
+        result.coffSize = coffChars2 / 2
+        this.peProbe("emit done coffChars=" + toStr(coffChars2))
         this.vprintln("    COFF 大小: " + result.coffSize + " 字节")
 
         // 生成目标文件路径
         val objPath = this.outDir + "/" + this.moduleName + ".obj"
         result.objectFilePath = objPath
 
-        // 落盘为**二进制** COFF。
-        this.peProbe("preWriteObj path=" + objPath + " chars=" + toStr(coffHex.length))
-        val wroteObj: Boolean = PhotonNativeWriter.writeObjectFile(objPath, coffHex)
+        // 落盘为**二进制** COFF（分片解码）。
+        this.peProbe("preWriteObj path=" + objPath + " chars=" + toStr(coffChars2))
+        val wroteObj: Boolean = PhotonNativeWriter.writeObjectFilePieces(objPath, coffPieces)
         this.peProbe("writeObj ok=" + this.toStr(wroteObj))
         if (!wroteObj) {
             println("    ⚠ 二进制落盘失败，回退 hex 文本（需外部脚本转换）：" + objPath + ".hex")

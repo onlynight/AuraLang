@@ -8,6 +8,7 @@ package aura.lang.compiler.photon.x86_64
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.std.string.StringBuilder
 
 /// x86_64 指令编码器：将操作码+操作数编码为机器码字节。
 class X86Encoder {
@@ -20,9 +21,14 @@ class X86Encoder {
     /// 编码阶段吃掉 5.6 GB（`aura_mem_used` 直方图：`<=1M` 桶 53292 次 / 5629 MB），
     /// 而 AOT 运行时**没有 GC**（`free_calls=0`），这些中间串全部驻留。
     ///
-    /// 改为「每字节一个列表项」：写入 O(1)、按下标改写 O(1)（`patchInt32` 用它）、
-    /// 只在 `toHex()` 时做一次两两归并（O(字节数 · log 字节数)）。
-    private var byteHex: List<String> = arrayListOf<String>()
+    /// ⚠️ 2026-10-09 第三次迭代（内存回合）：「每字节一个列表项」在自举
+    /// 闭包规模（6700 万字节 = 6700 万个 2 字符片段 + 两两归并 27 层）
+    /// 实测驻留 ~7 GB（AURA_MEM_STATS：aura_string_concat 98.8M 次 /
+    /// used 9.9 GB 的主力），改为 **StringBuilder**：写入 O(1)（appendHexByte，
+    /// 全程 Int）、按下标改写 O(1)（setChar2）、toHex() 一次线性 build——
+    /// 零归并中间层，扩容旧块真 free。前置修复：runtime ReadCStr 桩
+    /// return-0 → 恒等（build() 曾拿 null String 必崩）。
+    private var hex: StringBuilder = StringBuilder()
 
     /// 重定位项列表。
     private var relocations: List<String> = arrayListOf<String>()
@@ -37,20 +43,20 @@ class X86Encoder {
     private var pendingJumps: List<String> = arrayListOf<String>()
 
     init() {
-        this.byteHex = arrayListOf<String>()
         this.relocations = arrayListOf<String>()
         this.offset = 0
         this.labels = arrayListOf<String>()
         this.pendingJumps = arrayListOf<String>()
+        this.hex.reset()
     }
 
-    /// 重置编码器。
+    /// 重置编码器（保留缓冲容量，归零长度）。
     fun reset(): Unit {
-        this.byteHex = arrayListOf<String>()
         this.relocations = arrayListOf<String>()
         this.offset = 0
         this.labels = arrayListOf<String>()
         this.pendingJumps = arrayListOf<String>()
+        this.hex.reset()
     }
 
     // ── P413：peephole 支持（长度探测 + 安全回滚）──
@@ -85,23 +91,23 @@ class X86Encoder {
     /// 否则回滚会让已登记的偏移错位（标签指向错误位置 → 跳转跑飞）。
     /// 本函数自身不做校验——校验在调用方一次性完成。
     fun rollback(n: Int): Unit {
-        var k: Int = 0
-        while (k < n) {
-            val sz: Int = this.byteHex.size()
-            if (sz <= 0) {
-                return
-            }
-            this.byteHex.removeAt(sz - 1)
-            this.offset = this.offset - 1
-            k = k + 1
+        if (n <= 0) {
+            return
         }
+        val szc: Int = this.hex.length()
+        val cut: Int = n * 2
+        if (szc < cut) {
+            return
+        }
+        this.hex.truncate(szc - cut)
+        this.offset = this.offset - n
     }
 
     // ── 基础写入 ──
 
     /// 写入一个字节。
     fun writeByte(b: Int): Unit {
-        this.byteHex.add(toHex2(b & 255))
+        this.hex.appendHexByte(b)
         this.offset = this.offset + 1
     }
 
@@ -639,14 +645,19 @@ class X86Encoder {
 
     /// 在指定字节偏移处覆盖写入 4 字节小端整数。
     private fun patchInt32(byteOffset: Int, value: Int): Unit {
-        if (byteOffset < 0 || byteOffset + 4 > this.byteHex.size) {
+        if (byteOffset < 0 || byteOffset + 4 > this.hex.length() / 2) {
             return
         }
         // 小端写入 4 个字节（与 `intToHex8` 同序：先低字节）。
         var x: Int = value
         var i: Int = 0
         while (i < 4) {
-            this.byteHex[byteOffset + i] = toHex2(x & 255)
+            val b: Int = x & 255
+            val hiN: Int = b >> 4
+            val loN: Int = b & 15
+            val c1: Int = if (hiN < 10) { 48 + hiN } else { 87 + hiN }
+            val c2: Int = if (loN < 10) { 48 + loN } else { 87 + loN }
+            this.hex.setChar2((byteOffset + i) * 2, c1, c2)
             x = x >> 8
             i = i + 1
         }
@@ -1104,29 +1115,13 @@ class X86Encoder {
     /// 两两归并：每层拷贝总量恒为 O(总长)，共 O(log 字节数) 层
     /// ⇒ 总分配 O(总长 · log 总长)，避免 `r = r + c` 的 O(总长²)。
     private fun joinBytes(): String {
-        if (this.byteHex.size == 0) {
-            return ""
-        }
-        var cur: List<String> = this.byteHex
-        while (cur.size > 1) {
-            val next: List<String> = arrayListOf<String>()
-            var i: Int = 0
-            while (i < cur.size) {
-                if (i + 1 < cur.size) {
-                    next.add(cur[i] + cur[i + 1])
-                } else {
-                    next.add(cur[i])
-                }
-                i = i + 2
-            }
-            cur = next
-        }
-        return cur[0]
+        // StringBuilder 一次线性 build（零归并中间层，见 hex 字段说明）
+        return this.hex.build()
     }
 
     /// 获取编码后的字节数。
     fun byteCount(): Int {
-        return this.byteHex.size
+        return this.hex.length() / 2
     }
 
     /// 获取重定位项列表。

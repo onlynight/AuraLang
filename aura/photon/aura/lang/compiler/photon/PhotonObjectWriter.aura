@@ -247,15 +247,12 @@ class PhotonObjectWriter {
         this.appendRelocParts.add(rebasedEntries)
     }
 
-    /// 把 appendFunction 的追加片段物化为旧字段（text/relocs 两族）。
+    /// 把 appendFunction 的 relocs 追加片段物化为 relocs 字段。
     ///
-    /// 结果与旧「逐次拼接」**逐字符一致**（text 直接归并；relocs 沿用
-    /// 「累计为空则直置、否则 `;;` 相连」的规则）。在每个消费入口调用一次。
-    private fun materializeAppendParts(): Unit {
-        if (this.appendTextParts.size > 0) {
-            this.textSection = this.textSection + this.coffJoinList(this.appendTextParts)
-            this.appendTextParts = arrayListOf<String>()
-        }
+    /// 结果与旧「逐次拼接」**逐字符一致**（沿用「累计为空则直置、否则
+    /// `;;` 相连」的规则）。.text 片段**不**在此物化——buildCoffFile 已
+    /// 流式化（逐片段 normalize + coffBuf 逐片追加，见其头部说明）。
+    private fun materializeRelocParts(): Unit {
         if (this.appendRelocParts.size > 0) {
             var rl: String = this.relocs
             var j: Int = 0
@@ -578,7 +575,7 @@ class PhotonObjectWriter {
     /// → 2,647 次切片分配 + 1 次列表分配），17,066 条重定位 × 2,647 是纯重复
     /// 分配。
     private fun collectExternalSymbols(): List<String> {
-        this.materializeAppendParts()
+        this.materializeRelocParts()
         val out: List<String> = arrayListOf<String>()
         val funcs: List<String> = this.splitComma(this.functions)
         val dnames: List<String> = if (this.dataSymbolName != "") {
@@ -632,7 +629,7 @@ class PhotonObjectWriter {
     /// 重定位偏移已在 `appendFunction` 中按函数基准换算为节内绝对偏移，
     /// 此处仅需解析符号名到符号表索引。
     private fun composeRelocations(): List<String> {
-        this.materializeAppendParts()
+        this.materializeRelocParts()
         if (this.coffRelocCacheValid) {
             return this.coffRelocCache
         }
@@ -818,14 +815,34 @@ class PhotonObjectWriter {
     /// （44 vs 40），导致符号表实际位置比声明位置早 2 字节 —— 链接器按声明偏移
     /// 读取时，符号名整体错位 2 字节（"main" → "in"、"@str.0" → "tr.0"）。
     fun buildCoffFile(): String {
-        this.materializeAppendParts()
-        this.objwProbe("coff enter textChars=" + this.toStr(this.textSection.length) +
+        // ⚠️ .text 片段**流式化**（2026-10-09 内存回合）：不再把
+        // appendTextParts 物化成单串 textSection（134M 字符级 = 物化归并
+        // 中间层 + normalizeHex 全量拷贝 + 919 处 coffAppend 单片，无 GC
+        // 下 ~2 GB 驻留，实测末端 30s 冲 +3.5 GB 的主因）——逐片段
+        // normalize 后留在 appendTextParts，coffBuf 组装时逐片追加。
+        // relocs 仍走物化（composeRelocations/collectExternalSymbols 依赖）。
+        this.materializeRelocParts()
+        var textChars: Int = this.textSection.length
+        var tp: Int = 0
+        var textBytes: Int = 0
+        while (tp < this.appendTextParts.size) {
+            val part: String = this.normalizeHex(this.appendTextParts[tp])
+            this.appendTextParts[tp] = part
+            textBytes = textBytes + this.hexByteCount(part)
+            tp = tp + 1
+        }
+        if (this.appendTextParts.size > 0) {
+            this.textSize = textBytes
+            textChars = textBytes * 2
+        } else {
+            // 单发路径（emitFromMachineCode / textSection 直设）：原逻辑不变
+            this.textSection = this.normalizeHex(this.textSection)
+            this.textSize = this.hexByteCount(this.textSection)
+            textChars = this.textSection.length
+        }
+        this.objwProbe("coff enter textChars=" + this.toStr(textChars) +
                 " strConstChars=" + this.toStr(this.stringConsts.length) +
                 " dataChars=" + this.toStr(this.dataSection.length))
-        // ── 1. 规整节内容 ──
-        this.textSection = this.normalizeHex(this.textSection)
-        this.objwProbe("coff 1a normalizeHex(text) ok len=" + this.toStr(this.textSection.length))
-        this.textSize = this.hexByteCount(this.textSection)
         this.objwProbe("coff 1b textSize=" + this.toStr(this.textSize))
         this.rdataSection = this.stringConstsToHex(this.stringConsts)
         this.objwProbe("coff 1c stringConstsToHex ok rdataChars=" +
@@ -916,7 +933,18 @@ class PhotonObjectWriter {
         this.buildCoffHeader()
         this.buildSectionHeaders()
         this.coffAppend(this.padToBytes(textRawOffset))
-        this.coffAppend(this.textSection)
+        if (this.appendTextParts.size > 0) {
+            // 流式追加 .text 片段（片段已在 buildCoffFile 头部逐片 normalize，
+            // 跳过单串物化——见其头部说明）
+            var si: Int = 0
+            while (si < this.appendTextParts.size) {
+                this.coffAppend(this.appendTextParts[si])
+                si = si + 1
+            }
+            this.appendTextParts = arrayListOf<String>()
+        } else {
+            this.coffAppend(this.textSection)
+        }
         if (this.rdataSize > 0) {
             this.coffAppend(this.padToBytes(rdataRawOffset))
             this.coffAppend(this.rdataSection)
@@ -934,7 +962,33 @@ class PhotonObjectWriter {
         this.buildStringTable()
         this.objwProbe("coff9 strTable done bufHexChars=" + this.toStr(this.coffBufHexLen()))
 
+        // ⚠️ 终归并是 134M 字符级驻留大头（内容 × log₂(片段数) 的成对中间
+        // 层，无 GC 全驻留）：emitPieces() 路径跳过——驱动分片 print 到
+        // stdout / writeObjectFilePieces 分片解码落盘。
+        if (this.piecesMode) {
+            this.coffBuiltBuf = this.coffBuf
+            return ""
+        }
         return this.coffJoin()
+    }
+
+    /// 分片模式开关（emitPieces 用）：buildCoffFile 只构建 coffBuf 不归并。
+    private var piecesMode: Boolean = false
+
+    /// 最近一次分片构建的 coffBuf（emitPieces 的返回暂存）。
+    private var coffBuiltBuf: List<String> = arrayListOf<String>()
+
+    /// 构建 COFF 并**分片**返回（不归并成单串）。
+    ///
+    /// 消费方：驱动把各片段直接 `print` 到 stdout（marker 协议要求单行，
+    /// 用无换行 print 拼接）；`PhotonNativeWriter.writeObjectFilePieces`
+    /// 分片解码落盘。归并中间层 = 内容 × log₂(片段数)，134M 字符级
+    /// ≈ 1.3-2 GB 无 GC 驻留——分片化直接归零（2026-10-09 内存回合）。
+    fun emitPieces(): List<String> {
+        this.piecesMode = true
+        this.buildCoffFile()
+        this.piecesMode = false
+        return this.coffBuiltBuf
     }
 
     /// 追加一个片段到 COFF 缓冲（O(1)）。
@@ -1350,7 +1404,7 @@ class PhotonObjectWriter {
 
     /// 计算重定位项数量。
     private fun countRelocs(): Int {
-        this.materializeAppendParts()
+        this.materializeRelocParts()
         if (this.relocs == "") {
             return 0
         }
@@ -1863,7 +1917,12 @@ class PhotonObjectWriter {
     // ── ELF 目标文件生成 ──
 
     private fun buildElfFile(): String {
-        this.materializeAppendParts()
+        this.materializeRelocParts()
+        // ELF 路径（非热）保留整体物化：.text 片段归并成单串后走旧逻辑
+        if (this.appendTextParts.size > 0) {
+            this.textSection = this.textSection + this.coffJoinList(this.appendTextParts)
+            this.appendTextParts = arrayListOf<String>()
+        }
         // ── 1. 规整节内容 ──
         this.textSection = this.normalizeHex(this.textSection)
         this.textSize = this.hexByteCount(this.textSection)

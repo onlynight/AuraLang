@@ -31,6 +31,22 @@ class StringBuilder {
         this.h = newHandle()
     }
 
+    /// 句柄自愈取值：AOT 下构造器 `init()` 可能被静默忽略（"call ignored"
+    /// 家族，2026-10-09 实测：AOT 产物首个方法调用即在 `sbLen(0)` 处
+    /// `Memory.read64(8)` 段错误）——所有方法统一经此取句柄，h==0 时
+    /// 现场补造。Long 字段的方法内写入（非构造器初始化器）为已验证形态。
+    private fun hd(): Long {
+        if (this.h == 0) {
+            this.h = newHandle()
+        }
+        return this.h
+    }
+
+    /// [诊断] 句柄低 32 位（0 = init 未运行/句柄未建）。
+    fun handleLow(): Int {
+        return hd() as Int
+    }
+
     // ── 公开接口 ──
 
     /// 追加字符串（返回 self，便于链式调用）。
@@ -44,13 +60,35 @@ class StringBuilder {
             n = n + 1
             c = Memory.read(ptr + n)
         }
-        appendN(this.h, ptr, n)
+        appendN(hd(), ptr, n)
+        return this
+    }
+
+    /// 追加单个字节的两位小写 hex（X86Encoder 热路径专用）。
+    ///
+    /// ⚠️ 全程 Int（避免 Char 装箱/`as Byte` 的 AOT 未验证路径）——
+    /// 2026-10-09：appendChar 版在驱动编码阶段段错误（首个 writeByte 即崩）。
+    fun appendHexByte(b: Int): StringBuilder {
+        val x: Int = b & 255
+        val hiN: Int = x >> 4
+        val loN: Int = x & 15
+        val sb: Long = hd()
+        val len: Long = sbLen(sb)
+        sbReserve(sb, len + 2)
+        val buf: Long = sbBuf(sb)
+        if (buf == 0) { return this }
+        val c1: Int = if (hiN < 10) { 48 + hiN } else { 87 + hiN }
+        val c2: Int = if (loN < 10) { 48 + loN } else { 87 + loN }
+        Memory.write(buf + len, c1 as Byte)
+        Memory.write(buf + len + 1, c2 as Byte)
+        Memory.write64(sb + 8, len + 2)
+        Memory.write(buf + len + 2, 0 as Byte)
         return this
     }
 
     /// 追加单个字符（返回 self）。
     fun appendChar(ch: Char): StringBuilder {
-        val sb: Long = this.h
+        val sb: Long = hd()
         val len: Long = sbLen(sb)
         sbReserve(sb, len + 2)
         val buf: Long = sbBuf(sb)
@@ -63,7 +101,7 @@ class StringBuilder {
 
     /// 追加整数（返回 self）。
     fun appendInt(value: Int): StringBuilder {
-        val sb: Long = this.h
+        val sb: Long = hd()
         val len: Long = sbLen(sb)
         sbReserve(sb, len + 12)
         val buf: Long = sbBuf(sb)
@@ -108,7 +146,7 @@ class StringBuilder {
 
     /// 当前字节长度。
     fun length(): Int {
-        return sbLen(this.h) as Int
+        return sbLen(hd()) as Int
     }
 
     /// 检查缓冲区是否包含指定子串。
@@ -116,8 +154,8 @@ class StringBuilder {
         if (sub == "") {
             return true
         }
-        val buf: Long = sbBuf(this.h)
-        val len: Long = sbLen(this.h)
+        val buf: Long = sbBuf(hd())
+        val len: Long = sbLen(hd())
         if (buf == 0 || len <= 0) {
             return false
         }
@@ -152,16 +190,20 @@ class StringBuilder {
     /// 返回的 String 是独立分配（与缓冲区解耦），
     /// 后续 append 不影响已取出的 String 内容。
     fun build(): String {
-        val sb: Long = this.h
+        val sb: Long = hd()
         val buf: Long = sbBuf(sb)
         val len: Long = sbLen(sb)
+        println("[B1] hd/buf/len ok")
         if (buf == 0 || len <= 0) { return "" }
-        return ReadCStr(buf)
+        println("[B2] calling ReadCStr")
+        val r: String = ReadCStr(buf)
+        println("[B3] ReadCStr returned rlen=" + toStr(r.length))
+        return r
     }
 
     /// 清空（保留容量，返回 self）。
     fun reset(): StringBuilder {
-        val sb: Long = this.h
+        val sb: Long = hd()
         var buf: Long = sbBuf(sb)
         if (buf == 0) {
             buf = Memory.alloc(SB_INIT_CAP)
@@ -179,11 +221,38 @@ class StringBuilder {
         return this
     }
 
+    /// 截断到 newLen 字符（回退已写内容；比 reset+重放便宜）。
+    fun truncate(newLen: Int): StringBuilder {
+        val sb: Long = hd()
+        val buf: Long = sbBuf(sb)
+        if (buf == 0) { return this }
+        var nl: Long = newLen as Long
+        if (nl < 0) { nl = 0 }
+        val len: Long = sbLen(sb)
+        if (nl > len) { return this }
+        Memory.write64(sb + 8, nl)
+        Memory.write(buf + nl, 0 as Byte)
+        return this
+    }
+
+    /// 覆写 charOffset 起的 2 个字符（编码器标签回填 patchInt32 用）。
+    fun setChar2(charOffset: Int, c1: Int, c2: Int): StringBuilder {
+        val sb: Long = hd()
+        val buf: Long = sbBuf(sb)
+        val len: Long = sbLen(sb)
+        if (buf == 0) { return this }
+        val off: Long = charOffset as Long
+        if (off < 0 || off + 2 > len) { return this }
+        Memory.write(buf + off, c1 as Byte)
+        Memory.write(buf + off + 1, c2 as Byte)
+        return this
+    }
+
     /// 深拷贝当前内容到新实例。
     fun copy(): StringBuilder {
         val newSb: StringBuilder = StringBuilder()
         val newH: Long = newSb.h
-        val srcH: Long = this.h
+        val srcH: Long = hd()
         val srcLen: Long = sbLen(srcH)
         if (srcLen > 0) {
             val srcBuf: Long = sbBuf(srcH)
@@ -223,7 +292,10 @@ class StringBuilder {
 
     private fun sbReserve(sb: Long, need: Long) {
         if (sb == 0) { return }
-        val SB_MAX_CAP: Long = 268435456
+        // ⚠️ 2026-10-09 上限 256MB→1GB：X86Encoder 以本类做机器码 hex 缓冲
+        //（自举闭包模块 hex ≈ 134M 字符），256MB 上限会让 sbReserve 静默
+        // 拒绝扩容 → appendN 静默丢写 → 机器码被截断。
+        val SB_MAX_CAP: Long = 1073741824
         var want: Long = need
         if (want < 0 || want > SB_MAX_CAP) { return }
         val cap: Long = Memory.read64(sb + 16)

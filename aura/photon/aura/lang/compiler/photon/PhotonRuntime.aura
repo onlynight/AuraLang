@@ -3581,10 +3581,16 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// stub: ReadCStr 返回 0
+    /// stub: ReadCStr 恒等返回入参。
+    ///
+    /// ⚠️ 2026-10-09 实现真语义（旧占位桩 `return 0`）：AOT 下 Aura `String`
+    /// ≡ NUL 结尾 `i8*`（cffi `ReadCStr` 同语义、恒等不拷贝）——旧桩让
+    /// `StringBuilder.build()`（以及 EmitBuffer.sbBuild）拿到 null String，
+    /// 调用方 strlen(0) 即段错误。X86Encoder 换原生 hex 缓冲后每次
+    /// emitFunction 都会踩中（实测 sum 编码即崩）。
     fun emitReadCStr(enc: X86Encoder): Unit {
         enc.emitPrologue(0)
-        enc.emitMovRI("eax", 0)
+        enc.emitMovRR("rax", "rcx")
         enc.emitEpilogue()
     }
 
@@ -4514,7 +4520,25 @@ object PhotonRuntime {
         // `aura_typeof`（Plan A 折叠）使用，2026-10-06。
         writer.stringConsts = "0|4|Null3|Int6|String"
         writer.buildSymbols(writer.functions, writer.stringConsts)
+        // 分片模式：跳过 writer 终归并（134M 字符级驻留，见 emitPieces 说明）
+        if (this.rtPiecesMode) {
+            this.rtLastPieces = writer.emitPieces()
+            return ""
+        }
         return writer.emit()
+    }
+
+    /// 分片模式开关与结果暂存（buildRuntimeObjectPieces 用）。
+    var rtPiecesMode: Boolean = false
+    var rtLastPieces: List<String> = arrayListOf<String>()
+
+    /// 构建 runtime 目标并**分片**返回（不归并成单串）。
+    /// 与 buildRuntimeObject 产物逐字节一致；驱动分片 print 到 stdout。
+    fun buildRuntimeObjectPieces(): List<String> {
+        this.rtPiecesMode = true
+        this.buildRuntimeObject()
+        this.rtPiecesMode = false
+        return this.rtLastPieces
     }
 
     /// 生成用户代码目标文件（定`main`，引`println`）
