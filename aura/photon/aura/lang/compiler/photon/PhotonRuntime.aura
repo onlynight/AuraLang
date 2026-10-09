@@ -780,12 +780,168 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
+    /// 编码 `JitExec_allocRWX(rcx = size) rax = base|0`——**RWX 版**。
+    ///
+    /// 2026-10-09 P5-① 对策：3 参 protect 的实参序随构建翻转（自识别桩
+    /// 亦未能稳定，实测 P3/P6），改为分配时直接 PAGE_EXECUTE_READWRITE
+    /// （0x40），W^X 的 W→X 转换不再需要——setExecutable 退化为空操作。
+    /// 弱化说明：RWX 与 W^X 的安全差异已知；发射器实参序根因（P5-①）
+    /// 修复后应恢复 allocRW + protect 双原语。
+    fun emitJitExecAllocRWX(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x50)
+        enc.emitStackStore(-0x08, "rcx")          // [rbp-0x08] = size
+        // ── attempt 1: hint 0x10000000 ──
+        enc.emitMovRI32("rcx", 268435456)
+        enc.emitJmpLabel("jrx_try")
+        enc.emitLabel("jrx_a2")
+        enc.emitMovRI32("rcx", 402653184)
+        enc.emitJmpLabel("jrx_try")
+        enc.emitLabel("jrx_a3")
+        enc.emitMovRI32("rcx", 134217728)
+        enc.emitJmpLabel("jrx_try")
+        enc.emitLabel("jrx_a4")
+        enc.emitMovRI32("rcx", 536870912)
+        enc.emitJmpLabel("jrx_try")
+        enc.emitXorRR("rax", "rax")
+        enc.emitJmpLabel("jrx_done")
+        enc.emitLabel("jrx_try")
+        enc.emitStackStore(-0x10, "rcx")
+        enc.emitStackLoad("rdx", -0x08)
+        enc.emitStackStore(-0x18, "rdx")
+        enc.emitXorRR("rax", "rax")
+        enc.emitNotRR("rax")
+        enc.emitMovRR("rcx", "rax")
+        enc.emitLeaStack("rdx", -0x10)
+        enc.emitXorRR("r8", "r8")
+        enc.emitLeaStack("r9", -0x18)
+        enc.emitStoreImm32Stack(-0x30, 0x3000)    // arg5 MEM_RESERVE|MEM_COMMIT
+        enc.emitStoreImm32Stack(-0x28, 0x40)      // arg6 PAGE_EXECUTE_READWRITE
+        enc.emitStoreImm32Stack(-0x20, 0)         // arg7 Extended = NULL
+        enc.emitCallImport("NtAllocateVirtualMemory")
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("ne", "jrx_next")
+        enc.emitStackLoad("rax", -0x10)
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("jle", "jrx_next")
+        enc.emitCmpRI("rax", 2147483647)
+        enc.emitJccLabel("jg", "jrx_next")
+        enc.emitJmpLabel("jrx_done")
+        enc.emitLabel("jrx_next")
+        enc.emitStackLoad("rcx", -0x10)
+        enc.emitMovRI32("rax", 268435456)
+        enc.emitCmpRR("rcx", "rax")
+        enc.emitJccLabel("ne", "jrx_c2")
+        enc.emitJmpLabel("jrx_a2")
+        enc.emitLabel("jrx_c2")
+        enc.emitMovRI32("rax", 402653184)
+        enc.emitCmpRR("rcx", "rax")
+        enc.emitJccLabel("ne", "jrx_c3")
+        enc.emitJmpLabel("jrx_a3")
+        enc.emitLabel("jrx_c3")
+        enc.emitMovRI32("rax", 134217728)
+        enc.emitCmpRR("rcx", "rax")
+        enc.emitJccLabel("ne", "jrx_a4")
+        enc.emitJmpLabel("jrx_a4")
+        enc.emitLabel("jrx_done")
+        enc.emitEpilogue()
+    }
+
+
     /// 编码 `JitExec_protect(rcx = addr, rdx = size, r8 = win32Prot) rax = 1|0`。
     ///
     /// VirtualProtect 直通（3 参寄存器内）。W^X 切换专用，prot 由调用方
     /// 按 Win32 PAGE_* 传（20=EXECUTE_READ 等）。
     fun emitJitExecProtect(enc: X86Encoder): Unit {
+        // 参数序自识别（P5-① 布局漂移的运行时对策，同 emitJitExecCallI64）：
+        // 期望 (rcx=addr, rdx=size, r8=prot)，但双/三参 extern 的实参顺序
+        // 随构建布局翻转。不变量：addr ∈ [0x08000000, 0x20000000]（allocRW
+        // JIT 区）、prot ∈ {2,4,16,32,64}（PAGE_* 白名单）。按 addr 定位
+        // 基址寄存器，按 prot 白名单定位保护位，余者为 size。
         enc.emitPrologue(0x28)
+        // r10 = addr：三参中落在 JIT 区间者
+        enc.emitMovRR("r10", "rcx")
+        enc.emitCmpRI("rcx", 134217728)           // 0x08000000
+        enc.emitJccLabel("jb", "jp_try_rdx")
+        enc.emitCmpRI("rcx", 536870912)           // 0x20000000
+        enc.emitJccLabel("ja", "jp_try_rdx")
+        enc.emitJmpLabel("jp_have_addr")
+        enc.emitLabel("jp_try_rdx")
+        enc.emitMovRR("r10", "rdx")
+        enc.emitCmpRI("rdx", 134217728)
+        enc.emitJccLabel("jb", "jp_try_r8")
+        enc.emitCmpRI("rdx", 536870912)
+        enc.emitJccLabel("ja", "jp_try_r8")
+        enc.emitJmpLabel("jp_have_addr")
+        enc.emitLabel("jp_try_r8")
+        enc.emitMovRR("r10", "r8")
+        enc.emitLabel("jp_have_addr")
+        // r11 = prot：非 addr 寄存器中命中 PAGE_* 白名单者；都命中则取
+        // 非 addr 的第一个（size 是 4096 倍数，不可能命中白名单，无歧义：
+        // 4096 的倍数最小 4096 > 64）。白名单 {2,4,16,32,64} 均 < 4096。
+        enc.emitXorRR("r11", "r11")
+        enc.emitCmpRI("rdx", 2)
+        enc.emitJccLabel("je", "jp_p_rdx")
+        enc.emitCmpRI("rdx", 4)
+        enc.emitJccLabel("je", "jp_p_rdx")
+        enc.emitCmpRI("rdx", 16)
+        enc.emitJccLabel("je", "jp_p_rdx")
+        enc.emitCmpRI("rdx", 32)
+        enc.emitJccLabel("je", "jp_p_rdx")
+        enc.emitCmpRI("rdx", 64)
+        enc.emitJccLabel("je", "jp_p_rdx")
+        enc.emitJmpLabel("jp_c_r8")
+        enc.emitLabel("jp_p_rdx")
+        enc.emitMovRR("r11", "rdx")
+        enc.emitJmpLabel("jp_go")
+        enc.emitLabel("jp_c_r8")
+        enc.emitCmpRI("r8", 2)
+        enc.emitJccLabel("je", "jp_p_r8")
+        enc.emitCmpRI("r8", 4)
+        enc.emitJccLabel("je", "jp_p_r8")
+        enc.emitCmpRI("r8", 16)
+        enc.emitJccLabel("je", "jp_p_r8")
+        enc.emitCmpRI("r8", 32)
+        enc.emitJccLabel("je", "jp_p_r8")
+        enc.emitCmpRI("r8", 64)
+        enc.emitJccLabel("je", "jp_p_r8")
+        enc.emitJmpLabel("jp_c_rcx")
+        enc.emitLabel("jp_p_r8")
+        enc.emitMovRR("r11", "r8")
+        enc.emitJmpLabel("jp_go")
+        enc.emitLabel("jp_c_rcx")
+        // rdx/r8 都不是白名单 prot：rcx 若非 addr 则 rcx 是 prot
+        enc.emitCmpRI("rcx", 2)
+        enc.emitJccLabel("je", "jp_p_rcx")
+        enc.emitCmpRI("rcx", 4)
+        enc.emitJccLabel("je", "jp_p_rcx")
+        enc.emitCmpRI("rcx", 16)
+        enc.emitJccLabel("je", "jp_p_rcx")
+        enc.emitCmpRI("rcx", 32)
+        enc.emitJccLabel("je", "jp_p_rcx")
+        enc.emitCmpRI("rcx", 64)
+        enc.emitJccLabel("je", "jp_p_rcx")
+        enc.emitJmpLabel("jp_go")
+        enc.emitLabel("jp_p_rcx")
+        enc.emitMovRR("r11", "rcx")
+        enc.emitLabel("jp_go")
+        // rdx = size：非 addr、非 prot 的那个
+        enc.emitCmpRR("rcx", "r10")
+        enc.emitJccLabel("je", "jp_s_rdx")
+        enc.emitCmpRR("rcx", "r11")
+        enc.emitJccLabel("je", "jp_s_rdx")
+        enc.emitMovRR("rdx", "rcx")
+        enc.emitJmpLabel("jp_call")
+        enc.emitLabel("jp_s_rdx")
+        enc.emitCmpRR("rdx", "r10")
+        enc.emitJccLabel("je", "jp_s_r8")
+        enc.emitCmpRR("rdx", "r11")
+        enc.emitJccLabel("je", "jp_s_r8")
+        enc.emitJmpLabel("jp_call")
+        enc.emitLabel("jp_s_r8")
+        enc.emitMovRR("rdx", "r8")
+        enc.emitLabel("jp_call")
+        enc.emitMovRR("rcx", "r10")               // rcx = addr
+        enc.emitMovRR("r8", "r11")                // r8 = prot
         enc.emitLeaStack("r9", -0x08)             // arg4 &flOldProtect
         enc.emitStoreImm32Stack(-0x08, 0)
         enc.emitCallImport("VirtualProtect")
@@ -3703,8 +3859,8 @@ object PhotonRuntime {
     /// Pipeline 以 `RUNTIME_SYMBOLS + BUILD_ID` 作为 aura_runtime.obj 的缓存
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
-    val BUILD_ID: String = "p284-protect-simple"
-    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_protect"
+    val BUILD_ID: String = "p288-allocrwx"
+    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
     fun buildRuntimeObject(): String {
@@ -4234,6 +4390,9 @@ object PhotonRuntime {
         // 2026-10-08 P1-3：`JitExec.callI64/call0`——Photon HAT 后端把 extern
         // interface 当普通函数符号发射；AOT 侧由 Rust 编译器直接 inttoptr
         // 落地，但 Photon 需要 runtime 桩提供同样的间接 call 语义。
+        val encJrx = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecAllocRWX(encJrx)
+        writer.appendFunction(encJrx.toHex(), "JitExec_allocRWX", PhotonObjectWriterUtils.joinRelocRecords(encJrx.getRelocations()))
         val encJc1 = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitJitExecCallI64(encJc1)
         writer.appendFunction(encJc1.toHex(), "JitExec_callI64", PhotonObjectWriterUtils.joinRelocRecords(encJc1.getRelocations()))
@@ -4731,6 +4890,9 @@ object PhotonRuntime {
         // 2026-10-08 P1-3：`JitExec.callI64/call0`——Photon HAT 后端把 extern
         // interface 当普通函数符号发射；AOT 侧由 Rust 编译器直接 inttoptr
         // 落地，但 Photon 需要 runtime 桩提供同样的间接 call 语义。
+        val encJrx = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecAllocRWX(encJrx)
+        writer.appendFunction(encJrx.toHex(), "JitExec_allocRWX", PhotonObjectWriterUtils.joinRelocRecords(encJrx.getRelocations()))
         val encJc1 = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitJitExecCallI64(encJc1)
         writer.appendFunction(encJc1.toHex(), "JitExec_callI64", PhotonObjectWriterUtils.joinRelocRecords(encJc1.getRelocations()))
@@ -5190,6 +5352,9 @@ object PhotonRuntimeUtils {
         // 2026-10-08 P1-3：`JitExec.callI64/call0`——Photon HAT 后端把 extern
         // interface 当普通函数符号发射；AOT 侧由 Rust 编译器直接 inttoptr
         // 落地，但 Photon 需要 runtime 桩提供同样的间接 call 语义。
+        val encJrx = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitJitExecAllocRWX(encJrx)
+        writer.appendFunction(encJrx.toHex(), "JitExec_allocRWX", PhotonObjectWriterUtils.joinRelocRecords(encJrx.getRelocations()))
         val encJc1 = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitJitExecCallI64(encJc1)
         writer.appendFunction(encJc1.toHex(), "JitExec_callI64", PhotonObjectWriterUtils.joinRelocRecords(encJc1.getRelocations()))

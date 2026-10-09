@@ -32,10 +32,12 @@ import aura.lang.native.Memory
 import aura.lang.native.JitExec
 import aura.lang.compiler.photon.JitBackend
 import aura.lang.compiler.photon.JitDeopt
-import aura.lang.compiler.photon.JitStackMap  # TypeFeedbackTable 亦在本文件
+import aura.lang.compiler.photon.JitStackMap
+import aura.lang.native.time.Clock  # TypeFeedbackTable 亦在本文件
 import aura.lang.compiler.photon.StackMapTable
 import aura.lang.compiler.photon.StackMapEntry
-import aura.lang.compiler.photon.JitStackMap  # TypeFeedbackTable 亦在本文件
+import aura.lang.compiler.photon.JitStackMap
+import aura.lang.native.time.Clock  # TypeFeedbackTable 亦在本文件
 import aura.lang.compiler.photon.OsrTableUtils
 import "../../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
 
@@ -215,8 +217,76 @@ fun main(): Int {
     // ⚠ .auc 路径在 VmRunner 构造**之前**读取：规避「Env.get 与 VmRunner
     // 大规模内联共存取值异常」的历史问题面（本宿主为 Photon 原生，
     // env_get = 真 GetEnvironmentVariableA）。
-    val aucPath: String = Env.get("AURA_VM_AUC", "build/vm/current.auc")
+    val aucPath: String = "" + Env.get("AURA_VM_AUC", "build/vm/current.auc")
     val selftest: String = Env.get("AURA_VM_SELFTEST", "")
+
+    // ── JIT 基准模式（bench-jit-aot-vm.ps1 用）：手编机器码经
+    // JitBackend 真实装载/回填/RX 后 executeNative 执行，ClockImpl
+    // 单调时钟进程内计时。负载：
+    //   sum: n=1e9 循环累加（寄存器内，单次 JIT 调用）
+    //   fib: 递归 fib(40)（调用密集）
+    // ⚠️ Env.get 返回共享 envBuffer 指针（P292 同族）——下一次 Env.get
+    // 会覆盖内容。读取后立即经 strcat 拷贝到 arena（"" + s）。
+    val bench: String = "" + Env.get("AURA_BENCH_JIT", "")
+    if (bench == "sum" || bench == "fib") {
+        Heap.init()
+        val nStr: String = "" + Env.get("AURA_BENCH_N", "1000000000")
+        val n: Int = JitStackMapUtils.parseInt(nStr)
+        val be = JitBackend()
+        be.enableNativeExec()
+        // ⚠️ P5-① 对策：n 经**数据槽**传递（写入 JIT 区 +64 处 8 字节），
+        // 机器码 `mov r8/rcx, [rip+disp]` 读取——executeNative(entry, 0)
+        // 单参形态，绕开 2 参 extern 的实参丢失轮盘。
+        var hex: String = ""
+        if (bench == "sum") {
+            // 0: mov r8,[rip+57](7B) 7:xor eax,eax 9:xor ecx,ecx 11:cmp rcx,r8(3)
+            // 14: jge +8→24 16: add rax,rcx 19: inc rcx 22: jmp 11 24: ret
+            // 数据槽 @+64
+            hex = "4C8B053900000031C031C94C39C17D084801C848FFC1EBF3C3"
+        } else {
+            // 0: mov rcx,[rip+9](7B) 7: jmp +7→16 | fib@16: cmp rcx,2(3)
+            // 19: jge +4→25 21: lea eax,[rcx-1](3) 24: ret 25: push rsi
+            // 26: push rbx 27: mov rsi,rcx 30: lea rcx,[rsi-1] 34: call -23
+            // 39: mov rbx,rax 42: lea rcx,[rsi-2] 46: call -35 51: add rax,rbx
+            // 54: pop rbx 55: pop rsi 56: ret
+            // 入口 mov rcx,[rip+57] → 数据槽 @+64（fib 体 @16 起）
+            hex = "488B0D39000000EB079090909090909083F9027D048BC1C356534889CE488D4EFFE8E9FFFFFF4889C3488D76FEE8DDFFFFFF4801D85B5EC3"
+        }
+        val entry = be.emitFunction("bench_fn", hex)
+        // n 写入数据槽（JIT 区 +64，8 字节 LE；机器码 [rip+disp] 读取）
+        Memory.write64((entry + 64) as Long, n as Long)
+        // 内存转储（AURA_BENCH_DUMP=1）：验证 writeCode 真实写入
+        if (Env.get("AURA_BENCH_DUMP", "") == "1") {
+            var di: Int = 0
+            while (di < 40) {
+                val b: Int = Memory.read64((entry + di) as Long) as Int
+                println("[DUMP] " + toStr(di) + " -> " + toStr(b))
+                di = di + 1
+            }
+        }
+        if (entry == 0) {
+            println("[BENCH-ERROR] emitFunction returned 0")
+            return 1
+        }
+        // 正确性哨兵（小 n）
+        val chk: Long = be.executeNative(entry, 10)
+        val chkI: Int = chk as Int
+        println("[BENCH-CHK] " + toStr(chkI))
+        ClockImpl.init()
+        val t0: Long = ClockImpl.timeNs()
+        val r: Long = be.executeNative(entry, n)
+        val t1: Long = ClockImpl.timeNs()
+        // ⚠️ P5-②：Long 拼接打印在原生 Photon 代码下不可靠（实测静默
+        // 丢失），全部拆为独立行 + Int 化。
+        val wallMs: Int = ((t1 - t0) / 1000000) as Int
+        val rLow: Int = r as Int
+        println("[BENCH] kind=" + bench)
+        println("[BENCH-N] " + nStr)
+        println("[BENCH-RESULT-LOW32] " + toStr(rLow))
+        println("[BENCH-WALL-MS] " + toStr(wallMs))
+        println("[BENCH-DONE]")
+        return 0
+    }
 
     if (selftest == "1") {
         jitSelfTest()

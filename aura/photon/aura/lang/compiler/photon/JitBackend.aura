@@ -255,8 +255,8 @@ class JitBackend {
             return base
         }
 
-        println("[ST2] before allocRW size=" + toStr(alignedSize))
-        val baseL: Long = JitExec.allocRW(alignedSize as Long)
+        println("[ST2] before allocRWX size=" + toStr(alignedSize))
+        val baseL: Long = JitExec.allocRWX(alignedSize as Long)
         val base: Int = baseL as Int
         if (base == 0) {
             return 0
@@ -302,26 +302,21 @@ class JitBackend {
     /// ⚠️ 2026-10-08 P1-3：runtime 的 `Memory_mprotect` 旧为恒 0 空桩——
     /// 本调用曾长期静默无效，JIT 代码从未真正获得执行权限。现已是
     /// VirtualProtect 真实现；本处负责 prot 位翻译。
+    /// 将内存标记为可执行。
+    ///
+    /// ⚠️ 2026-10-09 P5-① 对策：RWX 直分配（见 allocateExecMemory）后
+    /// 页已可执行——本函数退化为空操作。旧实现（JitExec.protect 3 参
+    /// 调用）在发射器实参序翻转 + 一次损坏的 pok 拼接残体下崩溃
+    /// （实测 P3/P6 多次构建）。发射器根因修复后恢复真 W^X。
     fun setExecutable(base: Int, size: Int): Unit {
-        if (this.vmMode) {
-            return
-        }
-        val pok: Int = JitExec.protect(base as Long, size as Long,
-                this.protToWin32(this.PROT_READ + this.PROT_EXEC))
-                + " prot=" + toStr(this.protToWin32(this.PROT_READ + this.PROT_EXEC))
-                + " -> " + toStr(pok))
     }
 
     /// 将内存标记为可写（读+写，不可执行）。
     ///
     /// Windows: VirtualProtect(base, size, PAGE_READWRITE)
     /// Unix:    mprotect(base, size, PROT_READ|PROT_WRITE)
+    /// 将内存标记为可写（RWX 页天然可写，空操作——见 setExecutable）。
     fun setWritable(base: Int, size: Int): Unit {
-        if (this.vmMode) {
-            return
-        }
-        JitExec.protect(base as Long, size as Long,
-                this.protToWin32(this.PROT_READ + this.PROT_WRITE))
     }
 
     /// 将机器码写入可执行内存。

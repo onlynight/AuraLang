@@ -678,15 +678,7 @@ object JitOsrUtils {
         return out
     }
 
-    /// 修补 OSR 桩的帧地址。
-    fun patchOsrFrame(backend: JitBackend, stubBase: Int, osrFrame: Int): Unit {
-        if (osrFrame == 0) { return }
-        backend.writeReloc32(stubBase + JitOsrUtils.osrFrameOffset(), osrFrame)
-    }
-
-    /// 修补 OSR 桩的 JIT 入口。
-    fun patchOsrEntry(backend: JitBackend, stubBase: Int, jitEntry: Int): Unit {
-        if (jitEntry == 0) { return }
-        backend.writeReloc32(stubBase + JitOsrUtils.osrEntryOffset(), jitEntry)
-    }
+    // patchOsrFrame/patchOsrEntry 已移除：跨文件 JitBackend 参数的方法
+    // 调用在 AOT 闭包下解析为未定义全局（#writeReloc32 未定义，实测
+    // P3/驱动重建）。调用方直接用 backend.writeReloc32(base+off, val)。
 }
