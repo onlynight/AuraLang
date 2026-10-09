@@ -41,6 +41,7 @@
 //   ===ERR===<message>
 import aura.lang.std.String
 import aura.lang.std.fs.FileUtils
+import aura.lang.std.string.StringBuilder
 import aura.lang.std.Env
 import aura.lang.native.time.Clock
 
@@ -114,6 +115,38 @@ fun readPathEnv(name: String, default: String): String {
 // （源码读取仍由 `linker.link()` 内部完成），风险面与原注释所述的最小复现
 // 不同。读不到时一律回退默认路径，行为不劣于旧实现。
 
+    fun fnvFile(path: String): String {
+        val text: String = FileUtils.readText(path)
+        var h: Int = 0x811c9dc5
+        var i: Int = 0
+        while (i < text.length) {
+            h = h * 0x01000193
+            h = h ^ text.charCodeAt(i)
+            i = i + 1
+        }
+        var out: String = ""
+        var v: Int = h
+        var k: Int = 0
+        while (k < 8) {
+            val d: Int = v & 15
+            val ch: Int = if (d < 10) { 48 + d } else { 87 + d }
+            out = out + String.fromCharCode(ch)
+            v = v >> 4
+            k = k + 1
+        }
+        return out
+    }
+
+    fun joinSb(pieces: List<String>): String {
+        val sb: StringBuilder = StringBuilder()
+        var i: Int = 0
+        while (i < pieces.size) {
+            sb.append(pieces[i])
+            i = i + 1
+        }
+        return sb.build()
+    }
+
 fun main(): Int {
     // 输入通道：**优先读环境变量**（AURA_HAT_AURA / _OUT / _MODULE / _SRC），
     // 未设置时回退到固定路径约定（build/hat-vmhost/current.{aura,hat}）。
@@ -137,17 +170,74 @@ fun main(): Int {
     val hatPath = readPathEnv("AURA_HAT_SRC", outDir + "/current.hat")
 
     FileUtils.mkdirP(outDir)
+    // ── [MEM-FIX] 产物缓存（2026-10-10）──────────────────────────────
+    // 编译的固定大头 = 前端对整个闭包源码（~45K 行）的词法/解析/SSA 字符串
+    // 风暴（阶段归因：concat 1917 万次 / 7.7GB，见 09 报告 §A·补充五）。
+    // 闭包+入口源全部未变时，直接回放缓存 COFF（前端+后端全跳过，
+    // 编译内存 ~0）。任何源新增/修改/删除（内容哈希校验）→ 回退全量构建。
+    // AURA_BUILD_CACHE=0 关闭；AURA_HAT_SKIP_FRONT=1 时不参与缓存。
+    val cacheMain: String = outDir + "/" + moduleName + ".cache-main.hex"
+    val cacheRt: String = outDir + "/" + moduleName + ".cache-rt.hex"
+    val cacheManifest: String = outDir + "/" + moduleName + ".cache-manifest.txt"
+    val cacheOn: Boolean = Env.get("AURA_BUILD_CACHE", "1") == "1"
 
     // ── AURA_HAT_SKIP_FRONT=1：跳过前端，直接复用现成 .hat ──
     //（文档承诺过此开关但一直没实现；「bash 侧补桩 .hat + SKIP_FRONT 重编」
     // 两段式工作流必需它，2026-10-06。跳过段不调 link()，Env.get 安全。）
     val skipFront: Boolean = Env.get("AURA_HAT_SKIP_FRONT", "") == "1"
+    // 命中判定:清单存在 → 每个列出的源文件哈希一致 → 缓存 hex 文件存在
+    if (cacheOn && !skipFront) {
+        val mf: String = FileUtils.readText(cacheManifest)
+        if (mf != "") {
+        val mlines: List<String> = mf.split("\n")
+            var ok: Boolean = mlines[0] == "v1"
+            var mainHexPath: String = ""
+            var rtHexPath: String = ""
+            var linkCmdCached: String = ""
+            var fi: Int = 1
+            while (fi < mlines.size && ok) {
+                val line: String = mlines[fi]
+                if (line.startsWith("M ")) {
+                    mainHexPath = line.substring(2, line.length)
+                    ok = FileUtils.exists(mainHexPath)
+                } else if (line.startsWith("R ")) {
+                    rtHexPath = line.substring(2, line.length)
+                    ok = FileUtils.exists(rtHexPath)
+                } else if (line.startsWith("L ")) {
+                    linkCmdCached = line.substring(2, line.length)
+                } else if (line.startsWith("F ")) {
+                    val sp1: Int = line.indexOf(" ", 2)
+                    val wantHash: String = line.substring(2, sp1)
+                    val path: String = line.substring(sp1 + 1, line.length)
+                    if (!FileUtils.exists(path) || fnvFile(path) != wantHash) { ok = false }
+                }
+                fi = fi + 1
+            }
+            if (ok && mainHexPath != "" && rtHexPath != "") {
+                val mainHex: String = FileUtils.readText(mainHexPath)
+                val rtHex: String = FileUtils.readText(rtHexPath)
+                if (mainHex != "" && rtHex != "") {
+                    println("===COFF-MAIN===")
+                    print(mainHex)
+                    println("")
+                    println("===COFF-RUNTIME===")
+                    print(rtHex)
+                    println("")
+                    println("===LINK===" + linkCmdCached)
+                    println("===RESULT===success")
+                    return 0
+                }
+            }
+        }
+    }
+    var seenList: String = ""   // link 实际读取的源文件清单（缓存清单用）
     if (!skipFront) {
         // ── 前端：源码（含递归 import）→ 合并 HIR → SSA → HAT 文本 ──
         val tAll0: Long = tNs()
         val tLink0: Long = tNs()
         val linker = AotModuleLinker()
         val hir: Hir = linker.link(srcPath)
+        seenList = linker.seen
         if (linker.missing != "") {
             println("[hat-front] missing imports: " + linker.missing)
         }
@@ -225,6 +315,30 @@ fun main(): Int {
     var resultTag: String = "fail"
     if (result.success) { resultTag = "success" }
     println("===RESULT===" + resultTag)
+    // [MEM-FIX] 构建成功 → 写产物缓存清单（源文件清单+内容哈希+缓存 hex 路径）。
+    // 下次构建源全部未变 → 直接回放缓存（前端+后端全跳过）。
+    if (resultTag == "success" && cacheOn && seenList != "") {
+        val mf: String = "v1\nM " + cacheMain + "\nR " + cacheRt + "\nL " + result.linkCommand + "\n"
+        var fi: Int = 0
+        var mf2: String = mf
+        while (fi < seenList.length) {
+            var nl: Int = -1
+            var sc: Int = fi
+            while (sc < seenList.length) {
+                if (seenList.charCodeAt(sc) == 10) { nl = sc; break }
+                sc = sc + 1
+            }
+            if (nl < 0) { break }
+            val path: String = seenList.substring(fi, nl)
+            if (path != "" && FileUtils.exists(path)) {
+                mf2 = mf2 + "F " + fnvFile(path) + " " + path + "\n"
+            }
+            fi = nl + 1
+        }
+        FileUtils.writeText(cacheManifest, mf2)
+        FileUtils.writeText(cacheMain, joinSb(coffPieces))
+        FileUtils.writeText(cacheRt, joinSb(rtPieces))
+    }
     if (!result.success) {
         println("===ERR===" + result.errorMessage)
         return 1
