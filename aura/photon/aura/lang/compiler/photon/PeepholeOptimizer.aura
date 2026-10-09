@@ -248,18 +248,28 @@ class PeepholeOptimizer {
             if (instr.template == "nop") { i = i + 1; continue }
             var k: Int = 0
             while (k < copyMap.size) {
-                val parts: List<String> = this.splitStr(copyMap[k], "|")
-                val src: Int = this.strToInt(parts[0])
-                val dst: Int = this.strToInt(parts[1])
-                // 检查指令是否使用了 src
+                // [MEM-FIX] 2026-10-10：旧实现对**每个 copyMap 条目**做
+                // 「splitStr 整个 nodes 串 → 逐元素替换 → joinList 重建」——
+                // O(对数 × 节点数²) 的反复分裂/重连，splitStr/joinList/
+                // digitChar 的 6 个 concat 调用点 = OOM 归因表 413MB×3936 次
+                // ×6 RA ≈ 2.4GB 驻留的真身。改为：nodes 只分裂一次，每节点
+                // 按 copyMap 顺序做链式替换（语义与逐对全量扫描等价），最后
+                // joinList 重建一次。
                 val nodes: List<String> = this.splitStr(instr.nodes, ",")
                 var j: Int = 0
                 while (j < nodes.size) {
-                    if (this.strToInt(nodes[j]) == src) {
-                        // 替换为 dst
-                        nodes[j] = toStr(dst)
-                        changed = true
+                    var v: Int = this.strToInt(nodes[j])
+                    var kk: Int = 0
+                    while (kk < copyMap.size) {
+                        val parts: List<String> = this.splitStr(copyMap[kk], "|")
+                        if (this.strToInt(parts[0]) == v) {
+                            v = this.strToInt(parts[1])
+                        }
+                        kk = kk + 1
                     }
+                    val nv: String = toStr(v)
+                    if (nv != nodes[j]) { changed = true }
+                    nodes[j] = nv
                     j = j + 1
                 }
                 instr.nodes = this.joinList(nodes, ",")

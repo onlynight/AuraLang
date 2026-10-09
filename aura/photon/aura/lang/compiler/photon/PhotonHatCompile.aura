@@ -178,7 +178,23 @@ fun main(): Int {
     val pipeline = PhotonPipelineUtils.emptyPipeline()
     pipeline.outDir = outDir
     pipeline.moduleName = moduleName
-    val result = pipeline.compileHat(hatPath)
+    // [MEM-FIX] 直连判定：getter 桩补写**无改动**（hatFixed == hatText）⇒
+    // SSA 与落盘文本语义等价 ⇒ compileSsaDirect 跳过「落盘+重解析」
+    // （HatParser 4700 万次 substring/dup + SSA2 双份驻留，2026-10-09）。
+    // 补丁触发时自动回退旧路径（补丁只存在于文本层面，必须走重解析）。
+    // AURA_COMPILE_ROUNDTRIP=1 强制旧路径（对照/调试）。
+    // ⚠️ 默认关闭：实测直连与回环产物存在语义差异（sum .text 0xac8 起
+    // 编码不同——回环序列化会把部分调用结果物化进文本，直连保留调用），
+    // 等价性工作完成前不可默认启用。
+    val directCompile: Boolean = (hatFixed == hatText)
+            && Env.get("AURA_COMPILE_DIRECT", "") == "1"
+    val result: BackendResult
+    if (directCompile) {
+        result = pipeline.compileSsaDirect(ssa)
+    } else {
+        FileUtils.writeText(hatPath, hatFixed)
+        result = pipeline.compileHat(hatPath)
+    }
 
     // 输出 COFF hex（主对象 / runtime 对象）与链接信息
     // ⚠️ 分片输出（2026-10-09 内存回合）：result.coffPieces /

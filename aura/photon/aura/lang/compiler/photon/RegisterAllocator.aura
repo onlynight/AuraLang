@@ -859,7 +859,13 @@ class RegisterAllocator {
         // 必须**以逗号开头**：`containsColor` 用 `,rbx,` 形式做成员判定，缺前导
         // 逗号会让第一个颜色永远判不出「已存在」而被重复加入（并让末尾的
         // `substring(1, len-1)` 切掉首个颜色名的一个字符）。
-        var seen: String = ","
+        // ⚠️ [MEM-FIX] 2026-10-10：成员判定改用 List<String>（指针比较），
+        // CSV 只在返回时拼一次。旧实现 `seen = seen + c + ","` 逐收逐拷贝
+        // 已累积串（O(重叠数²)/调用 × 每个着色节点调用一次本函数）——OOM
+        // 归因表 411MB×3936 次 ×6 相邻 RA ≈ 2.4GB 驻留的真身，且
+        // `containsColor` 对增长串的线性扫描是 RA 阶段耗时的主因。
+        // 返回契约不变：无首尾分隔符的 CSV（调用方自行加定界）。
+        var seenParts: List<String> = arrayListOf<String>()
         val firstN: Int = this.nodeFirstIdx(nodeId)
         val lastN: Int = this.nodeLastIdx(nodeId)
         if (firstN < 0) {
@@ -879,11 +885,11 @@ class RegisterAllocator {
             if (availSeen >= availCount) { break }
             if (m != nodeId) {
                 val c: String = this.colorGet(m)
-                if (c != "" && !this.containsColor(seen, c)) {
+                if (c != "" && !this.containsStringIn(seenParts, c)) {
                     val firstM: Int = this.nodeFirstIdx(m)
                     val lastM: Int = this.nodeLastIdx(m)
                     if (firstM >= 0 && firstN <= lastM && firstM <= lastN) {
-                        seen = seen + c + ","
+                        seenParts.add(c)
                         if (this.isAvailColor(c)) {
                             availSeen = availSeen + 1
                         }
@@ -892,11 +898,28 @@ class RegisterAllocator {
             }
             m = m + 1
         }
-        if (seen == ",") {
+        if (seenParts.size == 0) {
             return ""
         }
-        // 去掉首尾分隔符，保持「逗号分隔、无首尾分隔符」的既有返回契约
-        return seen.substring(1, seen.length - 1)
+        // CSV 只在返回时拼一次（结果 ~百字节级，非热点）
+        var out: String = ""
+        var k: Int = 0
+        while (k < seenParts.size) {
+            if (k > 0) { out = out + "," }
+            out = out + seenParts[k]
+            k = k + 1
+        }
+        return out
+    }
+
+    /// List 成员判定（指针比较，零分配；替代 CSV containsColor 扫描）。
+    private fun containsStringIn(parts: List<String>, c: String): Boolean {
+        var i: Int = 0
+        while (i < parts.size) {
+            if (parts[i] == c) { return true }
+            i = i + 1
+        }
+        return false
     }
 
     /// 是否为可用颜色池里的非易失寄存器（见 `availList`）。

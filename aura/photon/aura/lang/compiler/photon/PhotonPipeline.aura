@@ -649,6 +649,14 @@ class PhotonPipeline {
     /// 从 SSA MIR 继续管线（Phase B-E）。
     ///
     /// 数据流：SSA MIR → LIR → MachineDag → RegAlloc → Peephole → Encode → COFF → Link
+    /// [MEM-FIX] 直连 SSA 编译入口：跳过「序列化 6.2MB HAT 文本 → 落盘 →
+    /// 重新解析」回环（重解析 = HatParser 4700 万次 substring/dup + 整套
+    /// SSA2 与前端 SSA1 双份驻留）。调用方须保证 SSA 与落盘文本语义等价
+    /// （补丁无改动时成立；驱动按 hatFixed == hatText 自动判定）。
+    fun compileSsaDirect(ssaMIR: MirSsaProgram): BackendResult {
+        return this.compileFromSsa(ssaMIR)
+    }
+
     private fun compileFromSsa(ssaMIR: MirSsaProgram): BackendResult {
         this.readVerboseFlag()
         this.probePath = this.readProbePath()
