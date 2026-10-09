@@ -1103,37 +1103,40 @@ class HatParser {
             body = HatParserUtils.safeSubstring(aux, 1, blen - 1)
             quoted = true
         }
-        var out: String = ""
+        // ⚠️ 2026-10-09（内存回合）：旧实现 `out = out + …` 逐字符拼接是
+        // O(len²) 拷贝——OOM 归因表 753 万次 concat / 6.8GB 的主力站点。
+        // 改为 StringBuilder 逐字节 appendByte（Aura String = NUL 结尾 i8*，
+        // charCodeAt 即字节值；全程 Int 无装箱），O(len)、零中间串。
+        val out: StringBuilder = StringBuilder()
         var i: Int = 0
         val len: Int = body.length
+        if (quoted) { out.appendByte(34) }
         while (i < len) {
             if (body.charCodeAt(i) == 92 && i + 1 < len) {
                 val n: Int = body.charCodeAt(i + 1)
                 if (n == 110) {
-                    out = out + "\n"
+                    out.appendByte(10)
                 } else if (n == 114) {
-                    out = out + "\r"
+                    out.appendByte(13)
                 } else if (n == 116) {
-                    out = out + "\t"
+                    out.appendByte(9)
                 } else if (n == 34) {
-                    out = out + "\""
+                    out.appendByte(34)
                 } else if (n == 92) {
-                    out = out + "\\"
+                    out.appendByte(92)
                 } else if (n == 124) {
-                    out = out + "|"
+                    out.appendByte(124)
                 } else {
-                    out = out + body.substring(i, i + 1)
+                    out.appendByte(body.charCodeAt(i))
                 }
                 i = i + 2
             } else {
-                out = out + body.substring(i, i + 1)
+                out.appendByte(body.charCodeAt(i))
                 i = i + 1
             }
         }
-        if (quoted) {
-            return "\"" + out + "\""
-        }
-        return out
+        if (quoted) { out.appendByte(34) }
+        return out.build()
     }
 
     /// 查找 `code` 字符，**跳过双引号字符串内部**。

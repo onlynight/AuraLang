@@ -64,6 +64,20 @@ class StringBuilder {
         return this
     }
 
+    /// 追加单字节（Aura String = NUL 结尾 i8*，charCodeAt 即字节值——
+    /// HAT 解析器逐字节转义/复制热路径专用，全程 Int）。
+    fun appendByte(b: Int): StringBuilder {
+        val sb: Long = hd()
+        val len: Long = sbLen(sb)
+        sbReserve(sb, len + 1)
+        val buf: Long = sbBuf(sb)
+        if (buf == 0) { return this }
+        Memory.write(buf + len, b as Byte)
+        Memory.write64(sb + 8, len + 1)
+        Memory.write(buf + len + 1, 0 as Byte)
+        return this
+    }
+
     /// 追加单个字节的两位小写 hex（X86Encoder 热路径专用）。
     ///
     /// ⚠️ 全程 Int（避免 Char 装箱/`as Byte` 的 AOT 未验证路径）——
