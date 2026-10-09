@@ -106,6 +106,18 @@ class PhotonObjectWriter {
     var textSize: Int = 0
     var rdataSize: Int = 0
     var dataSize: Int = 0
+    /// .data 的 **VirtualSize**（= max(实际初始化字节, dataSymbolName 声明
+    /// 总和)）：超出 SizeOfRawData 的尾部由加载器零填充（[MEM-FIX]，见
+    /// buildCoffFile 的 .data 说明）。SizeOfRawData 存 `dataRawSize`。
+    var dataVirtualSize: Int = 0
+    var dataRawSize: Int = 0
+
+    /// [MEM-FIX] 未初始化数据符号（`name:size` 逗号表，如静态堆
+    /// `heapArena:67108864`）——独立 **.bss** 节：SizeOfRawData=分配量、
+    /// PointerToRawData=0、CNT_UNINITIALIZED_DATA，链接器在镜像里分配空间、
+    /// 加载器零填充——文件不携带 64MB 零字节。空串 = 无 .bss 节。
+    var bssSymbolName: String = ""
+    var bssVirtualSize: Int = 0
 
     /// COFF 布局缓存（buildCoffFile 内部使用）。
     var coffSectionCount: Int = 0
@@ -167,6 +179,10 @@ class PhotonObjectWriter {
         this.textSize = 0
         this.rdataSize = 0
         this.dataSize = 0
+        this.dataVirtualSize = 0
+        this.dataRawSize = 0
+        this.bssSymbolName = ""
+        this.bssVirtualSize = 0
     }
 
     // ── 主入口 ──
@@ -364,6 +380,8 @@ class PhotonObjectWriter {
 
     fun buildSymbols(functionName: String, stringConsts: String): Unit {
         this.probePath = this.readProbePath()
+        // .bss 声明解析（符号记录 2c 与节头都依赖 bssVirtualSize）
+        this.bssVirtualSize = this.computeDeclaredSize(this.bssSymbolName)
         this.objwProbe("buildSymbols enter fnChars=" + this.toStr(functionName.length) +
                 " strChars=" + this.toStr(stringConsts.length))
         val recs: List<String> = arrayListOf<String>()
@@ -494,6 +512,34 @@ class PhotonObjectWriter {
                     dataOff = dataOff + sz
                 }
                 di = di + 1
+            }
+        }
+
+        // 2c) .bss 节符号（[MEM-FIX] 未初始化数据，如静态堆 heapArena）：
+        //     节号 = .text(1) + .rdata(有则+1) + .data(有则+1) + 1（本节）。
+        //     SizeOfRawData=分配量、PointerToRawData=0 → 链接器分配镜像空间、
+        //     加载器零填充，文件零字节。
+        if (this.bssSymbolName != "" && this.bssVirtualSize > 0) {
+            var bssSecNum: Int = 2
+            if (this.stringConsts != "") { bssSecNum = bssSecNum + 1 }
+            if (this.dataSymbolName != "") { bssSecNum = bssSecNum + 1 }  // 声明式数据也会合成 .data
+            val bparts: List<String> = this.splitComma(this.bssSymbolName)
+            var bOff: Int = 0
+            var bi: Int = 0
+            while (bi < bparts.size) {
+                val spec: String = bparts[bi]
+                if (spec != "") {
+                    var nm: String = spec
+                    var sz: Int = 8
+                    val colon: Int = spec.indexOf(":")
+                    if (colon > 0) {
+                        nm = spec.substring(0, colon)
+                        sz = this.strToInt(spec.substring(colon + 1))
+                    }
+                    recs.add(nm + "|" + this.toStr(bOff) + "|" + this.toStr(bssSecNum) + "|0|2")
+                    bOff = bOff + sz
+                }
+                bi = bi + 1
             }
         }
 
@@ -851,16 +897,34 @@ class PhotonObjectWriter {
         this.objwProbe("coff 1d rdataSize=" + this.toStr(this.rdataSize))
         println("RDATA-CHK rdataSize=" + this.toStr(this.rdataSize) +
                 " chars=" + this.toStr(this.rdataSection.length))
+        // [MEM-FIX] 纯声明式数据（dataSymbolName 有条目但无初始化 hex）：
+        // 合成零 hex 的小 .data（KB 级，可入文件）——这些符号必须落在真实
+        // .data 节内；大尾巴（静态堆等）走 .bss（见 dataVirtualSize）。
+        val dataDeclaredPre: Int = this.computeDataDeclaredSize()
+        if (this.dataSection == "" && dataDeclaredPre > 0) {
+            var block: String = "00"
+            val needChars: Int = dataDeclaredPre * 2
+            while (block.length < needChars) { block = block + block }
+            if (block.length > needChars) { block = block.substring(0, needChars) }
+            this.dataSection = block
+        }
         this.dataSection = this.normalizeHex(this.dataSection)
-        // 把 .data 补齐到 `dataSymbolName` 声明的总大小。
-        //
-        // 为什么需要：`dataSection` 的 hex 是**逐字节**写死的，而符号大小写在
-        // `dataSymbolName`（`name:size`）。若 hex 比声明短，节的实际大小就以
-        // hex 为准 —— 符号会指向节尾之外（读/写越界）。字符串堆 arena 有
-        // 数千字节，不可能在 Aura 源码里手写等长的零 hex，因此由 writer
-        // 按声明大小补零。
-        this.dataSection = this.padDataSectionToDeclaredSize()
+        // [MEM-FIX] .data 尾巴改为 **COFF 虚拟大小**（2026-10-09 内存回合）：
+        // 旧实现把 .data 用零 hex 补齐到 `dataSymbolName` 声明的总大小——
+        // runtime 的 `heapArena:67108864`（64MB 静态堆）于是产生 134M 字符
+        // 的零 hex 数份驻留（倍增补零 + out+block + normalizeHex），obj/exe
+        // 也各白胖 64MB。改为：SizeOfRawData = 实际初始化字节；
+        // VirtualSize = max(实际, 声明)——超出部分由 PE/COFF 加载器零填充
+        //（COFF/PE 标准语义），文件与内存双降。数据符号全部落在初始化段内，
+        // 符号值与重定位语义不变。
         this.dataSize = this.hexByteCount(this.dataSection)
+        this.dataRawSize = this.dataSize  // SizeOfRawData = 仅初始化部分
+        val dataDeclared: Int = this.computeDataDeclaredSize()
+        if (dataDeclared > this.dataSize) {
+            this.dataVirtualSize = dataDeclared
+        } else {
+            this.dataVirtualSize = this.dataSize
+        }
 
         // ── 2. 计数 ──
         this.coffSectionCount = 1
@@ -868,6 +932,9 @@ class PhotonObjectWriter {
             this.coffSectionCount = 2
         }
         if (this.dataSize > 0) {
+            this.coffSectionCount = this.coffSectionCount + 1
+        }
+        if (this.bssVirtualSize > 0) {
             this.coffSectionCount = this.coffSectionCount + 1
         }
         val symRecs: List<String> = this.splitDoubleSemi(this.symbols)
@@ -915,7 +982,7 @@ class PhotonObjectWriter {
         val rdataRawOffset: Int = this.alignUp(textRawEnd, 4)
         val rdataRawEnd: Int = rdataRawOffset + this.rdataSize
         val dataRawOffset: Int = this.alignUp(rdataRawEnd, 4)
-        val dataRawEnd: Int = dataRawOffset + this.dataSize
+        val dataRawEnd: Int = dataRawOffset + this.dataRawSize
         this.coffRelocOffset = this.alignUp(dataRawEnd, 4)
         this.coffSymTabOffset = this.coffRelocOffset + 10 * this.coffRelocCount
 
@@ -951,7 +1018,7 @@ class PhotonObjectWriter {
         }
         if (this.dataSize > 0) {
             this.coffAppend(this.padToBytes(dataRawOffset))
-            this.coffAppend(this.dataSection)
+            this.coffAppend(this.dataSection)  // 仅初始化部分（尾巴是虚拟零填充）
         }
         this.objwProbe("coff6 sections done bufParts=" + this.toStr(this.coffBuf.size) +
                 " bufHexChars=" + this.toStr(this.coffBufHexLen()))
@@ -1124,15 +1191,30 @@ class PhotonObjectWriter {
         }
         if (this.dataSize > 0) {
             this.coffAppend(this.padSectionName(".data", 8))
+            this.coffAppend(this.writeIntLe(this.dataVirtualSize, 4))  // VirtualSize（含零填充尾巴）
             this.coffAppend(this.writeIntLe(0, 4))
-            this.coffAppend(this.writeIntLe(0, 4))
-            this.coffAppend(this.writeIntLe(this.dataSize, 4))
+            this.coffAppend(this.writeIntLe(this.dataRawSize, 4))      // SizeOfRawData（仅初始化部分）
             this.coffAppend(this.writeIntLe(this.dataOffset, 4))
             this.coffAppend(this.writeIntLe(0, 4))          // 无重定位
             this.coffAppend(this.writeIntLe(0, 4))
             this.coffAppend(this.writeIntLe(0, 2))
             this.coffAppend(this.writeIntLe(0, 2))
             this.coffAppend(this.writeIntLe(0xC0400040, 4)) // CNT_INITIALIZED_DATA|MEM_READ|MEM_WRITE|ALIGN_4
+        }
+        if (this.bssVirtualSize > 0) {
+            // [MEM-FIX] .bss：对象文件里 SizeOfRawData=分配量、PointerToRawData=0、
+            // CNT_UNINITIALIZED_DATA——链接器分配镜像空间，加载器零填充，
+            // 文件零字节（旧实现 64MB 静态堆走 .data 原始字节 = obj/exe 白胖 64MB）。
+            this.coffAppend(this.padSectionName(".bss", 8))
+            this.coffAppend(this.writeIntLe(0, 4))
+            this.coffAppend(this.writeIntLe(0, 4))
+            this.coffAppend(this.writeIntLe(this.bssVirtualSize, 4))   // 分配量
+            this.coffAppend(this.writeIntLe(0, 4))                     // 无原始数据
+            this.coffAppend(this.writeIntLe(0, 4))          // 无重定位
+            this.coffAppend(this.writeIntLe(0, 4))
+            this.coffAppend(this.writeIntLe(0, 2))
+            this.coffAppend(this.writeIntLe(0, 2))
+            this.coffAppend(this.writeIntLe(0xC0000080, 4)) // CNT_UNINITIALIZED_DATA|MEM_READ|MEM_WRITE
         }
     }
 
@@ -1450,9 +1532,15 @@ class PhotonObjectWriter {
     ///
     /// `dataSymbolName` 形如 `toStrBuffer:32,strcatArena:4096,strcatBump:8`；
     /// 声明大小即符号跨距，节的实际大小必须 ≥ 该跨距，否则符号指向节外。
-    private fun padDataSectionToDeclaredSize(): String {
-        if (this.dataSymbolName == "") { return this.dataSection }
-        val specs: List<String> = this.splitComma(this.dataSymbolName)
+    /// [MEM-FIX] `dataSymbolName` 声明的总字节数（`name:size` 求和，无名者 8）。
+    private fun computeDataDeclaredSize(): Int {
+        return this.computeDeclaredSize(this.dataSymbolName)
+    }
+
+    /// `name:size` 逗号表的总字节数（无名者 8）。
+    private fun computeDeclaredSize(specCsv: String): Int {
+        if (specCsv == "") { return 0 }
+        val specs: List<String> = this.splitComma(specCsv)
         var declared: Int = 0
         var i: Int = 0
         while (i < specs.size) {
@@ -1467,23 +1555,7 @@ class PhotonObjectWriter {
             }
             i = i + 1
         }
-        var out: String = this.dataSection
-        var have: Int = this.hexByteCount(out)
-        var need: Int = declared - have
-        if (need <= 0) { return out }
-        // ⚠ 填充必须是**倍增**（`block = block + block`）：逐字节
-        // `out = out + "00"` 是 O(need²)（每次整段拷贝），arena 达数十 KB 时
-        // 完全不可接受；倍增的拷贝量为 2,4,8,…,need，总计 O(need)。
-        // `block` 长度按 hex 字符计（每字节 2 个字符）。
-        var block: String = "00"
-        val needChars: Int = need * 2
-        while (block.length < needChars) {
-            block = block + block
-        }
-        if (block.length > needChars) {
-            block = block.substring(0, needChars)
-        }
-        return out + block
+        return declared
     }
 
     /// 去掉 `dataSymbolName` 条目里的 `:size` 后缀，取纯符号名。

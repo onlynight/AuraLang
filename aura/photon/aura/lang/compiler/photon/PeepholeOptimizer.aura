@@ -463,15 +463,36 @@ class PeepholeOptimizer {
     }
 
     /// 连接列表。
+    ///
+    /// ⚠️ 2026-10-09（内存回合）：旧实现 `result = result + sep/list[i]`
+    /// 线性累加——每元素整段拷贝已累积结果，O(元素数²)，AOT 无 GC 全部
+    /// 驻留（OOM 归因表 411MB×3926 次 ×6 相邻 RA ≈ 2.4GB 的主力）。改为
+    /// List 累积 + 两两归并（O(总长·log 片段数)，与 X86Emitter.joinPairwise
+    /// 同一手法）。
     private fun joinList(list: List<String>, sep: String): String {
-        var result: String = ""
+        val parts: List<String> = arrayListOf<String>()
         var i: Int = 0
         while (i < list.size) {
-            if (result != "") { result = result + sep }
-            result = result + list[i]
+            if (i > 0) { parts.add(sep) }
+            parts.add(list[i])
             i = i + 1
         }
-        return result
+        var cur: List<String> = parts
+        while (cur.size > 1) {
+            val next: List<String> = arrayListOf<String>()
+            var j: Int = 0
+            while (j < cur.size) {
+                if (j + 1 < cur.size) {
+                    next.add(cur[j] + cur[j + 1])
+                } else {
+                    next.add(cur[j])
+                }
+                j = j + 2
+            }
+            cur = next
+        }
+        if (cur.size == 0) { return "" }
+        return cur[0]
     }
 
     /// 获取已应用的优化数量。
