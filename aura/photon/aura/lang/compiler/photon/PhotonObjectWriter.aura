@@ -86,6 +86,17 @@ class PhotonObjectWriter {
     /// 函数偏移的内部列表（O(1) 追加，取代字符串整段拷贝）。
     private var functionOffsetsList: List<String> = arrayListOf<String>()
 
+    /// `appendFunction` 的追加片段（O(1) 追加，消费点一次物化）。
+    ///
+    /// ⚠️ 旧实现每函数三连 O(全量)：`functions + "," + name`（整段拷贝）、
+    /// `textSection + hex`（整段拷贝）+ `hexByteCount(textSection)`（全量
+    /// 扫描）、`relocs + ";;" + entries`（整段拷贝）。自举规模（数千函数、
+    /// .text hex 134M 字符）下累计拷贝/扫描达数百 GB，AOT 无 GC 全部驻留
+    /// —— 2026-10-09 驱动编译 vmhost 闭包实测 >10 GB 常驻的主因。
+    private var appendTextParts: List<String> = arrayListOf<String>()
+    private var appendTextBytes: Int = 0
+    private var appendRelocParts: List<String> = arrayListOf<String>()
+
     /// 节数据偏移（运行时计算）。
     var textOffset: Int = 0
     var rdataOffset: Int = 0
@@ -147,6 +158,9 @@ class PhotonObjectWriter {
         this.functions = ""
         this.functionOffsets = ""
         this.functionOffsetsList = arrayListOf<String>()
+        this.appendTextParts = arrayListOf<String>()
+        this.appendTextBytes = 0
+        this.appendRelocParts = arrayListOf<String>()
         this.textOffset = 0
         this.rdataOffset = 0
         this.dataOffset = 0
@@ -180,6 +194,11 @@ class PhotonObjectWriter {
         this.stringConsts = stringConsts
         this.functions = functionName
         this.relocs = relocEntries
+        // 单函数入口语义 = 重置：清掉可能残留的 appendFunction 待物化片段，
+        // 防止它们在消费点被错误拼接到本函数显式设置的节内容上。
+        this.appendTextParts = arrayListOf<String>()
+        this.appendTextBytes = 0
+        this.appendRelocParts = arrayListOf<String>()
 
         // 单函数 API 的后向兼容入口：首函数永远位于 .text 偏移 0。
         this.functionOffsets = functionName + "|0"
@@ -203,25 +222,53 @@ class PhotonObjectWriter {
         // 多函数单 obj：先记录本函数在 .text 内的基准偏移，再追加机器码。
         this.coffRelocCacheValid = false
         // 后续重定位项会按这个基准换算为节内绝对偏移。
-        val funcOffset: Int = this.hexByteCount(this.textSection)
+        // ⚠️ 运行计数取代旧 `hexByteCount(this.textSection)` 的全量扫描
+        //（见 appendTextParts 字段说明）。
+        val funcOffset: Int = this.appendTextBytes
+        // ⚠️ 函数名保持**直接拼接**：buildSymbols 的调用方在组装期就把
+        // `writer.functions` 当实参读走（PhotonRuntime ×3 / PhotonPipeline ×2），
+        // 片段化会让符号表拿到空串 → 链接期全部内部符号 undefined
+        //（实测 undefined symbol: Memory_alloc）。名字串很小（数千函数
+        // × 数十字节），平方累计 ~200MB 可接受。
         if (this.functions == "") {
             this.functions = functionName
-            this.functionOffsetsList.add(functionName + "|0")
         } else {
             this.functions = this.functions + "," + functionName
-            this.functionOffsetsList.add(functionName + "|" + this.toStr(funcOffset))
         }
+        this.functionOffsetsList.add(functionName + "|" + this.toStr(funcOffset))
 
-        // 追加机器码到 textSection
-        this.textSection = this.textSection + machineCodeHex
+        // 追加机器码到 textSection（片段化；消费点 buildCoffFile 一次物化）
+        this.appendTextParts.add(machineCodeHex)
+        this.appendTextBytes = this.appendTextBytes + this.hexByteCount(machineCodeHex)
 
         // 追加重定位项：将每个条目的偏移加上 funcOffset，变为节内绝对偏移。
         // 用 `;;` 分隔函数边界。
         val rebasedEntries: String = this.rebaseRelocEntries(relocEntries, funcOffset)
-        if (this.relocs == "") {
-            this.relocs = rebasedEntries
-        } else {
-            this.relocs = this.relocs + ";;" + rebasedEntries
+        this.appendRelocParts.add(rebasedEntries)
+    }
+
+    /// 把 appendFunction 的追加片段物化为旧字段（text/relocs 两族）。
+    ///
+    /// 结果与旧「逐次拼接」**逐字符一致**（text 直接归并；relocs 沿用
+    /// 「累计为空则直置、否则 `;;` 相连」的规则）。在每个消费入口调用一次。
+    private fun materializeAppendParts(): Unit {
+        if (this.appendTextParts.size > 0) {
+            this.textSection = this.textSection + this.coffJoinList(this.appendTextParts)
+            this.appendTextParts = arrayListOf<String>()
+        }
+        if (this.appendRelocParts.size > 0) {
+            var rl: String = this.relocs
+            var j: Int = 0
+            while (j < this.appendRelocParts.size) {
+                if (rl == "") {
+                    rl = this.appendRelocParts[j]
+                } else {
+                    rl = rl + ";;" + this.appendRelocParts[j]
+                }
+                j = j + 1
+            }
+            this.relocs = rl
+            this.appendRelocParts = arrayListOf<String>()
         }
     }
 
@@ -531,6 +578,7 @@ class PhotonObjectWriter {
     /// → 2,647 次切片分配 + 1 次列表分配），17,066 条重定位 × 2,647 是纯重复
     /// 分配。
     private fun collectExternalSymbols(): List<String> {
+        this.materializeAppendParts()
         val out: List<String> = arrayListOf<String>()
         val funcs: List<String> = this.splitComma(this.functions)
         val dnames: List<String> = if (this.dataSymbolName != "") {
@@ -584,6 +632,7 @@ class PhotonObjectWriter {
     /// 重定位偏移已在 `appendFunction` 中按函数基准换算为节内绝对偏移，
     /// 此处仅需解析符号名到符号表索引。
     private fun composeRelocations(): List<String> {
+        this.materializeAppendParts()
         if (this.coffRelocCacheValid) {
             return this.coffRelocCache
         }
@@ -769,6 +818,7 @@ class PhotonObjectWriter {
     /// （44 vs 40），导致符号表实际位置比声明位置早 2 字节 —— 链接器按声明偏移
     /// 读取时，符号名整体错位 2 字节（"main" → "in"、"@str.0" → "tr.0"）。
     fun buildCoffFile(): String {
+        this.materializeAppendParts()
         this.objwProbe("coff enter textChars=" + this.toStr(this.textSection.length) +
                 " strConstChars=" + this.toStr(this.stringConsts.length) +
                 " dataChars=" + this.toStr(this.dataSection.length))
@@ -1300,6 +1350,7 @@ class PhotonObjectWriter {
 
     /// 计算重定位项数量。
     private fun countRelocs(): Int {
+        this.materializeAppendParts()
         if (this.relocs == "") {
             return 0
         }
@@ -1812,6 +1863,7 @@ class PhotonObjectWriter {
     // ── ELF 目标文件生成 ──
 
     private fun buildElfFile(): String {
+        this.materializeAppendParts()
         // ── 1. 规整节内容 ──
         this.textSection = this.normalizeHex(this.textSection)
         this.textSize = this.hexByteCount(this.textSection)

@@ -90,16 +90,21 @@ object JitDeoptUtils {
     }
 
     /// jne rel32 的 disp32 在 guard 序列内的偏移。
+    ///
+    /// ⚠️ guard 序列 = cmp（48 3D id32，6B，+0..5）+ jne（0F 85 rel32，6B）：
+    /// 0F85 操作码在 +6..7，**disp32 在 +8..11**。旧值 6 打在操作码上
+    /// —— 实测 jit_vmhost 自检 §4 因此把 disp 写错位并覆写快路径操作码
+    ///（2026-10-09 逐字节核对修正）。
     fun guardDeoptDispOffset(): Int {
-        return 6
+        return 8
     }
 
     /// jne 指令结束偏移（rel32 的基准）。
     fun guardDeoptInsnEnd(): Int {
-        return 10
+        return 12
     }
 
-    /// 计算 jne rel32 位移：deoptAddr - (guardBase + 10)。
+    /// 计算 jne rel32 位移：deoptAddr - (guardBase + 12)。
     fun guardDeoptDisp(guardBase: Int, deoptAddr: Int): Int {
         return deoptAddr - (guardBase + JitDeoptUtils.guardDeoptInsnEnd())
     }

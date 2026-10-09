@@ -46,11 +46,13 @@ fun main() {
     println("=== P2 GUARD + DEOPT TEST (Phase 3.1 + 3.2) ===")
 
     // ── A. guard 序列编码 ──
+    // ⚠️ 序列内偏移：cmp(6B @+0..5) + 0F85(@+6..7) + disp32(@+8..11)
+    //    —— 旧值 6/10 打在 0F85 操作码上（2026-10-09 逐字节核对修正）
     val g: String = JitDeoptUtils.buildGuardHex(100)
     ok("A1 guard 长度=12 字节", g.length, 24)
     okStr("A1 guard 字节", g, "483D64000000" + "0F8500000000")
-    ok("A1 guardDeoptDispOffset", JitDeoptUtils.guardDeoptDispOffset(), 6)
-    ok("A1 guardDeoptInsnEnd", JitDeoptUtils.guardDeoptInsnEnd(), 10)
+    ok("A1 guardDeoptDispOffset", JitDeoptUtils.guardDeoptDispOffset(), 8)
+    ok("A1 guardDeoptInsnEnd", JitDeoptUtils.guardDeoptInsnEnd(), 12)
     // imm=0 边界
     okStr("A1 guard imm=0", JitDeoptUtils.buildGuardHex(0), "483D00000000" + "0F8500000000")
 
@@ -69,12 +71,12 @@ fun main() {
     okStr("B2 entry imm32(LE)", tr.substring(36, 44), "00000008")
 
     // ── C. 位移算术 + 守卫补丁语义 ──
-    // guardBase=100, deoptAddr=128 → disp = 128 - 110 = 18
-    ok("C1 guardDeoptDisp", JitDeoptUtils.guardDeoptDisp(100, 128), 18)
-    // 反向（deopt 在前）：guardBase=200, deoptAddr=50 → 50-210 = -160
-    ok("C1 guardDeoptDisp 反向", JitDeoptUtils.guardDeoptDisp(200, 50), 0 - 160)
-    // 负数 imm32 的 LE 编码（-160 = 0xFFFFFF60）
-    okStr("C1 disp LE 编码", JitDeoptUtils.hex8(0 - 160), "60FFFFFF")
+    // guardBase=100, deoptAddr=128 → disp = 128 - 112 = 16
+    ok("C1 guardDeoptDisp", JitDeoptUtils.guardDeoptDisp(100, 128), 16)
+    // 反向（deopt 在前）：guardBase=200, deoptAddr=50 → 50-212 = -162
+    ok("C1 guardDeoptDisp 反向", JitDeoptUtils.guardDeoptDisp(200, 50), 0 - 162)
+    // 负数 imm32 的 LE 编码（-162 = 0xFFFFFF5E）
+    okStr("C1 disp LE 编码", JitDeoptUtils.hex8(0 - 162), "5EFFFFFF")
 
     // 守卫模式补丁：vmMode=true 时 writeReloc32 跳过（无副作用）。
     val be = JitBackend()
@@ -103,22 +105,22 @@ fun main() {
     ok("D2 守卫模式 locals 全 0", allZero, 1)
 
     // ── E. 端到端装配：guard + 快路径 + deopt 蹭床的偏移对齐 ──
-    // 布局（模拟 jit_vmhost 自检的真实形态）：
-    //   guardBase+0   : 48 89 C8        mov rax, rcx
-    //   guardBase+6   : guard 序列（12B）：cmp rax,100; jne deopt
-    //   guardBase+18  : B8 01 00 00 00  mov eax,1
-    //   guardBase+23  : C3              ret
-    //   deoptBase(=guardBase+24) : B8 2A 00 00 00  mov eax,42; C3 ret
+    // 布局（模拟 jit_vmhost 自检的真实形态；⚠️ 4889C8 = 3 字节）：
+    //   guardBase+0   : 48 89 C8        mov rax, rcx   (3B)
+    //   guardBase+3   : guard 序列（12B）：cmp rax,100; jne deopt
+    //   guardBase+15  : B8 01 00 00 00  mov eax,1
+    //   guardBase+20  : C3              ret
+    //   deoptBase(=guardBase+21) : B8 2A 00 00 00  mov eax,42; C3 ret
     val movRaxRcx: String = "4889C8"
     val guard: String = JitDeoptUtils.buildGuardHex(100)
     val fastPath: String = "B801000000" + "C3"
     val code: String = movRaxRcx + guard + fastPath
-    // deopt 相对 guardBase 的位置：6(mov) + 12(guard) = 18
-    val deoptRel: Int = 18
-    ok("E1 guard 起点=mov 之后(6)", JitDeoptUtils.guardDeoptDispOffset() + 6, 12)
-    // jne 的指令结束 = guardBase + 6 + 10 = guardBase + 16
-    // disp = deoptBase - (guardBase + 16) = 18 - 16 = 2
-    ok("E1 jne disp = deopt - insnEnd", JitDeoptUtils.guardDeoptDisp(6, 24), 8)
+    // deopt 相对 guardBase 的位置：3(mov) + 12(guard) = 15
+    val deoptRel: Int = 15
+    ok("E1 guard 起点=mov 之后(3)", JitDeoptUtils.guardDeoptDispOffset() + 3, 11)
+    // jne 的指令结束 = guardBase + 3 + 12 = guardBase + 15
+    // disp = deoptBase - (guardBase + 15) = 21 - 15 = 6
+    ok("E1 jne disp = deopt - insnEnd", JitDeoptUtils.guardDeoptDisp(3, 21), 6)
     okStr("E1 快路径 mov eax,1", fastPath.substring(0, 10), "B801000000")
     // 蹦床装配：targetFrame=帧基址(65536)、vmEntry=JIT 区某地址
     val tr2: String = JitDeoptUtils.buildDeoptTrampolineHex(65536, 134217728)

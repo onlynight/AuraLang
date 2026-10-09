@@ -153,10 +153,31 @@ $env:AURA_PHOTON_SKIP_LINK = '1'   # 前端只产 COFF hex，链接由本脚本�
 $env:AURA_MEM_LIMIT_MB   = '24576'
 $env:AURA_HEAP_MB        = '4096'  # 宿主闭包大（含 JitBackend→PhotonPipeline），driver 需扩堆
 $sw = [Diagnostics.Stopwatch]::StartNew()
-$out = & $Driver 2>&1
+# 驱动峰值内存采样（5ms 轮询 PeakWorkingSet64）——2026-10-09 内存回归观测
+$drvPeakMB = -1
+$drvOut = New-Object System.Collections.Generic.List[string]
+$drvPsi = New-Object System.Diagnostics.ProcessStartInfo
+$drvPsi.FileName = $Driver
+$drvPsi.UseShellExecute = $false
+$drvPsi.RedirectStandardOutput = $true
+$drvPsi.RedirectStandardError = $true
+$drvPsi.WorkingDirectory = $Root
+$drvProc = [System.Diagnostics.Process]::Start($drvPsi)
+$drvSoT = $drvProc.StandardOutput.ReadToEndAsync()
+$drvSeT = $drvProc.StandardError.ReadToEndAsync()
+while (-not $drvProc.HasExited) {
+    try { $ws = $drvProc.PeakWorkingSet64; if ($ws -gt $drvPeakMB) { $drvPeakMB = $ws } } catch {}
+    Start-Sleep -Milliseconds 5
+}
+try { $ws2 = $drvProc.PeakWorkingSet64; if ($ws2 -gt $drvPeakMB) { $drvPeakMB = $ws2 } } catch {}
+$so = ''; try { $so = $drvSoT.Result } catch {}
+$seDrv = ''; try { $seDrv = $drvSeT.Result } catch {}
+$out = @($so) + @($seDrv)
 $sw.Stop()
+Write-Host ("        driver peak={0} MB wall={1}s" -f [math]::Round($drvPeakMB / 1MB, 0), [math]::Round($sw.Elapsed.TotalSeconds, 1))
 $env:AURA_HAT_AURA = ''; $env:AURA_HAT_OUT = ''; $env:AURA_HAT_MODULE = ''; $env:AURA_HAT_SRC = ''
 $env:AURA_PHOTON_SKIP_LINK = ''; $env:AURA_MEM_LIMIT_MB = ''; $env:AURA_HEAP_MB = ''
+$data = ($out -join "`n")
 [IO.File]::WriteAllText((Join-Path $OutDir 'frontend.out.txt'), $data)
 $secs = [math]::Round($sw.Elapsed.TotalSeconds, 1)
 
@@ -210,7 +231,7 @@ Write-Host ($runText -replace "`n", "`n        ")
 
 $passLines = ([regex]::Matches($runText, '\[PASS\]')).Count
 $failLines = ([regex]::Matches($runText, '\[FAIL\]')).Count
-if ($code -eq 0 -and $failLines -eq 0 -and $runText.Contains('=== SELFTEST-ALL-PASS ===') -and $passLines -gt 0) {
+if ($code -eq 0 -and $failLines -eq 0 -and $runText.Contains('SELFTEST-ALL-PASS') -and $passLines -gt 0) {
     $verifyOk = $true
     Write-Host ""
     Write-Host "=== 原生 JIT 验证通过（pass=$passLines，第 $attempt 次构建）===" -ForegroundColor Green

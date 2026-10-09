@@ -100,11 +100,11 @@ class X86Emitter {
     private var savedRegs: String = ""
 
     /// P1（Phase 2.2）：本批次全部 call 点的 stack map（GC 根枚举用）。
-    /// ⚠️ **字符串增量存储**：类字段持有 StackMapTable 对象在种子 VM 下
-    /// 为 null（类类型字段初始化不可靠，call 被静默忽略），字符串字段
-    /// 则两种运行时都稳定。格式：
-    ///   funcName|pcOffset|slotCount|spillBase|callTarget(;...)*
-    var stackMapRecs: String = ""
+    /// ⚠️ **List O(1) 追加**（序列化文本由 `getStackMaps` 归并产出）：
+    /// 旧字符串增量拼接每 call 整段拷贝 O(call²)，见 getStackMaps 说明。
+    /// 格式（每条）：
+    ///   funcName|pcOffset|slotCount|spillBase|callTarget
+    var stackMapRecList: List<String> = arrayListOf<String>()
 
     // ── 定位探针（有界截断，见 `xeProbe` 的说明）──
     private var probePath: String = ""
@@ -125,7 +125,7 @@ class X86Emitter {
         this.isMainFunc = false
         // P1（Phase 2.2）：stack map 记录随批次重置（字符串字段，种子
         // 下可靠）。
-        this.stackMapRecs = ""
+        this.stackMapRecList = arrayListOf<String>()
     }
 
     // ── 主入口 ──
@@ -463,13 +463,14 @@ class X86Emitter {
     /// 获取函数偏移表（格式 "funcName|offset;;funcName|offset"）。
     fun getFuncOffsets(): String {
         if (this.funcOffsetsList.size == 0) { return "" }
-        var out: String = this.funcOffsetsList[0]
-        var i: Int = 1
+        val parts: List<String> = arrayListOf<String>()
+        var i: Int = 0
         while (i < this.funcOffsetsList.size) {
-            out = out + ";;" + this.funcOffsetsList[i]
+            if (i > 0) { parts.add(";;") }
+            parts.add(this.funcOffsetsList[i])
             i = i + 1
         }
-        return out
+        return this.joinPairwise(parts)
     }
 
     /// 获取「名字 → 段内偏移」表（格式 "funcName|offset"，`;` 分隔）。
@@ -479,13 +480,14 @@ class X86Emitter {
     /// 把 `R_X86_64_REL32` 重定位的符号名解析为段内偏移，再换算为绝对地址。
     fun getFuncNameOffsets(): String {
         if (this.funcOffsetsList.size == 0) { return "" }
-        var out: String = this.funcOffsetsList[0]
-        var i: Int = 1
+        val parts: List<String> = arrayListOf<String>()
+        var i: Int = 0
         while (i < this.funcOffsetsList.size) {
-            out = out + ";" + this.funcOffsetsList[i]
+            if (i > 0) { parts.add(";") }
+            parts.add(this.funcOffsetsList[i])
             i = i + 1
         }
-        return out
+        return this.joinPairwise(parts)
     }
 
     // ── 非易失寄存器保存/恢复 ──
@@ -1019,11 +1021,7 @@ class X86Emitter {
             val smSeg: String = this.curEmitFuncName + "|" + toStr(this.enc.byteCount())
                     + "|" + toStr(this.curSpillBase / 8 + this.extraSlotCount)
                     + "|" + toStr(this.curSpillBase) + "|" + funcName
-            if (this.stackMapRecs == "") {
-                this.stackMapRecs = smSeg
-            } else {
-                this.stackMapRecs = this.stackMapRecs + ";" + smSeg
-            }
+            this.stackMapRecList.add(smSeg)
 
             // ── 返回值落地（Win64：返回值固定放在 rax）──
             //
@@ -1629,8 +1627,23 @@ class X86Emitter {
     }
 
     /// 获取 stack map 序列化文本（Phase 2.2，call 点 → GC 根列表）。
+    ///
+    /// ⚠️ 记录侧是 List O(1) 追加（emitCall 每 call 一条）——旧实现
+    /// `stackMapRecs = stackMapRecs + ";" + seg` 每 call 整段拷贝，O(call²)，
+    /// vmhost 闭包（数万 call × 134M 字符级累计）是驱动 >10 GB 的第二主因。
     fun getStackMaps(): String {
-        return this.stackMapRecs
+        val n: Int = this.stackMapRecList.size
+        if (n == 0) {
+            return ""
+        }
+        val parts: List<String> = arrayListOf<String>()
+        var i: Int = 0
+        while (i < n) {
+            if (i > 0) { parts.add(";") }
+            parts.add(this.stackMapRecList[i])
+            i = i + 1
+        }
+        return this.joinPairwise(parts)
     }
 
     fun getStringConsts(): String {

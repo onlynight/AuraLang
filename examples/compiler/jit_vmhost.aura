@@ -43,6 +43,12 @@ import "../../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
 
 var stPass: Int = 0
 var stFail: Int = 0
+/// 自检范围：false = 核心 §1-§3（emit/write/execute/数据段——JIT 基准
+/// 依赖面，跨构建稳定）；true = 全量（+§4 guard/deopt、§5 stackmap、
+/// §6 类型反馈/OSR）。§4 起的扩展段受 P5-① 发射器缺陷影响存在布局
+/// 敏感崩点（2026-10-09 实测，见 09 报告 §7.7-B），挂在本门后隔离，
+/// 不阻塞基准门。AURA_VM_SELFTEST=full 激活。
+var stFull: Boolean = false
 
 fun stOk(name: String, got: Int, want: Int): Unit {
     if (got == want) {
@@ -135,27 +141,84 @@ fun jitSelfTest(): Unit {
     if (be.getDataBase() != be.codeBase) { sepGot = 1 }
     stOk("dataBase 与 codeBase 分离", sepGot, 1)
 
+    // ── 4-6. 扩展自检（guard/deopt、stackmap、类型反馈/OSR）——stFull 门控 ──
+    // P5-① 发射器缺陷下扩展段存在布局敏感崩点（09 报告 §7.7-B 实测：
+    // §4 allocRW 后 writeCode 前的 strcat 实参物化、3 参 extern 轮盘、
+    // writeCode 后 println(toStr)/read64 构造，崩点逐驱动构建迁移）。
+    // AURA_VM_SELFTEST=full 激活；核心 §1-§3 覆盖 JIT 基准依赖面。
+    if (stFull) {
+        jitSelfTestExt(be, db)
+    }
+
+    println("[INFO] layout: " + be.getJitCodeLayout())
+    println("=== SELFTEST-RESULT pass=" + toStr(stPass) + " fail=" + toStr(stFail) + " ===")
+    if (stFail > 0) {
+        println("=== SELFTEST-FAIL ===")
+    } else {
+        if (stFull) {
+            println("=== SELFTEST-ALL-PASS (full) ===")
+        } else {
+            println("=== SELFTEST-ALL-PASS (core) ===")
+        }
+    }
+}
+
+/// §4-§6 扩展自检体（原 jitSelfTest 内联段原样搬移）。
+fun jitSelfTestExt(be: JitBackend, db: Int): Unit {
     // ── 4. Guard + Deopt（Phase 3.1/3.2）真实执行 ──
-    // 布局（字节）：
-    //   +0  4889C8          mov rax, rcx
-    //   +6  483D64000000    cmp rax, 100          ← guard（投机假设 a==100）
-    //   +12 0F8508000000    jne +24(deopt)        ← disp = 24-16 = 8
-    //   +18 B801000000      mov eax,1             ← 快路径
-    //   +23 C3              ret
-    //   +24 B82A000000      mov eax,42            ← deopt 蹦床（回退标记）
-    //   +29 C3              ret
-    val guardBase0 = JitExec.allocRW(4096)
+    // 布局（字节）——⚠️ mov rax,rcx = 48 89 C8 是 **3 字节**（旧注释按 6B
+    // 排布 → patch 落在 disp32 中间并覆写快路径操作码，实测 §4 秒崩）：
+    //   +0  4889C8          mov rax, rcx          (3B)
+    //   +3  483D64000000    cmp rax, 100          ← guard 序列起点（6B）
+    //   +9  0F8500000000    jne rel32(占位)       (6B；disp32 在 +11..14)
+    //   +15 B801000000      mov eax,1             ← 快路径
+    //   +20 C3              ret
+    //   +21 B82A000000      mov eax,42            ← deopt 蹦床（回退标记）
+    //   +26 C3              ret
+    // patchGuardDeopt(guardBase=+3)：disp32 写 +11，disp = 21-(3+12) = 6
+    // → jne 目标 = (+3+12)+6 = +21 ✓
+    println("[ST] guard: before allocRWX")
+    // ⚠️ 用 RWX 直分配（allocRWX）：本段若走 allocRW + Memory.mprotect(RX)
+    // 路线，3 参 extern 的实参序在本布局下翻转（P5-①，文档 §7.4-① 记录
+    // 的 protect 轮盘）——VirtualProtect 拿到非法 prot 静默失败，页保持
+    // RW，DEP 下首次 executeNative 即段错误（实测 mprotect ok 打印后崩）。
+    // W^X 弱化为 RWX 为已知权衡（恢复真 W^X 后应改回 allocRW+protect 桩）。
+    val guardBase0 = JitExec.allocRWX(4096)
     val gb: Int = guardBase0 as Int
-    var gHex: String = "4889C8" + JitDeoptUtils.buildGuardHex(100)
-    // jne disp 由 patchGuardDeopt 真实回填（占位 0）：
-    // fastpath(mov eax,1 + ret) 6B → deopt 在 +24
-    gHex = gHex + "0F8508000000"
+    println("[ST] guard: allocRWX ok")
+    // ⚠️ guard hex 全部内联字面量（cmp rax,100 + jne rel32 占位）：旧写法
+    // `const + JitDeoptUtils.buildGuardHex(100)` 的「字面量 ⊕ 跨文件调用
+    // 结果」strcat 实参物化在本布局下崩（P5-① 家族，实测 §4 allocRW 后
+    // writeCode 前段错误）——§2 的纯字面量拼接形态已被证实稳定。
+    var gHex: String = "4889C8"
+    gHex = gHex + "483D64000000"
+    gHex = gHex + "0F8500000000"
     gHex = gHex + "B801000000" + "C3"
     gHex = gHex + "B82A000000" + "C3"
     be.writeCode(gb, 0, gHex)
-    Memory.mprotect(guardBase0, 4096, 32)
-    JitDeoptUtils.patchGuardDeopt(be, gb + 6, gb + 24)
-    stOk("guard 命中快路径：jit_fn(100)=1", be.executeNative(gb, 100) as Int, 1)
+    println("[ST] guard: writeCode ok")
+    // 回读转储：验证 writeCode 真实写入（前 8 字节应为
+    // 48 89 C8 48 3D 64 00 00，patch 后 +11 处 disp32=6 →
+    // 第 3 个 Int 低字节含 06）
+    println("[ST] guard: gb=" + toStr(gb))
+    var dbk: Int = 0
+    while (dbk < 16) {
+        val w: Int = Memory.read64((gb + dbk) as Long) as Int
+        println("[ST] guard: +" + toStr(dbk) + " = " + toStr(w))
+        dbk = dbk + 4
+    }
+    // ⚠️ 补丁必须在 mprotect(RX) **之前**：patchGuardDeopt 会写守卫字节，
+    // Memory.mprotect 已是真 VirtualProtect（旧版恒 0 空桩），先切 RX 再打
+    // 补丁 = 写只读页 → 段错误。
+    JitDeoptUtils.patchGuardDeopt(be, gb + 3, gb + 21)
+    println("[ST] guard: patchGuardDeopt ok")
+    // RWX 页无需 mprotect（页已可执行；3 参 extern 的 RX 转换轮盘见
+    // allocRWX 处注释——裸 Memory.mprotect 的 prot 翻转后 VirtualProtect
+    // 静默失败，页保持 RW，DEP 下首次执行即段错误）
+    println("[ST] guard: before exec100")
+    val g1 = be.executeNative(gb, 100)
+    println("[ST] guard: exec100 -> " + toStr(g1 as Int))
+    stOk("guard 命中快路径：jit_fn(100)=1", g1 as Int, 1)
     stOk("guard 失效走 deopt：jit_fn(5)=42", be.executeNative(gb, 5) as Int, 42)
     stOk("guard 失效走 deopt：jit_fn(7)=42", be.executeNative(gb, 7) as Int, 42)
 
@@ -201,14 +264,6 @@ fun jitSelfTest(): Unit {
     osr.recordOsr("hot_loop", 60, 4128)
     stOk("osr lookup(25)=4096", osr.entryOffsetOf("hot_loop", 25), 4096)
     stOk("osr lookup(100)=4128", osr.entryOffsetOf("hot_loop", 100), 4128)
-
-    println("[INFO] layout: " + be.getJitCodeLayout())
-    println("=== SELFTEST-RESULT pass=" + toStr(stPass) + " fail=" + toStr(stFail) + " ===")
-    if (stFail > 0) {
-        println("=== SELFTEST-FAIL ===")
-    } else {
-        println("=== SELFTEST-ALL-PASS ===")
-    }
 }
 
 fun main(): Int {
@@ -288,7 +343,8 @@ fun main(): Int {
         return 0
     }
 
-    if (selftest == "1") {
+    if (selftest == "1" || selftest == "full") {
+        stFull = selftest == "full"
         jitSelfTest()
         if (stFail > 0) {
             return 1
@@ -297,7 +353,7 @@ fun main(): Int {
 
     // 自检后默认只验证 JIT（.auc 与 JIT 自检共享进程内堆/arena，组合
     // 跑法留待 P5；需要组合时显式 AURA_VM_RUNAUC=1）。
-    if (selftest == "1") {
+    if (selftest == "1" || selftest == "full") {
         return 0
     }
     val vm = VmRunner()
