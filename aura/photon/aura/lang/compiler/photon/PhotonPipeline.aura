@@ -89,7 +89,20 @@ class PhotonPipeline {
     private var targetTriple: String = "x86_64-pc-windows-msvc"
 
     /// 优化级别。
+    ///
+    /// P3（Phase 4.3）：0 = 快速编译（跳过窥孔优化等可选通道），1 = 默认。
+    /// JIT 热路径首次编译追求低延迟时设 0；AOT/批量场景保持默认。
     private var optLevel: Int = 1
+
+    /// 设置优化级别（0=快速编译，1=默认全通道）。
+    fun setOptLevel(level: Int): Unit {
+        if (level >= 0 && level <= 1) { this.optLevel = level }
+    }
+
+    /// 读取优化级别。
+    fun getOptLevel(): Int {
+        return this.optLevel
+    }
 
     /// 输出目录。
     var outDir: String = "."
@@ -361,8 +374,12 @@ class PhotonPipeline {
         }
 
         // 窥孔优化
-        val peephole = PeepholeOptimizerUtils.emptyOptimizer()
-        peephole.optimize(dag)
+        // P3（Phase 4.3）：optLevel=0 快速编译——跳过窥孔（JIT 首译低延迟；
+        // AOT/批量保持默认全通道）。
+        var peephole: PeepholeOptimizer = PeepholeOptimizerUtils.emptyOptimizer()
+        if (this.optLevel > 0) {
+            peephole.optimize(dag)
+        }
         this.vprintln("  peephole passes=" + peephole.getPassCount() +
                 " dag=" + dag.nodeCount + "/" + dag.instrCount)
         if (Env.get("AURA_PHOTON_STOP") == "D") {
@@ -687,8 +704,12 @@ class PhotonPipeline {
         }
 
         // 窥孔优化
-        val peephole = PeepholeOptimizerUtils.emptyOptimizer()
-        peephole.optimize(dag)
+        // P3（Phase 4.3）：optLevel=0 快速编译——跳过窥孔（JIT 首译低延迟；
+        // AOT/批量保持默认全通道）。
+        var peephole: PeepholeOptimizer = PeepholeOptimizerUtils.emptyOptimizer()
+        if (this.optLevel > 0) {
+            peephole.optimize(dag)
+        }
         this.vprintln("  peephole passes=" + peephole.getPassCount() +
                 " dag=" + dag.nodeCount + "/" + dag.instrCount)
         if (Env.get("AURA_PHOTON_STOP") == "D") {
@@ -979,8 +1000,12 @@ class PhotonPipeline {
         this.vprintln("  spillSlots=" + allocator.getSpillSlots() +
                 " dag=" + dag.nodeCount + "/" + dag.instrCount)
 
-        val peephole = PeepholeOptimizerUtils.emptyOptimizer()
-        peephole.optimize(dag)
+        // P3（Phase 4.3）：optLevel=0 快速编译——跳过窥孔（JIT 首译低延迟；
+        // AOT/批量保持默认全通道）。
+        var peephole: PeepholeOptimizer = PeepholeOptimizerUtils.emptyOptimizer()
+        if (this.optLevel > 0) {
+            peephole.optimize(dag)
+        }
         this.vprintln("  peephole passes=" + peephole.getPassCount() +
                 " dag=" + dag.nodeCount + "/" + dag.instrCount)
 
