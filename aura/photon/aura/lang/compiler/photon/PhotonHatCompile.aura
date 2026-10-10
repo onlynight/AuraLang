@@ -228,10 +228,19 @@ fun main(): Int {
                 } else if (line.startsWith("L ")) {
                     linkCmdCached = line.substring(2, line.length)
                 } else if (line.startsWith("F ")) {
-                    val sp1: Int = line.indexOf(" ", 2)
-                    val wantHash: String = line.substring(2, sp1)
-                    val path: String = line.substring(sp1 + 1, line.length)
-                    if (!FileUtils.exists(path) || fnvFile(path) != wantHash) { ok = false }
+                    // [PLAN3-FIX] 哈希定长 8 nibble,按偏移直切。此前
+                    // `indexOf(" ", 2)` 的**起点参数被运行时吞掉**
+                    // (aura_lang_std_String_indexOf 只有 (s,sub) 两参),
+                    // 恒返回首空格(idx 1) ⇒ wantHash="" ⇒ 每个 F 行必判
+                    // 失败 ⇒ 缓存命中路径自 F 行引入起从未生效(提交态
+                    // 12:20 驱动对拍实证同样 MISS)。
+                    if (line.length < 11) {
+                        ok = false
+                    } else {
+                        val wantHash: String = line.substring(2, 10)
+                        val path: String = line.substring(11, line.length)
+                        if (!FileUtils.exists(path) || fnvFile(path) != wantHash) { ok = false }
+                    }
                 }
                 fi = fi + 1
             }
