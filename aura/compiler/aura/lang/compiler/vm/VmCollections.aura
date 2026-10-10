@@ -164,7 +164,9 @@ object VmCollections {
             return null
         }
         val len: Long = Memory.read64(ptr)
-        val index: Long = VmOps.toI32(toStr(idx)) as Long
+        // [根修轮R5] 装箱下标必须走 intOf 拆箱（(raw-1)/2 精确快路径）：
+        // 旧径 toI32(toStr(idx)) 对装箱值错位——实测 arr[0] 读成元素[1]。
+        val index: Long = VmOps.intOf(idx) as Long
         if (index < 0 || index >= len) {
             return null
         }
@@ -185,7 +187,9 @@ object VmCollections {
             return null
         }
         val len: Long = Memory.read64(ptr)
-        val index: Long = VmOps.toI32(toStr(idx)) as Long
+        // [根修轮R5] 装箱下标必须走 intOf 拆箱（(raw-1)/2 精确快路径）：
+        // 旧径 toI32(toStr(idx)) 对装箱值错位——实测 arr[0] 读成元素[1]。
+        val index: Long = VmOps.intOf(idx) as Long
         if (index < 0 || index >= len) {
             this.push(list, value)
             return list
