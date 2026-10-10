@@ -1137,49 +1137,137 @@ class X86Emitter {
             this.enc.emitStoreMemDisp32("rsp", sDisp, sReal)
             si = si + 1
         }
-        // **逆序装载**：若后面的实参来源寄存器恰好是前面某个实参的目标寄存器
-        // （典型：`strcat(toStr(x), y)` 中 toStr 的返回值被分配到 rcx），
-        // 正序装载会先覆写 rcx 再读它 → 两个实参变成同一个值。
-        var i: Int = argParts.size - 1
-        if (i > argRegs.size - 1) { i = argRegs.size - 1 }
-        while (i >= 0) {
-            val srcNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[i]))
-
-            // ── 整数常量：直接 emit mov argReg, imm（避免 rax clobber）──
-            if (srcNode.kind == "Const" && !srcNode.aux.startsWith("@str.")) {
-                val imm: Int = MachineDagUtils.strToInt(srcNode.aux)
-                this.enc.emitMovRI(argRegs[i], imm)
-                i = i - 1
+        // ── [P5-① 根修 v5] 寄存器参装载 = 标量展开的并行搬移安全序 ──
+        //
+        // 就绪规则（与 v3 相同）：
+        //   就绪(i) ⟺ 无未发射 j≠i 满足 (a) srcs[j]==tgts[i]（i 等 j 先读）
+        //                                (b) tgts[j]==srcs[i]（i 等 j 先写）
+        // 无就绪 = 环 → 一员源存 r11 并 deferred（最后发射）。
+        // v5：**全标量**。v3/v4 的多 ArrayList 方案在种子编译的驱动里
+        // 五个列表互相 alias（构建后立即读回全为同一标量垃圾，PMBUILD
+        // 探针实证 2026-10-10）——种子对同函数多 ArrayList 实例的
+        // 泛型/别名处理有缺陷（新入档种子缺陷）。n4≤4 标量展开零容器。
+        var n4: Int = argParts.size
+        if (n4 > 4) { n4 = 4 }
+        var tracePm: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
+        // 槽 0..3：kind("imm"/"str"/"reg"/"none") + src（imm 文本/@str.N/寄存器/"r11"=已断环）
+        var tg0: String = "rcx"
+        var tg1: String = "rdx"
+        var tg2: String = "r8"
+        var tg3: String = "r9"
+        var k0: String = "none"
+        var k1: String = "none"
+        var k2: String = "none"
+        var k3: String = "none"
+        var s0: String = ""
+        var s1: String = ""
+        var s2: String = ""
+        var s3: String = ""
+        var d0: Int = 0
+        var d1: Int = 0
+        var d2: Int = 0
+        var d3: Int = 0
+        var f0: Int = 0
+        var f1: Int = 0
+        var f2: Int = 0
+        var f3: Int = 0
+        var k4: Int = 0
+        while (k4 < n4) {
+            val srcNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[k4]))
+            var kk: String = "reg"
+            var ss: String = ""
+            if (srcNode.kind == "Const" || srcNode.kind == "ConstImm") {
+                if (srcNode.aux.startsWith("@str.")) { kk = "str" } else { kk = "imm" }
+                ss = srcNode.aux
+            } else {
+                val r: String = this.regOfNode(srcNode)
+                if (this.isStackRef(r)) { ss = "r10" } else { ss = r }
+            }
+            if (k4 == 0) { k0 = kk; s0 = ss }
+            else if (k4 == 1) { k1 = kk; s1 = ss }
+            else if (k4 == 2) { k2 = kk; s2 = ss }
+            else { k3 = kk; s3 = ss }
+            k4 = k4 + 1
+        }
+        var guard: Int = 0
+        var doneCnt: Int = 0
+        while (doneCnt < n4 && guard < 24) {
+            guard = guard + 1
+            var picked: Int = -1
+            // 就绪扫描（4 槽全展开；deferred/done 不参与互阻）
+            var rd0: Boolean = true
+            if (n4 > 0 && d0 == 0 && f0 == 0) {
+                if (d1 == 0 && f1 == 0 && s1 != "" && s1 == tg0) { rd0 = false }
+                if (d2 == 0 && f2 == 0 && s2 != "" && s2 == tg0) { rd0 = false }
+                if (d3 == 0 && f3 == 0 && s3 != "" && s3 == tg0) { rd0 = false }
+            } else { rd0 = false }
+            var rd1: Boolean = true
+            if (n4 > 1 && d1 == 0 && f1 == 0) {
+                if (d0 == 0 && f0 == 0 && s0 != "" && s0 == tg1) { rd1 = false }
+                if (d2 == 0 && f2 == 0 && s2 != "" && s2 == tg1) { rd1 = false }
+                if (d3 == 0 && f3 == 0 && s3 != "" && s3 == tg1) { rd1 = false }
+            } else { rd1 = false }
+            var rd2: Boolean = true
+            if (n4 > 2 && d2 == 0 && f2 == 0) {
+                if (d0 == 0 && f0 == 0 && s0 != "" && s0 == tg2) { rd2 = false }
+                if (d1 == 0 && f1 == 0 && s1 != "" && s1 == tg2) { rd2 = false }
+                if (d3 == 0 && f3 == 0 && s3 != "" && s3 == tg2) { rd2 = false }
+            } else { rd2 = false }
+            var rd3: Boolean = true
+            if (n4 > 3 && d3 == 0 && f3 == 0) {
+                if (d0 == 0 && f0 == 0 && s0 != "" && s0 == tg3) { rd3 = false }
+                if (d1 == 0 && f1 == 0 && s1 != "" && s1 == tg3) { rd3 = false }
+                if (d2 == 0 && f2 == 0 && s2 != "" && s2 == tg3) { rd3 = false }
+            } else { rd3 = false }
+            if (rd3) { picked = 3 }
+            if (rd2) { picked = 2 }
+            if (rd1) { picked = 1 }
+            if (rd0) { picked = 0 }
+            if (picked < 0) {
+                // 环：首个未发射 reg 槽源存 r11 并 deferred
+                if (d0 == 0 && f0 == 0 && k0 == "reg" && s0 != "r11") {
+                    this.enc.emitMovRR("r11", s0)
+                    s0 = "r11"; f0 = 1
+                } else if (d1 == 0 && f1 == 0 && k1 == "reg" && s1 != "r11") {
+                    this.enc.emitMovRR("r11", s1)
+                    s1 = "r11"; f1 = 1
+                } else if (d2 == 0 && f2 == 0 && k2 == "reg" && s2 != "r11") {
+                    this.enc.emitMovRR("r11", s2)
+                    s2 = "r11"; f2 = 1
+                } else if (d3 == 0 && f3 == 0 && k3 == "reg" && s3 != "r11") {
+                    this.enc.emitMovRR("r11", s3)
+                    s3 = "r11"; f3 = 1
+                }
                 continue
             }
-
-            // ── 字符串常量：直接 `lea argReg, @str.N`（重物化，不读颜色寄存器）──
-            //
-            // 与上面的整数常量同理，且**更必要**：串常量的物化指令
-            //（`lea %color, @str.N`）与其它常量共用同一批可着色寄存器，两个常量
-            // 连着发射时后者会覆写前者 —— 实测 `02_simple_vars` 的机器码：
-            //     movq $0x1, %rbx        ; 常量 A → rbx
-            //     leaq @str.2, %rbx      ; 常量 B → rbx   ← A 被覆写
-            //     leaq @str.3, %rsi
-            //     movq %rsi, %rdx ; movq %rbx, %rcx ; callq strcat
-            // 只要被覆写者此刻仍在使用点，两个实参就读成同一个值：
-            // `"z = " + toStr(true)` 输出 `truetrue`（strcat 收到 "true","true"）。
-            // 直接在参数寄存器里物化，就彻底不依赖「常量一直待在它的颜色寄存器里」
-            // 这个分配器无法保证的前提；顺带少占一个非易失寄存器。
-            if (srcNode.kind == "Const" && srcNode.aux.startsWith("@str.")) {
-                this.enc.emitLeaRIP(argRegs[i], srcNode.aux)
-                i = i - 1
-                continue
+            var pk: String = "none"
+            var ps: String = ""
+            var pt: String = ""
+            if (picked == 0) { pk = k0; ps = s0; pt = tg0 }
+            else if (picked == 1) { pk = k1; ps = s1; pt = tg1 }
+            else if (picked == 2) { pk = k2; ps = s2; pt = tg2 }
+            else { pk = k3; ps = s3; pt = tg3 }
+            if (tracePm) {
+                println("    [X86][PM] pick=" + toStr(picked) + " kind=" + pk + " src=" + ps + " -> " + pt)
             }
-
-            // ── 普通寄存器值：从节点寄存器搬到参数寄存器 ──
-            val srcReg: String = this.regOfNode(srcNode)
-            // 栈引用先装回临时寄存器（r10），再搬进参数寄存器
-            val realReg: String = this.resolveToReg(srcReg, "r10")
-            if (realReg != "" && realReg != argRegs[i]) {
-                this.enc.emitMovRR(argRegs[i], realReg)
+            if (pk == "imm") {
+                this.enc.emitMovRI(pt, MachineDagUtils.strToInt(ps))
+            } else if (pk == "str") {
+                this.enc.emitLeaRIP(pt, ps)
+            } else {
+                if (ps == "r11") {
+                    this.enc.emitMovRR(pt, "r11")
+                } else {
+                    val srcNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[picked]))
+                    val srcReg: String = this.regOfNode(srcNode)
+                    val realReg: String = this.resolveToReg(srcReg, "r10")
+                    if (realReg != "" && realReg != pt) {
+                        this.enc.emitMovRR(pt, realReg)
+                    }
+                }
             }
-            i = i - 1
+            if (picked == 0) { d0 = 1 } else if (picked == 1) { d1 = 1 } else if (picked == 2) { d2 = 1 } else { d3 = 1 }
+            doneCnt = doneCnt + 1
         }
     }
 
