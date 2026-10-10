@@ -650,6 +650,105 @@ static void aura_lc_dump(FILE *f) {
     }
 }
 
+/* ── 全量拼接/dup 站点表（方案 3 测量，无尺寸门槛）─────────────────
+ * lc 表只收结果 >256B 的拼接，而收口画像（09 报告 A·补充十一）显示剩余
+ * 风暴是 3,076 万次 avg-112B concat + 5,106 万次 avg-20B dup 的**分布式
+ * 小分配**——恰好低于 lc 门槛，站点级不可见。这张表按调用点 RA 哈希
+ * 聚合**全部** aura_string_concat / aura_dup_n 调用（每调用点一次
+ * O(1) 探测，AURA_LC_ALL=1 时才启用，默认零开销）：
+ *   · RegionReset 时快照打印并清零 → 前端时代表（重置前）与后端
+ *     时代表（OOM/exit 打的表）天然分离；
+ *   · OOM 统计与 atexit 各打一份（后端时代累计）。
+ * RA → Aura 函数：离线 `llvm-nm --numeric-sort <驱动obj>`，
+ * rva-0x1000 取最近下方符号（同 oom-attr/exit-ra1 口径）；
+ * 「同表达式 N 连 concat」表现为同函数内一串相邻 RA，RA 间距指纹
+ * （如 [67,65,71,65,71]）可在 obj 重定位表中唯一命中源构造。 */
+#define AURA_SC_SITES 16384              /* 2 的幂：掩码取模 */
+#define AURA_SC_MASK   (AURA_SC_SITES - 1)
+static void *g_sc_ra[AURA_SC_SITES];
+static int64_t g_sc_calls[AURA_SC_SITES];
+static int64_t g_sc_bytes[AURA_SC_SITES];
+static int64_t g_sc_max[AURA_SC_SITES];
+static unsigned char g_sc_kind[AURA_SC_SITES];   /* 0=concat 1=dup_n */
+static int64_t g_sc_drop = 0;                    /* 探测超限丢弃次数 */
+static int g_sc_on = -1;                         /* -1=未初始化 */
+
+static int aura_sc_enabled(void) {
+    if (g_sc_on < 0) {
+        g_sc_on = (getenv("AURA_LC_ALL") != NULL);
+    }
+    return g_sc_on;
+}
+
+static void aura_sc_note(unsigned char kind, int64_t out_len, void *ra) {
+    uintptr_t h = ((uintptr_t)ra >> 4) * (uintptr_t)2654435761u;
+    int i = (int)(h & AURA_SC_MASK);
+    int n;
+    for (n = 0; n < 128; n++) {
+        if (g_sc_ra[i] == ra) {
+            g_sc_calls[i] += 1;
+            g_sc_bytes[i] += out_len;
+            if (out_len > g_sc_max[i]) g_sc_max[i] = out_len;
+            return;
+        }
+        if (g_sc_ra[i] == NULL) {
+            g_sc_ra[i] = ra;
+            g_sc_calls[i] = 1;
+            g_sc_bytes[i] = out_len;
+            g_sc_max[i] = out_len;
+            g_sc_kind[i] = kind;
+            return;
+        }
+        i = (i + 1) & AURA_SC_MASK;
+    }
+    g_sc_drop += 1;
+}
+
+static unsigned long long aura_sc_rva(void *ra) {
+#ifdef _WIN32
+    return (unsigned long long)((uintptr_t)ra - (uintptr_t)GetModuleHandleW(NULL));
+#else
+    (void)ra;
+    return 0;
+#endif
+}
+
+/* top-40 按累计字节降序；打印过即清零，重复调用依次给出次高段。 */
+static void aura_sc_dump(FILE *f, const char *tag) {
+    int i, j, best;
+    if (!f) return;
+    fprintf(f, "[aura] %s all-sites top40 (concat/dup per RA, bytes desc):\n", tag);
+    for (j = 0; j < 40; j++) {
+        best = -1;
+        for (i = 0; i < AURA_SC_SITES; i++) {
+            if (g_sc_bytes[i] > 0 && (best < 0 || g_sc_bytes[i] > g_sc_bytes[best])) {
+                best = i;
+            }
+        }
+        if (best < 0) break;
+        fprintf(f,
+            "   %s kind=%s rva=0x%llx calls=%lld bytes=%lldMB max=%lldB avg=%lldB\n",
+            tag, g_sc_kind[best] ? "dup_n" : "concat",
+            aura_sc_rva(g_sc_ra[best]),
+            (long long)g_sc_calls[best],
+            (long long)(g_sc_bytes[best] >> 20),
+            (long long)g_sc_max[best],
+            (long long)(g_sc_bytes[best] / g_sc_calls[best]));
+        g_sc_bytes[best] = 0;
+    }
+    fprintf(f, "[aura] %s end (distinct_sites_full=%d drop=%lld)\n",
+            tag, AURA_SC_SITES, (long long)g_sc_drop);
+}
+
+static void aura_sc_clear(void) {
+    memset(g_sc_ra, 0, sizeof(g_sc_ra));
+    memset(g_sc_calls, 0, sizeof(g_sc_calls));
+    memset(g_sc_bytes, 0, sizeof(g_sc_bytes));
+    memset(g_sc_max, 0, sizeof(g_sc_max));
+    memset(g_sc_kind, 0, sizeof(g_sc_kind));
+    g_sc_drop = 0;
+}
+
 /* ── 内存区域取证（AURA_ATTR_DUMP=1 时随 OOM 统计打印）──────────────
  * 背景：big-concat 表的 RA 曾落在主镜像 base+1GB 附近——既不在 exe
  * .text 也不在当时已知的模块区间，事后拿 llvm-objdump 反查无门。归因
@@ -799,6 +898,9 @@ static void aura_mem_dump_stats(void) {
      * 反而看不到，这里补上。 */
     aura_cs_dump(stderr, "OOM");
     aura_lc_dump(stderr);
+    if (aura_sc_enabled()) {
+        aura_sc_dump(stderr, "oom-sc");
+    }
     fprintf(stderr,
         "[aura] mem stats: alloc_calls=%lld alloc_bytes=%lldMB realloc_calls=%lld "
         "realloc_net=%lldMB free_calls=%lld max_block=%lldMB bad_hdr=%lld\n",
@@ -918,6 +1020,14 @@ int64_t RegionEnter(void) {
 
 /// 重置区域:释放全部区块(记账同步扣回),退出区域模式。
 int64_t RegionReset(void) {
+    /* [PLAN3] 前端→后端时代边界:快照打印前端时代表并清零,
+     * 此后 OOM/exit 打出的 all-sites 表即纯后端时代累计。 */
+    if (aura_sc_enabled()) {
+        fprintf(stderr, "[aura] ===== all-sites snapshot at RegionReset (frontend era) =====\n");
+        aura_sc_dump(stderr, "reset-sc");
+        aura_sc_clear();
+        fflush(stderr);
+    }
     int64_t i;
     for (i = 0; i < g_rgn_n; i++) {
         if (g_rgn_chunks[i]) {
@@ -1033,6 +1143,8 @@ void *aura_mem_realloc(void *p, int64_t n) {
             }
         }
     }
+    /* [PLAN3-FIX] 悬空区域指针(Reset 后):页已 unmap,拷贝必 AV。
+     * 返回零填充新块顶住调用方,计数入档。 */
     AuraMemHdr *h = (AuraMemHdr *)((char *)p - sizeof(AuraMemHdr));
     int64_t old = h->h.size;
     g_aura_mem_realloc_calls += 1;
@@ -1128,6 +1240,9 @@ char *aura_mem_strdup(const char *s) {
  * 字段读出来变成别的文本甚至空串。代价是这些副本不会被释放（AOT 运行时暂无
  * 字符串 GC）。 */
 static char *aura_dup_n(const char *s, size_t n) {
+    if (aura_sc_enabled()) {
+        aura_sc_note(1, (int64_t)n, __builtin_return_address(0));
+    }
     char *out = (char *)aura_mem_alloc((int64_t)n + 1);
     if (!out) return (char *)"";
     if (s && n > 0) memcpy(out, s, n);
@@ -1461,6 +1576,9 @@ const char *aura_string_concat(const char *a, int64_t alen, const char *b, int64
     int64_t out_len = (int64_t)a_len + (int64_t)b_len;
     if (out_len > 256) {
         aura_lc_note(out_len, __builtin_return_address(0));
+    }
+    if (aura_sc_enabled()) {
+        aura_sc_note(0, out_len, __builtin_return_address(0));
     }
     char *out = (char *)aura_mem_alloc(out_len + 1);
     if (!out) return "";
@@ -4325,6 +4443,10 @@ size_t aura_attr_off(void *ra) {
  * 地址，减去镜像基址后用 llvm-nm obj 符号表即可落到 Aura 函数）。 */
 static void aura_attr_dump_atexit(void) {
     aura_attr_dump(stderr, "exit-attr");
+    if (aura_sc_enabled()) {
+        aura_sc_dump(stderr, "exit-sc");
+        fflush(stderr);
+    }
     if (getenv("AURA_ATTR_DUMP")) {
         HMODULE exe_base = GetModuleHandleW(NULL);
         uintptr_t base = (uintptr_t)exe_base;

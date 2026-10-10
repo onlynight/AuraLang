@@ -253,6 +253,12 @@ fun main(): Int {
         }
     }
     var seenList: String = ""   // link 实际读取的源文件清单（缓存清单用）
+    // [PLAN3-FIX] 时代幸存者判定：hatFixed==hatText 的比较**必须在
+    // RegionReset 之前**完成——reset 后两者是悬空区域指针，strcmp 读
+    // 已 unmap 的页 = AV（2026-10-10 sum 冒烟实证，崩在
+    // String_equals→strlen）。布尔结果跨边界安全；SKIP_FRONT 时恒 false
+    //（直连本就需要前端 SSA 存活，与区域互斥，此处仅参与守卫）。
+    var sameHat: Boolean = false
     if (!skipFront) {
         // ── 前端：源码（含递归 import）→ 合并 HIR → SSA → HAT 文本 ──
         val tAll0: Long = tNs()
@@ -286,6 +292,7 @@ fun main(): Int {
         //（每次调用分配 64 字节零块；被溶解对象当前都是无字段纯静态单例，
         // 实例值实际不被使用，泄漏可忽略）。
         val hatFixed: String = HatGetPatchUtils.patchMissingGetters(hatText)
+        sameHat = (hatFixed == hatText)
         val tPatch1: Long = tNs()
         // [MEM-FIX] 构建清单落盘(前端 era 内写磁盘,不受区域重置影响):
         // v1 + M/R 缓存 hex 路径 + F 行(每个 link 实际读取的源文件+内容哈希)。
@@ -320,7 +327,7 @@ fun main(): Int {
     // ⚠️ 默认关闭：实测直连与回环产物存在语义差异（sum .text 0xac8 起
     // 编码不同——回环序列化会把部分调用结果物化进文本，直连保留调用），
     // 等价性工作完成前不可默认启用。
-    val directCompile: Boolean = (hatFixed == hatText)
+    val directCompile: Boolean = sameHat
             && Env.get("AURA_COMPILE_DIRECT", "") == "1"
     val result: BackendResult
     if (directCompile) {
@@ -363,25 +370,37 @@ fun main(): Int {
     println("===RESULT===" + resultTag)
     // [MEM-FIX] 构建成功 → 写产物缓存清单（源文件清单+内容哈希+缓存 hex 路径）。
     // 下次构建源全部未变 → 直接回放缓存（前端+后端全跳过）。
-    if (resultTag == "success" && cacheOn && seenList != "") {
-        val mf: String = "v1\nM " + cacheMain + "\nR " + cacheRt + "\nL " + result.linkCommand + "\n"
-        var fi: Int = 0
-        var mf2: String = mf
-        while (fi < seenList.length) {
-            var nl: Int = -1
-            var sc: Int = fi
-            while (sc < seenList.length) {
-                if (seenList.charCodeAt(sc) == 10) { nl = sc; break }
-                sc = sc + 1
+    // [PLAN3-FIX] reset 后**绝不读区域字符串**：seenList 随 RegionReset 悬空
+    // （strcmp→AV）。F 行已在 reset 前 writeBuildManifest 落盘；此处只对
+    // L 行做磁盘读改写（linkCommand 后端结束才可知）。
+    if (resultTag == "success" && cacheOn) {
+        val mf: String = FileUtils.readText(cacheManifest)
+        if (mf != "") {
+            var out: String = ""
+            var fi: Int = 0
+            var wroteL: Boolean = false
+            while (fi < mf.length) {
+                var nl: Int = -1
+                var sc: Int = fi
+                while (sc < mf.length) {
+                    if (mf.charCodeAt(sc) == 10) { nl = sc; break }
+                    sc = sc + 1
+                }
+                if (nl < 0) { break }
+                val line: String = mf.substring(fi, nl)
+                if (line.startsWith("L ")) {
+                    out = out + "L " + result.linkCommand + "\n"
+                    wroteL = true
+                } else {
+                    out = out + line + "\n"
+                }
+                fi = nl + 1
             }
-            if (nl < 0) { break }
-            val path: String = seenList.substring(fi, nl)
-            if (path != "" && FileUtils.exists(path)) {
-                mf2 = mf2 + "F " + fnvFile(path) + " " + path + "\n"
+            if (!wroteL) {
+                out = out + "L " + result.linkCommand + "\n"
             }
-            fi = nl + 1
+            FileUtils.writeText(cacheManifest, out)
         }
-        FileUtils.writeText(cacheManifest, mf2)
         FileUtils.writeText(cacheMain, joinSb(coffPieces))
         FileUtils.writeText(cacheRt, joinSb(rtPieces))
     }

@@ -624,6 +624,11 @@ impl EmitCtx {
         s.push_str("declare i64 @aura_cpu_rdtsc()\n");
         s.push_str("declare void @aura_cpu_mem_fence()\n");
         s.push_str("declare i64 @aura_cpu_atomic_add(i64 %arg.0, i64 %arg.1)\n");
+        // [MEM-FIX] 阶段区域原语：Memory.regionEnter/regionReset 的 Builtin
+        // 包装体直接 call 这两个 C 符号（实现在 aura_std_cffi.c）。declare
+        // 与定义并存为 LLVM 允许的冗余声明。
+        s.push_str("declare i64 @RegionEnter()\n");
+        s.push_str("declare i64 @RegionReset()\n");
         // Phase D: 异常值全局变量（setjmp/longjmp 桥用）— 在 aura_syscalls.c 中定义
         s.push_str("@aura_exception_value = external global i8*\n");
         // LLVM 内建函数声明（Memory.copy / Memory.set / Memory.compare 用）
@@ -1070,6 +1075,21 @@ fn emit_native_wrapper(
             } else if func.name.contains("Memory") && method_lower == "set" {
                 // Memory.set(addr, v, n) → @llvm.memset
                 "%ptr.addr = inttoptr i64 %arg.0 to i8*\ncall void @llvm.memset(i8* %ptr.addr, i8 %arg.1, i64 %arg.2, i1 false)".to_string()
+            } else if method_lower == "regionenter" || method_lower == "regionreset" {
+                // [MEM-FIX] 阶段区域原语 → C runtime 同名符号（Aura 方法名
+                // regionEnter/regionReset → C 导出 RegionEnter/RegionReset）。
+                // ⚠️ 2026-10-10 方案3-R1 实证修复：此前无此分支，调用落入
+                // 「未知内置」空桩（define i64 @Memory_regionReset(){ret 0}）
+                // ——区域从未生效、前端垃圾从未回收，7.41GB 峰值实际全部
+                // 来自 7814f5e 的 CSV 炸弹修复。驱动全量构建 5.2GB→预期 3.5GB。
+                format!(
+                    "call i64 @{}()",
+                    if method_lower == "regionenter" {
+                        "RegionEnter"
+                    } else {
+                        "RegionReset"
+                    }
+                )
             } else if sym_lower.contains("console") && sym_lower.contains("println") {
                 // Console.println(msg) → call aura_lang_std_Console_println
                 "call void @aura_lang_std_Console_println(i64 %arg.0)".to_string()
