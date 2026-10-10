@@ -794,9 +794,9 @@ class PhotonPipeline {
         emitter.emitFunction(dag, moduleName)
         this.vprintln("    Step 4d: emit done")
         this.peProbe("emit done hexChars=" + toStr(emitter.getOutputHex().length) +
-        val tEmit1: Long = pipeTimeNs()
                 " relocs=" + toStr(emitter.getRelocRecords().length) +
                 " funcOffsets=" + toStr(emitter.getFuncOffsets().length))
+        val tEmit1: Long = pipeTimeNs()
         val machineCodeHex: String = emitter.getOutputHex()
         val relocRecords: String = emitter.getRelocRecords()
         result.machineCodeHex = machineCodeHex
