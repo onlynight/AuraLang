@@ -41,8 +41,10 @@ import aura.lang.native.time.Clock  # TypeFeedbackTable 亦在本文件
 import aura.lang.compiler.photon.OsrTableUtils
 import "../../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
 
-var stPass: Int = 0
-var stFail: Int = 0
+object SelfTestCounters {
+    var pass: Int = 0
+    var fail: Int = 0
+}
 /// 自检范围：false = 核心 §1-§3（emit/write/execute/数据段——JIT 基准
 /// 依赖面，跨构建稳定）；true = 全量（+§4 guard/deopt、§5 stackmap、
 /// §6 类型反馈/OSR）。§4 起的扩展段受 P5-① 发射器缺陷影响存在布局
@@ -52,10 +54,10 @@ var stFull: Boolean = false
 
 fun stOk(name: String, got: Int, want: Int): Unit {
     if (got == want) {
-        stPass = stPass + 1
+        SelfTestCounters.pass = SelfTestCounters.pass + 1
         println("[PASS] " + name + "  got=" + toStr(got) + " want=" + toStr(want))
     } else {
-        stFail = stFail + 1
+        SelfTestCounters.fail = SelfTestCounters.fail + 1
         println("[FAIL] " + name + "  got=" + toStr(got) + " want=" + toStr(want))
     }
 }
@@ -148,8 +150,8 @@ fun jitSelfTest(): Unit {
     }
 
     println("[INFO] layout: " + be.getJitCodeLayout())
-    println("=== SELFTEST-RESULT pass=" + toStr(stPass) + " fail=" + toStr(stFail) + " ===")
-    if (stFail > 0) {
+    println("=== SELFTEST-RESULT pass=" + toStr(SelfTestCounters.pass) + " fail=" + toStr(SelfTestCounters.fail) + " ===")
+    if (SelfTestCounters.fail > 0) {
         println("=== SELFTEST-FAIL ===")
     } else {
         if (stFull) {
@@ -272,10 +274,12 @@ fun main(): Int {
         jitVehInstall()
         println("[VEH] crash-dump handler installed")
     }
-    // ⚠ .auc 路径在 VmRunner 构造**之前**读取：规避「Env.get 与 VmRunner
-    // 大规模内联共存取值异常」的历史问题面（本宿主为 Photon 原生，
-    // env_get = 真 GetEnvironmentVariableA）。
-    val aucPath: String = "" + Env.get("AURA_VM_AUC", "build/vm/current.auc")
+    // [P5] .auc 路径 = 硬编码 build/vm/current.auc（与纯宿主 current.aura
+    // 同法，槽交换喂入）。此前的 `Env.get("AURA_VM_AUC", 默认)` 2 参调用
+    // 在本宿主布局下丢失 default/返回句柄（P5-① 句柄漂移，2026-10-10
+    // 实测：有 env 段错误、无 env 空路径 "cannot read file: "），故移除
+    // env 通道。跑批一律槽交换（run-suite-v3.ps1）。
+    val aucPath: String = "build/vm/current.auc"
     val selftest: String = Env.get("AURA_VM_SELFTEST", "")
 
     // ── JIT 基准模式（bench-jit-aot-vm.ps1 用）：手编机器码经
@@ -349,7 +353,7 @@ fun main(): Int {
     if (selftest == "1" || selftest == "full") {
         stFull = selftest == "full"
         jitSelfTest()
-        if (stFail > 0) {
+        if (SelfTestCounters.fail > 0) {
             return 1
         }
     }
