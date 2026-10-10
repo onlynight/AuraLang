@@ -409,7 +409,7 @@ class Vm {
         } else {
             var i: Int = 0
             while (i < opNames.size()) {
-                this.opCodes.add(Opcodes.fromName(opNames.get(i)))
+                this.opCodes.add(Opcodes.fromName(opNames[i]))
                 i = i + 1
             }
         }
@@ -467,11 +467,11 @@ class Vm {
         var i: Int = 0
         while (i < names.size()) {
             var parent: String = ""
-            val pid: Int = parentIds.get(i)
+            val pid: Int = parentIds[i]
             if (pid >= 0 && pid < names.size() && pid != i) {
-                parent = names.get(pid)
+                parent = names[pid]
             }
-            this.classParents.put(names.get(i), parent)
+            this.classParents.put(names[i], parent)
             i = i + 1
         }
     }
@@ -3923,7 +3923,9 @@ if (false && (r < n - 5
         var i: Int = 0
         val n: Int = flat.size()
         while (i < n) {
-            val ln: String = flat.get(i)
+            // [P5] List.get 在部分宿主布局下静默 null（符号解析随闭包布局漂移）
+            // ——下标索引是唯一可靠形态（与 X86Emitter v5 同教训）
+            val ln: String = flat[i]
             var c0: Int = -1
             var c1: Int = -1
             var p: Int = 0
