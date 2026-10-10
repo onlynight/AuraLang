@@ -353,8 +353,22 @@ object PhotonRuntime {
         enc.emitStoreMemDisp32("rdx", 40, "rcx")
         enc.emitMovMemDisp32("rcx", "r11", 8)        // [Rsp+8]
         enc.emitStoreMemDisp32("rdx", 48, "rcx")
+        // [P5] 栈转储 24 层（crashBuf+56 起，每层 8B）：返回地址链供符号映射
+        // （r8=游标自 ctx.Rsp 起向栈顶走 192B，均在已提交栈页内；rdx=crashBuf 保持）
+        enc.emitMovMemDisp32("r8", "rdx", 32)        // r8 = ctx.Rsp
+        enc.emitLeaRIP("r9", "crashBuf")
+        enc.emitAddRI("r9", 56)
+        enc.emitXorRR("r10", "r10")
+        enc.emitLabel("sv_loop")
+        enc.emitMovMemDisp32("rax", "r8", 0)
+        enc.emitStoreMemDisp32("r9", 0, "rax")
+        enc.emitAddRI("r8", 8)
+        enc.emitAddRI("r9", 8)
+        enc.emitAddRI("r10", 1)
+        enc.emitCmpRI("r10", 24)
+        enc.emitJccLabel("ne", "sv_loop")
         enc.emitMovMemDisp32("rcx", "rsp", 40)       // handle
-        enc.emitMovRI32("r8d", 56)
+        enc.emitMovRI32("r8d", 248)
         enc.emitMovRR("r9", "rdx")
         enc.emitAddRI("r9", 56)                      // scratch（crashBuf+56）
         enc.emitXorRR("r10", "r10")
@@ -4501,7 +4515,7 @@ object PhotonRuntime {
 
         // .data 段：toStrBuffer(32B) + arena(1MB) + bump 游标(8B) + 对象 bump(8B)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:256,canaryCount:8,canaryBuf:32"
 
         // 构建符号表（包含所有函数和 .data 符号
         // runtime 对象自带**一个空串常量** `@str.0`。
@@ -4981,7 +4995,7 @@ object PhotonRuntime {
         writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:256,canaryCount:8,canaryBuf:32"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
@@ -5444,7 +5458,7 @@ object PhotonRuntimeUtils {
         writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:64,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:256,canaryCount:8,canaryBuf:32"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
