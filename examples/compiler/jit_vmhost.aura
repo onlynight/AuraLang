@@ -71,11 +71,8 @@ fun jitVehInstall(): Int
 fun jitSelfTest(): Unit {
     println("=== P1-3 NATIVE JIT SELFTEST (in native VM host) ===")
     // VEH 转储默认关闭：handler 不过滤异常码，first-chance 风暴会干扰
-    // 正常执行（/FIXED 构建实测挂在 allocRW）。需要现场时 AURA_VEH=1。
-    if (Env.get("AURA_VEH", "") == "1") {
-        jitVehInstall()
-        println("[VEH] crash-dump handler installed")
-    }
+    // 正常执行（/FIXED 构建实测挂在 allocRW）。需要现场时 AURA_VEH=1
+    // （[P5] 安装点已上移到 main 入口，覆盖 .auc 执行路径）。
 
     val be = JitBackend()
     be.enableNativeExec()
@@ -269,6 +266,12 @@ fun jitSelfTestExt(be: JitBackend, db: Int): Unit {
 fun main(): Int {
     // P0-2b：堆初始化——必须在任何分配之前（VmRunner 构造即会分配）。
     Heap.init()
+    // [P5] VEH 崩溃现场通道提到进程最前（AURA_VEH=1）：此前只在
+    // jitSelfTest 内安装，.auc 执行路径的崩点（P5-4）永远拿不到现场。
+    if (Env.get("AURA_VEH", "") == "1") {
+        jitVehInstall()
+        println("[VEH] crash-dump handler installed")
+    }
     // ⚠ .auc 路径在 VmRunner 构造**之前**读取：规避「Env.get 与 VmRunner
     // 大规模内联共存取值异常」的历史问题面（本宿主为 Photon 原生，
     // env_get = 真 GetEnvironmentVariableA）。
@@ -353,8 +356,12 @@ fun main(): Int {
 
     // 自检后默认只验证 JIT（.auc 与 JIT 自检共享进程内堆/arena，组合
     // 跑法留待 P5；需要组合时显式 AURA_VM_RUNAUC=1）。
+    // [P5] AURA_VM_RUNAUC=1 已实现：自检通过后继续执行 .auc（组合跑法）。
     if (selftest == "1" || selftest == "full") {
-        return 0
+        val runauc: String = "" + Env.get("AURA_VM_RUNAUC", "")
+        if (runauc != "1") {
+            return 0
+        }
     }
     val vm = VmRunner()
     vm.loadAucAndRun(aucPath)
