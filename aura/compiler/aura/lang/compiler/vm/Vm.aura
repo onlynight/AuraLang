@@ -157,6 +157,9 @@ class Vm {
     // 指令计数
     private var instructionCount: Int = 0
 
+    /// [根修轮R4] op62 诊断计数（独立计数器，独立于 instructionCount）
+    private var p62DiagCount: Int = 0
+
     // ── 运行期 arena 水位 / 值栈容量探针（P1-RETAIN 诊断，2026-10-08）──
     //
     // 外部 memprof.py 只能读进程 RSS——它是**不可回收的**：bump arena 是 64 MiB
@@ -1006,7 +1009,14 @@ class Vm {
             if (this.argCountOf() >= 2) {
                 argc2 = VmOps.toI32(this.argStrOf(1))
             }
-            // P404：[62] CALL 参数诊断探针摘除（P380 追踪用）。
+            // [根修轮R4] 有界诊断（专用计数器，独立于 instructionCount）：
+            // 前 20 次 CALL_NATIVE_ARGS 实名 fname/argc——死循环 = fname 漂移
+            // 撞上 .auc 自身函数名的假设验证点。
+            if (this.p62DiagCount < 20) {
+                this.p62DiagCount = this.p62DiagCount + 1
+                println("[62] fname=[" + fname + "] argc=" + toStr(argc2)
+                    + " fn=[" + this.currentFunc + "]")
+            }
             this.callOrBuiltin(fname, argc2)
         } else if (op == 63) {
             val idx: Int = VmOps.toI32(this.argStrOf(0))
@@ -3952,6 +3962,10 @@ if (false && (r < n - 5
                 } else {
                     s1 = VmOps.vmSubstr(ln, c0 + 1, lnN - c0 - 1)
                 }
+            }
+            // [R4] 有界诊断：flat 行切分现场（前 40 行）
+            if (i < 40) {
+                println("[LAF] i=" + toStr(i) + " ln=[" + ln + "] s0=[" + s0 + "] s1=[" + s1 + "]")
             }
             this.argStrs.add(s0)
             this.argStrs.add(s1)

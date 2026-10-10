@@ -15,6 +15,9 @@ import aura.lang.native.Memory
 /// VM 操作工具对象（集中管理无状态工具函数）。
 object VmOps {
 
+    /// [R4] vmSubstr 定性探针计数
+    var vmSubDiag: Int = 0
+
     // ═══════════════════════════════════════════════════════════
     //  类型判定
     // ═══════════════════════════════════════════════════════════
@@ -564,15 +567,29 @@ object VmOps {
             return ""
         }
         if (start >= text.length) {
+            // [R4] 定性探针：哪个守卫误触发
+            if (vmSubDiag < 10) {
+                vmSubDiag = vmSubDiag + 1
+                println("[VS] guard start>=len: start=" + toStr(start) + " len=" + toStr(text.length))
+            }
             return ""
         }
         // P386：早返回风格——`end` 不再重赋值（旧实现两次重赋值 = 两处
         // merge phi，photon ISel 下 end 家槽跨调用残留前次值 ⇒ 同函数相邻
         // 调用点一成一败，§10.100 定罪）。全函数零 merge phi。
-        if (start + length > text.length) {
-            return text.substring(start, text.length)
+        // [根修轮R4] 切片改走 charCodeAt + fromCharCode 逐字符拼接：本布局下
+        // PhotonPipeline_substring 对合法输入返回空串（探针实证：守卫全过、
+        // substring 结果为空），而 charCodeAt 已被 loadArgsFlat 逗号扫描实证
+        // 可靠。args 装载路径冷，O(n) 拼接可接受。
+        var n2: Int = text.length
+        if (start + length < n2) { n2 = start + length }
+        var out: String = ""
+        var k2: Int = start
+        while (k2 < n2) {
+            out = out + String.fromCharCode(text.charCodeAt(k2))
+            k2 = k2 + 1
         }
-        return text.substring(start, start + length)
+        return out
     }
 
     /// `Any` → 原始 64 位表示。

@@ -84,6 +84,12 @@ class AucModule {
     /// AOT 段数量（段数据不再解析——随 Photon 任务）。
     var aotSegmentCount: Int = 0
 
+    /// [R4] 原生调用解码诊断计数
+    var nativeDiagCount: Int = 0
+
+    /// [R4] op78 诊断计数
+    var a78DiagCount: Int = 0
+
     fun isValid(): Boolean {
         return error == "" && funcsCount > 0
     }
@@ -463,14 +469,12 @@ class AucModule {
                     val fidx: Int = fidxL as Int
                     if (fidx != noMethodSentinel) {
                         // 扩容 slotNames 到 sj+1
-                        // [根修轮R2] get/set → 下标形态：List.get 链接布局敏感
-                        //（本槽名表烂 = CALL_METHOD 分发野调用的上游，P5-① 活体）
                         while (slotNames.size() <= sj) {
                             slotNames.add("")
                         }
-                        if (slotNames[sj] == "") {
+                        if (slotNames.get(sj) == "") {
                             val mname: String = methodNameOf(nameAt(funcNames, fidx))
-                            slotNames[sj] = mname
+                            slotNames.set(sj, mname)
                         }
                     }
                     sj = sj + 1
@@ -544,10 +548,9 @@ class AucModule {
         var fi3: Int = 0
         while (fi3 < mod.funcsCount) {
             startLines.add(lineNo2)
-            // [根修轮R2] 下标形态（List.get 链接布局敏感，同 §14）
-            reader.pos = codeStarts[fi3]
+            reader.pos = codeStarts.get(fi3)
             val startOpCount: Int = mod.numOpNames.size()
-            val decoded: Int = decodeNumeric(reader, codeLens[fi3], nativeNames,
+            val decoded: Int = decodeNumeric(reader, codeLens.get(fi3), nativeNames,
                 nativeParams, constTags, funcNames, funcParams, mod.slotMethodNames,
                 mod.classNames, lineNo2, mod)
             // P331：decoded 返回值在 photon 下不可靠（循环 phi 家槽被陈旧 MOV
@@ -562,12 +565,11 @@ class AucModule {
         var ftAcc: String = ""
         var fi4: Int = 0
         while (fi4 < mod.funcsCount) {
-            // [根修轮R2] 下标形态（同上）
-            ftAcc = ftAcc + funcNames[fi4]
+            ftAcc = ftAcc + funcNames.get(fi4)
             ftAcc = ftAcc + "|"
-            ftAcc = ftAcc + toStr(startLines[fi4])
+            ftAcc = ftAcc + toStr(startLines.get(fi4))
             ftAcc = ftAcc + "|"
-            ftAcc = ftAcc + toStr(funcParams[fi4])
+            ftAcc = ftAcc + toStr(funcParams.get(fi4))
             ftAcc = ftAcc + "\n"
             fi4 = fi4 + 1
         }
@@ -899,8 +901,7 @@ class AucModule {
                 // if/else 链的合并值在 photon 下陈旧读）。P366：idx 恒在
                 // constsCount 内（同文件 u16），去掉 if 表达式守卫
                 //（if 表达式赋值的 t0 亦 phi-web 陈旧读，numOpCodes 值错）。
-                // [根修轮R2] 下标形态（List.get 链接布局敏感）
-                val t0: Int = constTags[idx]
+                val t0: Int = constTags.get(idx)
                 mod.numOpCodes.add(5 + t0)
                 mod.numArgsFlat.add(toStr(idx))
                 count = count + 1
@@ -939,6 +940,12 @@ class AucModule {
                 mod.numOpNames.add("CALL_NATIVE_ARGS")
                 mod.numOpCodes.add(aucToVmOp(opcode))
                 val a27: String = n0 + ","
+                // [R4] 有界诊断：原生表尺寸与解析结果
+                if (nativeDiagCount < 10) {
+                    nativeDiagCount = nativeDiagCount + 1
+                    println("[A27] idx=" + toStr(idx) + " natives=" + toStr(nativeNames.size())
+                        + " n0=[" + n0 + "] params=" + toStr(paramAt(nativeParams, idx)))
+                }
                 mod.numArgsFlat.add(a27 + toStr(paramAt(nativeParams, idx)))
                 count = count + 1
                 var adv: Int = 1 + operandSize
@@ -954,6 +961,12 @@ class AucModule {
                 mod.numOpCodes.add(aucToVmOp(opcode))
                 val a78: String = n0 + ","
                 mod.numArgsFlat.add(a78 + toStr(argc))
+                // [R4] 有界诊断：op78 构造现场
+                if (a78DiagCount < 10) {
+                    a78DiagCount = a78DiagCount + 1
+                    println("[A78] idx=" + toStr(idx) + " natives=" + toStr(nativeNames.size())
+                        + " n0=[" + n0 + "] argc=" + toStr(argc) + " flat=[" + a78 + toStr(argc) + "]")
+                }
                 count = count + 1
                 var adv: Int = 1 + operandSize
                 offset = offset + adv
@@ -985,9 +998,8 @@ class AucModule {
                 // CallMethod(vtable 槽位) → 方法名
                 val slot: Int = reader.readU16()
                 var a0: String = toStr(slot)
-                // [根修轮R2] 下标形态：本表 + CALL_METHOD 解析 = 虚分发上游
-                if (slot >= 0 && slot < slotNames.size() && slotNames[slot] != "") {
-                    a0 = slotNames[slot]
+                if (slot >= 0 && slot < slotNames.size() && slotNames.get(slot) != "") {
+                    a0 = slotNames.get(slot)
                 }
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numOpCodes.add(aucToVmOp(opcode))
@@ -1172,7 +1184,7 @@ class AucModule {
     /// 类 ID → 类名（越界回退：0 = "Any"，其余用数字串保持旧行为）。
     private fun classNameAt(classNames: List<String>, id: Int): String {
         if (id >= 0 && id < classNames.size()) {
-            return classNames[id]
+            return classNames.get(id)
         }
         if (id == 0) { return "Any" }
         return toStr(id)
@@ -1225,7 +1237,7 @@ class AucModule {
         if (idx < 0 || idx >= tags.size()) {
             return "LOAD_CONST_S"
         }
-        val tag: Int = tags[idx]
+        val tag: Int = tags.get(idx)
         if (tag == 0) { return "LOAD_CONST_I" }   // Int(i64)
         if (tag == 1) { return "LOAD_CONST_F" }   // Float(f64)
         if (tag == 3) { return "LOAD_CONST_B" }   // Bool
@@ -1237,14 +1249,14 @@ class AucModule {
     private fun nameAt(names: List<String>, idx: Int): String {
         if (idx < 0) { return "" }
         if (idx >= names.size) { return "" }
-        return names[idx]
+        return names.get(idx)
     }
 
     /// 按下标取原生函数形参个数（越界返回 0）。
     private fun paramAt(params: List<Int>, idx: Int): Int {
         if (idx < 0) { return 0 }
         if (idx >= params.size) { return 0 }
-        return params[idx]
+        return params.get(idx)
     }
 
     /// 统计文本行数（不含结尾换行；空串计 0 行）。
