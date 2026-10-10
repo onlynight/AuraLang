@@ -61,6 +61,11 @@ extern interface Memory {
     // ARC 引用计数（原子操作：LLVM atomicrmw）
     // ═══════════════════════════════════════════════════════════
 
+    // [MEM-FIX] 阶段区域原语(编译内存:前端 bump 区域 + 边界整块回收,
+    // 驱动 PhotonHatCompile 接线见其 main)。AOT 符号 Memory_regionEnter/
+    // Memory_regionReset(seed 后端 runtime.rs 已注册)。
+    @native fun regionEnter(): Long
+    @native fun regionReset(): Long
     @native(asm = "lock inc") fun arcIncrement(addr: Long): Long
     @native(asm = "lock dec") fun arcDecrement(addr: Long): Long
 }

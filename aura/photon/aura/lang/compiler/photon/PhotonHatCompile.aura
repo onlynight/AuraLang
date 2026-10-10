@@ -147,6 +147,28 @@ fun readPathEnv(name: String, default: String): String {
         return sb.build()
     }
 
+/// [MEM-FIX] 构建清单落盘:v1 + M/R 缓存 hex 路径 + F 行(源文件+内容哈希)。
+/// L 行由后端完成后追加(见缓存写尾段)。命中判定见 main 的缓存检查块。
+fun writeBuildManifest(seenList: String, cacheMain: String, cacheRt: String, cacheManifest: String): Unit {
+    var mf: String = "v1\nM " + cacheMain + "\nR " + cacheRt + "\n"
+    var fi: Int = 0
+    while (fi < seenList.length) {
+        var nl: Int = -1
+        var sc: Int = fi
+        while (sc < seenList.length) {
+            if (seenList.charCodeAt(sc) == 10) { nl = sc; break }
+            sc = sc + 1
+        }
+        if (nl < 0) { break }
+        val path: String = seenList.substring(fi, nl)
+        if (path != "" && FileUtils.exists(path)) {
+            mf = mf + "F " + fnvFile(path) + " " + path + "\n"
+        }
+        fi = nl + 1
+    }
+    FileUtils.writeText(cacheManifest, mf)
+}
+
 fun main(): Int {
     // 输入通道：**优先读环境变量**（AURA_HAT_AURA / _OUT / _MODULE / _SRC），
     // 未设置时回退到固定路径约定（build/hat-vmhost/current.{aura,hat}）。
@@ -235,6 +257,8 @@ fun main(): Int {
         // ── 前端：源码（含递归 import）→ 合并 HIR → SSA → HAT 文本 ──
         val tAll0: Long = tNs()
         val tLink0: Long = tNs()
+        // [MEM-FIX] 前端阶段区域进入(退出点 = HAT 落盘后的 Memory.regionReset)
+        Memory.regionEnter()
         val linker = AotModuleLinker()
         val hir: Hir = linker.link(srcPath)
         seenList = linker.seen
@@ -263,7 +287,17 @@ fun main(): Int {
         // 实例值实际不被使用，泄漏可忽略）。
         val hatFixed: String = HatGetPatchUtils.patchMissingGetters(hatText)
         val tPatch1: Long = tNs()
+        // [MEM-FIX] 构建清单落盘(前端 era 内写磁盘,不受区域重置影响):
+        // v1 + M/R 缓存 hex 路径 + F 行(每个 link 实际读取的源文件+内容哈希)。
+        writeBuildManifest(seenList, cacheMain, cacheRt, cacheManifest)
         FileUtils.writeText(hatPath, hatFixed)
+        if (Env.get("AURA_COMPILE_DIRECT", "") != "1") {
+            // [MEM-FIX] 前端区域重置:回收 link/parse/SSA1 全部分配(≈6GB)。
+            // 后端 compileHat 从磁盘重读 .hat(区域外新分配)。区域指针自此
+            // 悬空但不再被触碰(区域惯用法)。直连模式(AURA_COMPILE_DIRECT=1)
+            // 与区域互斥——SSA1 存活于区域,保留到直连编译完成后再兜底重置。
+            Memory.regionReset()
+        }
         if (Env.get("AURA_PHOTON_TIME", "") == "1") {
             println("[time] link=" + secOf(tSsa0 - tLink0)
                     + " ssaBuild=" + secOf(tHat0 - tSsa0)
@@ -292,7 +326,6 @@ fun main(): Int {
     if (directCompile) {
         result = pipeline.compileSsaDirect(ssa)
     } else {
-        FileUtils.writeText(hatPath, hatFixed)
         result = pipeline.compileHat(hatPath)
     }
     if (Env.get("AURA_PHOTON_TIME", "") == "1") {

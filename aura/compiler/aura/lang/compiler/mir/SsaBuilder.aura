@@ -4034,6 +4034,7 @@ class SsaBuilder {
         if (name == "exit" || name == "exitGroup") { return true }
         if (name == "arrayListOf" || name == "transform" || name == "fromCharCode") { return true }
         if (name == "ReadCStr" || name == "aura_mem_used_mb" || name == "__throw") { return true }
+        if (name == "RegionEnter" || name == "RegionReset") { return true }
         if (name.startsWith("__")) { return true }
         if (name.startsWith("Memory_")) { return true }
         if (name.startsWith("Collections.")) { return true }

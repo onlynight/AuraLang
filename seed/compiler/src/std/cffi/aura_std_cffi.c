@@ -842,8 +842,99 @@ static void aura_mem_dump_stats(void) {
     fflush(stderr);
 }
 
+// ── 区域分配(阶段回收)[MEM-FIX] 2026-10-10 ──────────────────────────
+// 编译器各阶段(前端 link/parse/SSA1)的碎片分配进 bump 区域;阶段边界
+// RegionReset 整体释放。无 GC 运行时的逐块 free 无法追回这些中间串
+// (57M alloc vs ~960 free),区域整块重置是唯一的批量回收手段。
+// 幸存者纪律:阶段产物(如 .hat 文本)必须在 RegionReset 前落盘/复制
+// 到区域外(驱动已按此接线:writeText 先于 RegionReset)。
+// 安全:区域块无 AuraMemHdr——aura_mem_free/aura_mem_realloc 对区域
+// 指针做**地址范围守卫**,直接走跳过/新分配路径,绝不读头、绝不 free
+// 区域内部指针(防 free 中间指针破坏堆)。
+static void **g_rgn_chunks = NULL;
+static int64_t *g_rgn_sizes = NULL;
+static int64_t g_rgn_n = 0;
+static int64_t g_rgn_cap = 0;
+static char *g_rgn_cur = NULL;
+static int64_t g_rgn_off = 0;
+static int64_t g_rgn_cur_cap = 0;
+static int64_t g_rgn_active = 0;
+static int64_t g_rgn_used = 0;
+
+static int g_rgn_has(int64_t need) {
+    if (g_rgn_cap >= g_rgn_n + 1) return 1;
+    int64_t nc = g_rgn_cap ? g_rgn_cap * 2 : 64;
+    void **nc1 = (void **)realloc(g_rgn_chunks, (size_t)(nc * (int64_t)sizeof(void *)));
+    if (!nc1) return 0;
+    int64_t *nc2 = (int64_t *)realloc(g_rgn_sizes, (size_t)(nc * (int64_t)sizeof(int64_t)));
+    if (!nc2) { g_rgn_chunks = nc1; return 0; }
+    g_rgn_chunks = (void **)nc1;
+    g_rgn_sizes = nc2;
+    g_rgn_cap = nc;
+    return 1;
+}
+
+static void *rgn_chunk(int64_t need) {
+    int64_t cap = (int64_t)64 << 20; /* 64MB 区块 */
+    if (cap < need) cap = ((need + 0xFFFF) / 0x10000) * 0x10000;
+    void *c = malloc((size_t)cap);
+    if (!c) return NULL;
+    if (!g_rgn_has(0)) return NULL;
+    g_rgn_chunks[g_rgn_n] = c;
+    g_rgn_sizes[g_rgn_n] = cap;
+    g_rgn_n += 1;
+    g_rgn_cur = (char *)c;
+    g_rgn_off = 0;
+    g_rgn_cur_cap = cap;
+    return c;
+}
+
+static void *rgn_alloc(int64_t n) {
+    int64_t need = ((n + 15) / 16) * 16; /* 16 对齐(Plan A:指针低位为 0) */
+    if (g_aura_mem_limit > 0 && g_aura_mem_used + need > g_aura_mem_limit) {
+        aura_mem_oom(need);
+    }
+    if (!g_rgn_cur || g_rgn_off + need > g_rgn_cur_cap) {
+        if (!rgn_chunk(need)) return NULL;
+    }
+    void *p = g_rgn_cur + g_rgn_off;
+    g_rgn_off += need;
+    g_rgn_used += need;
+    g_aura_mem_used += need; /* 区域占用计入闸门;Reset 时统一扣回 */
+    return p;
+}
+
+/// 进入区域:此后 aura_mem_alloc 的块走区域 bump 分配。
+int64_t RegionEnter(void) {
+    g_rgn_active = 1;
+    return 0;
+}
+
+/// 重置区域:释放全部区块(记账同步扣回),退出区域模式。
+int64_t RegionReset(void) {
+    int64_t i;
+    for (i = 0; i < g_rgn_n; i++) {
+        free(g_rgn_chunks[i]);
+    }
+    g_aura_mem_used -= g_rgn_used;
+    g_rgn_n = 0;
+    g_rgn_cur = NULL;
+    g_rgn_off = 0;
+    g_rgn_cur_cap = 0;
+    g_rgn_used = 0;
+    g_rgn_active = 0;
+    return 0;
+}
+
 /// 统一分配入口（带上限检查）。
 void *aura_mem_alloc(int64_t n) {
+    aura_mem_init();
+    if (n < 0) {
+        n = 0;
+    }
+    if (g_rgn_active) {
+        return rgn_alloc(n);
+    }
     aura_mem_init();
     if (n < 0) {
         n = 0;
@@ -917,6 +1008,23 @@ void *aura_mem_realloc(void *p, int64_t n) {
     if (n < 0) {
         n = 0;
     }
+    /* [MEM-FIX] 区域指针守卫(同 aura_mem_free):区域块走「新分配+拷贝」
+     * 路径(拷贝长度按新尺寸,区域块内越界读是安全的有意行为)。 */
+    if (g_rgn_active && g_rgn_n > 0) {
+        int64_t k;
+        for (k = 0; k < g_rgn_n; k++) {
+            char *cs = (char *)g_rgn_chunks[k];
+            if ((char *)p >= cs && (char *)p < cs + g_rgn_sizes[k]) {
+                /* 拷贝长度按区块剩余截断,避免越界读(区块尾部之后未映射) */
+                int64_t rem = (cs + g_rgn_sizes[k]) - (char *)p;
+                int64_t cp = (n < rem) ? n : rem;
+                char *np = (char *)aura_mem_alloc(n);
+                if (!np) return NULL;
+                if (cp > 0) memcpy(np, p, (size_t)cp);
+                return np;
+            }
+        }
+    }
     AuraMemHdr *h = (AuraMemHdr *)((char *)p - sizeof(AuraMemHdr));
     int64_t old = h->h.size;
     g_aura_mem_realloc_calls += 1;
@@ -963,6 +1071,19 @@ void *aura_mem_realloc(void *p, int64_t n) {
 void aura_mem_free(void *p) {
     if (!p) {
         return;
+    }
+    /* [MEM-FIX] 区域指针守卫:区域 bump 块无 AuraMemHdr,读头 = 读垃圾
+     * (垃圾若通过 hdr_sane 会被 free 到区域块中间 → 堆破坏)。区域内存
+     * 由 RegionReset 整体管理,这里直接跳过。 */
+    if (g_rgn_active && g_rgn_n > 0) {
+        int64_t k;
+        for (k = 0; k < g_rgn_n; k++) {
+            char *cs = (char *)g_rgn_chunks[k];
+            if ((char *)p >= cs && (char *)p < cs + g_rgn_sizes[k]) {
+                g_aura_mem_bad_hdr += 1;
+                return;
+            }
+        }
     }
     AuraMemHdr *h = (AuraMemHdr *)((char *)p - sizeof(AuraMemHdr));
     int64_t sz = h->h.size;

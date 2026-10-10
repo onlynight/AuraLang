@@ -79,7 +79,7 @@ class InstructionSelector {
     /// 桩（getAt 恒返回空串 —— `Env.get` 历史落点），要么布局分叉。保留名单
     /// 会把 guest 真实现抑制掉（`!isRuntimeSymbol` 跳过发射），实测
     /// `tl.get(0)` 返回空串。仅保留 guest 没有的 clear/hashMapPut。
-    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.clear,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,aura_heapbump,Heap_init,Heap_mmap"
+    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,RegionEnter,RegionReset,io_open,io_close,io_read,io_write,io_access,Collections.clear,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,aura_heapbump,Heap_init,Heap_mmap"
 
     /// `computeReachable` 的列表形式结果（供 `select()` 免分配查表）。
     private var reachableNames: List<String> = arrayListOf<String>()

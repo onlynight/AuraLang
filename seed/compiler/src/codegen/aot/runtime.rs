@@ -954,6 +954,12 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
     let (ret, params): (&'static str, &[&str]) = match name {
         // C 运行时函数（Phase 1: 使用 C 运行时 malloc/free，不依赖 aura_memory_*）
         "malloc" => ("i8*", &["i64"]),
+        // [MEM-FIX] 阶段区域原语:符号与 Photon 侧 Memory.aura 的 @native 声明一致
+        "Memory_regionEnter" => ("i64", &[]),
+        "Memory_regionReset" => ("i64", &[]),
+        // [MEM-FIX] 阶段区域原语(编译内存:前端 bump 区域 + 边界整块回收)
+        "RegionEnter" => ("i64", &[]),
+        "RegionReset" => ("i64", &[]),
         "free" => ("void", &[P]),
         // aura.math
         "aura_math_sin" | "aura_math_cos" | "aura_math_tan" | "aura_math_asin"

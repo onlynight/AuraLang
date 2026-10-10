@@ -3393,6 +3393,17 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     }],
                     Some(HirType::Named("String".into())),
                 ),
+                // [MEM-FIX] 阶段区域原语:前端(link/parse/SSA1)分配走 bump
+                // 区域,阶段边界 RegionReset 整体释放(驱动接线见
+                // PhotonHatCompile.aura)。全程 Int 签名,零参数。
+                "RegionEnter" => (
+                    vec![],
+                    Some(HirType::Named("Long".into())),
+                ),
+                "RegionReset" => (
+                    vec![],
+                    Some(HirType::Named("Long".into())),
+                ),
                 // `CString` 的逆操作：指针 / 地址 → Aura `String`。
                 // VM 侧由 `native_builtin_read_cstr` 按 NUL 结尾拷出真 `String`；
                 // AOT 侧恒等（`String ≡ i8*`）。
