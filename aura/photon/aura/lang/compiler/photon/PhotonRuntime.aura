@@ -322,6 +322,14 @@ object PhotonRuntime {
         // 内部 GetStdHandle/WriteFile 调用才满足 16 字节对齐（sub 0x50 时
         // 不对齐 ⇒ SSE 指令崩溃 ⇒ handler 静默失效，2026-10-06）。
         enc.emitAddRI("rsp", -88)
+        // [根修轮R1] 防递归守卫：handler 自身若再故障，VEH 会再次进入本
+        // 函数 → 无限递归 → 栈溢出静默死亡（比 WER 可见崩溃更糟）。置位
+        // 后重入直接返回（进程反正必死，一进程一转储即正确语义）。
+        enc.emitMovRIP("rax", "vehFlag")
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("ne", "avh_done")
+        enc.emitMovRI("rax", 1)
+        enc.emitStoreRIP("vehFlag", "rax")
         enc.emitMovMemDisp32("r10", "rcx", 0)        // r10 = ExceptionRecord
         enc.emitStoreMemDisp32("rsp", 48, "r10")
         enc.emitMovMemDisp32("r11", "rcx", 8)        // r11 = Context
@@ -367,8 +375,34 @@ object PhotonRuntime {
         enc.emitAddRI("r10", 1)
         enc.emitCmpRI("r10", 24)
         enc.emitJccLabel("ne", "sv_loop")
+        // [P5] rbp 链回溯 16 帧（crashBuf+248 起，每帧 8B=返回地址）：
+        // photon 帧为 rbp 帧（push rbp; mov rbp,rsp），[rbp+8]=返回地址、
+        // [rbp]=上一帧 rbp——精确调用链，替代裸栈扫描的噪声。
+        enc.emitMovMemDisp32("r11", "rsp", 56)       // r11 = Context
+        enc.emitMovMemDisp32("r10", "r11", 168)      // r10 = ctx.Rbp (+0xA8)
+        enc.emitLeaRIP("r9", "crashBuf")
+        enc.emitAddRI("r9", 248)
+        enc.emitXorRR("rcx", "rcx")
+        enc.emitLabel("sv_rbp_loop")
+        // [根修轮R1] 守卫：rbp 链走到根帧后 [rbp]=0（main 的入口 rbp），
+        // 无守卫的下一轮读 [0+8] = 近空解引用 ⇒ handler 自身再崩 ⇒
+        // 整个转储通道静默死亡（P5 第七轮「41 字节无转储」的真因——
+        // 此前误判为对齐/环境敏感，2026-10-10 审计定性）。双守卫：
+        // r10=0 即停；近空（<0x10000）垃圾 rbp 亦停。
+        enc.emitTestRR("r10", "r10")
+        enc.emitJccLabel("z", "sv_rbp_done")
+        enc.emitCmpRI("r10", 0x10000)
+        enc.emitJccLabel("be", "sv_rbp_done")
+        enc.emitMovMemDisp32("rax", "r10", 8)        // rax = [rbp+8] 返回地址
+        enc.emitStoreMemDisp32("r9", 0, "rax")
+        enc.emitMovMemDisp32("r10", "r10", 0)        // r10 = [rbp] 上一帧
+        enc.emitAddRI("r9", 8)
+        enc.emitAddRI("rcx", 1)
+        enc.emitCmpRI("rcx", 16)
+        enc.emitJccLabel("ne", "sv_rbp_loop")
+        enc.emitLabel("sv_rbp_done")
         enc.emitMovMemDisp32("rcx", "rsp", 40)       // handle
-        enc.emitMovRI32("r8d", 248)
+        enc.emitMovRI32("r8d", 376)
         enc.emitMovRR("r9", "rdx")
         enc.emitAddRI("r9", 56)                      // scratch（crashBuf+56）
         enc.emitXorRR("r10", "r10")
@@ -1119,7 +1153,12 @@ object PhotonRuntime {
     /// 语义：跳过前导 ASCII 空白（空格/`\t`/`\r`/`\n`），再从尾部剪掉空白；
     /// 结果串由 `String_substring` 完成（避免在此重复 bump 分配）。
     fun emitStringTrim(enc: X86Encoder): Unit {
-        enc.emitPrologue(0)
+        // [根修轮R1] Win64 callee-saved 契约：rdi 在宿主 RA 颜色池内
+        //（rbx,rsi,rdi,r12-r15），本函数旧版用 rdi 做扫描下标且不恢复 ⇒
+        // 宿主着色在 rdi 的值跨本调用被摧毁（布局轮盘的被调侧根因，
+        // 2026-10-10 审计 8 处违约）。帧 16B 存 rdi 入口值，出口恢复。
+        enc.emitPrologue(16)
+        enc.emitStackStore(-8, "rdi")
         enc.emitCallRel("strlen")
         enc.emitMovRR("r9", "rax")
         // 前导空白扫描（只认空格 0x20，与 VM `String.trim` 一致）
@@ -1151,6 +1190,7 @@ object PhotonRuntime {
         enc.emitMovRR("rdx", "rdi")
         enc.emitMovRR("r8", "r9")
         enc.emitCallRel("String_substring")
+        enc.emitStackLoad("rdi", -8)
         enc.emitEpilogue()
     }
 
@@ -1163,58 +1203,58 @@ object PhotonRuntime {
     ///   * 未找到 → 空串
     ///   * 找到 → `substring(i + m, len(str))`
     fun emitStringSubstringAfter(enc: X86Encoder): Unit {
-        enc.emitPrologue(0)
+        // [根修轮R1] 语义修复：旧版在 strlen(delimiter) 前把 rcx（str）清零——
+        // str 从此丢失，扫描循环读**绝对地址**（近空指针必崩）、命中分支
+        // substring(小整数) 同崩。凡被调且 len(str) ≥ m 即 0xC0000005。
+        // 修复：str/delim 存帧槽，扫描经 [base+index] 基址寻址；rdi 契约同修。
+        enc.emitPrologue(32)
+        enc.emitStackStore(-8, "rdi")
+        enc.emitStackStore(-16, "rcx")              // str
+        enc.emitStackStore(-24, "rdx")              // delimiter
         enc.emitCallRel("strlen")
-        enc.emitMovRR("r9", "rax")
-        // 分隔符长度 m
-        enc.emitXorRR("rcx", "rcx")
+        enc.emitMovRR("r9", "rax")                  // r9 = len(str)
         enc.emitMovRR("rcx", "rdx")
         enc.emitCallRel("strlen")
-        enc.emitMovRR("r11", "rax")
-        enc.emitXorRR("rcx", "rcx")     // 复位：下面从 str 开始扫
-        // 逐位置扫描 str[i..] 是否等于 delimiter
-        enc.emitXorRR("rdi", "rdi")     // i = 0
+        enc.emitMovRR("r11", "rax")                 // r11 = m
+        enc.emitXorRR("rdi", "rdi")                 // i = 0
         enc.emitLabel("ssa_scan")
-        enc.emitAddRR("rdi", "r11")
-        enc.emitCmpRR("rdi", "r9")
+        // i + m > len → notfound（先守卫，杜绝读越 NUL）
+        enc.emitMovRR("rax", "rdi")
+        enc.emitAddRR("rax", "r11")
+        enc.emitCmpRR("rax", "r9")
         enc.emitJccLabel("jg", "ssa_notfound")
-        // 比较 str[rdi..rdi+r11-1] 与 delimiter
-        enc.emitAddRR("rcx", "rdi")
-        enc.emitXorRR("r8", "r8")
+        enc.emitXorRR("r8", "r8")                   // j = 0
         enc.emitLabel("ssa_cmp")
         enc.emitCmpRR("r8", "r11")
         enc.emitJccLabel("jge", "ssa_hit")
-        enc.emitMovzxRegMemByte("eax", "rcx")
-        enc.emitTestRR("rax", "rax")
-        enc.emitJccLabel("jz", "ssa_miss")
-        enc.emitMovzxRegMemByte("ecx", "rdx")
+        // str[i+j] vs delim[j]：基址寻址（rcx = str + i 作 base）
+        enc.emitStackLoad("rcx", -16)
+        enc.emitAddRR("rcx", "rdi")
+        enc.emitMovzxRegMemIndexed("eax", "rcx", "r8")
+        enc.emitStackLoad("rcx", -24)
+        enc.emitMovzxRegMemIndexed("ecx", "rcx", "r8")
         enc.emitCmpRR("eax", "ecx")
         enc.emitJccLabel("jne", "ssa_miss")
-        enc.emitIncRR("rcx")
-        enc.emitIncRR("rdx")
         enc.emitIncRR("r8")
         enc.emitJmpLabel("ssa_cmp")
         enc.emitLabel("ssa_miss")
-        enc.emitXorRR("rcx", "rcx")
-        enc.emitAddRR("rdi", 1)
+        enc.emitIncRR("rdi")
         enc.emitJmpLabel("ssa_scan")
         enc.emitLabel("ssa_hit")
-        // 已命中：跳过分隔符，取 substring(i+m, len)
-        enc.emitSubRR("r9", "rdi")
-        enc.emitSubRR("r9", "r11")
-        enc.emitMovRR("rdx", "r11")
-        enc.emitAddRR("rdx", "rdi")    // start = i + m
-        enc.emitMovRR("r8", "r9")      // len = len - (i+m)
+        // substring(str, i + m, len - (i + m))
+        enc.emitMovRR("rdx", "rdi")
+        enc.emitAddRR("rdx", "r11")                 // start = i + m
+        enc.emitMovRR("r8", "r9")
+        enc.emitSubRR("r8", "rdx")                  // len = len - (i+m)
+        enc.emitStackLoad("rcx", -16)               // str
         enc.emitCallRel("String_substring")
+        enc.emitStackLoad("rdi", -8)
         enc.emitEpilogue()
-        // ⚠️ 上述命中分支结束即返回；未命中必须显式跳到这里。
-        // 但 emitJumpLabel 只发跳指令、不是块结束——故 `ssa_notfound` 需放在
-        // epilogue 之前以产生一个"分配空串"返回。为保持简单，此处用一个
-        // 返回空串桩：`String_fromCharCode(0)` 返回 1 字节 NUL 字符串，
-        // 与空串行为等价（strlen 返回 0）。
+        // 未找到 → 空串桩（`String_fromCharCode(0)`，语义不变）。
         enc.emitLabel("ssa_notfound")
         enc.emitMovRI("rcx", 0)
         enc.emitCallRel("String_fromCharCode")
+        enc.emitStackLoad("rdi", -8)
         enc.emitEpilogue()
     }
 
@@ -1224,46 +1264,51 @@ object PhotonRuntime {
     /// 大量调用。语义与 `String.substringBefore`：找到 delim 首次出现位置 i
     /// 返回 `substring(0, i)`；未找到返回原串。
     fun emitStringSubstringBefore(enc: X86Encoder): Unit {
-        enc.emitPrologue(0)
+        // [根修轮R1] 语义修复：同 substringAfter——旧版把 str 清零后扫绝对
+        // 地址；且 notfound 出口返回被清零的 rcx（=null）而非文档承诺的原串。
+        // 修复：基址寻址扫描 + notfound 返回原串；rdi 契约同修。
+        enc.emitPrologue(32)
+        enc.emitStackStore(-8, "rdi")
+        enc.emitStackStore(-16, "rcx")              // str
+        enc.emitStackStore(-24, "rdx")              // delimiter
         enc.emitCallRel("strlen")
-        enc.emitMovRR("r9", "rax")
-        enc.emitXorRR("rcx", "rcx")
+        enc.emitMovRR("r9", "rax")                  // r9 = len(str)
         enc.emitMovRR("rcx", "rdx")
         enc.emitCallRel("strlen")
-        enc.emitMovRR("r11", "rax")
-        enc.emitXorRR("rcx", "rcx")
-        enc.emitXorRR("rdi", "rdi")
+        enc.emitMovRR("r11", "rax")                 // r11 = m
+        enc.emitXorRR("rdi", "rdi")                 // i = 0
         enc.emitLabel("ssb_scan")
-        enc.emitAddRR("rdi", "r11")
-        enc.emitCmpRR("rdi", "r9")
+        enc.emitMovRR("rax", "rdi")
+        enc.emitAddRR("rax", "r11")
+        enc.emitCmpRR("rax", "r9")
         enc.emitJccLabel("jg", "ssb_notfound")
-        enc.emitAddRR("rcx", "rdi")
         enc.emitXorRR("r8", "r8")
         enc.emitLabel("ssb_cmp")
         enc.emitCmpRR("r8", "r11")
         enc.emitJccLabel("jge", "ssb_hit")
-        enc.emitMovzxRegMemByte("eax", "rcx")
-        enc.emitTestRR("rax", "rax")
-        enc.emitJccLabel("jz", "ssb_miss")
-        enc.emitMovzxRegMemByte("ecx", "rdx")
+        enc.emitStackLoad("rcx", -16)
+        enc.emitAddRR("rcx", "rdi")
+        enc.emitMovzxRegMemIndexed("eax", "rcx", "r8")
+        enc.emitStackLoad("rcx", -24)
+        enc.emitMovzxRegMemIndexed("ecx", "rcx", "r8")
         enc.emitCmpRR("eax", "ecx")
         enc.emitJccLabel("jne", "ssb_miss")
-        enc.emitIncRR("rcx")
-        enc.emitIncRR("rdx")
         enc.emitIncRR("r8")
         enc.emitJmpLabel("ssb_cmp")
         enc.emitLabel("ssb_miss")
-        enc.emitXorRR("rcx", "rcx")
-        enc.emitAddRR("rdi", 1)
+        enc.emitIncRR("rdi")
         enc.emitJmpLabel("ssb_scan")
         enc.emitLabel("ssb_hit")
-        // substring(0, i)：len = i
+        // substring(str, 0, i)
         enc.emitXorRR("rdx", "rdx")
         enc.emitMovRR("r8", "rdi")
+        enc.emitStackLoad("rcx", -16)
         enc.emitCallRel("String_substring")
+        enc.emitStackLoad("rdi", -8)
         enc.emitEpilogue()
         enc.emitLabel("ssb_notfound")
-        enc.emitMovRR("rax", "rcx")
+        enc.emitStackLoad("rax", -16)               // 原串（文档语义）
+        enc.emitStackLoad("rdi", -8)
         enc.emitEpilogue()
     }
 
@@ -1275,9 +1320,16 @@ object PhotonRuntime {
     /// ——足以让链接通过、语法分析器只用来做「存在性 / 非空」判定时行为一致。
     /// 若真需要多元素分裂，请改用 `arrayListOf` + 逐字符扫描。
     fun emitStringSplit(enc: X86Encoder): Unit {
-        enc.emitPrologue(0)
-        enc.emitCallRel("Collections_emptyList")
-        enc.emitCallRel("Collections_listAppend")
+        // [根修轮R1] 语义修复：旧版 emptyList 返回后未把 rax→rcx 就调
+        // listAppend——rcx 仍是入口 str ⇒ 列表头 24 字节 = 字符串内容被
+        // 解引用（[str+16] 当 items 指针写野）⇒ 堆腐坏/段错误。
+        // 修复：str 存帧槽，emptyList 返回后正确装 (rcx=list, rdx=str)。
+        enc.emitPrologue(16)
+        enc.emitStackStore(-8, "rcx")               // str
+        enc.emitCallRel("Collections_emptyList")    // rax = list
+        enc.emitMovRR("rcx", "rax")
+        enc.emitStackLoad("rdx", -8)
+        enc.emitCallRel("Collections_listAppend")   // rax = list
         enc.emitEpilogue()
     }
 
@@ -1296,7 +1348,9 @@ object PhotonRuntime {
     ///   * 逐字符比较，不等即 false
     /// 约定 `rax` 返回 1/0（与 Aura 的 Boolean → i64 一致）。
     fun emitStringStartsWith(enc: X86Encoder): Unit {
-        enc.emitPrologue(0)
+        // [根修轮R1] rdi 契约修复（同 emitStringTrim）
+        enc.emitPrologue(16)
+        enc.emitStackStore(-8, "rdi")
         // rcx = str, rdx = prefix
         enc.emitCallRel("strlen")
         enc.emitMovRR("r8", "rax")           // r8 = strlen(str)
@@ -1331,6 +1385,7 @@ object PhotonRuntime {
         enc.emitLabel("sw_false")
         enc.emitXorRR("rax", "rax")          // 返回 0
         enc.emitLabel("sw_done")
+        enc.emitStackLoad("rdi", -8)
         enc.emitEpilogue()
     }
 
@@ -3353,11 +3408,15 @@ object PhotonRuntime {
         enc.emitJmpLabel("cii_loop")
         enc.emitLabel("cii_found")
         enc.emitMovRR("rax", "rdi")  // return index
+        // [根修轮R1] rdi 恢复：-0x30 的保存此前存在但出口漏恢复，
+        // 每次 indexOf 调用都把宿主着色在 rdi 的值摧毁成残留扫描下标。
+        enc.emitStackLoad("rdi", -0x30)
         enc.emitStackLoad("rsi", -0x28)
         enc.emitStackLoad("rbx", -0x20)
         enc.emitEpilogue()
         enc.emitLabel("cii_notfound")
         enc.emitMovRI("eax", -1)  // return -1
+        enc.emitStackLoad("rdi", -0x30)
         enc.emitStackLoad("rsi", -0x28)
         enc.emitStackLoad("rbx", -0x20)
         enc.emitEpilogue()
@@ -3437,7 +3496,11 @@ object PhotonRuntime {
         // ⚠️ 手写桩（Memory_alloc 等）**不保存 callee-saved 寄存器**——
         // rdi/rsi/rbx 在调用后全灭（旧 grow 丢失 items/newCap/list 的
         // 实测根因）。全部经栈槽跨调用传递。
-        enc.emitPrologue(0x50)
+        // [根修轮R1] 本函数自身也对调用方负契约：rdi（copy 循环新块指针）、
+        // rsi（旧 items）出口必须恢复——帧 0x50→0x60，新增 -0x50/-0x58 两槽。
+        enc.emitPrologue(0x60)
+        enc.emitStackStore(-0x50, "rdi")
+        enc.emitStackStore(-0x58, "rsi")
         enc.emitStackStore(-0x10, "rcx")             // list
         enc.emitStackStore(-0x18, "rdx")             // value
         enc.emitMovMemDisp32("rax", "rcx", 0)        // len
@@ -3498,9 +3561,14 @@ object PhotonRuntime {
         enc.emitStackLoad("rdx", -0x10)
         enc.emitStoreMemDisp32("rdx", 0, "rcx")
         enc.emitMovRR("rax", "rdx")
+        // [根修轮R1] 出口恢复 rdi/rsi（契约）
+        enc.emitStackLoad("rsi", -0x58)
+        enc.emitStackLoad("rdi", -0x50)
         enc.emitEpilogue()
         enc.emitLabel("la_fail")
         enc.emitXorRR("eax", "eax")
+        enc.emitStackLoad("rsi", -0x58)
+        enc.emitStackLoad("rdi", -0x50)
         enc.emitEpilogue()
     }
 
@@ -3576,6 +3644,8 @@ object PhotonRuntime {
         enc.emitStoreIndexed8("rax", "rsp", 0, "rdi")
         // 返回被移除的元素
         enc.emitMovRR("rax", "rbx")
+        // [根修轮R1] rdi 恢复：-0x30 保存已在，出口此前漏恢复（同 indexOf）
+        enc.emitStackLoad("rdi", -0x30)
         enc.emitStackLoad("rsi", -0x28)
         enc.emitStackLoad("rbx", -0x20)
         enc.emitEpilogue()
@@ -4515,7 +4585,7 @@ object PhotonRuntime {
 
         // .data 段：toStrBuffer(32B) + arena(1MB) + bump 游标(8B) + 对象 bump(8B)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:256,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:512,canaryCount:8,canaryBuf:32"
 
         // 构建符号表（包含所有函数和 .data 符号
         // runtime 对象自带**一个空串常量** `@str.0`。
@@ -4995,7 +5065,7 @@ object PhotonRuntime {
         writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:256,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:512,canaryCount:8,canaryBuf:32"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
@@ -5458,7 +5528,7 @@ object PhotonRuntimeUtils {
         writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:256,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:512,canaryCount:8,canaryBuf:32"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
