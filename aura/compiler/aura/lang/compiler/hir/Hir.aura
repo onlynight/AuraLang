@@ -502,8 +502,13 @@ class HirLowerer {
     // 些包装类的 override 方法正是「无 this 展平」家族的全部成员（常规类
     // HashMap/FileUtils 等的既有调用图依赖裸名互调，不能波及）。
     private var valueLikeTypes: String = ",String,Byte,Boolean,Double,Unit,Char,Float,Int,Long,Short,"
-    private var localVarTys: String = ""
-    private var typeMemberTys: String = ""
+    // [MEM-FIX] 2026-10-10：原为 CSV 累积串（`k=v,k=v,…`）——每条声明整段
+    // 拷贝已累积串,O(条目²),AOT 无 GC 全驻留(OOM 归因 413MB×3936×6RA
+    // ≈2.4GB 的真身,RA 指纹 [67,65,71,65,71] 唯一命中 lowerValDecl/
+    // lowerVarDecl)。改为 List<String> 条目(`k=v`),追加 O(1)、查找
+    // 零分配线性扫描;csvLookup 语义(精确 key、首条命中)由 kvGet 保持。
+    private var localVarTys: List<String> = arrayListOf<String>()
+    private var typeMemberTys: List<String> = arrayListOf<String>()
     private var typeMethods: String = ""
     /// 是否正处在类型体的直接成员层（方法体内部为 false）
     private var inTypeBody: Boolean = false
@@ -792,7 +797,7 @@ class HirLowerer {
     /// 降级函数声明。
     fun lowerFunction(ast: Ast, id: Int): Int {
         // 2026-10-02 接收者类型传播：局部类型表按函数清空（作用域边界）。
-        this.localVarTys = ""
+        this.localVarTys = arrayListOf<String>()
         var name: String = ast.textOf(id)
         val retTy: String = ast.tyOf(id)
         val sp: Span = ast.spanOf(id)
@@ -810,7 +815,7 @@ class HirLowerer {
                 this.pendingMethodSelf, sp, HirUtils.hirNoKids())
             paramsStr = HirUtils.hirKidsAdd(paramsStr, thisParam)
             // 接收者登记（方法体 this.length / this.charCodeAt 的派发依赖）
-            this.localVarTys = this.localVarTys + ",this=" + this.pendingMethodSelf
+            this.localVarTys = this.kvAdd(this.localVarTys, "this", this.pendingMethodSelf)
             this.pendingMethodSelf = ""
         }
 
@@ -828,7 +833,7 @@ class HirLowerer {
                 // 接收者的 .size()/.get() 限定依赖它 —— 实测 registerAucClasses
                 // 的 names.size()/parentIds.get(i) 全靠此登记）。
                 if (pTy != "" && this.localVarTy(pName) == "") {
-                    this.localVarTys = this.localVarTys + "," + pName + "=" + pTy
+                    this.localVarTys = this.kvAdd(this.localVarTys, pName, pTy)
                 }
                 val pSp: Span = ast.spanOf(pId)
                 // 默认参数值：作为 HirParam 的 kids[0]，供调用点补齐实参
@@ -1033,9 +1038,9 @@ class HirLowerer {
         val cty: String = this.cleanTy(ty)
         if (cty != "") {
             if (this.inTypeBody && this.curTypeDecl != "") {
-                this.typeMemberTys = this.typeMemberTys + "," + this.curTypeDecl + "." + name + "=" + cty
+                this.typeMemberTys = this.kvAdd(this.typeMemberTys, this.curTypeDecl + "." + name, cty)
             }
-            this.localVarTys = this.localVarTys + "," + name + "=" + cty
+            this.localVarTys = this.kvAdd(this.localVarTys, name, cty)
         }
         return this.hir.add("HirValDecl", name, ty, sp, hirKids)
     }
@@ -1071,9 +1076,9 @@ class HirLowerer {
         val cty: String = this.cleanTy(ty)
         if (cty != "") {
             if (this.inTypeBody && this.curTypeDecl != "") {
-                this.typeMemberTys = this.typeMemberTys + "," + this.curTypeDecl + "." + name + "=" + cty
+                this.typeMemberTys = this.kvAdd(this.typeMemberTys, this.curTypeDecl + "." + name, cty)
             }
-            this.localVarTys = this.localVarTys + "," + name + "=" + cty
+            this.localVarTys = this.kvAdd(this.localVarTys, name, cty)
         }
         return this.hir.add("HirVarDecl", name, ty, sp, hirKids)
     }
@@ -1847,6 +1852,26 @@ class HirLowerer {
     }
 
     /// "k1=v1,k2=v2" 形式的 CSV 中按键取值（未命中返回 ""）。
+    /// [MEM-FIX] 键值条目追加（O(1) 摊还,替代 CSV 整段拷贝累积）。
+    private fun kvAdd(list: List<String>, key: String, value: String): List<String> {
+        list.add(key + "=" + value)
+        return list
+    }
+
+    /// 键值查找（精确 key、首条命中——csvLookup 同语义,零分配）。
+    private fun kvGet(list: List<String>, key: String): String {
+        if (key == "") { return "" }
+        var i: Int = 0
+        while (i < list.size) {
+            val e: String = list[i]
+            if (e.startsWith(key + "=")) {
+                return e.substring(key.length + 1, e.length)
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
     private fun csvLookup(csv: String, key: String): String {
         if (csv == "" || key == "") { return "" }
         var start: Int = 0
@@ -1870,13 +1895,13 @@ class HirLowerer {
 
     /// 局部量声明类型（localVarTys 查表）。
     private fun localVarTy(name: String): String {
-        return this.csvLookup(this.localVarTys, name)
+        return this.kvGet(this.localVarTys, name)
     }
 
     /// 类字段声明类型（typeMemberTys 查表，owner 为类/对象名）。
     private fun typeMemberTy(owner: String, field: String): String {
         if (owner == "" || field == "") { return "" }
-        return this.csvLookup(this.typeMemberTys, owner + "." + field)
+        return this.kvGet(this.typeMemberTys, owner + "." + field)
     }
 
     /// 类型体成员预登记（在正式降级**之前**对每个 Class/Struct/Object 调用，
@@ -1896,8 +1921,8 @@ class HirLowerer {
                 val fty: String = this.cleanTy(this.ast.tyOf(mKids[mi]))
                 if (fty != "") {
                     val key: String = name + "." + mn + "=" + fty
-                    if (this.csvLookup(this.typeMemberTys, name + "." + mn) == "") {
-                        this.typeMemberTys = this.typeMemberTys + "," + key
+                    if (this.kvGet(this.typeMemberTys, name + "." + mn) == "") {
+                        this.typeMemberTys = this.kvAdd(this.typeMemberTys, key, "")
                     }
                 }
             }
@@ -2535,7 +2560,7 @@ class HirLowerer {
                 // 接收者的 .size()/.get() 限定依赖它 —— 实测 registerAucClasses
                 // 的 names.size()/parentIds.get(i) 全靠此登记）。
                 if (pTy != "" && this.localVarTy(pName) == "") {
-                    this.localVarTys = this.localVarTys + "," + pName + "=" + pTy
+                    this.localVarTys = this.kvAdd(this.localVarTys, pName, pTy)
                 }
                 val pSp: Span = ast.spanOf(pId)
                 // 默认参数值：作为 HirParam 的 kids[0]，供调用点补齐实参

@@ -50,6 +50,22 @@ import aura.lang.compiler.hir.Hir
 // HAT v2.0
 import aura.lang.compiler.hir.hat.HatParser
 
+// ── 逐阶段耗时（AURA_PHOTON_TIME=1）─────────────────────────────
+// 独立命名（pipeTimeNs/pipeSecOf）：驱动侧已有 tNs/secOf，闭包内顶层
+// 函数同名会冲突。默认零输出，不影响协议标记。
+fun pipeTimeNs(): Long {
+    ClockImpl.init()
+    return ClockImpl.timeNs()
+}
+
+fun pipeSecOf(deltaNs: Long): String {
+    val sec: Long = deltaNs / 1000000000
+    val ms: Long = (deltaNs % 1000000000) / 1000000
+    val mss: String = toStr(ms)
+    val pad: String = if (mss.length == 1) { "00" } else if (mss.length == 2) { "0" } else { "" }
+    return toStr(sec) + "." + pad + mss
+}
+
 /// 新后端编译结果。
 class BackendResult {
     var success: Boolean = false
@@ -621,6 +637,7 @@ class PhotonPipeline {
     fun compileHat(hatPath: String): BackendResult {
         this.readVerboseFlag()
         this.vprintln("[photon] compileHat: " + hatPath)
+        val tHatP0: Long = pipeTimeNs()
 
         // Step 1: 读取 .hat 文件
         val hatText: String = FileUtils.readText(hatPath)
@@ -634,6 +651,10 @@ class PhotonPipeline {
         // Step 2: 解析 .hat → SSA MIR
         val parser = HatParserUtils.emptyParser()
         val ssaMIR: MirSsaProgram = parser.parse(hatText)
+        if (Env.get("AURA_PHOTON_TIME", "") == "1") {
+            println("[time] hatReadParse=" + pipeSecOf(pipeTimeNs() - tHatP0)
+                    + " hatChars=" + toStr(hatText.length))
+        }
         this.traceMark("ssa functions=" + ssaMIR.functionCount + " values=" + ssaMIR.valueCount)
         this.vprintln("  SSA functions=" + ssaMIR.functionCount +
                 " values=" + ssaMIR.valueCount +
@@ -664,12 +685,14 @@ class PhotonPipeline {
         this.vprintln("[Phase B-E] SSA MIR → LIR → ... → Executable")
 
         val result = BackendResult()
+        val tB0: Long = pipeTimeNs()
 
         // ── Phase B: MIR → LIR ──
         this.traceMark("phaseB")
         this.vprintln("[Phase B] MIR → LIR (Lowering)")
         val lowering = Lowering()
         var lir = lowering.lower(ssaMIR)
+        val tB1: Long = pipeTimeNs()
         this.vprintln("  LIR functions=" + lir.functionCount +
                 " values=" + lir.valueCount +
                 " blocks=" + lir.blockCount)
@@ -688,6 +711,7 @@ class PhotonPipeline {
         this.vprintln("[Phase C] LIR → Machine DAG (InstructionSelection)")
         val selector = InstructionSelectorUtils.emptySelector()
         var dag = selector.select(lir)
+        val tC1: Long = pipeTimeNs()
         this.vprintln("  DAG nodes=" + dag.nodeCount +
                 " instrs=" + dag.instrCount)
         // ⚠️ 2026-09-29 阶段释放点：LIR 在 Phase C 产出 DAG 后不再需要。
@@ -702,6 +726,7 @@ class PhotonPipeline {
         this.vprintln("[Phase D] Register Allocation + Peephole")
         val allocator = RegisterAllocatorUtils.emptyAllocator()
         allocator.allocate(dag)
+        val tRA1: Long = pipeTimeNs()
         // mergePhiHomesAfterRA 已停用（2026-10-06）：把 phi home 改写到入边 home
         // 会把循环携带变量钉在易失寄存器上（实测 VM runner 读循环 buf/cap
         // 双双读成垃圾：buf=装箱奇数、cap=0 ⇒ FileOps.read(count=0)）。P115
@@ -732,6 +757,7 @@ class PhotonPipeline {
         if (this.optLevel > 0) {
             peephole.optimize(dag)
         }
+        val tP1: Long = pipeTimeNs()
         this.vprintln("  peephole passes=" + peephole.getPassCount() +
                 " dag=" + dag.nodeCount + "/" + dag.instrCount)
         if (Env.get("AURA_PHOTON_STOP") == "D") {
@@ -748,6 +774,7 @@ class PhotonPipeline {
             }
         }
 
+        val tEmit0: Long = pipeTimeNs()
         // ── Phase E: 指令编码 → 目标文件 → 链接 ──
         this.traceMark("phaseE")
         this.peProbe("phaseE enter instrs=" + toStr(dag.instrCount) +
@@ -767,6 +794,7 @@ class PhotonPipeline {
         emitter.emitFunction(dag, moduleName)
         this.vprintln("    Step 4d: emit done")
         this.peProbe("emit done hexChars=" + toStr(emitter.getOutputHex().length) +
+        val tEmit1: Long = pipeTimeNs()
                 " relocs=" + toStr(emitter.getRelocRecords().length) +
                 " funcOffsets=" + toStr(emitter.getFuncOffsets().length))
         val machineCodeHex: String = emitter.getOutputHex()
@@ -819,6 +847,7 @@ class PhotonPipeline {
         result.coffSize = coffChars2 / 2
         this.peProbe("emit done coffChars=" + toStr(coffChars2))
         this.vprintln("    COFF 大小: " + result.coffSize + " 字节")
+        val tW1: Long = pipeTimeNs()
 
         // 生成目标文件路径
         val objPath = this.outDir + "/" + this.moduleName + ".obj"
@@ -828,6 +857,7 @@ class PhotonPipeline {
         this.peProbe("preWriteObj path=" + objPath + " chars=" + toStr(coffChars2))
         val wroteObj: Boolean = PhotonNativeWriter.writeObjectFilePieces(objPath, coffPieces)
         this.peProbe("writeObj ok=" + this.toStr(wroteObj))
+        val tO1: Long = pipeTimeNs()
         if (!wroteObj) {
             println("    ⚠ 二进制落盘失败，回退 hex 文本（需外部脚本转换）：" + objPath + ".hex")
             writer.writeObjectBinaryFile(objPath)
@@ -944,6 +974,16 @@ class PhotonPipeline {
         this.vprintln("══════════════════════════════════════════════")
         this.vprintln("Photon 管线完成 (HAT) — 目标文件已生成")
         this.vprintln("══════════════════════════════════════════════")
+        if (Env.get("AURA_PHOTON_TIME", "") == "1") {
+            println("[time] phaseB=" + pipeSecOf(tB1 - tB0)
+                    + " phaseC=" + pipeSecOf(tC1 - tB1)
+                    + " ra=" + pipeSecOf(tRA1 - tC1)
+                    + " peephole=" + pipeSecOf(tP1 - tRA1)
+                    + " emit=" + pipeSecOf(tEmit1 - tEmit0)
+                    + " writer=" + pipeSecOf(tW1 - tEmit1)
+                    + " objWrite=" + pipeSecOf(tO1 - tW1)
+                    + " runtimeObj+link=" + pipeSecOf(pipeTimeNs() - tO1))
+        }
 
         return result
     }

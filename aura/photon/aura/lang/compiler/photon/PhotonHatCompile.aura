@@ -261,6 +261,11 @@ fun main(): Int {
         // 实例值实际不被使用，泄漏可忽略）。
         val hatFixed: String = HatGetPatchUtils.patchMissingGetters(hatText)
         FileUtils.writeText(hatPath, hatFixed)
+        if (Env.get("AURA_PHOTON_TIME", "") == "1") {
+            println("[time] link=" + secOf(tSsa0 - tLink0)
+                    + " ssaBuild=" + secOf(tHat0 - tSsa0)
+                    + " hatSer+patch+write=" + secOf(tNs() - tHat0))
+        }
     }
 
     // ── HAT 文本 → SSA MIR → LIR → DAG → RegAlloc → X86 → COFF ──
@@ -284,6 +289,9 @@ fun main(): Int {
     } else {
         FileUtils.writeText(hatPath, hatFixed)
         result = pipeline.compileHat(hatPath)
+    }
+    if (Env.get("AURA_PHOTON_TIME", "") == "1") {
+        println("[time] backend=" + secOf(tNs() - tBack0))
     }
 
     // 输出 COFF hex（主对象 / runtime 对象）与链接信息
