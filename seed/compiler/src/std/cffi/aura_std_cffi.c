@@ -639,13 +639,133 @@ static void aura_lc_dump(FILE *f) {
     fprintf(f, "[aura] big-concat sites (result > 4KB; >=1MB shown):\n");
     for (i = 0; i < g_lc_n; i++) {
         int k = order[i];
-        if (g_lc_bytes[k] < (int64_t)(32 << 20)) continue;
+        if (g_lc_bytes[k] < (int64_t)(4 << 20)) continue;
         fprintf(f, "   big-concat ra=%p calls=%lld bytes=%lldMB max=%lldB\n",
                 g_lc_ra[k], (long long)g_lc_calls[k],
                 (long long)(g_lc_bytes[k] / (1024 * 1024)),
                 (long long)g_lc_maxes[k]);
     }
 }
+
+/* ── 内存区域取证（AURA_ATTR_DUMP=1 时随 OOM 统计打印）──────────────
+ * 背景：big-concat 表的 RA 曾落在主镜像 base+1GB 附近——既不在 exe
+ * .text 也不在当时已知的模块区间，事后拿 llvm-objdump 反查无门。归因
+ * 必须在 OOM 现场做：用 VirtualQuery 把地址空间走一遍，回答三个问题：
+ *   1) RA 落在哪种区域里：MEM_IMAGE（某模块内 → 反查模块名 + 模块内
+ *      RVA，归属当场闭合）/ MEM_PRIVATE + PAGE_EXECUTE_*（动态生成的
+ *      机器码，RWX/JIT 嫌疑）/ MEM_PRIVATE + PAGE_READWRITE（数据地址
+ *      被当成 RA——脏栈槽或坏 RA，表本身不可信）；
+ *   2) 全进程有哪些私有可执行区域（JIT/RWX 嫌疑人清单，正常应为空）；
+ *   3) 提交总量与区域计数，与 mem stats 口径互相印证。
+ * ─────────────────────────────────────────────────────────────── */
+#ifdef _WIN32
+
+static const char *aura_prot_str(DWORD p) {
+    switch (p & 0xFF) {
+    case PAGE_NOACCESS:           return "NA";
+    case PAGE_READONLY:           return "R";
+    case PAGE_READWRITE:          return "RW";
+    case PAGE_WRITECOPY:          return "WC";
+    case PAGE_EXECUTE:            return "X";
+    case PAGE_EXECUTE_READ:       return "XR";
+    case PAGE_EXECUTE_READWRITE:  return "XRW";
+    case PAGE_EXECUTE_WRITECOPY:  return "XWC";
+    default:                      return "?";
+    }
+}
+
+/// 单个地址的区域归属（一行）。镜像区域用 GetModuleHandleExW 反查模块，
+/// 打印模块完整路径 + 该地址的模块内 RVA——归属在现场直接闭合。
+static void aura_region_line(FILE *f, void *addr) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!f || !addr) return;
+    if (!VirtualQuery(addr, &mbi, sizeof(mbi))) {
+        fprintf(f, "   region %p: VirtualQuery failed (gle=%lu)\n",
+                addr, (unsigned long)GetLastError());
+        return;
+    }
+    fprintf(f,
+        "   region %p -> base=%p span=%lldMB state=%s type=%s prot=%s%s",
+        addr, mbi.BaseAddress, (long long)(mbi.RegionSize >> 20),
+        (mbi.State == MEM_COMMIT) ? "commit"
+            : (mbi.State == MEM_RESERVE) ? "reserve" : "free",
+        (mbi.Type == MEM_IMAGE) ? "image"
+            : (mbi.Type == MEM_MAPPED) ? "mapped" : "private",
+        aura_prot_str(mbi.Protect),
+        (mbi.Protect & PAGE_GUARD) ? "+guard" : "");
+    if (mbi.Type == MEM_IMAGE) {
+        HMODULE hm = NULL;
+        char name[MAX_PATH];
+        name[0] = '\0';
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)addr, &hm) &&
+            GetModuleFileNameA(hm, name, MAX_PATH)) {
+            fprintf(f, " module=%s rva=0x%llx", name,
+                    (unsigned long long)((uintptr_t)addr - (uintptr_t)hm));
+        } else {
+            fprintf(f, " module=(image-region, lookup failed)");
+        }
+    }
+    fputc('\n', f);
+}
+
+/// 全地址空间走查 + big-concat RA 逐个归属。
+/// 只展开三类区域：私有可执行（嫌疑人清单，正常为空）、镜像可执行
+/// （数量有限，顺带核对「已知模块区间」）、以及汇总计数；数据区域只进
+/// 汇总。RA 归属用与 aura_lc_dump 相同的 >=32MB 阈值。
+static void aura_memmap_dump(FILE *f) {
+    MEMORY_BASIC_INFORMATION mbi;
+    uintptr_t cursor = 0x10000;
+    int nCommit = 0, nImage = 0, nPrivExec = 0, nImgExec = 0, i;
+    int64_t commitB = 0, imageB = 0, privExecB = 0;
+    HMODULE exe = GetModuleHandleW(NULL);
+    if (!f) return;
+    fprintf(f, "[aura] mem map (exe base=%p)\n", (void *)exe);
+    while (VirtualQuery((LPCVOID)cursor, &mbi, sizeof(mbi)) == sizeof(mbi)) {
+        uintptr_t next = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        int exec = (mbi.Protect &
+                    (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                     PAGE_EXECUTE_WRITECOPY)) != 0;
+        if (mbi.State == MEM_COMMIT) {
+            nCommit += 1;
+            commitB += (int64_t)mbi.RegionSize;
+            if (mbi.Type == MEM_IMAGE) {
+                nImage += 1;
+                imageB += (int64_t)mbi.RegionSize;
+                /* 镜像可执行区域按模块合并展示负担大，只计数量；
+                 * RA 归属行（下方）会带模块名，够用。 */
+                if (exec) nImgExec += 1;
+            } else if (exec) {
+                /* 私有可执行 = 不属于任何模块的机器码：JIT/RWX/自改码
+                 * 嫌疑人。正常进程应为空，出现即全列。 */
+                nPrivExec += 1;
+                privExecB += (int64_t)mbi.RegionSize;
+                fprintf(f, "   PRIVATE-EXEC base=%p span=%lldMB prot=%s\n",
+                        mbi.BaseAddress, (long long)(mbi.RegionSize >> 20),
+                        aura_prot_str(mbi.Protect));
+            }
+        }
+        if (next <= cursor) break;   /* 地址空间走完（回绕保护） */
+        cursor = next;
+    }
+    fprintf(f,
+        "[aura] mem map summary: regions=%d commitMB=%lld imageRegions=%d "
+        "imageExec=%d imageMB=%lld privateExec=%d (%lldMB)\n",
+        nCommit, (long long)(commitB >> 20), nImage, nImgExec,
+        (long long)(imageB >> 20), nPrivExec, (long long)(privExecB >> 20));
+    fprintf(f, "[aura] big-concat RA attribution (sites >=32MB):\n");
+    for (i = 0; i < g_lc_n; i++) {
+        if (g_lc_bytes[i] < (int64_t)(32 << 20)) continue;
+        aura_region_line(f, g_lc_ra[i]);
+    }
+}
+
+#else  /* 非 Windows：保持可编译，取证只在 Windows 现场有意义 */
+
+static void aura_memmap_dump(FILE *f) { (void)f; }
+
+#endif /* _WIN32 */
 
 static void aura_mem_oom(int64_t need) {
     fflush(stdout);
@@ -715,6 +835,9 @@ static void aura_mem_dump_stats(void) {
                         (unsigned long long)((uintptr_t)g_attr_ra1[k2] - base2));
             }
         }
+        /* 区域取证：big-concat RA 落在哪类区域/哪个模块，OOM 现场闭合
+         * （事后反查对私有可执行区域和脏 RA 无能为力，见函数头说明）。 */
+        aura_memmap_dump(stderr);
     }
     fflush(stderr);
 }
@@ -1207,7 +1330,7 @@ const char *aura_string_concat(const char *a, int64_t alen, const char *b, int64
     // 必须返回新分配内存：同一表达式内的链式拼接（`a + b + c`）会把前一步的
     // 结果再当作输入，若返回共享 static 缓冲则前后互相覆盖。
     int64_t out_len = (int64_t)a_len + (int64_t)b_len;
-    if (out_len > 128) {
+    if (out_len > 256) {
         aura_lc_note(out_len, __builtin_return_address(0));
     }
     char *out = (char *)aura_mem_alloc(out_len + 1);
