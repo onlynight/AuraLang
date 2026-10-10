@@ -265,7 +265,9 @@ fun main(): Int {
         val tPatch1: Long = tNs()
         FileUtils.writeText(hatPath, hatFixed)
         if (Env.get("AURA_PHOTON_TIME", "") == "1") {
-            println("[time] hatSerialize=" + secOf(tSer1 - tHat0)
+            println("[time] link=" + secOf(tSsa0 - tLink0)
+                    + " ssaBuild=" + secOf(tHat0 - tSsa0)
+                    + " hatSerialize=" + secOf(tSer1 - tHat0)
                     + " getterPatch=" + secOf(tPatch1 - tPatch0)
                     + " hatWrite=" + secOf(tNs() - tPatch1))
         }
