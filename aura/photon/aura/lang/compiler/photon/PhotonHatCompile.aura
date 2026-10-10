@@ -247,6 +247,8 @@ fun main(): Int {
 
         val tHat0: Long = tNs()
         val hatText: String = HatSerializerUtils.serializeHat(ssa, moduleName)
+        val tSer1: Long = tNs()
+        val tPatch0: Long = tNs()
         // ── 溶解对象 getter 桩补写（2026-10-06）──
         //
         // 前端对部分 `object X`（实测 MirUtils，aura/lang/compiler/mir/Mir.aura）
@@ -260,11 +262,12 @@ fun main(): Int {
         //（每次调用分配 64 字节零块；被溶解对象当前都是无字段纯静态单例，
         // 实例值实际不被使用，泄漏可忽略）。
         val hatFixed: String = HatGetPatchUtils.patchMissingGetters(hatText)
+        val tPatch1: Long = tNs()
         FileUtils.writeText(hatPath, hatFixed)
         if (Env.get("AURA_PHOTON_TIME", "") == "1") {
-            println("[time] link=" + secOf(tSsa0 - tLink0)
-                    + " ssaBuild=" + secOf(tHat0 - tSsa0)
-                    + " hatSer+patch+write=" + secOf(tNs() - tHat0))
+            println("[time] hatSerialize=" + secOf(tSer1 - tHat0)
+                    + " getterPatch=" + secOf(tPatch1 - tPatch0)
+                    + " hatWrite=" + secOf(tNs() - tPatch1))
         }
     }
 
@@ -365,10 +368,25 @@ object HatGetPatchUtils {
     fun patchMissingGetters(hat: String): String {
         // 1) 收集被调的 X（去重 CSV；禁 ArrayList.add——红线①）。
         var calledCsv: String = ""
+        // [SLOW-FIX] 2026-10-10：已判定 X 的记忆（无论有无定义）。
+        // 原实现只记忆「确认缺失」的 X——**有定义的 X 不进 calledCsv**，
+        // 同名 X 的每个调用点都对全文做一次 `indexOf("@fn X_getInstance(")`
+        // （纯 charCodeAt 循环，6.2MB 文本 ~150ms/次）。vmhost 闭包实测
+        // 928 个 `_getInstance` 调用点 × 全文扫 = 151.8s（AURA_PHOTON_TIME
+        // 实测，占全构建一半）；[getPatch] 全程 0 次触发——绝大多数 X 有
+        // 定义。加 resolvedCsv 后每个 distinct X 只扫一次全文。
+        var resolvedCsv: String = ""
         var i: Int = 0
+        // 诊断计数器（AURA_PHOTON_TIME=1 时输出）：定位 getterPatch 实测
+        // 150-200s 与部件估算（全文扫 4ms×928 + 外层扫 30ms）的 25 倍缺口。
+        var dbgOuter: Int = 0
+        var dbgCalls: Int = 0
+        var dbgSites: Int = 0
+        val dbgOn: Boolean = Env.get("AURA_PHOTON_TIME", "") == "1"
         val n: Int = hat.length
         // 诊断探针（按需打开）：println("[getPatch0] len=" + toStr(n))
         while (i + 7 <= n) {
+        dbgOuter = dbgOuter + 1
             // 手工匹配 "@call @"（7 字符）：禁带 from 的 indexOf（红线②）。
             // ⚠️ charCodeAt 必须 `as Int` 再比较（裸比较在 seed AOT 下恒假，
             // 实测 P136 桩补写静默不触发，2026-10-06）。
@@ -376,34 +394,59 @@ object HatGetPatchUtils {
                 (hat.charCodeAt(i + 2) as Int) == 97 && (hat.charCodeAt(i + 3) as Int) == 108 &&
                 (hat.charCodeAt(i + 4) as Int) == 108 && (hat.charCodeAt(i + 5) as Int) == 32 &&
                 (hat.charCodeAt(i + 6) as Int) == 64) {
-                // 提取名字到 '('
+                dbgCalls = dbgCalls + 1
+                // [SLOW-FIX] 2026-10-10：名字提取改两遍切片。
+                // 原实现逐字符 `name = name + hat.substring(j, j+1)`——每个
+                // 字符 2 次小分配（substring + concat），实测 43.9 万字符 =
+                // 88 万次分配。无 free 运行时下分配成本随堆驻留劣化（微基
+                // 准：同循环 50MB 堆 244ms → 4.3GB 堆 166s，~700×），本函数
+                // 在 7GB 堆上实测 152-240s、占全构建一半。改为：先扫到终
+                // 结符，再一次 substring（每站点 1 次分配）；后缀判定走
+                // charCodeAt 零分配（95,101,99,110,97,116,115,110,73,116,
+                // 101,103 = "_getInstance" 逆序）。语义等价：原「遇空白弃
+                // 名」= 新「终结符必须为 '('」。
                 var j: Int = i + 7
-                var name: String = ""
                 while (j < n) {
                     val c: Int = hat.charCodeAt(j) as Int
-                    if (c == 40) { break }
-                    if (c == 10 || c == 32) { name = ""; break }
-                    name = name + hat.substring(j, j + 1)
+                    if (c == 40 || c == 10 || c == 32) { break }
                     j = j + 1
                 }
-                // 精确后缀 `_getInstance`（12 字符）
-                if (name.length > 12) {
-                    val cut: Int = name.length - 12
-                    if (name.substring(cut, name.length) == "_getInstance") {
-                        val x: String = name.substring(0, cut)
-                        if (x != "" && calledCsv.indexOf("\n" + x + "\n") < 0) {
-                            // 有定义则跳过（`@fn X_getInstance(` 全文检索）
-                            val defNeedle: String = "@fn " + x + "_getInstance("
-                            if (hat.indexOf(defNeedle) < 0) {
-                                println("[getPatch] " + x)
-                                calledCsv = calledCsv + "\n" + x + "\n"
-                            }
+                if (j > i + 19 && j < n && (hat.charCodeAt(j) as Int) == 40 &&
+                    (hat.charCodeAt(j - 1) as Int) == 101 &&
+                    (hat.charCodeAt(j - 2) as Int) == 99 &&
+                    (hat.charCodeAt(j - 3) as Int) == 110 &&
+                    (hat.charCodeAt(j - 4) as Int) == 97 &&
+                    (hat.charCodeAt(j - 5) as Int) == 116 &&
+                    (hat.charCodeAt(j - 6) as Int) == 115 &&
+                    (hat.charCodeAt(j - 7) as Int) == 110 &&
+                    (hat.charCodeAt(j - 8) as Int) == 73 &&
+                    (hat.charCodeAt(j - 9) as Int) == 116 &&
+                    (hat.charCodeAt(j - 10) as Int) == 101 &&
+                    (hat.charCodeAt(j - 11) as Int) == 103 &&
+                    (hat.charCodeAt(j - 12) as Int) == 95) {
+                    dbgSites = dbgSites + 1
+                    val x: String = hat.substring(i + 7, j - 12)
+                    if (x != "" && calledCsv.indexOf("\n" + x + "\n") < 0 &&
+                        resolvedCsv.indexOf("\n" + x + "\n") < 0) {
+                        // 有定义则跳过（`@fn X_getInstance(` 全文检索——
+                        // 每个 distinct X 只做一次，见 resolvedCsv 说明）
+                        val defNeedle: String = "@fn " + x + "_getInstance("
+                        if (hat.indexOf(defNeedle) < 0) {
+                            println("[getPatch] " + x)
+                            calledCsv = calledCsv + "\n" + x + "\n"
+                        } else {
+                            resolvedCsv = resolvedCsv + "\n" + x + "\n"
                         }
                     }
                 }
                 i = j
             }
             i = i + 1
+        }
+        if (dbgOn) {
+            println("[getPatch-dbg] outer=" + toStr(dbgOuter)
+                    + " calls=" + toStr(dbgCalls)
+                    + " sites=" + toStr(dbgSites))
         }
         if (calledCsv == "") {
             return hat
