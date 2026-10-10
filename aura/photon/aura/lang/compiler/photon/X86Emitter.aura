@@ -1025,70 +1025,15 @@ class X86Emitter {
 
             // ── 返回值落地（Win64：返回值固定放在 rax）──
             //
-            // 调用结果必须显式搬到该节点被分配的寄存器/溢出槽，否则后续
-            // 使用者按 `node.reg` 取到的仍是**旧值**（实测 `"x = " + toStr(x)`
-            // 里 strcat 的第二个实参读成第一个实参的寄存器；println 拿不到实参）。
-            val dst: String = this.regOfNode(node)
-            // 诊断：打印调用结果的落点决策（有界）。
-            // ⚠️ 2026-10-08 P1-3：默认静默（`AURA_X86_TRACE=1` 打开）。
-            if (Env.get("AURA_X86_TRACE", "") == "1" && this.slotDiagCount < 200) {
-                // P388：限定 escapeConstValue 内的 strcat/println——跨调用存活的落槽取证。
-                if ((funcName == "strcat" || funcName == "println")
-                        && this.curEmitFuncName == "AucLoaderUtils_escapeConstValue") {
-                    this.slotDiagCount = this.slotDiagCount + 1
-                    println("[CALLDST] aux=" + funcName + " nodeId=" + toStr(nodeId)
-                            + " node.id=" + toStr(node.id) + " reg=[" + node.reg + "] dst=[" + dst + "]"
-                            + " nodeSlot=" + toStr(this.nodeSlot(node.id))
-                            + " base=" + toStr(this.curSpillBase)
-                            + " n=" + toStr(this.extraSlotCount))
-                }
-            }
-            // 返回值落地：无论 dst 是什么，都必须把 rax 搬到目标位置。
-            // 若节点被 spill 到栈槽，直接存栈；否则 mov 到目标寄存器。
-            // 若 dst == "rax"（默认 fallback），也必须存栈，否则后续 call 会覆写 rax。
-            if (dst.startsWith("stack:")) {
-                // ⚠️ 与读侧同一道归一化：偏移 0 是**非法**槽位 —— `[rbp+0]` 正是
-                // `push rbp` 保存下来的 rbp 本身，写坏它 `leave`/`ret` 必崩。
-                // 解析不出/为 0 时按**本调用节点**各自分配（见 `slotForNode`）。
-                // ⚠️ **不再**把偏移 0 改写成 `-8`（见 `regOfNode` 的说明）：
-                // 那会让所有调用结果共用 `-8`。正常路径 dst 已是本节点专有槽。
-                val dstOff: Int = this.stackOffsetOf(dst)
-                this.cdMark("st-call-stack", dstOff)
-                this.enc.emitStackStore(dstOff, "rax")
-            } else if (dst != "" && dst != "rax") {
-                this.enc.emitMovRR(dst, "rax")
-            } else {
-                // dst == "rax" 或 dst == "" - 必须保存到栈槽
-                // ⚠️ 偏移必须是**负值**：`emitStackStore` 编码的是 `[rbp + offset]`，
-                // 而帧空间在 rbp **下方**（prologue = `push rbp; mov rbp,rsp; sub rsp,N`）。
-                //   旧代码：注释写「默认栈槽 (rbp-8)」，实际传的是 `8` ⇒ 落到
-                //   `[rbp+8]`，而 `[rbp+8]` 正是**返回地址槽**；`getSpillOffset`
-                //   返回的也是「自 rbp 向下的距离」正值，同样被直接当偏移用。
-                //   后果：**每次调用都把返还值写进返回地址槽** ⇒ 函数一被调用就崩。
-                //   实测自举 `Main.exe`：`BOOT-1 → BOOT-1a → CEA-1 → CEA-2 → 0xC0000005`
-                //（崩在 `Env.get` 返回之后的 `streq(s, "")`；反汇编可见每条 call 后都是
-                // `movq %rax, 0x8(%rbp)`）。
-                // ⚠️ 必须同时校验 `getSpillOffset != 0`：RA 会出现「`isSpilled` 为真
-                // 但偏移为 0」的不一致状态，此时直接取负会写出 `[rbp+0]`
-                //（= **保存的 rbp 本身**）而不是帧槽 —— 实测正是如此：
-                // `movq %rax, (%rbp)`，随后读回也是 0，`streq` 对垃圾指针比较而崩。
-                // 偏移为 0 时退回与读侧一致的确定性兜底槽 `-8`。
-                // ⚠️ 每个节点**各自**一个槽（`slotForNode` 首次分配、按 nodeId 记忆）。
-                //
-                // 绝不能让所有调用结果共用同一个槽：实测自举 `Main.exe` 里
-                // `Env.get` 的结果先写入，随即被 `streq` 的返回值 `1` 覆写 ⇒
-                // 后面读回的 `s` 变成 `1` ⇒ `strlen(1)` → `0xC0000005`。
-                //
-                // ⚠️ **绝不可**在此处再登记 `setNodeSlot(nodeId, spillOffset)`：
-                // 旧实现正是在这里把 `slotForNode` 刚分配的槽（如 `-16`）**覆盖**成
-                // 兜底的 `-8`（未 spill 时 `spillOffset` 恒为 -8）⇒ 写侧落 `-16`、
-                // 读侧（`regOfNodeRaw` 按 `nodeSlot` 取）落 `-8` ⇒ **两端不一致且
-                // 所有调用结果共用 `-8`**。实测崩溃序列：`Env.get` 结果写 `-16`，
-                // `streq` 的返回值写 `-8`，读回 `-8` 得 `1`，`strlen(1)` → 崩。
-                val storeOff: Int = this.slotForNode(nodeId)
-                this.cdMark("st-call-else", storeOff)
-                this.enc.emitStackStore(storeOff, "rax")
-            }
+            // [根修轮R2 S1-ii] call 结果**一律立即落本节点专属栈槽**
+            //（slotForNode 首次分配、按 nodeId 记忆；phi 别名链在函数内
+            // 解析）。旧实现 dst 为着色寄存器时发 `mov reg, rax`——寄存器
+            // 落点与读侧槽回退路径构成 P266 双家漂移；Call 节点现于
+            // regOfNodeRaw 同步跳过着色/溢出，读写两端同槽即一致。
+            // 调用点 stack map 记录保持不变（见下）。
+            val storeOff: Int = this.slotForNode(nodeId)
+            this.cdMark("st-call-slot", storeOff)
+            this.enc.emitStackStore(storeOff, "rax")
         }
     }
 
@@ -1609,6 +1554,13 @@ class X86Emitter {
     }
 
     private fun regOfNodeRaw(node: DagNode): String {
+        // [根修轮R2 S1-ii] Call 节点读写两端一律走本节点专属槽（写侧见
+        // `emitCall` 落地段）：跳过着色/溢出判定，P266「写寄存器/读槽」
+        // 双家漂移家族以 node.kind 为锚点结构性消失。嵌套调用（S1-iii）
+        // 随之闭环：内层结果先落槽，外层实参装载自槽读取，无寄存器窗口。
+        if (node != null && node.kind == "Call") {
+            return "stack:" + toStr(this.slotForNode(node.id))
+        }
         // ① 有效 RA 颜色优先（2026-10-04）：颜色寄存器是值的权威所在地。
         //    旧实现 nodeSlot 表**先于**颜色判定 —— 某节点只要被任何早期
         //    兜底物化占过一个槽（③ slotForNode），此后即便 RA 给它着了

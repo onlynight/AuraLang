@@ -1453,7 +1453,7 @@ class Vm {
             return
         } else if (funcName == "Collections.getAt" || funcName == "aura.lang.std.Collections.getAt"
             || funcName == "__get") {
-            // `.auc` 里 `xs[0]` / `xs.get(0)` → `Collections.getAt(list, idx)`
+            // `.auc` 里 `xs[0]` / `xs[0)` → `Collections.getAt(list, idx)`
             val idx: Any = this.stack.pop()
             val list: Any = this.stack.pop()
             this.stack.push(VmCollections.vmListAt(list, idx))
@@ -1630,7 +1630,7 @@ class Vm {
             this.stack.push(VmOps.vmSubstr(s, st, en - st))
             return
         } else if (funcName == "Collections.set" || funcName == "aura.lang.std.Collections.set") {
-            // xs.set(idx, value)：栈顶 value、其下 idx、其下列表
+            // xs[idx] = value：栈顶 value、其下 idx、其下列表
             val value: Any = this.stack.pop()
             val idx: Any = this.stack.pop()
             val list: Any = this.stack.pop()
@@ -2083,7 +2083,7 @@ class Vm {
     private fun popLocalsPool(): VmLocals {
         val n: Int = this.localsPool.size()
         if (n > 0) {
-            val v: VmLocals = this.localsPool.get(n - 1)
+            val v: VmLocals = this.localsPool[n - 1]
             this.localsPool.removeAt(n - 1)
             return v
         }
@@ -2427,7 +2427,7 @@ class Vm {
     private fun loadClosure(closureData: String): Unit {
         val parts: List<String> = VmOps.split(closureData, "|")
         if (parts.size >= 1) {
-            this.makeClosure(parts.get(0), parts)
+            this.makeClosure(parts[0], parts)
         }
     }
 
@@ -2453,7 +2453,7 @@ class Vm {
             }
             var j: Int = n - 1
             while (j >= 0) {
-                caps.add(tmp.get(j))
+                caps.add(tmp[j])
                 j = j - 1
             }
         }
@@ -2499,7 +2499,7 @@ class Vm {
         if (argc > 0) {
             var j: Int = argc - 1
             while (j >= 0) {
-                this.stack.push(argVals.get(j))
+                this.stack.push(argVals[j])
                 j = j - 1
             }
         }
@@ -2520,7 +2520,7 @@ class Vm {
             this.running = false
             return
         }
-        this.stack.push(caps.get(idx))
+        this.stack.push(caps[idx])
     }
 
     /// 原位改写当前闭包的第 idx 个 upvalue（P1.3，闭包间共享可变状态）。
@@ -2537,7 +2537,7 @@ class Vm {
             return
         }
         val v: Any = this.stack.pop()
-        caps.set(idx, v)
+        caps[idx] = v
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -2986,10 +2986,10 @@ class Vm {
             if (parts.size < 5) {
                 continue
             }
-            val target: Int = VmOps.toI32(parts.get(0))
-            val slot: Int = VmOps.toI32(parts.get(2))
-            val catchType: String = parts.get(3)
-            val frame: Int = VmOps.toI32(parts.get(4))
+            val target: Int = VmOps.toI32(parts[0])
+            val slot: Int = VmOps.toI32(parts[2])
+            val catchType: String = parts[3]
+            val frame: Int = VmOps.toI32(parts[4])
             if (!this.exceptionMatches(ex, catchType)) {
                 continue
             }
@@ -3343,8 +3343,8 @@ class Vm {
             this.running = false
             return
         }
-        val targetSymbol: String = parts.get(2)
-        val localFuncIdxStr: String = parts.get(3)
+        val targetSymbol: String = parts[2]
+        val localFuncIdxStr: String = parts[3]
         val localFuncIdx: Int = VmOps.toI32(localFuncIdxStr)
 
         // 尝试从导出表查找目标符号（同模块场景）
@@ -3352,7 +3352,7 @@ class Vm {
         if (exportEntry != "") {
             val expParts: List<String> = splitPipe(exportEntry)
             if (expParts.size >= 2) {
-                val expFuncIdx: Int = VmOps.toI32(expParts.get(1))
+                val expFuncIdx: Int = VmOps.toI32(expParts[1])
                 // 通过函数表按索引调用
                 val funcName: String = findFuncNameByIndex(expFuncIdx)
                 if (funcName != "") {
@@ -3380,19 +3380,19 @@ class Vm {
         }
 
         // P2.3：模块注册表查询（已登记模块的导出符号诊断）
-        val regExports: String = this.loadedModuleExports.getOrDefault(parts.get(1), "")
+        val regExports: String = this.loadedModuleExports.getOrDefault(parts[1], "")
         if (regExports != "") {
             val regEntry: String = this.lookupExportIn(regExports, targetSymbol)
             if (regEntry != "") {
-                this.error = "CallExternal: module=" + parts.get(1)
+                this.error = "CallExternal: module=" + parts[1]
                     + " symbol=" + targetSymbol
                     + " (registered but its code is not loaded into this VM instance)"
             } else {
-                this.error = "CallExternal: module=" + parts.get(1)
+                this.error = "CallExternal: module=" + parts[1]
                     + " symbol=" + targetSymbol + " (registered module lacks this symbol)"
             }
         } else {
-            this.error = "CallExternal: module=" + parts.get(1)
+            this.error = "CallExternal: module=" + parts[1]
                 + " symbol=" + targetSymbol
                 + " (cross-module linking requires loaded module registry)"
         }
@@ -3563,8 +3563,8 @@ class Vm {
         var i: Int = 0
         val n: Int = this.funcNamesL.size()
         while (i < n) {
-            if (this.funcNamesL.get(i) == funcName) {
-                return this.funcOffL.get(i)
+            if (this.funcNamesL[i] == funcName) {
+                return this.funcOffL[i]
             }
             i = i + 1
         }
@@ -3576,8 +3576,8 @@ class Vm {
         var i: Int = 0
         val n: Int = this.funcNamesL.size()
         while (i < n) {
-            if (this.funcNamesL.get(i) == funcName) {
-                return this.funcPcL.get(i)
+            if (this.funcNamesL[i] == funcName) {
+                return this.funcPcL[i]
             }
             i = i + 1
         }
@@ -3676,12 +3676,12 @@ class Vm {
         }
         var sj: Int = 0
         while (sj < n) {
-            val jop: Int = this.opCodes.get(sj)
+            val jop: Int = this.opCodes[sj]
             if (jop == 50 || jop == 51 || jop == 52) {
-                if (this.argCounts.get(sj) > 0) {
-                    val t: Int = VmOps.toI32(this.argStrs.get(sj * 3))
+                if (this.argCounts[sj] > 0) {
+                    val t: Int = VmOps.toI32(this.argStrs[sj * 3))
                     if (t >= 0 && t < n) {
-                        isTarget.set(t, 1)
+                        isTarget[t] = 1
                     }
                 }
             }
@@ -3703,7 +3703,7 @@ class Vm {
                 var k2: Int = i + 1
                 val kEnd: Int = i + span
                 while (k2 < kEnd) {
-                    if (k2 < n && isTarget.get(k2) == 1) {
+                    if (k2 < n && isTarget[k2) == 1) {
                         blocked = 1
                         k2 = kEnd
                     }
@@ -3721,18 +3721,18 @@ class Vm {
         var pi: Int = 0
         val pn: Int = planR.size()
         while (pi < pn) {
-            val r: Int = planR.get(pi)
-            val f: Int = planF.get(pi)
+            val r: Int = planR[pi)
+            val f: Int = planF[pi)
             val span: Int = this.fuseSpanOf(f)
             val pair: List<String> = this.buildFusePair(r, f)
-            this.opCodes.set(r, f)
+            this.opCodes[r] = f
             this.setArgsRow(r, pair)
-            this.ops.set(r, this.fuseNameOf(f))
+            this.ops[r] = this.fuseNameOf(f)
             var kk: Int = 1
             while (kk < span) {
-                this.opCodes.set(r + kk, Opcodes.OP_NOP)
+                this.opCodes[r + kk] = Opcodes.OP_NOP
                 this.setArgsRow(r + kk, arrayListOf<String>())
-                this.ops.set(r + kk, "")
+                this.ops[r + kk] = ""
                 kk = kk + 1
             }
             pi = pi + 1
@@ -3743,16 +3743,16 @@ class Vm {
     /// 6 连守卫（204）保留 store/load 同槽检查（tmpW==tmpR）——不同槽
     /// 时原第二分支会错误假设同槽，此处不融合（放弃该对，语义安全）。
     private fun matchFuseAt(r: Int, n: Int): Int {
-        val op: Int = this.opCodes.get(r)
+        val op: Int = this.opCodes[r]
         if (r < n - 5
             && op == 10
-            && this.opCodes.get(r + 1) == 5
-            && this.opCodes.get(r + 2) == 32
-            && this.opCodes.get(r + 3) == 11
-            && this.opCodes.get(r + 4) == 10
-            && this.opCodes.get(r + 5) == 51) {
-            val a3s: String = this.argStrs.get((r + 3) * 3)
-            val a4s: String = this.argStrs.get((r + 4) * 3)
+            && this.opCodes[r + 1) == 5
+            && this.opCodes[r + 2) == 32
+            && this.opCodes[r + 3) == 11
+            && this.opCodes[r + 4) == 10
+            && this.opCodes[r + 5) == 51) {
+            val a3s: String = this.argStrs[(r + 3) * 3)
+            val a4s: String = this.argStrs[(r + 4) * 3)
             if (a3s == a4s) {
                 return 204
             }
@@ -3760,34 +3760,34 @@ class Vm {
         }
         if (r < n - 3
             && op == 10
-            && this.opCodes.get(r + 1) == 5
-            && this.isArithOp(this.opCodes.get(r + 2))
-            && this.opCodes.get(r + 3) == 11) {
+            && this.opCodes[r + 1) == 5
+            && this.isArithOp(this.opCodes[r + 2))
+            && this.opCodes[r + 3) == 11) {
             return 202
         }
         if (r < n - 3
             && op == 10
-            && this.opCodes.get(r + 1) == 10
-            && this.isArithOp(this.opCodes.get(r + 2))
-            && this.opCodes.get(r + 3) == 11) {
+            && this.opCodes[r + 1) == 10
+            && this.isArithOp(this.opCodes[r + 2))
+            && this.opCodes[r + 3) == 11) {
             return 203
         }
 if (false && (r < n - 5
             && op == 10
-            && this.opCodes.get(r + 1) == 10
-            && this.opCodes.get(r + 2) == 32
-            && this.opCodes.get(r + 3) == 11
-            && this.opCodes.get(r + 4) == 10
-            && this.opCodes.get(r + 5) == 51) {
+            && this.opCodes[r + 1) == 10
+            && this.opCodes[r + 2) == 32
+            && this.opCodes[r + 3) == 11
+            && this.opCodes[r + 4) == 10
+            && this.opCodes[r + 5) == 51) {
             return 205
         }
-        if (op == 10 && this.opCodes.get(r + 1) == 11) {
+        if (op == 10 && this.opCodes[r + 1) == 11) {
             return 206
         }
-        if (op == 5 && this.opCodes.get(r + 1) == 11) {
+        if (op == 5 && this.opCodes[r + 1) == 11) {
             return 200
         }
-        if (op == 10 && this.opCodes.get(r + 1) == 51) {
+        if (op == 10 && this.opCodes[r + 1) == 51) {
             return 201
         }
         return 0
@@ -3803,10 +3803,10 @@ if (false && (r < n - 5
     /// 融合对的参数构造（从 argStrs 读取原行参数）。
     private fun buildFusePair(r: Int, f: Int): List<String> {
         val pair: List<String> = arrayListOf<String>()
-        val a0s: String = this.argStrs.get(r * 3)
-        val a1s: String = this.argStrs.get((r + 1) * 3)
+        val a0s: String = this.argStrs[r * 3)
+        val a1s: String = this.argStrs[(r + 1) * 3)
         if (f == 202 || f == 203 || f == 205) {
-            val a3s: String = this.argStrs.get((r + 3) * 3)
+            val a3s: String = this.argStrs[(r + 3) * 3)
             if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
             if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
             if (f == 205) {
@@ -3815,15 +3815,15 @@ if (false && (r < n - 5
                 // arg3 落 argNoneMark → 0 → 跳回第 0 行（banner 重启 /
                 // loop1M 吞输出的实相）。
                 if (a3s != "") { pair.add(a3s) } else { pair.add("-1") }
-                val a5s: String = this.argStrs.get((r + 5) * 3)
+                val a5s: String = this.argStrs[(r + 5) * 3)
                 if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
             } else {
-                pair.add(toStr(this.opCodes.get(r + 2)))
+                pair.add(toStr(this.opCodes[r + 2)))
                 if (a3s != "") { pair.add(a3s) } else { pair.add("0") }
             }
         } else if (f == 204) {
-            val a3s: String = this.argStrs.get((r + 3) * 3)
-            val a5s: String = this.argStrs.get((r + 5) * 3)
+            val a3s: String = this.argStrs[(r + 3) * 3)
+            val a5s: String = this.argStrs[(r + 5) * 3)
             if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
             if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
             pair.add(toStr(32))
@@ -3831,7 +3831,7 @@ if (false && (r < n - 5
             if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
         } else if (f == 206 || f == 201) {
             // 两参融合对：arg1 在 r+1 行（STORE 槽 / JIF 跳转目标）。
-            val a1b: String = this.argStrs.get((r + 1) * 3)
+            val a1b: String = this.argStrs[(r + 1) * 3)
             if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
             if (a1b != "") { pair.add(a1b) } else { pair.add("0") }
         } else if (f == 200) {
@@ -3991,7 +3991,7 @@ if (false && (r < n - 5
     private fun writeArgsRow(temp: List<String>): Unit {
         var k: Int = 0
         while (k < 3) {
-            val v: String = if (k < temp.size()) { temp.get(k) } else { "" }
+            val v: String = if (k < temp.size()) { temp[k) } else { "" }
             this.argStrs.add(v)
             if (k == 0) {
                 // P391：arg0/arg1 整数预解析（文本路径与预解码路径同构）。
@@ -4030,42 +4030,42 @@ if (false && (r < n - 5
     private fun setArgsRow(r: Int, pair: List<String>): Unit {
         var k: Int = 0
         while (k < 3) {
-            val v: String = if (k < pair.size()) { pair.get(k) } else { "" }
-            this.argStrs.set(r * 3 + k, v)
+            val v: String = if (k < pair.size()) { pair[k) } else { "" }
+            this.argStrs[r * 3 + k] = v
             if (k == 0) {
                 // P391：融合改写行同步更新 arg0/1Ints（P271 重新启用后
                 // arg0/1Ints 不再由 buildLoadCaches 事后重建）。
                 if (VmOps.isAllDigits(v)) {
-                    this.arg0Ints.set(r, VmOps.toI32(v))
+                    this.arg0Ints[r] = VmOps.toI32(v)
                 } else {
-                    this.arg0Ints.set(r, this.argNoneMark)
+                    this.arg0Ints[r] = this.argNoneMark
                 }
             } else if (k == 1) {
                 if (VmOps.isAllDigits(v)) {
-                    this.arg1Ints.set(r, VmOps.toI32(v))
+                    this.arg1Ints[r] = VmOps.toI32(v)
                 } else {
-                    this.arg1Ints.set(r, this.argNoneMark)
+                    this.arg1Ints[r] = this.argNoneMark
                 }
             } else if (k == 2) {
                 if (VmOps.isAllDigits(v)) {
-                    this.arg2Ints.set(r, VmOps.toI32(v))
+                    this.arg2Ints[r] = VmOps.toI32(v)
                 } else {
-                    this.arg2Ints.set(r, this.argNoneMark)
+                    this.arg2Ints[r] = this.argNoneMark
                 }
             }
             k = k + 1
         }
         if (pair.size() > 3) {
-            this.arg3Ints.set(r, VmOps.toI32(pair.get(3)))
+            this.arg3Ints[r] = VmOps.toI32(pair[3])
         } else {
-            this.arg3Ints.set(r, this.argNoneMark)
+            this.arg3Ints[r] = this.argNoneMark
         }
         if (pair.size() > 4) {
-            this.arg4Ints.set(r, VmOps.toI32(pair.get(4)))
+            this.arg4Ints[r] = VmOps.toI32(pair[4])
         } else {
-            this.arg4Ints.set(r, this.argNoneMark)
+            this.arg4Ints[r] = this.argNoneMark
         }
-        this.argCounts.set(r, pair.size())
+        this.argCounts[r] = pair.size()
     }
 
     private fun arg0IntOf(): Int {
@@ -4113,7 +4113,7 @@ if (false && (r < n - 5
         val n: Int = this.constLines.size()
         if (idx >= 0 && idx < n) {
             // P359：转义态统一反转义
-            return unescapeConst(this.constLines.get(idx))
+            return unescapeConst(this.constLines[idx))
         }
         return unescapeConst(VmOps.getFieldAt(this.constPool, idx, "\n"))
     }
@@ -4347,25 +4347,25 @@ if (false && (r < n - 5
 
     /// 诊断：读融合后指令流的操作码名（dump 用，不进热路径）。
     fun debugOpName(i: Int): String {
-        return this.ops.get(i)
+        return this.ops[i)
     }
 
     /// 诊断：读融合后指令流的参数个数。
     fun debugArgCount(i: Int): Int {
-        return this.argCounts.get(i)
+        return this.argCounts[i]
     }
 
     /// 诊断：读融合后指令流的第 j 个参数。
     fun debugArg(i: Int, j: Int): String {
         if (j <= 2) {
-            return this.argStrs.get(i * 3 + j)
+            return this.argStrs[i * 3 + j)
         }
         if (j == 3) {
-            val v: Int = this.arg3Ints.get(i)
+            val v: Int = this.arg3Ints[i)
             if (v != this.argNoneMark) { return toStr(v) }
         }
         if (j == 4) {
-            val v: Int = this.arg4Ints.get(i)
+            val v: Int = this.arg4Ints[i)
             if (v != this.argNoneMark) { return toStr(v) }
         }
         return ""
