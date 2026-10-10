@@ -25,6 +25,9 @@
 #include <ctype.h>
 #include <sys/stat.h>
 #include <errno.h>
+/* 区域区块的页级分配(避免 CRT 堆空闲链滞留;驱动链接 kernel32 ✓) */
+extern void *VirtualAlloc(void *, unsigned long long, unsigned long, unsigned long);
+extern int VirtualFree(void *, unsigned long long, unsigned long);
 
 // 跨平台时间获取
 #ifdef _WIN32
@@ -875,9 +878,12 @@ static int g_rgn_has(int64_t need) {
 }
 
 static void *rgn_chunk(int64_t need) {
+    /* 区块走 VirtualAlloc:Reset 时 VirtualFree(MEM_RELEASE) 把整个区块
+     * 直接归还 OS(避免 CRT 堆空闲链长期占用物理页——本轮实测 WS 峰值
+     * 比 used 峰值高 ~5GB 的主因);64KB 对齐满足 Plan A。 */
     int64_t cap = (int64_t)64 << 20; /* 64MB 区块 */
     if (cap < need) cap = ((need + 0xFFFF) / 0x10000) * 0x10000;
-    void *c = malloc((size_t)cap);
+    void *c = VirtualAlloc(NULL, (unsigned long long)cap, 0x3000 /*RESERVE|COMMIT*/, 4 /*READWRITE*/);
     if (!c) return NULL;
     if (!g_rgn_has(0)) return NULL;
     g_rgn_chunks[g_rgn_n] = c;
@@ -914,7 +920,9 @@ int64_t RegionEnter(void) {
 int64_t RegionReset(void) {
     int64_t i;
     for (i = 0; i < g_rgn_n; i++) {
-        free(g_rgn_chunks[i]);
+        if (g_rgn_chunks[i]) {
+            VirtualFree(g_rgn_chunks[i], 0, 0x8000 /*MEM_RELEASE*/);
+        }
     }
     g_aura_mem_used -= g_rgn_used;
     g_rgn_n = 0;
