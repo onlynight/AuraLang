@@ -517,10 +517,11 @@ class Vm {
             // P392：热路径读 Memory 裸缓冲（值域 < 2^31，read64 as Int 无损）。
             val opCode: Int = Memory.read64(this.mcOpCodes + this.ip * 8) as Int
             this.ip = this.ip + 1
-            // [P5-EXECDEBUG] 有界执行探针（前 500 条）
-            if (this.instructionCount < 500) {
-                println("[EXEC] ip=" + toStr(this.ip - 1) + " op=" + toStr(opCode) + " fn=" + this.currentFunc)
-            }
+            // [P5-EXECDEBUG] 探针已移除（根修轮R3）：`instructionCount` 在本循环
+            // 内不递增，500 条的界形同虚设 → 每指令一次字符串拼装 + println ⇒
+            // arena 分配风暴，256MB 堆在 ~1M 条指令内打满（[OOM] HEAP FULL，
+            // exit=70）。崩溃取证已由 runtime VEH 双守卫转储（R1）+ /FIXED 定址
+            //（R3）接管，无需进程内探针。
 
 
             // 注释行 / 空行（加载期已编号为 OP_NOP——buildLineCache 与
