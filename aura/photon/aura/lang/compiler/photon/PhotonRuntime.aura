@@ -2109,6 +2109,25 @@ object PhotonRuntime {
     /// ```
     fun emitObjectAlloc(enc: X86Encoder): Unit {
         enc.emitPrologue(0x50)
+        // [根修轮R4] 分配环形缓冲：记录 (size, 调用点)，OOM 时倒出最后 32 笔。
+        // [根修轮R4] 分配环形缓冲（复用 crashBuf 尾部：ring@+3600，idx@+3592；
+        // VEH 转储最多用到 +2344，互不重叠）。记录 (size, 调用点) ×32，
+        // OOM 时倒出——分配风暴主体自曝。
+        enc.emitLeaRIP("r11", "crashBuf")
+        enc.emitMovMemDisp32("rdx", "r11", 3592)     // rdx = idx
+        enc.emitAndRI("rdx", 31)
+        enc.emitMovRR("r10", "rdx")
+        enc.emitShlRI("r10", 4)                      // r10 = slot*16
+        enc.emitAddRI("r10", 3600)
+        enc.emitAddRR("r11", "r10")                  // r11 = crashBuf+3600+slot*16
+        enc.emitStoreMemDisp32("r11", 0, "rcx")      // size
+        enc.emitMovMemDisp32("rdx", "rbp", 8)        // ret addr = [rbp+8]（调用点实名）
+        enc.emitStoreMemDisp32("r11", 8, "rdx")
+        enc.emitLeaRIP("rdx", "crashBuf")
+        enc.emitMovMemDisp32("rdx", "rdx", 3592)
+        enc.emitAddRI("rdx", 1)
+        enc.emitLeaRIP("rax", "crashBuf")
+        enc.emitStoreMemDisp32("rax", 3592, "rdx")
 
         // 保存 callee-saved
         enc.emitStackStore(-0x30, "r12")
@@ -3290,6 +3309,17 @@ object PhotonRuntime {
         // 复用）。52×exit=70 家族（值模型死循环分配）的第一现场 = 谁在循环
         // 分配——exe 区返回地址直接给出循环体与内建名。
         enc.emitLeaRIP("r9", "crashBuf")
+        enc.emitLeaRIP("r8", "crashBuf")
+        enc.emitAddRI("r8", 3600)
+        enc.emitXorRR("r10", "r10")
+        enc.emitLabel("oom_ringdump")
+        enc.emitMovMemDisp32("rax", "r8", 0)
+        enc.emitStoreMemDisp32("r9", 0, "rax")
+        enc.emitAddRI("r8", 8)
+        enc.emitAddRI("r9", 8)
+        enc.emitAddRI("r10", 1)
+        enc.emitCmpRI("r10", 64)
+        enc.emitJccLabel("ne", "oom_ringdump")
         enc.emitMovRR("r8", "rsp")
         enc.emitXorRR("r10", "r10")
         enc.emitLabel("oom_dump")
@@ -3304,7 +3334,7 @@ object PhotonRuntime {
         enc.emitCallImport("GetStdHandle")
         enc.emitMovRR("rcx", "rax")                  // handle
         enc.emitLeaRIP("rdx", "crashBuf")            // buf
-        enc.emitMovRI32("r8d", 512)                  // len
+        enc.emitMovRI32("r8d", 1024)                 // len = ring 512 + stack 512
         enc.emitLeaRIP("r9", "crashBuf")
         enc.emitAddRI("r9", 600)                     // &written（crashBuf 内草稿位）
         enc.emitXorRR("r10", "r10")
