@@ -3286,6 +3286,30 @@ object PhotonRuntime {
     /// 输出：`[OOM] HEAP FULL`
     fun emitHeapOom(enc: X86Encoder): Unit {
         enc.emitPrologue(0x20)
+        // [根修轮R4] OOM 现场转储：64 层裸栈 → crashBuf → stdout（VEH 模式
+        // 复用）。52×exit=70 家族（值模型死循环分配）的第一现场 = 谁在循环
+        // 分配——exe 区返回地址直接给出循环体与内建名。
+        enc.emitLeaRIP("r9", "crashBuf")
+        enc.emitMovRR("r8", "rsp")
+        enc.emitXorRR("r10", "r10")
+        enc.emitLabel("oom_dump")
+        enc.emitMovMemDisp32("rax", "r8", 0)
+        enc.emitStoreMemDisp32("r9", 0, "rax")
+        enc.emitAddRI("r8", 8)
+        enc.emitAddRI("r9", 8)
+        enc.emitAddRI("r10", 1)
+        enc.emitCmpRI("r10", 64)
+        enc.emitJccLabel("ne", "oom_dump")
+        enc.emitMovRI("ecx", -11)
+        enc.emitCallImport("GetStdHandle")
+        enc.emitMovRR("rcx", "rax")                  // handle
+        enc.emitLeaRIP("rdx", "crashBuf")            // buf
+        enc.emitMovRI32("r8d", 512)                  // len
+        enc.emitLeaRIP("r9", "crashBuf")
+        enc.emitAddRI("r9", 600)                     // &written（crashBuf 内草稿位）
+        enc.emitXorRR("r10", "r10")
+        enc.emitStoreMemDisp32("rsp", 32, "r10")     // 第 5 参 = NULL（复用 [rbp] 槽，exit 不返回）
+        enc.emitCallImport("WriteFile")
         enc.emitLeaRIP("rdx", "oomMsg")
         enc.emitMovRI("eax", 0x4D4F4F5B)
         enc.emitStoreMemDisp32("rdx", 0, "rax")
