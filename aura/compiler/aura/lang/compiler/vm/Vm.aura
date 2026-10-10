@@ -517,6 +517,10 @@ class Vm {
             // P392：热路径读 Memory 裸缓冲（值域 < 2^31，read64 as Int 无损）。
             val opCode: Int = Memory.read64(this.mcOpCodes + this.ip * 8) as Int
             this.ip = this.ip + 1
+            // [P5-EXECDEBUG] 有界执行探针（前 500 条）
+            if (this.instructionCount < 500) {
+                println("[EXEC] ip=" + toStr(this.ip - 1) + " op=" + toStr(opCode) + " fn=" + this.currentFunc)
+            }
 
 
             // 注释行 / 空行（加载期已编号为 OP_NOP——buildLineCache 与
