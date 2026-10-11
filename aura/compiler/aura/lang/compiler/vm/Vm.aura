@@ -157,6 +157,12 @@ class Vm {
     // 指令计数
     private var instructionCount: Int = 0
 
+    /// [R10] LOAD_LOCAL 槽位轨迹配额
+    private var ldTraceCap: Int = 60
+
+    /// [R10] STORE 轨迹配额
+    private var stTraceCap: Int = 80
+
     /// [根修轮R4] op62 诊断计数（独立计数器，独立于 instructionCount）
     private var p62DiagCount: Int = 0
 
@@ -520,6 +526,10 @@ class Vm {
             // P392：热路径读 Memory 裸缓冲（值域 < 2^31，read64 as Int 无损）。
             val opCode: Int = Memory.read64(this.mcOpCodes + this.ip * 8) as Int
             this.ip = this.ip + 1
+            // [R10] 槽位轨迹（判决实验）
+            if (this.ldTraceCap > 0) {
+                this.ldTraceCap = this.ldTraceCap - 1
+            }
             // [P5-EXECDEBUG] 探针已移除（根修轮R3）：`instructionCount` 在本循环
             // 内不递增，500 条的界形同虚设 → 每指令一次字符串拼装 + println ⇒
             // arena 分配风暴，256MB 堆在 ~1M 条指令内打满（[OOM] HEAP FULL，
@@ -693,6 +703,11 @@ class Vm {
         if (op == 10) {
             val slot: Int = this.arg0IntOf()
             val v: Any = this.locals.getSlot(slot)
+            // [R10] 槽位轨迹（判决实验：args 解码漂移 vs VmLocals 存取漂移）
+            if (this.ldTraceCap > 0) {
+                this.ldTraceCap = this.ldTraceCap - 1
+                println("[LD] slot=" + toStr(slot) + " val=[" + VmOps.toStrAny(v) + "]")
+            }
             if (v == null) {
                 this.stack.push(toAny(0))
             } else {
@@ -701,6 +716,11 @@ class Vm {
         } else if (op == 11) {
             val slot: Int = this.arg0IntOf()
             val sv: Any = this.stack.pop()
+            // [R10] STORE 轨迹（抓 slot12="2" 的写入者）
+            if (this.stTraceCap > 0) {
+                this.stTraceCap = this.stTraceCap - 1
+                println("[ST] slot=" + toStr(slot) + " val=[" + VmOps.toStrAny(sv) + "]")
+            }
             this.locals.putSlot(slot, sv)
         } else if (op == 5) {
             // P404：[LC] 装载链诊断探针摘除（2026-10-06 追踪用，git 历史
@@ -2259,22 +2279,15 @@ class Vm {
     private fun getField(fieldName: String): Unit {
         val obj: Any = this.stack.pop()
         if (fieldName == "length" || fieldName == "size" || fieldName == "count") {
-            // [根修轮R9] 家族A根修：长度 = 对 obj 直接 charCodeAt NUL 扫描。
-            // runtime toStr = 纯 Int 转换器，对字符串打印指针十进制（判决
-            // 实验 obj=[543060976] len=9）⇒ 旧径 .length = 指针位数 = 垃圾。
-            var n7: Int = 0
-            while (obj.charCodeAt(n7) != 0) {
-                n7 = n7 + 1
-            }
-            this.stack.push(n7)
+            // [根修轮R10·家族A根修v2] 长度 = runtime strlen 裸名直调。
+            // v1 (charCodeAt NUL 扫描) 在此布局漂移成 2——宿主编译的
+            // String 方法调用逐位点漂移；runtime strlen = 手写汇编已审计，
+            // 裸名原生调用 = 布局无关确定性通道。
+            this.stack.push(strlen(obj))
             return
         }
         if (fieldName == "isEmpty") {
-            var n: Int = 0
-            while (obj.charCodeAt(n) != 0) {
-                n = n + 1
-            }
-            if (n == 0) {
+            if (strlen(obj) == 0) {
                 this.stack.push(true)
             } else {
                 this.stack.push(false)
