@@ -188,6 +188,19 @@ class Vm {
     private var heapKindKeys: List<String> = arrayListOf<String>()
     private var heapKindVals: List<String> = arrayListOf<String>()
 
+    // [R33] 全局变量线性登记
+    private var gKeys: List<String> = arrayListOf<String>()
+    private var gVals: List<Any> = arrayListOf<Any>()
+    // [R33] 对象字段扁平登记：键 = "<objKey>|<fieldName>"
+    private var ofKeys: List<String> = arrayListOf<String>()
+    private var ofVals: List<Any> = arrayListOf<Any>()
+    // [R33] 对象类名登记：键 = objKey
+    private var ocKeys: List<String> = arrayListOf<String>()
+    private var ocVals: List<String> = arrayListOf<String>()
+    // [R33] 类继承登记：键 = 类名
+    private var cpKeys: List<String> = arrayListOf<String>()
+    private var cpVals: List<String> = arrayListOf<String>()
+
     // ── 运行期 arena 水位 / 值栈容量探针（P1-RETAIN 诊断，2026-10-08）──
     //
     // 外部 memprof.py 只能读进程 RSS——它是**不可回收的**：bump arena 是 64 MiB
@@ -502,7 +515,22 @@ class Vm {
             if (pid >= 0 && pid < names.size() && pid != i) {
                 parent = names[pid]
             }
-            this.classParents.put(names[i], parent)
+            // [R33] 线性登记（覆盖式）
+            var pi1: Int = 0
+            val pn1: Int = this.cpKeys.size()
+            var had1: Int = 0
+            while (pi1 < pn1) {
+                if (this.cpKeys[pi1] == names[i]) {
+                    this.cpVals[pi1] = parent
+                    had1 = 1
+                    pi1 = pn1
+                }
+                pi1 = pi1 + 1
+            }
+            if (had1 == 0) {
+                this.cpKeys.add(names[i])
+                this.cpVals.add(parent)
+            }
             i = i + 1
         }
     }
@@ -3044,10 +3072,12 @@ class Vm {
         // 类名键取栈值的 toStrAny 形态——与 get/set/方法解析同一转换路径；
         // 不得对 Long 局部变量做 toStr（装箱路径不一致会导致键不匹配）。
         val objKey: String = VmOps.toStrAny(this.stack.peek())
-        this.objectClass.put(objKey, className)
-        this.objectFields.put(objKey, HashMap<String, Any>())
-        // P1.5：登记堆分配（DEC_REF 释放与活跃计数的数据源）
-        this.heapKinds.put(objKey, "object")
+        // [R33] 线性登记
+        this.ocKeys.add(objKey)
+        this.ocVals.add(className)
+        this.heapKindKeys.add(objKey)
+        this.heapKindVals.add("object")
+        // [R33] 旧 heapKinds(HashMap).put 调用窗骰跳过——线性登记已完成
     }
 
     /// 读取对象字段（含字符串/集合的**内建成员**）。
@@ -3102,9 +3132,19 @@ class Vm {
             this.stack.push(toAny(0))
             return
         }
-        val fields: HashMap<String, Any> = this.objectFields.getOrDefault(objKey, HashMap<String, Any>())
-        val val = fields.get(fieldName)
-        this.stack.push(if (val == null) 0 else val)
+        // [R33] 扁平线性读（键 objKey|fieldName）
+        val fkey: String = objKey + "|" + fieldName
+        val fn: Int = this.ofKeys.size()
+        var found: Any = null
+        var fi: Int = 0
+        while (fi < fn) {
+            if (this.ofKeys[fi] == fkey) {
+                found = this.ofVals[fi]
+                fi = fn
+            }
+            fi = fi + 1
+        }
+        this.stack.push(if (found == null) 0 else found)
     }
 
     /// 设置对象字段。
@@ -3123,12 +3163,23 @@ class Vm {
         if (VmOps.toI64(objKey) == 0L) {
             return
         }
-        var fields: HashMap<String, Any> = this.objectFields.getOrDefault(objKey, HashMap<String, Any>())
-        if (fields.getSize() == 0 && !this.objectFields.containsKey(objKey)) {
-            fields = HashMap<String, Any>()
-            this.objectFields.put(objKey, fields)
+        // [R33] 扁平线性写（存在则覆写，否则追加）
+        val fkey2: String = objKey + "|" + fieldName
+        val fn2: Int = this.ofKeys.size()
+        var fi2: Int = 0
+        var wrote2: Int = 0
+        while (fi2 < fn2) {
+            if (this.ofKeys[fi2] == fkey2) {
+                this.ofVals[fi2] = val
+                wrote2 = 1
+                fi2 = fn2
+            }
+            fi2 = fi2 + 1
         }
-        fields.put(fieldName, val)
+        if (wrote2 == 0) {
+            this.ofKeys.add(fkey2)
+            this.ofVals.add(val)
+        }
     }
 
     /// 分配数组（在堆上）。
@@ -3192,7 +3243,22 @@ class Vm {
     private fun defClass(cls: String, parent: String): Unit {
         var p: String = parent
         if (p == "-") { p = "" }
-        this.classParents.put(cls, p)
+        // [R33] 线性登记（覆盖式）
+        var pi2: Int = 0
+        val pn2: Int = this.cpKeys.size()
+        var had2: Int = 0
+        while (pi2 < pn2) {
+            if (this.cpKeys[pi2] == cls) {
+                this.cpVals[pi2] = p
+                had2 = 1
+                pi2 = pn2
+            }
+            pi2 = pi2 + 1
+        }
+        if (had2 == 0) {
+            this.cpKeys.add(cls)
+            this.cpVals.add(p)
+        }
     }
 
     /// 沿父类链解析方法（P1.2）：返回 "类名.方法名"，链上无命中返回 ""。
@@ -3204,7 +3270,16 @@ class Vm {
             if (this.funcParamCount(candidate) >= 0 || this.funcOffset(candidate) != 0) {
                 return candidate
             }
-            cur = this.classParents.getOrDefault(cur, "")
+            // [R33] 线性读
+            var cn6: Int = this.cpKeys.size()
+            var ci6: Int = 0
+            while (ci6 < cn6) {
+                if (this.cpKeys[ci6] == cur) {
+                    cur = this.cpVals[ci6]
+                    ci6 = cn6
+                }
+                ci6 = ci6 + 1
+            }
             depth = depth + 1
         }
         return ""
@@ -3228,7 +3303,16 @@ class Vm {
         if (v == null) { return "" }
         val key: String = VmOps.toStrAny(v)
         if (this.heapKinds.getOrDefault(key, "") != "object") { return "" }
-        return this.objectClass.getOrDefault(key, "")
+        // [R33] 线性读
+        val cn2: Int = this.ocKeys.size()
+        var ci2: Int = 0
+        while (ci2 < cn2) {
+            if (this.ocKeys[ci2] == key) {
+                return this.ocVals[ci2]
+            }
+            ci2 = ci2 + 1
+        }
+        return ""
     }
     ///
     /// depth = 接收者之下压着的实参个数（0 = 接收者在栈顶）。
@@ -3241,7 +3325,17 @@ class Vm {
         // 仅整型堆指针可能是 VM 对象（装箱类型名随宿主为 "Int"/"Long"，
         // 见 getField 注释）；字符串/布尔等直接排除
         if (!VmOps.isNumeric(v)) { return "" }
-        return this.objectClass.getOrDefault(VmOps.toStrAny(v), "")
+        // [R33] 线性读
+        val key3: String = VmOps.toStrAny(v)
+        val cn3: Int = this.ocKeys.size()
+        var ci3: Int = 0
+        while (ci3 < cn3) {
+            if (this.ocKeys[ci3] == key3) {
+                return this.ocVals[ci3]
+            }
+            ci3 = ci3 + 1
+        }
+        return ""
     }
 
     /// 虚方法调用（P0.5，ADR-003）。
@@ -5122,12 +5216,36 @@ if (false && (r < n - 5
 
     /// 获取全局变量。
     fun getGlobal(name: String): Any {
-        return this.globals.getOrDefault(name, null)
+        // [R33] 线性读
+        val gn: Int = this.gKeys.size()
+        var gi: Int = 0
+        while (gi < gn) {
+            if (this.gKeys[gi] == name) {
+                return this.gVals[gi]
+            }
+            gi = gi + 1
+        }
+        return null
     }
 
     /// 设置全局变量。
     fun setGlobal(name: String, value: Any): Unit {
-        this.globals.put(name, value)
+        // [R33] 线性写
+        val gn2: Int = this.gKeys.size()
+        var gi2: Int = 0
+        var gw2: Int = 0
+        while (gi2 < gn2) {
+            if (this.gKeys[gi2] == name) {
+                this.gVals[gi2] = value
+                gw2 = 1
+                gi2 = gn2
+            }
+            gi2 = gi2 + 1
+        }
+        if (gw2 == 0) {
+            this.gKeys.add(name)
+            this.gVals.add(value)
+        }
     }
 
     /// 获取闭包总数。
