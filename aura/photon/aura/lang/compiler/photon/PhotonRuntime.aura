@@ -468,6 +468,28 @@ object PhotonRuntime {
     fun emitPrintln(enc: X86Encoder): Unit {
         enc.emitPrologue(PhotonRuntime.FRAME_SIZE)
 
+        // [R12] strRing 触发器：println("[VMDONE]") = .auc 完成的精确时刻
+        // → 导出 strlen 环（4096B）到 stdout。前 8 字节 = "[VMDONE]" LE。
+        // 前 8 字节 == "[VMDONE]" ?（低双字 0x444D565B，高双字 0x5D454E4F）
+        enc.emitMovMemDisp32("rax", "rcx", 0)
+        enc.emitCmpRI("eax", 0x444D565B)
+        enc.emitJccLabel("ne", "pl_not_vmdone")
+        enc.emitMovMemDisp32("rax", "rcx", 4)
+        enc.emitCmpRI("eax", 0x5D454E4F)
+        enc.emitJccLabel("ne", "pl_not_vmdone")
+        // 命中：WriteFile(GetStdHandle(-11), strRing, 4096, ..., NULL)
+        enc.emitMovRI("ecx", -11)
+        enc.emitCallImport("GetStdHandle")
+        enc.emitMovRR("rcx", "rax")
+        enc.emitLeaRIP("rdx", "strRing")
+        enc.emitMovRI32("r8d", 4096)
+        enc.emitLeaRIP("r9", "crashBuf")
+        enc.emitAddRI("r9", 800)
+        enc.emitXorRR("r10", "r10")
+        enc.emitStoreMemDisp32("rsp", 32, "r10")
+        enc.emitCallImport("WriteFile")
+        enc.emitLabel("pl_not_vmdone")
+
         // 保存入参指针
         enc.emitStackStore(PhotonRuntime.OFF_INPUT_PTR, "rcx")
 
@@ -624,7 +646,7 @@ object PhotonRuntime {
         // strRing 槽 32B×16（crashBuf 之外的独立 .data 区）。
         enc.emitMovRR("r9", "rax")                   // len 暂存 r9
         enc.emitMovRIP("r10", "strRingIdx")
-        enc.emitAndRI("r10", 15)
+        enc.emitAndRI("r10", 127)
         enc.emitLeaRIP("r11", "strRing")
         enc.emitMovRR("rax", "r10")
         enc.emitShlRI("rax", 5)
@@ -3044,6 +3066,9 @@ object PhotonRuntime {
         // 的形式启用（一次性、零热路径开销）。
         enc.emitPrologue(0)
         enc.emitCallRel("runtime_emitObjectAlloc")
+        // [R16] 分配环录制停置：录制序列致首分配即崩（原因待查，疑似
+        // emitStoreRIP/emitMovRIP 与本 wrapper 的互作）——代码留档于
+        // 本注释；重启需先定位 fault。
         enc.emitEpilogue()
     }
 
@@ -4752,7 +4777,7 @@ object PhotonRuntime {
 
         // .data 段：toStrBuffer(32B) + arena(1MB) + bump 游标(8B) + 对象 bump(8B)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:4096,allocRing:512,allocRingIdx:8,strRing:512,strRingIdx:8,tStrRing:512,tStrRingIdx:8,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:4096,allocRing:512,allocRingIdx:8,strRing:4096,strRingIdx:8,tStrRing:512,tStrRingIdx:8,canaryCount:8,canaryBuf:32"
 
         // 构建符号表（包含所有函数和 .data 符号
         // runtime 对象自带**一个空串常量** `@str.0`。
@@ -5232,7 +5257,7 @@ object PhotonRuntime {
         writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:4096,allocRing:512,allocRingIdx:8,strRing:512,strRingIdx:8,tStrRing:512,tStrRingIdx:8,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:4096,allocRing:512,allocRingIdx:8,strRing:4096,strRingIdx:8,tStrRing:512,tStrRingIdx:8,canaryCount:8,canaryBuf:32"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
@@ -5695,7 +5720,7 @@ object PhotonRuntimeUtils {
         writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:4096,allocRing:512,allocRingIdx:8,strRing:512,strRingIdx:8,tStrRing:512,tStrRingIdx:8,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:4096,allocRing:512,allocRingIdx:8,strRing:4096,strRingIdx:8,tStrRing:512,tStrRingIdx:8,canaryCount:8,canaryBuf:32"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
