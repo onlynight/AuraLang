@@ -2861,6 +2861,12 @@ class Vm {
     /// 修复同根因（当时症状：8 秒涨到 7GB）。
     private fun retain(): Unit {
         val v: Any = this.stack.pop()
+        // [根修轮R17·根修] RETAIN 的栈约定 = 弹出→调整→**回推**（值仍留在
+        // 栈上供后续 ops 使用——种子 interp.rs 同语义）。旧实现弹出不回推
+        // ⇒ 栈丢失该值 ⇒ 后续 GET_FIELD 弹到**陈旧残留**（实测 02-strings
+        // 的 s.length 弹到 tagged 残留 "33" ⇒ strlen=2）⇒ 整个值漂移家族
+        // 的单点根因。所有出口回推。
+        this.stack.push(v)
         if (v == null || !VmOps.isNumeric(v)) {
             return
         }
@@ -2878,6 +2884,7 @@ class Vm {
                 }
             }
         }
+        this.stack.push(v)
     }
 
     /// 释放（RELEASE，op 113）——**消费**栈顶，不回压（同 retain 的栈约定）。
