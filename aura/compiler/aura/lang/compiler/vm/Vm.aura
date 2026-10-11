@@ -1859,6 +1859,26 @@ class Vm {
             this.stack.push(null)
             return
         }
+        // [R31] Any.toString/Any.hashCode 宿主接管——.auc 闭包版是执行骰
+        // 重灾区（simple_test 死于其内跳转漂移 Unknown opcode -1、
+        // hashmap_impl 死于其内 charCodeAt 段错误）。toString 语义 =
+        // toStrAny；hashCode 语义 = djb2（put/get 一致即成立）。
+        if (funcName0 == "Any.toString") {
+            var vT: Any = null
+            if (argc > 0) {
+                vT = this.stack.pop()
+            }
+            this.stack.push(VmOps.toStrAny(vT))
+            return
+        }
+        if (funcName0 == "Any.hashCode") {
+            var vH: Any = null
+            if (argc > 0) {
+                vH = this.stack.pop()
+            }
+            this.stack.push(VmOps.toAny(VmOps.hashCodeOf(vH)))
+            return
+        }
         // [R25] String.length 全名前置路由——旧径走剥离→"length" 臂→
         // `.length` 核心方法读（value-class 调用窗掷骰族，实测
         // 14-string-interp 挂起于此）。

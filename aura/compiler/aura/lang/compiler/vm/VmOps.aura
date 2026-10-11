@@ -733,6 +733,21 @@ object VmOps {
         return x as Long
     }
 
+    /// [R31] 任意值哈希（djb2，字符域 charCodeAt 扫描 = strLenRaw 同款
+    /// 已证形状）。供 .auc 的 HashMap 闭包键分桶——宿主接管 Any.hashCode
+    /// 后，put/get 两侧一致即语义成立（桶序与种子不必一致）。
+    fun hashCodeOf(v: Any): Int {
+        val s: String = toStrAny(v)
+        val n: Int = strLenRaw(s)
+        var h: Int = 5381
+        var i: Int = 0
+        while (i < n) {
+            h = h * 33 + s.charCodeAt(i)
+            i = i + 1
+        }
+        return h
+    }
+
     /// [R19] ASCII 大写化——**零拼接实现**。累加器循环 `result = result +
     /// fromCharCode(c)` 在宿主管线下多轮迭代必腐坏（实测 toUpper 出
     /// "0t^ HELLO"、toLower 出 "aa"——每轮 concat 的指针漂移复合，R13
