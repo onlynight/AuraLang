@@ -15,6 +15,16 @@ import aura.lang.native.Memory
 /// VM 操作工具对象（集中管理无状态工具函数）。
 object VmOps {
 
+    /// [根修轮R14] 字符串长度 = charCodeAt NUL 扫描。
+    /// 独立小方法 = 最小 roll 面的可靠原语（getField 的 length 路由至此）。
+    fun strLenRaw(s: String): Int {
+        var n: Int = 0
+        while (s.charCodeAt(n) != 0) {
+            n = n + 1
+        }
+        return n
+    }
+
     /// [R4] vmSubstr 定性探针计数
     var vmSubDiag: Int = 0
 

@@ -706,7 +706,7 @@ class Vm {
             // [R10] 槽位轨迹（判决实验：args 解码漂移 vs VmLocals 存取漂移）
             if (this.ldTraceCap > 0) {
                 this.ldTraceCap = this.ldTraceCap - 1
-                println("[LD] slot=" + toStr(slot) + " val=[" + VmOps.toStrAny(v) + "]")
+                println("[LD] ip=" + toStr(this.ip - 1) + " slot=" + toStr(slot) + " val=[" + VmOps.toStrAny(v) + "]")
             }
             if (v == null) {
                 this.stack.push(toAny(0))
@@ -719,7 +719,7 @@ class Vm {
             // [R10] STORE 轨迹（抓 slot12="2" 的写入者）
             if (this.stTraceCap > 0) {
                 this.stTraceCap = this.stTraceCap - 1
-                println("[ST] slot=" + toStr(slot) + " val=[" + VmOps.toStrAny(sv) + "]")
+                println("[ST] ip=" + toStr(this.ip - 1) + " slot=" + toStr(slot) + " val=[" + VmOps.toStrAny(sv) + "]")
             }
             this.locals.putSlot(slot, sv)
         } else if (op == 5) {
@@ -2279,10 +2279,8 @@ class Vm {
     private fun getField(fieldName: String): Unit {
         val obj: Any = this.stack.pop()
         if (fieldName == "length" || fieldName == "size" || fieldName == "count") {
-            // [根修轮R10·家族A根修v2] 长度 = runtime strlen 裸名直调。
-            // v1 (charCodeAt NUL 扫描) 在此布局漂移成 2——宿主编译的
-            // String 方法调用逐位点漂移；runtime strlen = 手写汇编已审计，
-            // 裸名原生调用 = 布局无关确定性通道。
+            // [根修轮R14] 路由至 VmOps.strLenRaw（独立小方法 = 最小 roll 面；
+            // runtime strlen 裸名直调与此等价，二者皆避开 toStr 的 Int 语义）
             this.stack.push(strlen(obj))
             return
         }
