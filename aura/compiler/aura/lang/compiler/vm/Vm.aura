@@ -1562,6 +1562,62 @@ class Vm {
             this.stack.push(hR)
             return
         }
+        // [R25b] Math.sqrt 全名（11-imports 挂点）：牛顿迭代（纯 Int/Float
+        // 标量，宿主 Float 标量乘除在双基底已证）。
+        if (funcName0 == "aura.lang.std.Math.sqrt" || funcName0 == "Math.sqrt" || funcName0 == "sqrt") {
+            val sQ: Any = this.stack.pop()
+            val xQ: Float = VmOps.parseFloat(VmOps.toStrAny(sQ))
+            if (xQ <= 0) {
+                this.stack.push(0.0 as Any)
+                return
+            }
+            var g: Float = xQ
+            var itQ: Int = 0
+            while (itQ < 40) {
+                val ng: Float = (g + xQ / g) / 2
+                val d: Float = ng - g
+                if (d < 0) { g = ng } else { g = ng }
+                if (d > -0.000001 && d < 0.000001) { itQ = 40 }
+                itQ = itQ + 1
+            }
+            this.stack.push(g as Any)
+            return
+        }
+        // [R25b] StringBuilder.appendChar（aot/string_builder_runtime 挂点）
+        if (funcName0 == "aura.lang.std.StringBuilder.appendChar") {
+            val cC: Any = this.stack.pop()
+            val hC: Any = this.stack.pop()
+            val ptrC: Long = VmOps.rawOf(hC)
+            if (ptrC != 0) {
+                val ch: Int = VmOps.intOf(cC)
+                val oldLenC: Long = Memory.read64(ptrC)
+                val oldCapC: Long = Memory.read64(ptrC + 8)
+                var newCapC: Long = oldCapC
+                while (newCapC < oldLenC + 2) {
+                    newCapC = newCapC * 2
+                }
+                if (newCapC != oldCapC) {
+                    val nbC: Long = Memory.alloc(newCapC)
+                    Memory.copy(nbC, Memory.read64(ptrC + 16), oldLenC)
+                    Memory.write64(ptrC + 8, newCapC)
+                    Memory.write64(ptrC + 16, nbC)
+                }
+                val bufC: Long = Memory.read64(ptrC + 16)
+                Memory.write(bufC + oldLenC, ch as Byte)
+                Memory.write(bufC + oldLenC + 1, 0 as Byte)
+                Memory.write64(ptrC, oldLenC + 1)
+            }
+            this.stack.push(hC)
+            return
+        }
+        // [R25] String.length 全名前置路由——旧径走剥离→"length" 臂→
+        // `.length` 核心方法读（value-class 调用窗掷骰族，实测
+        // 14-string-interp 挂起于此）。
+        if (funcName0 == "aura.lang.std.String.length" || funcName0 == "String.length") {
+            val sL2: Any = this.stack.pop()
+            this.stack.push(VmOps.toAny(VmOps.strLenRaw(VmOps.toStrAny(sL2))))
+            return
+        }
         if (funcName0 == "aura.lang.std.Collections.listSize" || funcName0 == "Collections.listSize") {
             val lN2: Any = this.stack.pop()
             val ptrN2: Long = VmOps.rawOf(lN2)
