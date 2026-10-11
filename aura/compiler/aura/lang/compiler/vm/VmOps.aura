@@ -730,6 +730,13 @@ object VmOps {
         return x as Long
     }
 
+    /// [R34] 堆指针键（登记/查询共用）：指针十进制。**不要**用 toStrAny
+    /// 做堆对象键——偶指针走 String 分支 = 把堆内存当字符串读（实测列表
+    /// 键 = len 字段字节 → strlen=1，m[i].size 全灭）。
+    fun ptrKeyOf(v: Any): String {
+        return intToStr(rawOf(v) as Int)
+    }
+
     /// [R31] 任意值哈希（djb2，字符域 charCodeAt 扫描 = strLenRaw 同款
     /// 已证形状）。供 .auc 的 HashMap 闭包键分桶——宿主接管 Any.hashCode
     /// 后，put/get 两侧一致即语义成立（桶序与种子不必一致）。

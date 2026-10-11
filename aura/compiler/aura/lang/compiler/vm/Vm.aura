@@ -1245,7 +1245,7 @@ class Vm {
             val items80: Long = Memory.alloc(32)
             Memory.write64(l80 + 16, items80)
             this.stack.push(l80 as Any)
-            this.heapKindKeys.add(VmOps.toStrAny(this.stack.peek()))
+            this.heapKindKeys.add(VmOps.ptrKeyOf(this.stack.peek()))
             this.heapKindVals.add("list")
         } else if (op == 81) {
             // [R24] NEW_MAP 同款内联：len@0/cap@8/keys@16/vals@24。
@@ -1257,7 +1257,7 @@ class Vm {
             Memory.write64(m81 + 16, keys81)
             Memory.write64(m81 + 24, vals81)
             this.stack.push(m81 as Any)
-            this.heapKindKeys.add(VmOps.toStrAny(this.stack.peek()))
+            this.heapKindKeys.add(VmOps.ptrKeyOf(this.stack.peek()))
             this.heapKindVals.add("map")
         } else if (op == 82) {
             val list: Any = this.stack.pop()
@@ -1980,12 +1980,12 @@ class Vm {
             val idxS: Any = this.stack.pop()
             val listS: Any = this.stack.pop()
             val ptrS: Long = VmOps.rawOf(listS)
-            val keyS: String = VmOps.toStrAny(listS)
+            val keyS: String = VmOps.ptrKeyOf(listS)
             val knS: Int = this.heapKindKeys.size()
             var kindS: String = ""
             var kiS: Int = 0
             while (kiS < knS) {
-                if (this.heapKindKeys[kiS] == keyS) {
+                if (VmOps.toI32(this.heapKindKeys[kiS]) == VmOps.toI32(keyS)) {
                     kindS = this.heapKindVals[kiS]
                     kiS = knS
                 }
@@ -2119,7 +2119,7 @@ class Vm {
             val idxS: Any = this.stack.pop()
             val listS: Any = this.stack.pop()
             println("[S1] entered set")
-            val keyS: String = VmOps.toStrAny(listS)
+            val keyS: String = VmOps.ptrKeyOf(listS)
             println("[S2] key ok len=" + toStr(this.heapKindKeys.size()))
             val kn: Int = this.heapKindKeys.size()
             var kindS: String = ""
@@ -2157,7 +2157,7 @@ class Vm {
                 this.stack.pop()
                 kL = kL + 1
             }
-            this.heapKindKeys.add(VmOps.toStrAny(nl))
+            this.heapKindKeys.add(VmOps.ptrKeyOf(nl))
             this.heapKindVals.add("list")
             this.stack.push(nl)
             return
@@ -3071,7 +3071,7 @@ class Vm {
         this.stack.push(ptr)
         // 类名键取栈值的 toStrAny 形态——与 get/set/方法解析同一转换路径；
         // 不得对 Long 局部变量做 toStr（装箱路径不一致会导致键不匹配）。
-        val objKey: String = VmOps.toStrAny(this.stack.peek())
+        val objKey: String = VmOps.ptrKeyOf(this.stack.peek())
         // [R33] 线性登记
         this.ocKeys.add(objKey)
         this.ocVals.add(className)
@@ -3093,10 +3093,43 @@ class Vm {
             // 下实参腐坏：[X] 轨迹实锤栈顶为 "Hello" 而 strlen 返回 2（R10
             // 调用窗实参漂移同族）。[GF] 对照实验（raw=5 strlen=5 同轮复核）
             // 后定案，探针已拆。
-            this.stack.push(toAny(VmOps.strLenRaw(VmOps.toStrAny(obj))))
+            // [R34] 容器分派：list/map 接收者走 Collections.length（strLenRaw
+            // 对列表头 = 读 len 字段字节，实测 m[i].size 全灭为 1）
+            val keyF: String = VmOps.ptrKeyOf(obj)
+            val knF: Int = this.heapKindKeys.size()
+            var kindF: String = ""
+            var kiF: Int = 0
+            while (kiF < knF) {
+                if (VmOps.toI32(this.heapKindKeys[kiF]) == VmOps.toI32(keyF)) {
+                    kindF = this.heapKindVals[kiF]
+                    kiF = knF
+                }
+                kiF = kiF + 1
+            }
+            if (kindF == "list" || kindF == "map") {
+                this.stack.push(VmCollections.length(obj))
+            } else {
+                this.stack.push(toAny(VmOps.strLenRaw(VmOps.toStrAny(obj))))
+            }
             return
         }
         if (fieldName == "isEmpty") {
+            val keyE: String = VmOps.ptrKeyOf(obj)
+            val knE: Int = this.heapKindKeys.size()
+            var kindE: String = ""
+            var kiE: Int = 0
+            while (kiE < knE) {
+                if (VmOps.toI32(this.heapKindKeys[kiE]) == VmOps.toI32(keyE)) {
+                    kindE = this.heapKindVals[kiE]
+                    kiE = knE
+                }
+                kiE = kiE + 1
+            }
+            if (kindE == "list" || kindE == "map") {
+                val nE2: Any = VmCollections.length(obj)
+                this.stack.push(VmOps.toI32(VmOps.toStrAny(nE2)) == 0)
+                return
+            }
             if (VmOps.strLenRaw(VmOps.toStrAny(obj)) == 0) {
                 this.stack.push(true)
             } else {
@@ -3218,6 +3251,9 @@ class Vm {
         // 初始化为 0
         Memory.set(items, 0, itemsBytes)
         this.stack.push(ptr)
+        // [R34] kind 登记（.size/.length 的 GET_FIELD 容器分派依赖）
+        this.heapKindKeys.add(VmOps.ptrKeyOf(this.stack.peek()))
+        this.heapKindVals.add("list")
     }
 
     /// 数组/列表元素读取（`Collections` 布局：元素在 `read64(ptr+16)` 指向的数组中）。
