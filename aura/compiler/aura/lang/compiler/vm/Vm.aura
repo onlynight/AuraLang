@@ -1275,7 +1275,101 @@ class Vm {
     // ═══════════════════════════════════════════════════════════
 
     /// 调用内置函数或用户函数。
-    private fun callOrBuiltin(funcName: String, argc: Int): Unit {
+    private fun callOrBuiltin(funcName0: String, argc: Int): Unit {
+        // [根修轮R5] 限定名剥离：.auc 原生表携带全限定名。尾段提取走
+        // charCodeAt 扫描 + vmSubstr（零 .length/.substring 依赖——两者均
+        // 为位点漂移成员，R4/R5 探针实证）。
+        val funcName: String = if (funcName0.startsWith("aura.lang.")) {
+            var fnLen: Int = 0
+            while (funcName0.charCodeAt(fnLen) != 0) {
+                fnLen = fnLen + 1
+            }
+            var lastDot: Int = -1
+            var q: Int = 0
+            while (q < fnLen) {
+                if (funcName0.charCodeAt(q) == 46) { lastDot = q }
+                q = q + 1
+            }
+            if (lastDot >= 0 && lastDot + 1 < fnLen) {
+                VmOps.vmSubstr(funcName0, lastDot + 1, fnLen - lastDot - 1)
+            } else {
+                funcName0
+            }
+        } else {
+            funcName0
+        }
+        // [根修轮R5] Collections 原生族路由（动态数组读写；set = void 语义
+        // 不压栈——压了即栈失衡，后续取值整体错位）
+        if (funcName == "set" || funcName == "__list_set") {
+            val v: Any = this.stack.pop()
+            val idx: Any = this.stack.pop()
+            val list: Any = this.stack.pop()
+            VmCollections.vmListSet(list, idx, v)
+            return
+        }
+        if (funcName == "get" || funcName == "__get") {
+            val idx: Any = this.stack.pop()
+            val list: Any = this.stack.pop()
+            this.stack.push(VmCollections.vmListAt(list, idx))
+            return
+        }
+        if (funcName == "__list_is_empty") {
+            val list: Any = this.stack.pop()
+            this.stack.push(if (VmCollections.length(list) == 0) { 1 } else { 0 })
+            return
+        }
+        // [根修轮R5] 异常族路由（P5 缺口③）：throwException 语义完备
+        //（handler 走栈/帧截断/类型匹配），只差分派。
+        if (funcName == "__throw") {
+            this.throwException()
+            return
+        }
+        if (funcName == "__new_exception") {
+            val msg: String = this.collectArgs(argc)
+            this.stack.push(msg)
+            return
+        }
+        // [根修轮R5] native 小内建（R5a 实证：aura_isOfType/ThreadOps.cores
+        // 各自的测试在路由后通过）
+        if (funcName == "rdtsc") {
+            this.stack.push(VmOps.rawOf(Cpu.rdtsc()))
+            return
+        }
+        if (funcName == "MemoryAlloc") {
+            val n3: Int = VmOps.intOf(this.stack.pop())
+            this.stack.push(Memory.alloc(n3))
+            return
+        }
+        if (funcName == "ThreadOps.cores" || funcName == "cores") {
+            this.stack.push(ThreadOps.cores())
+            return
+        }
+        if (funcName == "aura_isOfType") {
+            val tn: String = toStr(this.stack.pop())
+            val v: Any = this.stack.pop()
+            if (tn == VmOps.typeName(v)) { this.stack.push(1) } else { this.stack.push(0) }
+            return
+        }
+        if (funcName == "arrayOf2D") {
+            val cols: Int = VmOps.intOf(this.stack.pop())
+            val rows: Int = VmOps.intOf(this.stack.pop())
+            var grid: String = "["
+            var r3: Int = 0
+            while (r3 < rows) {
+                if (r3 > 0) { grid = grid + "," }
+                grid = grid + "["
+                var c3: Int = 0
+                while (c3 < cols) {
+                    if (c3 > 0) { grid = grid + "," }
+                    grid = grid + "0"
+                    c3 = c3 + 1
+                }
+                grid = grid + "]"
+                r3 = r3 + 1
+            }
+            this.stack.push(grid + "]")
+            return
+        }
         // ── P393：用户函数快速路径（缓存命中时跳过内建名 if-else 链）──
         //
         // 内建分派是一条数十臂的 `funcName == "…"` 链（每臂一次 streq
