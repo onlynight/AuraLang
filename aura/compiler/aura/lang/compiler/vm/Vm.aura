@@ -1610,6 +1610,65 @@ class Vm {
             this.stack.push(hC)
             return
         }
+        // [R27] Collections.listOf 族前置（35+ 字符长串撞剥离扫描骰，
+        // 15-advanced 挂点；argc 元素按源顺序入表）。
+        if (funcName0 == "aura.lang.std.Collections.listOf" || funcName0 == "aura.lang.std.Collections.mutableListOf"
+            || funcName0 == "Collections.listOf" || funcName0 == "Collections.mutableListOf") {
+            val baseQ: Int = this.stack.stackDepth() - argc
+            val nlQ: Any = VmCollections.newList()
+            var jQ: Int = 0
+            while (jQ < argc) {
+                if (baseQ >= 0) {
+                    VmCollections.push(nlQ, this.stack.vmSlotAt(baseQ + jQ))
+                }
+                jQ = jQ + 1
+            }
+            var kQ: Int = 0
+            while (kQ < argc) {
+                this.stack.pop()
+                kQ = kQ + 1
+            }
+            this.stack.push(nlQ)
+            return
+        }
+        // [R27] Math 三角族前置（11-imports 挂点；Taylor 级数，Float 标量
+        // 乘除双基底已证；角度归一到 [-pi,pi]）。
+        if (funcName0 == "aura.lang.std.Math.cos" || funcName0 == "Math.cos" || funcName0 == "cos") {
+            val xC: Any = this.stack.pop()
+            val xf: Float = VmOps.parseFloat(VmOps.toStrAny(xC))
+            var t: Float = xf
+            val pi2: Float = 6.28318530718
+            while (t > 3.14159265359) { t = t - pi2 }
+            while (t < -3.14159265359) { t = t + pi2 }
+            var term: Float = 1.0
+            var sumC: Float = 1.0
+            var nC: Int = 1
+            while (nC < 12) {
+                term = term * (0.0 - t) * t / ((2 * nC - 1) * (2 * nC))
+                sumC = sumC + term
+                nC = nC + 1
+            }
+            this.stack.push(sumC as Any)
+            return
+        }
+        if (funcName0 == "aura.lang.std.Math.sin" || funcName0 == "Math.sin" || funcName0 == "sin") {
+            val xS: Any = this.stack.pop()
+            val xf2: Float = VmOps.parseFloat(VmOps.toStrAny(xS))
+            var t2: Float = xf2
+            val pi2b: Float = 6.28318530718
+            while (t2 > 3.14159265359) { t2 = t2 - pi2b }
+            while (t2 < -3.14159265359) { t2 = t2 + pi2b }
+            var term2: Float = t2
+            var sumS: Float = t2
+            var nS: Int = 1
+            while (nS < 12) {
+                term2 = term2 * (0.0 - t2) * t2 / ((2 * nS) * (2 * nS + 1))
+                sumS = sumS + term2
+                nS = nS + 1
+            }
+            this.stack.push(sumS as Any)
+            return
+        }
         // [R25] String.length 全名前置路由——旧径走剥离→"length" 臂→
         // `.length` 核心方法读（value-class 调用窗掷骰族，实测
         // 14-string-interp 挂起于此）。
