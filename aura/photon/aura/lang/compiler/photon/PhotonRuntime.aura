@@ -620,6 +620,27 @@ object PhotonRuntime {
         enc.emitIncRR("rax")
         enc.emitJmpLabel("strlen_loop")
         enc.emitLabel("strlen_done")
+        // [R12] 环形记录器：每次 strlen 记录 {ptr, len, 前16字节}。
+        // strRing 槽 32B×16（crashBuf 之外的独立 .data 区）。
+        enc.emitMovRR("r9", "rax")                   // len 暂存 r9
+        enc.emitMovRIP("r10", "strRingIdx")
+        enc.emitAndRI("r10", 15)
+        enc.emitLeaRIP("r11", "strRing")
+        enc.emitMovRR("rax", "r10")
+        enc.emitShlRI("rax", 5)
+        enc.emitAddRR("r11", "rax")                  // r11 = strRing + idx*32
+        enc.emitStoreMemDisp32("r11", 0, "rcx")      // ptr
+        enc.emitStoreMemDisp32("r11", 8, "r9")       // len
+        enc.emitMovRR("rax", "rcx")
+        enc.emitAddRR("rax", "r9")                   // rax = ptr + len（NUL 位置）
+        enc.emitMovMemDisp32("rdx", "rax", -16)      // 内容 -16..-8
+        enc.emitStoreMemDisp32("r11", 16, "rdx")
+        enc.emitMovMemDisp32("rdx", "rax", -8)       // 内容 -8..0（含 NUL）
+        enc.emitStoreMemDisp32("r11", 24, "rdx")
+        enc.emitMovRIP("rax", "strRingIdx")
+        enc.emitAddRI("rax", 1)
+        enc.emitStoreRIP("strRingIdx", "rax")
+        enc.emitMovRR("rax", "r9")                   // 恢复返回值
         enc.emitEpilogue()
     }
 
@@ -1620,8 +1641,19 @@ object PhotonRuntime {
     /// ```
     fun emitExit(enc: X86Encoder): Unit {
         enc.emitPrologue(0x20)
-        // 保存退出码（rcx 将被覆盖processHandle
-        enc.emitStackStore(-0x10, "rcx")
+        // [R12] strlen 环倒出（512B）：进程退出时把最近 16 次 strlen 的
+        // {ptr, len, 前16字节} 记录落 stdout——值漂移的黑匣子。
+        enc.emitMovRI("ecx", -11)
+        enc.emitCallImport("GetStdHandle")
+        enc.emitMovRR("rcx", "rax")
+        enc.emitLeaRIP("rdx", "strRing")
+        enc.emitMovRI32("r8d", 512)
+        enc.emitLeaRIP("r9", "crashBuf")
+        enc.emitAddRI("r9", 800)
+        enc.emitXorRR("r10", "r10")
+        enc.emitStoreMemDisp32("rsp", 32, "r10")
+        enc.emitCallImport("WriteFile")
+        enc.emitLeaRIP("rdx", "oomMsg")
         // NtTerminateProcess(NtCurrentProcess(), exitStatus)
         //
         // ⚠️ 当前进程*伪句柄是 -1xFFFFFFFFFFFFFFFF*，不0
@@ -4699,7 +4731,7 @@ object PhotonRuntime {
 
         // .data 段：toStrBuffer(32B) + arena(1MB) + bump 游标(8B) + 对象 bump(8B)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:4096,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,ArenaAllocatorVtable:8,AucModuleVtable:8,AucReaderVtable:8,CStringVtable:8,HashMapVtable:8,HirVtable:8,HirLowererVtable:8,MirVtable:8,MirBlockVtable:8,MirFunctionVtable:8,MirSsaProgramVtable:8,MirValueVtable:8,ParserVtable:8,SpanVtable:8,VmRunnerVtable:8,VmStackVtable:8,VmStrStackVtable:8,VmFrameStackVtable:8,InstructionSelectorVtable:8,MachineDagVtable:8,DagNodeVtable:8,DagInstructionVtable:8,PeepholeOptimizerVtable:8,X86EmitterVtable:8,X86EncoderVtable:8,EmitBufferVtable:8,DebugInfoVtable:8,LoweringVtable:8,TargetTripleVtable:8,OptimizationLevelVtable:8,CEmitterVtable:8,LlvmEmitterVtable:8,PhotonPipelineVtable:8,PhotonObjectWriterVtable:8,PhotonSystemLinkerVtable:8,PhotonLldConfigVtable:8,AotCodeGeneratorVtable:8,AotExeResultVtable:8,AotLinkResultVtable:8,AotModuleLinkerVtable:8,AotOptionsVtable:8,AotResultVtable:8,BackendResultVtable:8,JitBackendVtable:8,JitCoreCompilerVtable:8,JitCoreVmVtable:8,JitLinkResultVtable:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:4096,allocRing:512,allocRingIdx:8,strRing:512,strRingIdx:8,canaryCount:8,canaryBuf:32"
 
         // 构建符号表（包含所有函数和 .data 符号
         // runtime 对象自带**一个空串常量** `@str.0`。
@@ -5179,7 +5211,7 @@ object PhotonRuntime {
         writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:4096,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:4096,allocRing:512,allocRingIdx:8,strRing:512,strRingIdx:8,canaryCount:8,canaryBuf:32"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
@@ -5642,7 +5674,7 @@ object PhotonRuntimeUtils {
         writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
         // .data: toStrBuffer(32) + heapArena(1048576) + heapBump(8) + objBump(8)
         writer.dataSection = "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:4096,canaryCount:8,canaryBuf:32"
+        writer.dataSymbolName = "toStrBuffer:32,oomMsg:24,heapMbName:24,heapArenaBase:8,heapCap:8,heapBump:8,objBump:8,envBuffer:4096,objSlots:4096,vehFlag:8,crashBuf:4096,allocRing:512,allocRingIdx:8,strRing:512,strRingIdx:8,canaryCount:8,canaryBuf:32"
         // runtime 对象自带**一个空串常量** `@str.0`。
         //
         // ⚠️ 必须显式给：`Collections.getAt`（`Env.get` 的落点，见 `emitCollectionsGetAt`）
