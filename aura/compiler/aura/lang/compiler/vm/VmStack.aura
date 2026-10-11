@@ -117,89 +117,73 @@ class VmStack {
 }
 class VmStrStack {
 
+    // [R20·根修] 同 VmFrameStack 的 d[sp]=v 越界写病（cap 与 size 脱节），
+    // 异常处理帧（07-error-handling 家族）同根因。size 驱动纯净模式。
     private var d: List<String> = arrayListOf<String>()
-    private var sp: Int = 0
-    private var cap: Int = 0
 
     fun push(v: String): Unit {
-        if (this.sp < this.cap) {
-            this.d[this.sp] = v
-        } else {
-            this.d.add(v)
-            this.cap = this.cap + 1
-        }
-        this.sp = this.sp + 1
+        this.d.add(v)
     }
 
     fun pop(): String {
-        if (this.sp <= 0) {
+        val n: Int = this.d.size()
+        if (n <= 0) {
             return ""
         }
-        this.sp = this.sp - 1
-        return this.d[this.sp]
+        val v: String = this.d[n - 1]
+        this.d.removeAt(n - 1)
+        return v
     }
 
     fun peek(): String {
-        if (this.sp <= 0) {
+        val n: Int = this.d.size()
+        if (n <= 0) {
             return ""
         }
-        return this.d[this.sp - 1]
+        return this.d[n - 1]
     }
 
     fun size(): Int {
-        // [R19] P366 可靠模式：字段读先入局部——旧体 `return this.sp` 的
-        // photon 产码在 VmStack 上实测恒返回 0（[X] 探针 sp 列全程 0），
-        // collectArgs 的 `base = size() - argc` 因此变负下标。四个栈类同款
-        // body 一并改写。
-        val s0: Int = this.sp
-        return s0
+        return this.d.size()
     }
 
     fun clear(): Unit {
         this.d = arrayListOf<String>()
-        this.sp = 0
-        this.cap = 0
     }
 }
 
 /// 保存的局部变量帧栈（函数调用时保存调用者的槽位表）。
 class VmFrameStack {
 
+    // [R20·根修] 旧实现的 `sp<cap → d[sp]=v / else d.add(v); cap+1` 模式里
+    // cap 计数与 d.size() 脱节：首次 push 后 d.size()=1、cap=1，第二次 push
+    // 走 `d[1]=v` **写到列表尾部之外**（下标写不增 size）。下降段从不清
+    // savedLocals 故从未暴露；首次返回 pop() 读 d[sp] 越界 → 帧对象丢失，
+    // 恢复出的 locals 全部读零（实测 fib(2) 的 n=2 → 0/-2，递归返回值
+    // 家族根因）。改 size 驱动的 add/removeAt 纯净模式（Collections 已证
+    // 路径），sp/cap 字段删除。
     private var d: List<VmLocals> = arrayListOf<VmLocals>()
-    private var sp: Int = 0
-    private var cap: Int = 0
 
     fun push(v: VmLocals): Unit {
-        if (this.sp < this.cap) {
-            this.d[this.sp] = v
-        } else {
-            this.d.add(v)
-            this.cap = this.cap + 1
-        }
-        this.sp = this.sp + 1
+        this.d.add(v)
     }
 
     fun pop(): VmLocals {
-        if (this.sp <= 0) {
+        val n: Int = this.d.size()
+        if (n <= 0) {
             return VmLocals()
         }
-        this.sp = this.sp - 1
-        return this.d[this.sp]
+        val v: VmLocals = this.d[n - 1]
+        this.d.removeAt(n - 1)
+        return v
     }
 
     fun size(): Int {
-        // [R19] P366 可靠模式：字段读先入局部——旧体 `return this.sp` 的
-        // photon 产码在 VmStack 上实测恒返回 0（[X] 探针 sp 列全程 0），
-        // collectArgs 的 `base = size() - argc` 因此变负下标。四个栈类同款
-        // body 一并改写。
-        val s0: Int = this.sp
-        return s0
+        return this.d.size()
     }
 
     fun clear(): Unit {
-        this.d = arrayListOf<HashMap<Int, Any>>()
-        this.sp = 0
-        this.cap = 0
+        this.d = arrayListOf<VmLocals>()
     }
 }
 
@@ -281,7 +265,13 @@ class VmCallStack {
         if (this.sp < this.cap) {
             Memory.write64(this.mcIps + this.sp * 8, ip)
             Memory.write64(this.mcFrames + this.sp * 8, frame)
-            this.funcs[this.sp] = func
+            // [R20] cap 与 funcs.size() 脱节的越界下标写（同 VmFrameStack
+            // 病）——funcs 当前无读取点（诊断预留），写法改 size 安全。
+            if (this.sp < this.funcs.size()) {
+                this.funcs[this.sp] = func
+            } else {
+                this.funcs.add(func)
+            }
             Memory.write64(this.mcClosures + this.sp * 8, closure)
         } else {
             val newCap: Int = this.cap * 2 + 64

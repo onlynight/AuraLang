@@ -132,7 +132,11 @@ class Vm {
 
 
     // 保存的局部变量帧（帧切换用）
-    private var savedLocals: VmFrameStack = VmFrameStack()
+    // [R20·根修] 旧 VmFrameStack 类的 size()/pop() 在宿主产码中读零
+    //（返回点拿到全新 VmLocals，调用者帧全灭 = 递归返回值家族根因）。
+    // 改用与 localsPool 完全同构的 List 直操（add/[]/removeAt/size 四原语
+    // 已被池路径实证可靠）。
+    private var savedLocals: List<VmLocals> = arrayListOf<VmLocals>()
 
     // 当前帧 ID 和函数名
     private var currentFrame: Int = 0
@@ -163,8 +167,11 @@ class Vm {
     /// [R10] STORE 轨迹配额
     private var stTraceCap: Int = 0
 
-    /// [R19] 全 op 参数/栈顶/sp 轨迹配额（参数列审计 + 漂移 op 实证）
+    /// [R20] 递归返回值解剖：全 op 轨迹配额（r20rec 最小复现用）
     private var xTraceCap: Int = 0
+
+    /// [R20] 调用/返回点轨迹配额
+    private var rtTraceCap: Int = 0
 
     /// [根修轮R4] op62 诊断计数（独立计数器，独立于 instructionCount）
     private var p62DiagCount: Int = 0
@@ -266,7 +273,7 @@ class Vm {
         this.locals.reset()
         this.globals = HashMap<String, Any>()
         this.callStack.reset()
-        this.savedLocals = VmFrameStack()
+        this.savedLocals = arrayListOf<VmLocals>()
         this.currentFrame = 0
         this.currentFunc = ""
         this.instructionCount = 0
@@ -303,7 +310,7 @@ class Vm {
         this.locals.reset()
         this.globals = HashMap<String, Any>()
         this.callStack.reset()
-        this.savedLocals = VmFrameStack()
+        this.savedLocals = arrayListOf<VmLocals>()
         this.handlerStack = VmStrStack()
         this.instructionCount = 0
         this.currentFrame = 0
@@ -370,7 +377,7 @@ class Vm {
         this.locals.reset()
         this.globals = HashMap<String, Any>()
         this.callStack.reset()
-        this.savedLocals = VmFrameStack()
+        this.savedLocals = arrayListOf<VmLocals>()
         this.handlerStack = VmStrStack()
         this.instructionCount = 0
         this.currentFrame = 0
@@ -439,7 +446,7 @@ class Vm {
         this.locals.reset()
         this.globals = HashMap<String, Any>()
         this.callStack.reset()
-        this.savedLocals = VmFrameStack()
+        this.savedLocals = arrayListOf<VmLocals>()
         this.handlerStack = VmStrStack()
         this.instructionCount = 0
         this.currentFrame = 0
@@ -536,7 +543,8 @@ class Vm {
                 val topX: Any = this.stack.peek()
                 println("[X] ip=" + toStr(this.ip - 1) + " op=" + toStr(opCode)
                     + " a0=[" + this.argStrOf(0) + "] top=[" + VmOps.toStrAny(topX)
-                    + "] sp=" + toStr(this.stack.stackDepth()) + "/" + toStr(this.stack.stackDepth()))
+                    + "] sp=" + toStr(this.stack.stackDepth())
+                    + " lc=" + toStr(this.locals.getSize()))
             }
             // [R10] 槽位轨迹（判决实验）
             if (this.ldTraceCap > 0) {
@@ -869,7 +877,11 @@ class Vm {
         else if (op == 5) {
             this.stack.push(toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))))
         } else if (op == 6) {
-            this.stack.push(VmOps.parseFloat(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf()))))
+            // [R20] Float 常量直推**常量文本**（"2.5"）——Plan A 无 Float
+            // Any 形态，parseFloat 的位模式是偶数 = "String" 指针，算术与
+            // 打印全灭（实测 x*2.0 打 0）。文本形态 + isFloatText 判定 +
+            // VmOps 定标整数算术 = 浮点通道（见 VmOps isFloatText 注释）。
+            this.stack.push(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))
         } else if (op == 7) {
             this.stack.push(this.getConstByIdx(this.arg0IntOf()))
         } else if (op == 8) {
@@ -1414,7 +1426,7 @@ class Vm {
             val target: Int = this.cfTarget
             val pc: Int = this.cfPc
             this.callStack.push(this.ip, this.currentFrame, this.currentFunc, this.currentClosure)
-            this.savedLocals.push(this.locals)
+            this.savedFramesAdd(this.locals)
             this.locals = this.popLocalsPool()
             var k: Int = pc - 1
             while (k >= 0 && k < argc) {
@@ -1447,7 +1459,9 @@ class Vm {
             return
         } else if (funcName == "toFloat") {
             val v: Any = this.stack.pop()
-            this.stack.push(VmOps.parseFloat(VmOps.toStrAny(v)))
+            // [R20] Float 文本通道：归一化为浮点文本（"3"→"3.0"），不再推
+            // parseFloat 位模式（偶数 = 假 "String" 指针）。
+            this.stack.push(VmOps.floatTextOf(VmOps.floatMantissaOf(v), VmOps.floatDecimalsOf(v)))
             return
         } else if (funcName == "toBool") {
             val v: Any = this.stack.pop()
@@ -2148,8 +2162,13 @@ class Vm {
 
         // 保存返回地址和当前帧（第 4 字段为调用者的闭包上下文，P1.3）
         this.callStack.push(this.ip, this.currentFrame, this.currentFunc, this.currentClosure)
-        this.savedLocals.push(this.locals)
+        this.savedFramesAdd(this.locals)
         this.locals = this.popLocalsPool()
+        // [R20] 调用点轨迹
+        if (this.rtTraceCap > 0) {
+            println("[CF] call=[" + funcName + "] argc=" + toStr(argc)
+                + " target=" + toStr(target) + " pc=" + toStr(pc))
+        }
 
         // 绑定参数到槽位（槽基址随调用约定不同，见 `aucArgBase`）
         var k: Int = pc - 1
@@ -2165,9 +2184,19 @@ class Vm {
 
     /// 从函数返回。
     private fun returnFromFunc(): Unit {
+        // [R20] 返回点轨迹：谁在返回、栈上有什么、返回什么
+        if (this.rtTraceCap > 0) {
+            this.rtTraceCap = this.rtTraceCap - 1
+            println("[RT] fn=[" + this.currentFunc + "] sp=" + toStr(this.stack.stackDepth())
+                + " ip=" + toStr(this.ip - 1)
+                + " top=[" + VmOps.toStrAny(this.stack.peek()) + "]")
+        }
         var retVal: Any = "Unit"
         if (this.stack.stackDepth() > 0) {
             retVal = this.stack.pop()
+        }
+        if (this.rtTraceCap > 0) {
+            println("[RTV] retVal=[" + VmOps.toStrAny(retVal) + "]")
         }
         this.returnValue = retVal
         this.currentFunc = ""
@@ -2179,11 +2208,14 @@ class Vm {
 
         val returnIp: Int = this.callStack.peekIp()
         val savedClosure: Int = this.callStack.peekClosure()
+        if (this.rtTraceCap > 0) {
+            println("[RT2] returnIp=" + toStr(returnIp) + " depth-after=" + toStr(this.callStack.callDepth() - 1))
+        }
         this.callStack.pop()
 
         // 恢复局部变量与闭包上下文
         this.retireLocals(this.locals)
-        this.locals = this.popSavedLocals()
+        this.locals = this.savedFramesPop()
         this.currentClosure = savedClosure
         this.currentFrame = this.currentFrame - 1
 
@@ -2221,12 +2253,20 @@ class Vm {
         this.ip = target
     }
 
-    /// 弹出最后一个保存的局部变量块。
-    private fun popSavedLocals(): VmLocals {
-        if (this.savedLocals.size() == 0) {
+    /// [R20] 压入调用者帧（List 直操，见 savedLocals 字段注释）。
+    private fun savedFramesAdd(v: VmLocals): Unit {
+        this.savedLocals.add(v)
+    }
+
+    /// [R20] 弹出最后一个保存的局部变量块（size 驱动 + 尾下标，同池模式）。
+    private fun savedFramesPop(): VmLocals {
+        val n: Int = this.savedLocals.size()
+        if (n <= 0) {
             return VmLocals()
         }
-        return this.savedLocals.pop()
+        val v: VmLocals = this.savedLocals[n - 1]
+        this.savedLocals.removeAt(n - 1)
+        return v
     }
 
     /// 从池中取一个（已重置的）locals；池空则新建。
@@ -3152,7 +3192,7 @@ class Vm {
             while (this.currentFrame > frame && this.callStack.callDepth() > 0) {
                 this.currentClosure = this.callStack.peekClosure()
                 this.callStack.pop()
-                this.locals = this.popSavedLocals()
+                this.locals = this.savedFramesPop()
                 this.currentFrame = this.currentFrame - 1
             }
             // 异常值落槽（若 handler 指定）并压栈

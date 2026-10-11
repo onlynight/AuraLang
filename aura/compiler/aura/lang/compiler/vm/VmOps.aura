@@ -91,6 +91,121 @@ object VmOps {
         return false
     }
 
+    // ═══════════════════════════════════════════════════════════
+    //  [R20] Float 文本形态（Plan A 值模型的务实浮点通道）
+    // ═══════════════════════════════════════════════════════════
+    //
+    // Plan A 无 Float Any 形态（isFloat 恒 false，浮点位模式是偶数 =
+    // "String"）⇒ 算术浮点分支全灭（实测 01-arithmetic 的 `x * 2.0`
+    // 打 0）。本通道让浮点以**十进制文本**走 Any 槽：LOAD_CONST_F 直推
+    // 常量文本，算术在此用纯 Int 定标数学（无任何 Float 位依赖），
+    // 渲染与种子 Display 对齐（"5.0"/"2.5"/"-1.25"）。
+    // 取舍：数值型字符串（"2.5" 作 String 值）参与算术会被升格浮点——
+    // 仅算术路径受影响，务实接受。
+
+    /// 浮点文本判定：[±]digits.digits。[R20] 全程已证原语（indexOf/vmSubstr/
+    /// isAllDigits）——自建累加扫描循环在宿主产码下按位点重掷腐坏。
+    fun isFloatText(v: Any): Boolean {
+        if (v == null) {
+            return false
+        }
+        val s: String = toStrAny(v)
+        val dot: Int = indexOf(s, ".", 0)
+        if (dot < 1) {
+            return false
+        }
+        val ip: String = vmSubstr(s, 0, dot)
+        val fp: String = vmSubstr(s, dot + 1, strLenRaw(s) - dot - 1)
+        if (strLenRaw(fp) < 1) {
+            return false
+        }
+        var ipD: String = ip
+        if (strLenRaw(ip) > 0) {
+            if (vmSubstr(ip, 0, 1) == "-") {
+                ipD = vmSubstr(ip, 1, strLenRaw(ip) - 1)
+            }
+        }
+        if (strLenRaw(ipD) < 1) {
+            return false
+        }
+        return isAllDigits(ipD) && isAllDigits(fp)
+    }
+
+    /// 小数位数："2.5"→1，"-1.25"→2，"2"→0。（点后段长度，无自建循环）
+    fun floatDecimalsOf(v: Any): Int {
+        val s: String = toStrAny(v)
+        val dot: Int = indexOf(s, ".", 0)
+        if (dot < 0) {
+            return 0
+        }
+        return strLenRaw(s) - dot - 1
+    }
+
+    /// 去点去符号的尾数："2.5"→25，"-1.25"→-125，"2"→2。
+    /// [R20] 点两侧各走已证 vmSubstr + toI32，无累加循环。
+    fun floatMantissaOf(v: Any): Int {
+        val s: String = toStrAny(v)
+        val dot: Int = indexOf(s, ".", 0)
+        if (dot < 0) {
+            return toI32(s)
+        }
+        val ip: String = vmSubstr(s, 0, dot)
+        val fp: String = vmSubstr(s, dot + 1, strLenRaw(s) - dot - 1)
+        val fd: Int = strLenRaw(fp)
+        val ival: Int = toI32(ip)
+        val fval: Int = toI32(fp)
+        var m: Int = 0
+        if (ival < 0) {
+            m = ival * floatPow10(fd) - fval
+        } else {
+            m = ival * floatPow10(fd) + fval
+        }
+        return m
+    }
+
+    fun floatPow10(d: Int): Int {
+        var p: Int = 1
+        var k: Int = 0
+        while (k < d) {
+            p = p * 10
+            k = k + 1
+        }
+        return p
+    }
+
+    /// 定标尾数 → 显示文本（种子 Display 风格）：(50,1)→"5.0"，
+    /// (25,1)→"2.5"，(-125,2)→"-1.25"。去尾零但至少保留 1 位小数。
+    /// [R20] 补零走单次 vmSubstr + 一次拼接（无自建累加循环）。
+    fun floatTextOf(m: Int, d: Int): String {
+        var mag: Int = m
+        var dec: Int = d
+        if (dec < 1) {
+            dec = 1
+        }
+        var neg: Boolean = false
+        if (mag < 0) {
+            neg = true
+            mag = -mag
+        }
+        while (dec > 1 && (mag % 10) == 0) {
+            mag = mag / 10
+            dec = dec - 1
+        }
+        val p: Int = floatPow10(dec)
+        val ip: Int = mag / p
+        val fp: Int = mag % p
+        var fs: String = intToStr(fp)
+        val fd: Int = strLenRaw(fs)
+        if (fd < dec) {
+            fs = vmSubstr("000000000", 0, dec - fd) + fs
+        }
+        var out: String = ""
+        if (neg) {
+            out = "-"
+        }
+        return out + intToStr(ip) + "." + fs
+    }
+
     /// 检查是否为字符串类型。
     ///
     /// AOT 载体（Plan A）下 `typeof` 按静态类型折叠：Any 形参**恒报 "String"**，
@@ -320,8 +435,14 @@ object VmOps {
 
     /// 加法。
     fun add(a: Any, b: Any): Any {
-        if (isFloat(a) || isFloat(b)) {
-            return parseFloat(toStr(a)) + parseFloat(toStr(b))
+        if (isFloatText(a) || isFloatText(b)) {
+            val dA: Int = floatDecimalsOf(a)
+            val dB: Int = floatDecimalsOf(b)
+            var d: Int = dA
+            if (dB > d) { d = dB }
+            val mA: Int = floatMantissaOf(a) * floatPow10(d - dA)
+            val mB: Int = floatMantissaOf(b) * floatPow10(d - dB)
+            return floatTextOf(mA + mB, d)
         } else if (isString(a) || isString(b)) {
             // P347：字符串分支必须走 toStrAny（运行时 toStr 是纯整数实现，
             // 字符串指针会打成指针值十进制）
@@ -333,8 +454,14 @@ object VmOps {
 
     /// 减法。
     fun sub(a: Any, b: Any): Any {
-        if (isFloat(a) || isFloat(b)) {
-            return parseFloat(toStr(a)) - parseFloat(toStr(b))
+        if (isFloatText(a) || isFloatText(b)) {
+            val dA: Int = floatDecimalsOf(a)
+            val dB: Int = floatDecimalsOf(b)
+            var d: Int = dA
+            if (dB > d) { d = dB }
+            val mA: Int = floatMantissaOf(a) * floatPow10(d - dA)
+            val mB: Int = floatMantissaOf(b) * floatPow10(d - dB)
+            return floatTextOf(mA - mB, d)
         } else {
             return toAny(intOf(a) - intOf(b))
         }
@@ -342,8 +469,9 @@ object VmOps {
 
     /// 乘法。
     fun mul(a: Any, b: Any): Any {
-        if (isFloat(a) || isFloat(b)) {
-            return parseFloat(toStr(a)) * parseFloat(toStr(b))
+        if (isFloatText(a) || isFloatText(b)) {
+            val d: Int = floatDecimalsOf(a) + floatDecimalsOf(b)
+            return floatTextOf(floatMantissaOf(a) * floatMantissaOf(b), d)
         } else {
             return toAny(intOf(a) * intOf(b))
         }
@@ -351,12 +479,27 @@ object VmOps {
 
     /// 除法（零除保护）。
     fun div(a: Any, b: Any): Any {
-        if (isFloat(a) || isFloat(b)) {
-            val bb: Float = parseFloat(toStr(b))
-            if (bb == 0.0f) {
-                return 0.0f
+        if (isFloatText(a) || isFloatText(b)) {
+            // 定标到 6 位小数的整数除法；结果文本去尾零保 1 位。
+            val mB: Int = floatMantissaOf(b)
+            if (mB == 0) {
+                return "0.0"
             }
-            return parseFloat(toStr(a)) / bb
+            val scale: Int = 6 + floatDecimalsOf(b) - floatDecimalsOf(a)
+            var m: Int = floatMantissaOf(a)
+            var k: Int = 0
+            if (scale > 0) {
+                while (k < scale) {
+                    m = m * 10
+                    k = k + 1
+                }
+            } else {
+                while (k < -scale) {
+                    m = m / 10
+                    k = k + 1
+                }
+            }
+            return floatTextOf(m / mB, 6)
         } else {
             val bb: Int = intOf(b)
             if (bb == 0) {
@@ -368,12 +511,18 @@ object VmOps {
 
     /// 取模（零除保护）。
     fun mod(a: Any, b: Any): Any {
-        if (isFloat(a) || isFloat(b)) {
-            val bb: Float = parseFloat(toStr(b))
-            if (bb == 0.0f) {
-                return 0.0f
+        if (isFloatText(a) || isFloatText(b)) {
+            val dA: Int = floatDecimalsOf(a)
+            val dB: Int = floatDecimalsOf(b)
+            var d: Int = dA
+            if (dB > d) { d = dB }
+            val p: Int = floatPow10(d)
+            val mA: Int = floatMantissaOf(a) * floatPow10(d - dA)
+            val mB: Int = floatMantissaOf(b) * floatPow10(d - dB)
+            if (mB == 0) {
+                return "0.0"
             }
-            return parseFloat(toStr(a)) - parseFloat(toStr(a)) / bb * bb
+            return floatTextOf(mA - mA / mB * mB, d)
         } else {
             val bb: Int = intOf(b)
             if (bb == 0) {
@@ -385,8 +534,8 @@ object VmOps {
 
     /// 一元取负。
     fun neg(a: Any): Any {
-        if (isFloat(a)) {
-            return -parseFloat(toStr(a))
+        if (isFloatText(a)) {
+            return floatTextOf(-floatMantissaOf(a), floatDecimalsOf(a))
         } else {
             return toAny(-intOf(a))
         }
