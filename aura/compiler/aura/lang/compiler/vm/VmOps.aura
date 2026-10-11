@@ -110,19 +110,32 @@ object VmOps {
             return false
         }
         val s: String = toStrAny(v)
-        val dot: Int = indexOf(s, ".", 0)
+        val n: Int = strLenRaw(s)
+        if (n < 3) {
+            return false
+        }
+        // [R21] 点位扫描内联（loadArgsFlat 逗号扫描同款形状，去 indexOf 依赖
+        // ——其 text.length 守卫在宿主下为坏死字段读）
+        var dot: Int = -1
+        var p: Int = 0
+        while (p < n) {
+            if (s.charCodeAt(p) == 46) {
+                dot = p
+                p = n
+            }
+            p = p + 1
+        }
         if (dot < 1) {
             return false
         }
-        val ip: String = vmSubstr(s, 0, dot)
-        val fp: String = vmSubstr(s, dot + 1, strLenRaw(s) - dot - 1)
+        val fp: String = vmSubstr(s, dot + 1, n - dot - 1)
+        var ipD: String = vmSubstr(s, 0, dot)
         if (strLenRaw(fp) < 1) {
             return false
         }
-        var ipD: String = ip
-        if (strLenRaw(ip) > 0) {
-            if (vmSubstr(ip, 0, 1) == "-") {
-                ipD = vmSubstr(ip, 1, strLenRaw(ip) - 1)
+        if (strLenRaw(ipD) > 0) {
+            if (vmSubstr(ipD, 0, 1) == "-") {
+                ipD = vmSubstr(ipD, 1, strLenRaw(ipD) - 1)
             }
         }
         if (strLenRaw(ipD) < 1) {
@@ -131,26 +144,44 @@ object VmOps {
         return isAllDigits(ipD) && isAllDigits(fp)
     }
 
-    /// 小数位数："2.5"→1，"-1.25"→2，"2"→0。（点后段长度，无自建循环）
+    /// 小数位数："2.5"→1，"-1.25"→2，"2"→0。（点位内联扫描，同 isFloatText）
     fun floatDecimalsOf(v: Any): Int {
         val s: String = toStrAny(v)
-        val dot: Int = indexOf(s, ".", 0)
+        val n: Int = strLenRaw(s)
+        var dot: Int = -1
+        var p: Int = 0
+        while (p < n) {
+            if (s.charCodeAt(p) == 46) {
+                dot = p
+                p = n
+            }
+            p = p + 1
+        }
         if (dot < 0) {
             return 0
         }
-        return strLenRaw(s) - dot - 1
+        return n - dot - 1
     }
 
     /// 去点去符号的尾数："2.5"→25，"-1.25"→-125，"2"→2。
     /// [R20] 点两侧各走已证 vmSubstr + toI32，无累加循环。
     fun floatMantissaOf(v: Any): Int {
         val s: String = toStrAny(v)
-        val dot: Int = indexOf(s, ".", 0)
+        val n: Int = strLenRaw(s)
+        var dot: Int = -1
+        var p: Int = 0
+        while (p < n) {
+            if (s.charCodeAt(p) == 46) {
+                dot = p
+                p = n
+            }
+            p = p + 1
+        }
         if (dot < 0) {
             return toI32(s)
         }
         val ip: String = vmSubstr(s, 0, dot)
-        val fp: String = vmSubstr(s, dot + 1, strLenRaw(s) - dot - 1)
+        val fp: String = vmSubstr(s, dot + 1, n - dot - 1)
         val fd: Int = strLenRaw(fp)
         val ival: Int = toI32(ip)
         val fval: Int = toI32(fp)

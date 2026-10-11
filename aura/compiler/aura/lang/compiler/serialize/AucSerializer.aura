@@ -199,7 +199,15 @@ object AucWriter {
         if (tag == AucConstants.CONST_INT) {
             writeU64(this.decToLong(value))
         } else if (tag == AucConstants.CONST_FLOAT) {
-            writeF64(value.toFloat())
+            // [R22] float 常量统一写文本（与 CONST_STR 同形：u32 长度 + 字节）
+            // ——读端 AucLoader tag==1 已改 readStrN（字符串已证路径），写位
+            // 模式将不兼容新格式。
+            writeU32(value.length)
+            var i: Int = 0
+            while (i < value.length) {
+                writeByte(value.charCodeAt(i) as Byte)
+                i = i + 1
+            }
         } else if (tag == AucConstants.CONST_STR) {
             writeU32(value.length)
             var i: Int = 0

@@ -703,38 +703,24 @@ class AucModule {
                 return toStr(low)
             }
             return toStr(low)
-        } else if (tag == 1) {  // CONST_FLOAT：IEEE-754 位模式 → 文本化
-            // P2.2 修复：原实现 skip(8) 并桩返回 "0.0" —— 一切浮点常量在
-            // Aura VM 上变成 0.0（实测差分用例 2.5*2.0 → 0.0）。
-            //
-            // 位模式 → 值采用**纯 Aura 拆位**实现（符号/指数/尾数 + pow 缩放）：
-            // 宿主对外部接口的 Long 传参存在不可靠失真（实测
-            // FloatOps.fromBits(2.5 的位模式) → 3.5），不能依赖新原生。
-            // 常量按 f32 精度还原（Aura Float 为 32 位）——高位宽常量会
-            // 舍入，已在 ADR 记录为已知限制。
-            //
+        } else if (tag == 1) {  // CONST_FLOAT：[R22] 十进制**文本**（种子端直接写文本，线格式与 CONST_STR 同形）
+            // 旧实现 = 8 字节位模式 + f64BitsToText（纯 Aura 拆位）——该内核
+            //（52 次 Float 累加 + VmOps.pow + toStr(Float)，宿主 toStr =
+            // 纯整数打印机）在宿主产码下漂移（实测 2.5/2.0 → "-2000"）；
+            // 纯 Long 重写内核逻辑正确但该布局发射代码致命（exit=127 启动崩）。
+            // 文本编码 = 字符串已证路径（readStrN 与 CONST_STR 同款），宿主侧
+            // 零格式化。串长实际 < 65536，读两个 u16 与写端 u32 字节序兼容
+            //（同 tag 2）。
             // P4.1（AOT 基底适配）：位模式改为逐字节构造。自举 AOT 下
             // readU64 的 `(hi as Long) << 32` 路径不可靠（`as Long` 失真），
             // 而标量 Long 的乘加在双基底均可靠（探针实测 2^52 精确）。
             // 写端是小端：首字节为最低位，故按 b7..b0 逆序乘累加
             //（v1 把首字节累到最高位，5.0 被读成 0x1440 → 0.0，差分当场抓住）。
-            val b0: Int = reader.readByte()
-            val b1: Int = reader.readByte()
-            val b2: Int = reader.readByte()
-            val b3: Int = reader.readByte()
-            val b4: Int = reader.readByte()
-            val b5: Int = reader.readByte()
-            val b6: Int = reader.readByte()
-            val b7: Int = reader.readByte()
-            var bits: Long = b7
-            bits = bits * 256 + b6
-            bits = bits * 256 + b5
-            bits = bits * 256 + b4
-            bits = bits * 256 + b3
-            bits = bits * 256 + b2
-            bits = bits * 256 + b1
-            bits = bits * 256 + b0
-            return f64BitsToText(bits)
+            // [R22] 位模式内核整体停置：f64BitsToText 保留但不再被调用
+            //（Float 常量已改文本编码，见上）。
+            val lenF: Int = reader.readU16()
+            val lenFHi: Int = reader.readU16()
+            return reader.readStrN(lenF + lenFHi * 65536)
         } else if (tag == 2) {  // CONST_STR
             // P4.1（AOT 基底适配）：长度改为两次 readU16 的组合。
             // 原实现 readU32 → `as Long` 在自举 AOT 下失真成巨值 → 常量区

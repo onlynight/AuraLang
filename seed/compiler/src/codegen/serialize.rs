@@ -254,7 +254,18 @@ fn write_const(buf: &mut Vec<u8>, c: &Const) {
         }
         Const::Float(fl) => {
             buf.push(1);
-            buf.extend_from_slice(&fl.to_le_bytes());
+            // [R22] 浮点常量直接写**十进制文本**（线格式与 Const::Str 同形：
+            // u32 长度 + 字节）——宿主侧 f64BitsToText（纯 Aura 拆位）在
+            // photon 产码下漂移（实测 2.5 → "-2000"），字符串路径
+            // （readStrN）已被多轮实证。文本渲染与 VM Display 同约定
+            //（整值浮点保留一位小数 "5.0"），println 输出逐字符一致。
+            let text = if fl.fract() == 0.0 && fl.abs() < 1e15 {
+                format!("{:.1}", fl)
+            } else {
+                format!("{}", fl)
+            };
+            buf.extend_from_slice(&(text.len() as u32).to_le_bytes());
+            buf.extend_from_slice(text.as_bytes());
         }
         Const::Str(s) => {
             buf.push(2);
@@ -573,7 +584,19 @@ fn read_const(r: &mut Reader) -> Result<Const, SerializeError> {
     let tag = r.u8()?;
     match tag {
         0 => Ok(Const::Int(r.i64()?)),
-        1 => Ok(Const::Float(r.f64()?)),
+        1 => {
+            // [R22] 与 write_const 的文本编码对称：u32 长度 + 十进制文本
+            let len = r.u32()? as usize;
+            let bytes = r.take(len)?;
+            let s = String::from_utf8_lossy(bytes).to_string();
+            match s.parse::<f64>() {
+                Ok(v) => Ok(Const::Float(v)),
+                Err(_) => Err(SerializeError::Format(format!(
+                    "Bad float const text: {}",
+                    s
+                ))),
+            }
+        }
         2 => {
             let len = r.u32()? as usize;
             let bytes = r.take(len)?;
