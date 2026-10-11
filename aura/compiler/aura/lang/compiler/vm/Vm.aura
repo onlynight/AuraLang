@@ -1669,6 +1669,188 @@ class Vm {
             this.stack.push(sumS as Any)
             return
         }
+        // [R28] 并发族前置路由（种子 concurrent_native.rs 对齐；宿主单线程
+        // 语义：锁=检查置位（有界自旋防死锁）、Condvar/Barrier wait 即返、
+        // Atomic 走 Memory.atomicAdd。句柄 = toAny(低32位指针)（tagged）。
+        if (funcName0 == "aura.lang.concurrent.Mutex.new") {
+            val mH: Long = Memory.alloc(8)
+            Memory.write64(mH, 0)
+            this.stack.push(VmOps.toAny(mH as Int))
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.Mutex.lock" || funcName0 == "aura.lang.concurrent.Mutex.writeLock") {
+            val mL: Any = this.stack.pop()
+            val pL: Long = VmOps.addrOf(mL)
+            if (pL != 0) {
+                var spL: Int = 0
+                while (spL < 1000000) {
+                    if (Memory.read64(pL) == 0) {
+                        Memory.write64(pL, 1)
+                        spL = 1000000
+                    }
+                    spL = spL + 1
+                }
+            }
+            this.stack.push(null)
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.Mutex.unlock") {
+            val mU: Any = this.stack.pop()
+            val pU: Long = VmOps.addrOf(mU)
+            if (pU != 0) {
+                Memory.write64(pU, 0)
+            }
+            this.stack.push(null)
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.Mutex.tryLock") {
+            val mT: Any = this.stack.pop()
+            val pT: Long = VmOps.addrOf(mT)
+            if (pT != 0 && Memory.read64(pT) == 0) {
+                Memory.write64(pT, 1)
+                this.stack.push(true)
+            } else {
+                this.stack.push(false)
+            }
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.Mutex.destroy") {
+            val mD: Any = this.stack.pop()
+            val pD: Long = VmOps.addrOf(mD)
+            if (pD != 0) {
+                Memory.free(pD)
+            }
+            this.stack.push(null)
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.Atomic.new") {
+            val aV: Any = this.stack.pop()
+            val aH: Long = Memory.alloc(8)
+            Memory.write64(aH, VmOps.intOf(aV) as Long)
+            this.stack.push(VmOps.toAny(aH as Int))
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.Atomic.load") {
+            val aL2: Any = this.stack.pop()
+            val pL2: Long = VmOps.addrOf(aL2)
+            if (pL2 != 0) {
+                this.stack.push(VmOps.toAny(Memory.read64(pL2) as Int))
+            } else {
+                this.stack.push(VmOps.toAny(0))
+            }
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.Atomic.store") {
+            val vS2: Any = this.stack.pop()
+            val aS2: Any = this.stack.pop()
+            val pS2: Long = VmOps.addrOf(aS2)
+            if (pS2 != 0) {
+                Memory.write64(pS2, VmOps.intOf(vS2) as Long)
+            }
+            this.stack.push(null)
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.Atomic.add" || funcName0 == "aura.lang.concurrent.Atomic.sub") {
+            val dA: Any = this.stack.pop()
+            val aA: Any = this.stack.pop()
+            val pA: Long = VmOps.addrOf(aA)
+            var delta: Long = VmOps.intOf(dA) as Long
+            if (funcName0 == "aura.lang.concurrent.Atomic.sub") {
+                delta = 0 - delta
+            }
+            if (pA != 0) {
+                Memory.atomicAdd(pA, delta)
+                this.stack.push(VmOps.toAny(Memory.read64(pA) as Int))
+            } else {
+                this.stack.push(VmOps.toAny(0))
+            }
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.Atomic.cas") {
+            val nC: Any = this.stack.pop()
+            val eC: Any = this.stack.pop()
+            val aC: Any = this.stack.pop()
+            val pC: Long = VmOps.addrOf(aC)
+            if (pC != 0 && Memory.read64(pC) == VmOps.intOf(eC) as Long) {
+                Memory.write64(pC, VmOps.intOf(nC) as Long)
+                this.stack.push(true)
+            } else {
+                this.stack.push(false)
+            }
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.RwLock.new") {
+            val rH: Long = Memory.alloc(8)
+            Memory.write64(rH, 0)
+            this.stack.push(VmOps.toAny(rH as Int))
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.RwLock.readLock") {
+            val rR: Any = this.stack.pop()
+            val pR: Long = VmOps.addrOf(rR)
+            if (pR != 0) {
+                val st: Long = Memory.read64(pR)
+                if (st >= 0) {
+                    Memory.write64(pR, st + 1)
+                }
+            }
+            this.stack.push(null)
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.RwLock.writeLock") {
+            val rW: Any = this.stack.pop()
+            val pW: Long = VmOps.addrOf(rW)
+            if (pW != 0 && Memory.read64(pW) == 0) {
+                Memory.write64(pW, -1)
+            }
+            this.stack.push(null)
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.RwLock.readUnlock") {
+            val rRU: Any = this.stack.pop()
+            val pRU: Long = VmOps.addrOf(rRU)
+            if (pRU != 0 && Memory.read64(pRU) > 0) {
+                Memory.write64(pRU, Memory.read64(pRU) - 1)
+            }
+            this.stack.push(null)
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.RwLock.writeUnlock") {
+            val rWU: Any = this.stack.pop()
+            val pWU: Long = VmOps.addrOf(rWU)
+            if (pWU != 0 && Memory.read64(pWU) == -1) {
+                Memory.write64(pWU, 0)
+            }
+            this.stack.push(null)
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.RwLock.destroy") {
+            val rD: Any = this.stack.pop()
+            val pD2: Long = VmOps.addrOf(rD)
+            if (pD2 != 0) {
+                Memory.free(pD2)
+            }
+            this.stack.push(null)
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.Condvar.new" || funcName0 == "aura.lang.concurrent.Barrier.new") {
+            val cH: Long = Memory.alloc(16)
+            Memory.write64(cH, 0)
+            Memory.write64(cH + 8, 0)
+            this.stack.push(VmOps.toAny(cH as Int))
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.Condvar.wait" || funcName0 == "aura.lang.concurrent.Condvar.signal"
+            || funcName0 == "aura.lang.concurrent.Condvar.broadcast" || funcName0 == "aura.lang.concurrent.Barrier.wait"
+            || funcName0 == "aura.lang.concurrent.Condvar.destroy" || funcName0 == "aura.lang.concurrent.Barrier.destroy") {
+            var wK: Int = 0
+            while (wK < argc) {
+                this.stack.pop()
+                wK = wK + 1
+            }
+            this.stack.push(null)
+            return
+        }
         // [R25] String.length 全名前置路由——旧径走剥离→"length" 臂→
         // `.length` 核心方法读（value-class 调用窗掷骰族，实测
         // 14-string-interp 挂起于此）。
