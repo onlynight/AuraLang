@@ -730,6 +730,37 @@ object VmOps {
         return x as Long
     }
 
+    /// [R36] Float → 十进制文本（6 位小数，去尾零保 1 位；种子 Display
+    /// 同约定）。标量 Float 比较/乘减 + Float→Int 截断（编译器内联
+    /// cvttss2si，单指令低骰）。供 Math 原生臂的文本通道输出。
+    fun floatToTextF(f: Float): String {
+        var neg: Boolean = false
+        var af: Float = f
+        if (af < 0) {
+            neg = true
+            af = 0 - af
+        }
+        var ip: Int = af as Int
+        if (ip < 0) { ip = 0 - ip }
+        var frac: Float = af - (ip as Float)
+        if (frac < 0) { frac = 0 - frac }
+        var out: String = ""
+        if (neg) { out = "-" }
+        out = out + intToStr(ip) + "."
+        var digits: Int = 0
+        var done: Boolean = false
+        while (!done) {
+            frac = frac * 10
+            var d: Int = frac as Int
+            if (d < 0) { d = 0 }
+            out = out + intToStr(d)
+            frac = frac - (d as Float)
+            digits = digits + 1
+            if (frac <= 0.000001 || digits >= 6) { done = true }
+        }
+        return out
+    }
+
     /// [R34] 堆指针键（登记/查询共用）：指针十进制。**不要**用 toStrAny
     /// 做堆对象键——偶指针走 String 分支 = 把堆内存当字符串读（实测列表
     /// 键 = len 字段字节 → strlen=1，m[i].size 全灭）。
