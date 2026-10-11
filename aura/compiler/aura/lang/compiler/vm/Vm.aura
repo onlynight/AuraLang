@@ -176,6 +176,18 @@ class Vm {
     /// [根修轮R4] op62 诊断计数（独立计数器，独立于 instructionCount）
     private var p62DiagCount: Int = 0
 
+    // [R24] 堆对象 kind 线性登记（HashMap.getOrDefault 调用窗在宿主下
+    // 无界挂起——实测 Collections.set 卡死；List 直操全已证）
+    private var cbDiag: Int = 0
+
+    // [R24] 布局扰动桩（真尺寸变化掷骰用；无调用者）
+    private fun layoutDiceStub(): Int {
+        val d: Int = 7
+        return d * 3
+    }
+    private var heapKindKeys: List<String> = arrayListOf<String>()
+    private var heapKindVals: List<String> = arrayListOf<String>()
+
     // ── 运行期 arena 水位 / 值栈容量探针（P1-RETAIN 诊断，2026-10-08）──
     //
     // 外部 memprof.py 只能读进程 RSS——它是**不可回收的**：bump arena 是 64 MiB
@@ -1188,11 +1200,29 @@ class Vm {
 
         // ── 集合 ──
         else if (op == 80) {
-            this.stack.push(VmCollections.newList())
-            this.registerHeapTop("list")
+            // [R24] NEW_LIST 内联（Memory 直操，R23 判决：原臂调用链宿主产
+            // 码崩，凡含列表字面量 100% 死于本臂）。布局 len@0/cap@8/items@16
+            //（Collections 兼容）；kind 线性登记供 Collections.set 双分派。
+            val l80: Long = Memory.alloc(24)
+            Memory.write64(l80, 0)
+            Memory.write64(l80 + 8, 4)
+            val items80: Long = Memory.alloc(32)
+            Memory.write64(l80 + 16, items80)
+            this.stack.push(l80 as Any)
+            this.heapKindKeys.add(VmOps.toStrAny(this.stack.peek()))
+            this.heapKindVals.add("list")
         } else if (op == 81) {
-            this.stack.push(VmCollections.newMap())
-            this.registerHeapTop("map")
+            // [R24] NEW_MAP 同款内联：len@0/cap@8/keys@16/vals@24。
+            val m81: Long = Memory.alloc(32)
+            Memory.write64(m81, 0)
+            Memory.write64(m81 + 8, 4)
+            val keys81: Long = Memory.alloc(32)
+            val vals81: Long = Memory.alloc(32)
+            Memory.write64(m81 + 16, keys81)
+            Memory.write64(m81 + 24, vals81)
+            this.stack.push(m81 as Any)
+            this.heapKindKeys.add(VmOps.toStrAny(this.stack.peek()))
+            this.heapKindVals.add("map")
         } else if (op == 82) {
             val list: Any = this.stack.pop()
             val elem: Any = this.stack.pop()
@@ -1393,10 +1423,179 @@ class Vm {
 
     /// 调用内置函数或用户函数。
     private fun callOrBuiltin(funcName0: String, argc: Int): Unit {
+        // [R24] 全名前置路由（剥离**前**）：streq 直比 = runtime 汇编
+        //（emitStreq，R3 审计过）——绕开剥离块的 charCodeAt NUL 扫描
+        //（长堆串接收者漂移后无零区自旋，本轮 [CB0-4] 二分判决）。
+        // set 语义 = 种子 nat_set：原位写 + 返回集合（旧 void 语义 =
+        // STORE_LOCAL 弹空栈失衡家族）。写路径 Memory 直操内联
+        //（vmListSet 调用窗与 op80 newList 同族掷骰死）。
+        if (funcName0 == "aura.lang.std.Collections.set" || funcName0 == "aura.lang.std.Collections.listSet"
+            || funcName0 == "Collections.set" || funcName0 == "Collections.listSet") {
+            val vP: Any = this.stack.pop()
+            val idxP: Any = this.stack.pop()
+            val listP: Any = this.stack.pop()
+            val ptrP: Long = VmOps.rawOf(listP)
+            if (ptrP != 0) {
+                val lenP: Long = Memory.read64(ptrP)
+                val indexP: Long = VmOps.intOf(idxP) as Long
+                if (indexP >= 0 && indexP < lenP) {
+                    val itemsP: Long = Memory.read64(ptrP + 16)
+                    if (itemsP != 0) {
+                        Memory.write64(itemsP + indexP * 8, VmOps.rawOf(vP))
+                    }
+                } else {
+                    VmCollections.push(listP, vP)
+                }
+            }
+            this.stack.push(listP)
+            return
+        }
+        // [R24b] StringBuilder 原生族（宿主此前零臂 → .auc 调用落 unknown
+        // → std 封装层死循环 = 2 个 TIMEOUT）。句柄布局：len@0 / cap@8 /
+        // buf@16（字节缓冲，恒 NUL 结尾）。全 Memory 直操内联。
+        if (funcName0 == "aura.lang.std.StringBuilder.create" || funcName0 == "Collections.sbCreate") {
+            val sbH: Long = Memory.alloc(24)
+            Memory.write64(sbH, 0)
+            Memory.write64(sbH + 8, 64)
+            val sbB: Long = Memory.alloc(64)
+            Memory.write64(sbB, 0)
+            Memory.write64(sbH + 16, sbB)
+            this.stack.push(sbH as Any)
+            return
+        }
+        if (funcName0 == "aura.lang.std.StringBuilder.length" || funcName0 == "Collections.sbLength") {
+            val sbL: Any = this.stack.pop()
+            val ptrL: Long = VmOps.rawOf(sbL)
+            if (ptrL == 0) {
+                this.stack.push(VmOps.toAny(0))
+            } else {
+                this.stack.push(VmOps.toAny(Memory.read64(ptrL) as Int))
+            }
+            return
+        }
+        if (funcName0 == "aura.lang.std.StringBuilder.append" || funcName0 == "Collections.sbAppend") {
+            val sA: Any = this.stack.pop()
+            val hA: Any = this.stack.pop()
+            val ptrA: Long = VmOps.rawOf(hA)
+            if (ptrA != 0) {
+                val sTxt: String = VmOps.toStrAny(sA)
+                val sN: Int = VmOps.strLenRaw(sTxt)
+                val oldLen: Long = Memory.read64(ptrA)
+                val oldCap: Long = Memory.read64(ptrA + 8)
+                var newCap: Long = oldCap
+                while (newCap < oldLen + sN + 1) {
+                    newCap = newCap * 2
+                }
+                if (newCap != oldCap) {
+                    val nbA: Long = Memory.alloc(newCap)
+                    Memory.copy(nbA, Memory.read64(ptrA + 16), oldLen)
+                    Memory.write64(ptrA + 8, newCap)
+                    Memory.write64(ptrA + 16, nbA)
+                }
+                val bufA: Long = Memory.read64(ptrA + 16)
+                var cA: Int = 0
+                while (cA < sN) {
+                    Memory.write(bufA + oldLen + cA, sTxt.charCodeAt(cA) as Byte)
+                    cA = cA + 1
+                }
+                Memory.write(bufA + oldLen + sN, 0 as Byte)
+                Memory.write64(ptrA, oldLen + sN)
+            }
+            this.stack.push(hA)
+            return
+        }
+        if (funcName0 == "aura.lang.std.StringBuilder.appendInt" || funcName0 == "Collections.sbAppendInt") {
+            val iA: Any = this.stack.pop()
+            val hA2: Any = this.stack.pop()
+            val iTxt: String = VmOps.intToStr(VmOps.intOf(iA))
+            val ptrA2: Long = VmOps.rawOf(hA2)
+            if (ptrA2 != 0) {
+                val sN2: Int = VmOps.strLenRaw(iTxt)
+                val oldLen2: Long = Memory.read64(ptrA2)
+                val oldCap2: Long = Memory.read64(ptrA2 + 8)
+                var newCap2: Long = oldCap2
+                while (newCap2 < oldLen2 + sN2 + 1) {
+                    newCap2 = newCap2 * 2
+                }
+                if (newCap2 != oldCap2) {
+                    val nb2: Long = Memory.alloc(newCap2)
+                    Memory.copy(nb2, Memory.read64(ptrA2 + 16), oldLen2)
+                    Memory.write64(ptrA2 + 8, newCap2)
+                    Memory.write64(ptrA2 + 16, nb2)
+                }
+                val buf2: Long = Memory.read64(ptrA2 + 16)
+                var c2: Int = 0
+                while (c2 < sN2) {
+                    Memory.write(buf2 + oldLen2 + c2, iTxt.charCodeAt(c2) as Byte)
+                    c2 = c2 + 1
+                }
+                Memory.write(buf2 + oldLen2 + sN2, 0 as Byte)
+                Memory.write64(ptrA2, oldLen2 + sN2)
+            }
+            return
+        }
+        if (funcName0 == "aura.lang.std.StringBuilder.finish" || funcName0 == "Collections.sbFinish") {
+            val hF: Any = this.stack.pop()
+            val ptrF: Long = VmOps.rawOf(hF)
+            if (ptrF == 0) {
+                this.stack.push("" as Any)
+            } else {
+                val bufF: Long = Memory.read64(ptrF + 16)
+                val lenF: Long = Memory.read64(ptrF)
+                var outF: String = ""
+                var kF: Int = 0
+                while (kF < lenF) {
+                    outF = outF + String.fromCharCode(Memory.read(bufF + kF) as Int)
+                    kF = kF + 1
+                }
+                this.stack.push(outF)
+            }
+            return
+        }
+        if (funcName0 == "aura.lang.std.StringBuilder.reset" || funcName0 == "Collections.sbReset") {
+            val hR: Any = this.stack.pop()
+            val ptrR: Long = VmOps.rawOf(hR)
+            if (ptrR != 0) {
+                Memory.write64(ptrR, 0)
+                Memory.write(Memory.read64(ptrR + 16), 0 as Byte)
+            }
+            this.stack.push(hR)
+            return
+        }
+        if (funcName0 == "aura.lang.std.Collections.listSize" || funcName0 == "Collections.listSize") {
+            val lN2: Any = this.stack.pop()
+            val ptrN2: Long = VmOps.rawOf(lN2)
+            if (ptrN2 == 0) {
+                this.stack.push(VmOps.toAny(0))
+            } else {
+                this.stack.push(VmOps.toAny(Memory.read64(ptrN2) as Int))
+            }
+            return
+        }
+        if (funcName0 == "aura.lang.std.Collections.listAppend" || funcName0 == "Collections.listAppend") {
+            val vA2: Any = this.stack.pop()
+            val lA2: Any = this.stack.pop()
+            VmCollections.push(lA2, vA2)
+            this.stack.push(lA2)
+            return
+        }
         // [根修轮R5] 限定名剥离：.auc 原生表携带全限定名。尾段提取走
         // charCodeAt 扫描 + vmSubstr（零 .length/.substring 依赖——两者均
         // 为位点漂移成员，R4/R5 探针实证）。
-        val funcName: String = if (funcName0.startsWith("aura.lang.")) {
+        // [R24] startsWith 内联（charCodeAt 前缀扫描）——核心 String 方法
+        // 调用窗（value-class 方法族，R19 toUpperCase 同款）在长堆串上
+        // 掷骰死：实测 29 字符 "aura.lang.std.Collections.set" 挂起于本点。
+        var qual24: Boolean = true
+        if (argc < -1000) { qual24 = false }
+        var qc: Int = 0
+        while (qc < 10) {
+            if (funcName0.charCodeAt(qc) != "aura.lang.".charCodeAt(qc)) {
+                qual24 = false
+                qc = 10
+            }
+            qc = qc + 1
+        }
+        val funcName: String = if (qual24) {
             var fnLen: Int = 0
             while (funcName0.charCodeAt(fnLen) != 0) {
                 fnLen = fnLen + 1
@@ -1408,23 +1607,69 @@ class Vm {
                 q = q + 1
             }
             if (lastDot >= 0 && lastDot + 1 < fnLen) {
-                VmOps.vmSubstr(funcName0, lastDot + 1, fnLen - lastDot - 1)
+                val stripped: String = VmOps.vmSubstr(funcName0, lastDot + 1, fnLen - lastDot - 1)
+                stripped
             } else {
                 funcName0
             }
         } else {
             funcName0
         }
-        // [根修轮R5] Collections 原生族路由（动态数组读写；set = void 语义
-        // 不压栈——压了即栈失衡，后续取值整体错位）
-        if (funcName == "set" || funcName == "__list_set") {
-            val v: Any = this.stack.pop()
-            val idx: Any = this.stack.pop()
-            val list: Any = this.stack.pop()
-            VmCollections.vmListSet(list, idx, v)
+        // [R24] Collections 原生族路由（限定名剥离后的短名在此接住；全名
+        // 由链首臂处理）。set 语义改判：种子 nat_set = **原位写 + 返回集合**
+        //（HIR 把 `xs[i]=v` 降级为 `xs = Collections.set(xs,i,v)` 表达式——
+        // 旧 void 语义不压栈 ⇒ STORE_LOCAL 弹空 = 栈失衡家族）。写路径内联
+        // Memory 直操（vmListSet 调用窗与 op80 newList 同族掷骰死，R23 判决）。
+        if (funcName == "set" || funcName == "__list_set"
+            || funcName == "Collections.set" || funcName == "aura.lang.std.Collections.set"
+            || funcName == "Collections.listSet" || funcName == "aura.lang.std.Collections.listSet") {
+            val vS: Any = this.stack.pop()
+            val idxS: Any = this.stack.pop()
+            val listS: Any = this.stack.pop()
+            val ptrS: Long = VmOps.rawOf(listS)
+            val keyS: String = VmOps.toStrAny(listS)
+            val knS: Int = this.heapKindKeys.size()
+            var kindS: String = ""
+            var kiS: Int = 0
+            while (kiS < knS) {
+                if (this.heapKindKeys[kiS] == keyS) {
+                    kindS = this.heapKindVals[kiS]
+                    kiS = knS
+                }
+                kiS = kiS + 1
+            }
+            if (ptrS != 0) {
+                if (kindS == "map") {
+                    VmCollections.mapSet(listS, idxS, vS)
+                } else {
+                    val lenS: Long = Memory.read64(ptrS)
+                    val indexS: Long = VmOps.intOf(idxS) as Long
+                    if (indexS >= 0 && indexS < lenS) {
+                        val itemsS: Long = Memory.read64(ptrS + 16)
+                        if (itemsS != 0) {
+                            Memory.write64(itemsS + indexS * 8, VmOps.rawOf(vS))
+                        }
+                    } else {
+                        VmCollections.push(listS, vS)
+                    }
+                }
+            }
+            this.stack.push(listS)
             return
         }
-        if (funcName == "get" || funcName == "__get") {
+        if (funcName == "listSize" || funcName == "aura.lang.std.Collections.listSize") {
+            val lN: Any = this.stack.pop()
+            val ptrN: Long = VmOps.rawOf(lN)
+            if (ptrN == 0) {
+                this.stack.push(VmOps.toAny(0))
+            } else {
+                this.stack.push(VmOps.toAny(Memory.read64(ptrN) as Int))
+            }
+            return
+        }
+        if (funcName == "get" || funcName == "__get"
+            || funcName == "listGet" || funcName == "aura.lang.std.Collections.listGet"
+            || funcName == "getAt" || funcName == "aura.lang.std.Collections.getAt") {
             val idx: Any = this.stack.pop()
             val list: Any = this.stack.pop()
             this.stack.push(VmCollections.vmListAt(list, idx))
@@ -1512,7 +1757,78 @@ class Vm {
             return
         }
         // 内置函数        // 内置函数
-        if (funcName == "println" || funcName == "print") {
+        // ── [R24] Collections 原生族（置链首：短名臂在链深处够不到全名，
+        // 且链评估本身在特定串长掷骰挂起）——.auc 的 `xs[i] = v` 编译为
+        // aura.lang.std.Collections.set 原生调用。map/list 双分派按登记。──
+        if (funcName == "Collections.set" || funcName == "aura.lang.std.Collections.set"
+            || funcName == "Collections.listSet" || funcName == "aura.lang.std.Collections.listSet") {
+            val valS: Any = this.stack.pop()
+            val idxS: Any = this.stack.pop()
+            val listS: Any = this.stack.pop()
+            println("[S1] entered set")
+            val keyS: String = VmOps.toStrAny(listS)
+            println("[S2] key ok len=" + toStr(this.heapKindKeys.size()))
+            val kn: Int = this.heapKindKeys.size()
+            var kindS: String = ""
+            var ki: Int = 0
+            while (ki < kn) {
+                if (this.heapKindKeys[ki] == keyS) {
+                    kindS = this.heapKindVals[ki]
+                    ki = kn
+                }
+                ki = ki + 1
+            }
+            println("[S3] kind=[" + kindS + "]")
+            if (kindS == "map") {
+                VmCollections.mapSet(listS, idxS, valS)
+            } else {
+                VmCollections.vmListSet(listS, idxS, valS)
+            }
+            println("[S4] set done")
+            this.stack.push(listS)
+            return
+        } else if (funcName == "Collections.listOf" || funcName == "aura.lang.std.Collections.listOf"
+            || funcName == "Collections.mutableListOf" || funcName == "aura.lang.std.Collections.mutableListOf"
+            || funcName == "Collections.emptyList" || funcName == "aura.lang.std.Collections.emptyList") {
+            val baseL: Int = this.stack.stackDepth() - argc
+            val nl: Any = VmCollections.newList()
+            var jL: Int = 0
+            while (jL < argc) {
+                if (baseL >= 0) {
+                    VmCollections.push(nl, this.stack.vmSlotAt(baseL + jL))
+                }
+                jL = jL + 1
+            }
+            var kL: Int = 0
+            while (kL < argc) {
+                this.stack.pop()
+                kL = kL + 1
+            }
+            this.heapKindKeys.add(VmOps.toStrAny(nl))
+            this.heapKindVals.add("list")
+            this.stack.push(nl)
+            return
+        } else if (funcName == "Collections.listAppend" || funcName == "aura.lang.std.Collections.listAppend") {
+            val vA: Any = this.stack.pop()
+            val lA: Any = this.stack.pop()
+            VmCollections.push(lA, vA)
+            this.stack.push(lA)
+            return
+        } else if (funcName == "Collections.listSize" || funcName == "aura.lang.std.Collections.listSize") {
+            val lI: Any = this.stack.pop()
+            this.stack.push(VmCollections.length(lI))
+            return
+        } else if (funcName == "Collections.isEmpty" || funcName == "aura.lang.std.Collections.isEmpty") {
+            val lE: Any = this.stack.pop()
+            val nE: Any = VmCollections.length(lE)
+            this.stack.push(VmOps.toI32(VmOps.toStrAny(nE)) == 0)
+            return
+        } else if (funcName == "Collections.listGet" || funcName == "aura.lang.std.Collections.listGet") {
+            val idxG: Any = this.stack.pop()
+            val listG: Any = this.stack.pop()
+            this.stack.push(VmCollections.vmListAt(listG, idxG))
+            return
+        } else if (funcName == "println" || funcName == "print") {
             val text: String = this.collectArgs(argc)
             if (funcName == "println") {
                 println(text)
