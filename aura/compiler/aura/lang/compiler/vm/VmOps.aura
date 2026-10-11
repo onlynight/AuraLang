@@ -695,11 +695,8 @@ object VmOps {
             return ""
         }
         if (start >= text.length) {
-            // [R4] 定性探针：哪个守卫误触发
-            if (vmSubDiag < 10) {
-                vmSubDiag = vmSubDiag + 1
-                println("[VS] guard start>=len: start=" + toStr(start) + " len=" + toStr(text.length))
-            }
+            // [R4→R32] 定性探针摘除（生产路径噪声：边界 substring
+            // start==len 为合法空串语义，实证 07-exception-simple 被污染）
             return ""
         }
         // P386：早返回风格——`end` 不再重赋值（旧实现两次重赋值 = 两处
