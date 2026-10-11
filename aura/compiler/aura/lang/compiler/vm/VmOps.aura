@@ -615,6 +615,50 @@ object VmOps {
         return x as Long
     }
 
+    /// [R19] ASCII 大写化——**零拼接实现**。累加器循环 `result = result +
+    /// fromCharCode(c)` 在宿主管线下多轮迭代必腐坏（实测 toUpper 出
+    /// "0t^ HELLO"、toLower 出 "aa"——每轮 concat 的指针漂移复合，R13
+    /// ptr+1 家族），改为：Memory.alloc 一次 + 逐字节写入 + NUL 终止，
+    /// 结果裸指针原样作 String（Long→Any 裸传 + Any→String 重释，同
+    /// toStrAny/newListCap 先例）。charCodeAt 多轮扫描由 loadArgsFlat
+    /// 逗号扫描实证可靠。
+    fun toUpper(text: String): String {
+        val n: Int = strLenRaw(text)
+        val buf: Long = Memory.alloc(n + 1)
+        var i: Int = 0
+        while (i < n) {
+            val c: Int = text.charCodeAt(i)
+            var oc: Int = c
+            if (c >= 97 && c <= 122) {
+                oc = c - 32
+            }
+            Memory.write(buf + i, oc as Byte)
+            i = i + 1
+        }
+        Memory.write(buf + n, 0 as Byte)
+        val ab: Any = buf as Any
+        return ab as String
+    }
+
+    /// [R19] ASCII 小写化（同 toUpper 的零拼接模式）。
+    fun toLower(text: String): String {
+        val n: Int = strLenRaw(text)
+        val buf: Long = Memory.alloc(n + 1)
+        var i: Int = 0
+        while (i < n) {
+            val c: Int = text.charCodeAt(i)
+            var oc: Int = c
+            if (c >= 65 && c <= 90) {
+                oc = c + 32
+            }
+            Memory.write(buf + i, oc as Byte)
+            i = i + 1
+        }
+        Memory.write(buf + n, 0 as Byte)
+        val ab: Any = buf as Any
+        return ab as String
+    }
+
     /// Any → String（统一入口）。
     ///
     /// 供 VM 的**值输出/内建分派**使用：`toStr(v)` 直接写在 `Vm` 的方法里时，

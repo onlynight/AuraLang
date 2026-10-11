@@ -158,10 +158,13 @@ class Vm {
     private var instructionCount: Int = 0
 
     /// [R10] LOAD_LOCAL 槽位轨迹配额
-    private var ldTraceCap: Int = 60
+    private var ldTraceCap: Int = 0
 
     /// [R10] STORE 轨迹配额
-    private var stTraceCap: Int = 80
+    private var stTraceCap: Int = 0
+
+    /// [R19] 全 op 参数/栈顶/sp 轨迹配额（参数列审计 + 漂移 op 实证）
+    private var xTraceCap: Int = 0
 
     /// [根修轮R4] op62 诊断计数（独立计数器，独立于 instructionCount）
     private var p62DiagCount: Int = 0
@@ -526,6 +529,15 @@ class Vm {
             // P392：热路径读 Memory 裸缓冲（值域 < 2^31，read64 as Int 无损）。
             val opCode: Int = Memory.read64(this.mcOpCodes + this.ip * 8) as Int
             this.ip = this.ip + 1
+            // [R19] 全 op 轨迹：ip / opcode / arg0 / 栈顶 / sp——每条 op 的
+            // 净栈效应直接可见（相邻两行 top 差 = 本 op 的推弹账）。
+            if (this.xTraceCap > 0) {
+                this.xTraceCap = this.xTraceCap - 1
+                val topX: Any = this.stack.peek()
+                println("[X] ip=" + toStr(this.ip - 1) + " op=" + toStr(opCode)
+                    + " a0=[" + this.argStrOf(0) + "] top=[" + VmOps.toStrAny(topX)
+                    + "] sp=" + toStr(this.stack.stackDepth()) + "/" + toStr(this.stack.stackDepth()))
+            }
             // [R10] 槽位轨迹（判决实验）
             if (this.ldTraceCap > 0) {
                 this.ldTraceCap = this.ldTraceCap - 1
@@ -629,8 +641,8 @@ class Vm {
             + " capAvg=" + toStr(this.capSum / p)
             + " capLast=" + toStr(this.stack.cap())
             + " capGrow=" + toStr(this.stack.capGrow())
-            + " depth=" + toStr(this.stack.size())
-            + " calls=" + toStr(this.callStack.size()))
+            + " depth=" + toStr(this.stack.stackDepth())
+            + " calls=" + toStr(this.callStack.callDepth()))
     }
 
     /// 加载期预处理：把字节码切成行并缓存 `opcode` 助记符 / **数值编号** / 参数表
@@ -1542,7 +1554,7 @@ class Vm {
         } else if (funcName == "listOf") {
             // 按**原顺序**取实参（见 `VmStack.vmSlotAt`：逐个 pop 会反转元素顺序）
             val list: Any = VmCollections.newList()
-            val base: Int = this.stack.size() - argc
+            val base: Int = this.stack.stackDepth() - argc
             var j: Int = 0
             while (j < argc) {
                 VmCollections.push(list, this.stack.vmSlotAt(base + j))
@@ -1715,26 +1727,39 @@ class Vm {
 
         // ── `.auc` 原生名别名（P2.2：.auc 的原生表使用 std 全名，
         //    与上方短名不同；差分框架实测补齐）──
+        // [R19] 两层修复：
+        //   1) 转换统一走 VmOps.toStrAny——bare toStr 在本宿主布局的多个
+        //      调用窗返回陈旧值（历史案例：collectArgs 同一次 toStr(v) 得
+        //      "5"；本轮 02-strings 实测 charAt 经 toStr 得 "5"）。
+        //   2) 大小写变换**不再调用核心 String.toUpperCase/toLowerCase 方法**
+        //      ——该 value-class 方法调用窗在宿主管线下脆断（R19 实测：一次
+        //      构建返回 ""、重掷后 SEGFAULT），改用已证原语内联实现
+        //      （charCodeAt 扫描 + fromCharCode + strcat 拼接，与
+        //      VmOps.vmSubstr 同一可靠模式）。
         else if (funcName == "String.toUpperCase" || funcName == "toUpperCase") {
             val v: Any = this.stack.pop()
-            val svtoUpperCase: String = toStr(v)
-            this.stack.push(svtoUpperCase.toUpperCase())
+            val sUpper: String = VmOps.toStrAny(v)
+            val outUpper: String = VmOps.toUpper(sUpper)
+            this.stack.push(outUpper)
             return
         } else if (funcName == "String.toLowerCase" || funcName == "toLowerCase") {
             val v: Any = this.stack.pop()
-            val svtoLowerCase: String = toStr(v)
-            this.stack.push(svtoLowerCase.toLowerCase())
+            val sLower: String = VmOps.toStrAny(v)
+            val outLower: String = VmOps.toLower(sLower)
+            this.stack.push(outLower)
             return
         } else if (funcName == "String.charAt" || funcName == "charAt") {
             val idx: Any = this.stack.pop()
             val v: Any = this.stack.pop()
-            val s: String = toStr(v)
+            val s: String = VmOps.toStrAny(v)
             val i: Int = VmOps.intOf(idx)
-            if (i < 0 || i >= s.length) {
-                this.stack.push("")
+            var outC: String = ""
+            if (i < 0 || i >= VmOps.strLenRaw(s)) {
+                outC = ""
             } else {
-                this.stack.push(VmOps.vmSubstr(s, i, 1))
+                outC = VmOps.vmSubstr(s, i, 1)
             }
+            this.stack.push(outC)
             return
         } else if (funcName == "String.indexOf" || funcName == "indexOf") {
             val sub: Any = this.stack.pop()
@@ -2026,7 +2051,7 @@ class Vm {
         } else if (funcName == "Collections.listOf" || funcName == "aura.lang.std.Collections.listOf") {
             // 与顶层 listOf 相同
             val list: Any = VmCollections.newList()
-            val base: Int = this.stack.size() - argc
+            val base: Int = this.stack.stackDepth() - argc
             var j: Int = 0
             while (j < argc) {
                 VmCollections.push(list, this.stack.vmSlotAt(base + j))
@@ -2141,13 +2166,13 @@ class Vm {
     /// 从函数返回。
     private fun returnFromFunc(): Unit {
         var retVal: Any = "Unit"
-        if (this.stack.size() > 0) {
+        if (this.stack.stackDepth() > 0) {
             retVal = this.stack.pop()
         }
         this.returnValue = retVal
         this.currentFunc = ""
 
-        if (this.callStack.size() == 0) {
+        if (this.callStack.callDepth() == 0) {
             this.running = false
             return
         }
@@ -2279,13 +2304,16 @@ class Vm {
     private fun getField(fieldName: String): Unit {
         val obj: Any = this.stack.pop()
         if (fieldName == "length" || fieldName == "size" || fieldName == "count") {
-            // [根修轮R14] 路由至 VmOps.strLenRaw（独立小方法 = 最小 roll 面；
-            // runtime strlen 裸名直调与此等价，二者皆避开 toStr 的 Int 语义）
-            this.stack.push(strlen(obj))
+            // [R19] 路由至 strLenRaw(toStrAny(obj))——两个已证可靠原语的组合。
+            // 旧径 strlen(obj)（prelu 全局 → text.length）的调用窗在宿主布局
+            // 下实参腐坏：[X] 轨迹实锤栈顶为 "Hello" 而 strlen 返回 2（R10
+            // 调用窗实参漂移同族）。[GF] 对照实验（raw=5 strlen=5 同轮复核）
+            // 后定案，探针已拆。
+            this.stack.push(toAny(VmOps.strLenRaw(VmOps.toStrAny(obj))))
             return
         }
         if (fieldName == "isEmpty") {
-            if (strlen(obj) == 0) {
+            if (VmOps.strLenRaw(VmOps.toStrAny(obj)) == 0) {
                 this.stack.push(true)
             } else {
                 this.stack.push(false)
@@ -2452,7 +2480,7 @@ class Vm {
     /// depth = 接收者之下压着的实参个数（0 = 接收者在栈顶）。
     private fun receiverClassAt(depth: Int): String {
         if (depth < 0) { return "" }
-        val idx: Int = this.stack.size() - 1 - depth
+        val idx: Int = this.stack.stackDepth() - 1 - depth
         if (idx < 0) { return "" }
         val v: Any = this.stack.vmSlotAt(idx)
         if (v == null) { return "" }
@@ -2479,7 +2507,7 @@ class Vm {
                 val chainHit: String = this.resolveMethodInChain(cls0, methodName)
                 if (chainHit != "") { resolved = chainHit }
             }
-            if (this.stack.size() > 0) {
+            if (this.stack.stackDepth() > 0) {
                 this.stack.pop()  // 丢弃接收者副本
             }
             val pc: Int = this.funcParamCount(resolved)
@@ -2601,7 +2629,7 @@ class Vm {
         if (this.argCountOf() >= 1) {
             argc = VmOps.toI32(this.argStrOf(0))
         }
-        if (this.stack.size() < argc + 1) {
+        if (this.stack.stackDepth() < argc + 1) {
             this.error = "CALL_CLOSURE: stack underflow"
             this.running = false
             return
@@ -2782,7 +2810,7 @@ class Vm {
 
     /// 当前调用深度（主帧为 1）。
     fun getCallDepth(): Int {
-        return this.callStack.size() + 1
+        return this.callStack.callDepth() + 1
     }
 
     /// 递增引用计数。
@@ -2851,22 +2879,18 @@ class Vm {
         }
     }
 
-    /// 保留（RETAIN，op 112）——**消费**栈顶，不回压。
+    /// 保留（RETAIN，op 112）——**消费**栈顶，不回推。
     ///
-    /// P0-2c 栈约定对齐（2026-10-08）：emit 端模式是 `LoadVar src; RETAIN`
-    /// （压栈后由本指令消费）。旧实现 `this.incRef()` pop 后又 push 回去，
-    /// 每对净增 1 个栈槽——紧密循环里值栈按 ~16B/迭代无上界倍增（longstep
-    /// 1M 次 `as Long` 实测 VmStack cap 涨到 2,097,088 槽 ≈34MB，各代旧缓冲
-    /// 累计 ≈31MB 全部滞留 bump arena）。与种子 interp.rs 2026-10-02 的同名
-    /// 修复同根因（当时症状：8 秒涨到 7GB）。
+    /// [R19·语义判决] 种子 interp.rs（.auc 的唯一生产者 + 语义基准）：
+    /// `Instr::Retain => stack.pop()` —— 2026-10-02 修复确认消费约定
+    /// （发射端模式 `LoadVar(src); RETAIN`，push 后由本指令消费，两两抵消）。
+    /// 旧实现「弹出不回推」与「回推」都错——**回推一次**（R17）在堆指针
+    /// 值上净增 1 槽（旧版 7GB 泄漏的回魂），**回推两次**（R17 编辑残留，
+    /// 2869+2887 双 push）每次 RETAIN 泄 2 槽。唯一正确语义 = 消费。
+    /// [X] 轨迹实证：GET_FIELD 的操作数来自其**前一条** LOAD_LOCAL（ip29→30），
+    /// 与 RETAIN 无关——「RETAIN 喂 GET_FIELD」的前提不成立。
     private fun retain(): Unit {
         val v: Any = this.stack.pop()
-        // [根修轮R17·根修] RETAIN 的栈约定 = 弹出→调整→**回推**（值仍留在
-        // 栈上供后续 ops 使用——种子 interp.rs 同语义）。旧实现弹出不回推
-        // ⇒ 栈丢失该值 ⇒ 后续 GET_FIELD 弹到**陈旧残留**（实测 02-strings
-        // 的 s.length 弹到 tagged 残留 "33" ⇒ strlen=2）⇒ 整个值漂移家族
-        // 的单点根因。所有出口回推。
-        this.stack.push(v)
         if (v == null || !VmOps.isNumeric(v)) {
             return
         }
@@ -2884,7 +2908,6 @@ class Vm {
                 }
             }
         }
-        this.stack.push(v)
     }
 
     /// 释放（RELEASE，op 113）——**消费**栈顶，不回压（同 retain 的栈约定）。
@@ -3108,7 +3131,7 @@ class Vm {
     }
 
     private fun throwException(): Unit {
-        val ex: Any = if (this.stack.size() > 0) this.stack.pop() else "Exception"
+        val ex: Any = if (this.stack.stackDepth() > 0) this.stack.pop() else "Exception"
 
         // 自内向外逐层过滤（P1.4 多级过滤：内层不匹配则继续外层）
         while (this.handlerStack.size() > 0) {
@@ -3126,7 +3149,7 @@ class Vm {
                 continue
             }
             // 帧截断：丢弃 handler 之上（含当前）的调用帧，恢复到 handler 帧
-            while (this.currentFrame > frame && this.callStack.size() > 0) {
+            while (this.currentFrame > frame && this.callStack.callDepth() > 0) {
                 this.currentClosure = this.callStack.peekClosure()
                 this.callStack.pop()
                 this.locals = this.popSavedLocals()
@@ -4330,7 +4353,7 @@ if (false && (r < n - 5
 
     /// 获取栈深度。
     fun getStackDepth(): Int {
-        return this.stack.size()
+        return this.stack.stackDepth()
     }
 
     /// 获取退出码。

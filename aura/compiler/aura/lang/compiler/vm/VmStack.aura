@@ -74,7 +74,12 @@ class VmStack {
     }
 
     fun size(): Int {
-        return this.sp
+        // [R19] P366 可靠模式：字段读先入局部——旧体 `return this.sp` 的
+        // photon 产码在 VmStack 上实测恒返回 0（[X] 探针 sp 列全程 0），
+        // collectArgs 的 `base = size() - argc` 因此变负下标。四个栈类同款
+        // body 一并改写。
+        val s0: Int = this.sp
+        return s0
     }
 
     /// 当前容量（已倍增到的槽数）。P1-RETAIN 诊断用：容量应受活跃深度约束，
@@ -88,8 +93,19 @@ class VmStack {
         return this.capGrow
     }
 
+    /// [R19] 唯一名通道：`size` 与四个栈类 + 集合族撞名，photon 产码把
+    /// `stack.size()` 调用解析到错误目标（实测恒 0）；唯一名无撞名面，
+    /// [X] 探针对照实验证实本方法返回正确 sp（push→1 / pop→0）。
+    /// **生产路径一律走本名**（Vm.aura 已全部替换）。
+    fun stackDepth(): Int {
+        val s0: Int = this.sp
+        return s0
+    }
+
     fun vmSlotAt(i: Int): Any {
-        if (i < 0 || i >= this.sp) {
+        // [R19] P366 可靠模式：sp 先入局部再判定（同 size() 的错译规避）
+        val sp0: Int = this.sp
+        if (i < 0 || i >= sp0) {
             return null
         }
         return Memory.read64(this.mc + i * 8) as Any
@@ -131,7 +147,12 @@ class VmStrStack {
     }
 
     fun size(): Int {
-        return this.sp
+        // [R19] P366 可靠模式：字段读先入局部——旧体 `return this.sp` 的
+        // photon 产码在 VmStack 上实测恒返回 0（[X] 探针 sp 列全程 0），
+        // collectArgs 的 `base = size() - argc` 因此变负下标。四个栈类同款
+        // body 一并改写。
+        val s0: Int = this.sp
+        return s0
     }
 
     fun clear(): Unit {
@@ -167,7 +188,12 @@ class VmFrameStack {
     }
 
     fun size(): Int {
-        return this.sp
+        // [R19] P366 可靠模式：字段读先入局部——旧体 `return this.sp` 的
+        // photon 产码在 VmStack 上实测恒返回 0（[X] 探针 sp 列全程 0），
+        // collectArgs 的 `base = size() - argc` 因此变负下标。四个栈类同款
+        // body 一并改写。
+        val s0: Int = this.sp
+        return s0
     }
 
     fun clear(): Unit {
@@ -302,7 +328,18 @@ class VmCallStack {
     }
 
     fun size(): Int {
-        return this.sp
+        // [R19] P366 可靠模式：字段读先入局部——旧体 `return this.sp` 的
+        // photon 产码在 VmStack 上实测恒返回 0（[X] 探针 sp 列全程 0），
+        // collectArgs 的 `base = size() - argc` 因此变负下标。四个栈类同款
+        // body 一并改写。
+        val s0: Int = this.sp
+        return s0
+    }
+
+    /// [R19] 唯一名通道（同 VmStack.stackDepth 的撞名规避）。
+    fun callDepth(): Int {
+        val s0: Int = this.sp
+        return s0
     }
 
     fun reset(): Unit {
