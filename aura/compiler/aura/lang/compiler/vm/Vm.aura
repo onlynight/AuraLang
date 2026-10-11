@@ -834,11 +834,34 @@ class Vm {
         } else if (op == 20) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            this.stack.push(VmOps.add(a, b))
+            // [R21] Float 文本分支在 dispatch 层内联（push(String) = toUpper
+            // 已证形状）——VmOps.add 的双类型返回合并会被 Int 装箱（P364
+            // getConstByIdx 同款病）。
+            if (VmOps.isFloatText(a) || VmOps.isFloatText(b)) {
+                val dA20: Int = VmOps.floatDecimalsOf(a)
+                val dB20: Int = VmOps.floatDecimalsOf(b)
+                var d20: Int = dA20
+                if (dB20 > d20) { d20 = dB20 }
+                val mA20: Int = VmOps.floatMantissaOf(a) * VmOps.floatPow10(d20 - dA20)
+                val mB20: Int = VmOps.floatMantissaOf(b) * VmOps.floatPow10(d20 - dB20)
+                this.stack.push(VmOps.floatTextOf(mA20 + mB20, d20))
+            } else {
+                this.stack.push(VmOps.add(a, b))
+            }
         } else if (op == 21) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            this.stack.push(VmOps.sub(a, b))
+            if (VmOps.isFloatText(a) || VmOps.isFloatText(b)) {
+                val dA21: Int = VmOps.floatDecimalsOf(a)
+                val dB21: Int = VmOps.floatDecimalsOf(b)
+                var d21: Int = dA21
+                if (dB21 > d21) { d21 = dB21 }
+                val mA21: Int = VmOps.floatMantissaOf(a) * VmOps.floatPow10(d21 - dA21)
+                val mB21: Int = VmOps.floatMantissaOf(b) * VmOps.floatPow10(d21 - dB21)
+                this.stack.push(VmOps.floatTextOf(mA21 - mB21, d21))
+            } else {
+                this.stack.push(VmOps.sub(a, b))
+            }
         } else if (op == 32) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
@@ -877,11 +900,12 @@ class Vm {
         else if (op == 5) {
             this.stack.push(toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))))
         } else if (op == 6) {
-            // [R20] Float 常量直推**常量文本**（"2.5"）——Plan A 无 Float
-            // Any 形态，parseFloat 的位模式是偶数 = "String" 指针，算术与
-            // 打印全灭（实测 x*2.0 打 0）。文本形态 + isFloatText 判定 +
-            // VmOps 定标整数算术 = 浮点通道（见 VmOps isFloatText 注释）。
-            this.stack.push(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))
+            // [R21] Float 常量直推常量 Any（与 op7 逐字同形）——R20 版在此
+            // 多包了一层 toStrAny：冗余 String→Any 转换位点被发射器按 Int
+            // 装箱（栈上出现 (ptr<<1)|1 巨数，实测 2.5 → 295414120844813376）。
+            // getConstByIdx 已有 P364 单返回路径修复，op7 的字符串常量全程
+            // 正确 = 该形态已被多轮实证。
+            this.stack.push(this.getConstByIdx(this.arg0IntOf()))
         } else if (op == 7) {
             this.stack.push(this.getConstByIdx(this.arg0IntOf()))
         } else if (op == 8) {
@@ -932,18 +956,67 @@ class Vm {
         } else if (op == 22) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            this.stack.push(VmOps.mul(a, b))
+            // [R21] Float 文本分支 dispatch 层内联（同 op20/21 注释）
+            if (VmOps.isFloatText(a) || VmOps.isFloatText(b)) {
+                val d22: Int = VmOps.floatDecimalsOf(a) + VmOps.floatDecimalsOf(b)
+                this.stack.push(VmOps.floatTextOf(VmOps.floatMantissaOf(a) * VmOps.floatMantissaOf(b), d22))
+            } else {
+                this.stack.push(VmOps.mul(a, b))
+            }
         } else if (op == 23) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            this.stack.push(VmOps.div(a, b))
+            if (VmOps.isFloatText(a) || VmOps.isFloatText(b)) {
+                // 定标 6 位小数的整数除法
+                val mB23: Int = VmOps.floatMantissaOf(b)
+                if (mB23 == 0) {
+                    this.stack.push("0.0")
+                } else {
+                    val scale23: Int = 6 + VmOps.floatDecimalsOf(b) - VmOps.floatDecimalsOf(a)
+                    var m23: Int = VmOps.floatMantissaOf(a)
+                    var k23: Int = 0
+                    if (scale23 > 0) {
+                        while (k23 < scale23) {
+                            m23 = m23 * 10
+                            k23 = k23 + 1
+                        }
+                    } else {
+                        while (k23 < -scale23) {
+                            m23 = m23 / 10
+                            k23 = k23 + 1
+                        }
+                    }
+                    this.stack.push(VmOps.floatTextOf(m23 / mB23, 6))
+                }
+            } else {
+                this.stack.push(VmOps.div(a, b))
+            }
         } else if (op == 24) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            this.stack.push(VmOps.mod(a, b))
+            if (VmOps.isFloatText(a) || VmOps.isFloatText(b)) {
+                val dA24: Int = VmOps.floatDecimalsOf(a)
+                val dB24: Int = VmOps.floatDecimalsOf(b)
+                var d24: Int = dA24
+                if (dB24 > d24) { d24 = dB24 }
+                val p24: Int = VmOps.floatPow10(d24)
+                val mA24: Int = VmOps.floatMantissaOf(a) * VmOps.floatPow10(d24 - dA24)
+                val mB24: Int = VmOps.floatMantissaOf(b) * VmOps.floatPow10(d24 - dB24)
+                if (mB24 == 0) {
+                    this.stack.push("0.0")
+                } else {
+                    this.stack.push(VmOps.floatTextOf(mA24 - mA24 / mB24 * mB24, d24))
+                }
+            } else {
+                this.stack.push(VmOps.mod(a, b))
+            }
         } else if (op == 25) {
             val a: Any = this.stack.pop()
-            this.stack.push(VmOps.neg(a))
+            if (VmOps.isFloatText(a)) {
+                this.stack.push(VmOps.floatTextOf(-VmOps.floatMantissaOf(a), VmOps.floatDecimalsOf(a)))
+            } else {
+                this.stack.push(VmOps.neg(a))
+            }
         } else if (op == 26) {
             val a: Any = this.stack.pop()
             this.stack.push(a)

@@ -435,15 +435,9 @@ object VmOps {
 
     /// 加法。
     fun add(a: Any, b: Any): Any {
-        if (isFloatText(a) || isFloatText(b)) {
-            val dA: Int = floatDecimalsOf(a)
-            val dB: Int = floatDecimalsOf(b)
-            var d: Int = dA
-            if (dB > d) { d = dB }
-            val mA: Int = floatMantissaOf(a) * floatPow10(d - dA)
-            val mB: Int = floatMantissaOf(b) * floatPow10(d - dB)
-            return floatTextOf(mA + mB, d)
-        } else if (isString(a) || isString(b)) {
+        // [R21] Float 文本分支已上移 dispatch（op20）——本函数保持
+        // String/Any 单类型返回，避免 P364 双类型合并装箱病。
+        if (isString(a) || isString(b)) {
             // P347：字符串分支必须走 toStrAny（运行时 toStr 是纯整数实现，
             // 字符串指针会打成指针值十进制）
             return toStrAny(a) + toStrAny(b)
@@ -454,91 +448,35 @@ object VmOps {
 
     /// 减法。
     fun sub(a: Any, b: Any): Any {
-        if (isFloatText(a) || isFloatText(b)) {
-            val dA: Int = floatDecimalsOf(a)
-            val dB: Int = floatDecimalsOf(b)
-            var d: Int = dA
-            if (dB > d) { d = dB }
-            val mA: Int = floatMantissaOf(a) * floatPow10(d - dA)
-            val mB: Int = floatMantissaOf(b) * floatPow10(d - dB)
-            return floatTextOf(mA - mB, d)
-        } else {
-            return toAny(intOf(a) - intOf(b))
-        }
+        return toAny(intOf(a) - intOf(b))
     }
 
     /// 乘法。
     fun mul(a: Any, b: Any): Any {
-        if (isFloatText(a) || isFloatText(b)) {
-            val d: Int = floatDecimalsOf(a) + floatDecimalsOf(b)
-            return floatTextOf(floatMantissaOf(a) * floatMantissaOf(b), d)
-        } else {
-            return toAny(intOf(a) * intOf(b))
-        }
+        return toAny(intOf(a) * intOf(b))
     }
 
     /// 除法（零除保护）。
     fun div(a: Any, b: Any): Any {
-        if (isFloatText(a) || isFloatText(b)) {
-            // 定标到 6 位小数的整数除法；结果文本去尾零保 1 位。
-            val mB: Int = floatMantissaOf(b)
-            if (mB == 0) {
-                return "0.0"
-            }
-            val scale: Int = 6 + floatDecimalsOf(b) - floatDecimalsOf(a)
-            var m: Int = floatMantissaOf(a)
-            var k: Int = 0
-            if (scale > 0) {
-                while (k < scale) {
-                    m = m * 10
-                    k = k + 1
-                }
-            } else {
-                while (k < -scale) {
-                    m = m / 10
-                    k = k + 1
-                }
-            }
-            return floatTextOf(m / mB, 6)
-        } else {
-            val bb: Int = intOf(b)
-            if (bb == 0) {
-                return 0
-            }
-            return toAny(intOf(a) / bb)
+        val bb: Int = intOf(b)
+        if (bb == 0) {
+            return 0
         }
+        return toAny(intOf(a) / bb)
     }
 
     /// 取模（零除保护）。
     fun mod(a: Any, b: Any): Any {
-        if (isFloatText(a) || isFloatText(b)) {
-            val dA: Int = floatDecimalsOf(a)
-            val dB: Int = floatDecimalsOf(b)
-            var d: Int = dA
-            if (dB > d) { d = dB }
-            val p: Int = floatPow10(d)
-            val mA: Int = floatMantissaOf(a) * floatPow10(d - dA)
-            val mB: Int = floatMantissaOf(b) * floatPow10(d - dB)
-            if (mB == 0) {
-                return "0.0"
-            }
-            return floatTextOf(mA - mA / mB * mB, d)
-        } else {
-            val bb: Int = intOf(b)
-            if (bb == 0) {
-                return 0
-            }
-            return toAny(intOf(a) % bb)
+        val bb: Int = intOf(b)
+        if (bb == 0) {
+            return 0
         }
+        return toAny(intOf(a) % bb)
     }
 
     /// 一元取负。
     fun neg(a: Any): Any {
-        if (isFloatText(a)) {
-            return floatTextOf(-floatMantissaOf(a), floatDecimalsOf(a))
-        } else {
-            return toAny(-intOf(a))
-        }
+        return toAny(-intOf(a))
     }
 
     // ═══════════════════════════════════════════════════════════
