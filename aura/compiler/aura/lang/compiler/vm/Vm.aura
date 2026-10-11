@@ -546,6 +546,14 @@ class Vm {
             }
 
             // P392：热路径读 Memory 裸缓冲（值域 < 2^31，read64 as Int 无损）。
+            // [R30] ip 越界守卫：闭包内跳转目标骰坏（JMP 写入垃圾 ip）时，
+            // 旧径继续 fetch 越界缓冲 = 垃圾执行自旋（TIMEOUT）或段错误。
+            // 守卫 = 干净报错退出（TIMEOUT → 可计数的 OUTPUT-DIFF）。
+            if (this.ip < 0 || this.ip >= this.mcN) {
+                this.error = "jump target out of range: ip=" + toStr(this.ip) + " at fn=[" + this.currentFunc + "]"
+                this.running = false
+                break
+            }
             val opCode: Int = Memory.read64(this.mcOpCodes + this.ip * 8) as Int
             this.ip = this.ip + 1
             // [R19] 全 op 轨迹：ip / opcode / arg0 / 栈顶 / sp——每条 op 的
