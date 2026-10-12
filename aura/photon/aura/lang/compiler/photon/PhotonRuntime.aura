@@ -866,22 +866,20 @@ object PhotonRuntime {
     fun emitJitExecAllocRW(enc: X86Encoder): Unit {
         enc.emitPrologue(0x50)
         enc.emitStackStore(-0x08, "rcx")          // [rbp-0x08] = size
-        // ── attempt 1: hint 0x10000000 ──
-        enc.emitMovRI32("rcx", 268435456)
+        // [P41x] 与 allocRWX 同款：提示搬出栈预留区 + 第 4 档失败显式落底
+        // （旧路由 chk3 两分支都回 a4 = 无限自旋）。
+        enc.emitMovRI32("rcx", 1073741824)
         enc.emitJmpLabel("jalloc_try")
         enc.emitLabel("jalloc_a2")
-        // ── attempt 2: hint 0x18000000 ──
-        enc.emitMovRI32("rcx", 402653184)
+        enc.emitMovRI32("rcx", 1342177280)
         enc.emitJmpLabel("jalloc_try")
         enc.emitLabel("jalloc_a3")
-        // ── attempt 3: hint 0x08000000 ──
-        enc.emitMovRI32("rcx", 134217728)
+        enc.emitMovRI32("rcx", 1610612736)
         enc.emitJmpLabel("jalloc_try")
         enc.emitLabel("jalloc_a4")
-        // ── attempt 4: hint 0x20000000 ──
-        enc.emitMovRI32("rcx", 536870912)
+        enc.emitMovRI32("rcx", 1879048192)
         enc.emitJmpLabel("jalloc_try")
-        // ── 全部失败 ──
+        enc.emitLabel("jalloc_fail")
         enc.emitXorRR("rax", "rax")
         enc.emitJmpLabel("jalloc_done")
         // ── 公共尝试体：rcx = 提示基址 ──
@@ -911,19 +909,19 @@ object PhotonRuntime {
         enc.emitLabel("jalloc_next")
         // 失败：按当前 hint 落到下一档（rcx 已被调用体覆盖，从槽重载）
         enc.emitStackLoad("rcx", -0x10)
-        enc.emitMovRI32("rax", 268435456)
+        enc.emitMovRI32("rax", 1073741824)
         enc.emitCmpRR("rcx", "rax")
         enc.emitJccLabel("ne", "jalloc_chk2")
         enc.emitJmpLabel("jalloc_a2")
         enc.emitLabel("jalloc_chk2")
-        enc.emitMovRI32("rax", 402653184)
+        enc.emitMovRI32("rax", 1342177280)
         enc.emitCmpRR("rcx", "rax")
         enc.emitJccLabel("ne", "jalloc_chk3")
         enc.emitJmpLabel("jalloc_a3")
         enc.emitLabel("jalloc_chk3")
-        enc.emitMovRI32("rax", 134217728)
+        enc.emitMovRI32("rax", 1610612736)
         enc.emitCmpRR("rcx", "rax")
-        enc.emitJccLabel("ne", "jalloc_a4")
+        enc.emitJccLabel("ne", "jalloc_fail")
         enc.emitJmpLabel("jalloc_a4")
         enc.emitLabel("jalloc_done")
         enc.emitEpilogue()
@@ -939,18 +937,23 @@ object PhotonRuntime {
     fun emitJitExecAllocRWX(enc: X86Encoder): Unit {
         enc.emitPrologue(0x50)
         enc.emitStackStore(-0x08, "rcx")          // [rbp-0x08] = size
-        // ── attempt 1: hint 0x10000000 ──
-        enc.emitMovRI32("rcx", 268435456)
+        // [P41x] 提示搬出 512MB 栈预留区（旧 4 提示在 /STACK:512MB 非 ASLR
+        // 宿主全落栈预留 [0x400000,0x203F8000]，VirtualQueryEx 取证）→
+        // 0x40000000-0x70000000（仍 Int32 域，远离堆竞技场）。
+        enc.emitMovRI32("rcx", 1073741824)
         enc.emitJmpLabel("jrx_try")
         enc.emitLabel("jrx_a2")
-        enc.emitMovRI32("rcx", 402653184)
+        enc.emitMovRI32("rcx", 1342177280)
         enc.emitJmpLabel("jrx_try")
         enc.emitLabel("jrx_a3")
-        enc.emitMovRI32("rcx", 134217728)
+        enc.emitMovRI32("rcx", 1610612736)
         enc.emitJmpLabel("jrx_try")
         enc.emitLabel("jrx_a4")
-        enc.emitMovRI32("rcx", 536870912)
+        enc.emitMovRI32("rcx", 1879048192)
         enc.emitJmpLabel("jrx_try")
+        // [P41x] 全失败显式落底（旧路由第 4 档失败回 a4 = 无限自旋，
+        // 反汇编实证；全失败返回 0 曾为不可达死代码）
+        enc.emitLabel("jrx_fail")
         enc.emitXorRR("rax", "rax")
         enc.emitJmpLabel("jrx_done")
         enc.emitLabel("jrx_try")
@@ -977,19 +980,19 @@ object PhotonRuntime {
         enc.emitJmpLabel("jrx_done")
         enc.emitLabel("jrx_next")
         enc.emitStackLoad("rcx", -0x10)
-        enc.emitMovRI32("rax", 268435456)
+        enc.emitMovRI32("rax", 1073741824)
         enc.emitCmpRR("rcx", "rax")
         enc.emitJccLabel("ne", "jrx_c2")
         enc.emitJmpLabel("jrx_a2")
         enc.emitLabel("jrx_c2")
-        enc.emitMovRI32("rax", 402653184)
+        enc.emitMovRI32("rax", 1342177280)
         enc.emitCmpRR("rcx", "rax")
         enc.emitJccLabel("ne", "jrx_c3")
         enc.emitJmpLabel("jrx_a3")
         enc.emitLabel("jrx_c3")
-        enc.emitMovRI32("rax", 134217728)
+        enc.emitMovRI32("rax", 1610612736)
         enc.emitCmpRR("rcx", "rax")
-        enc.emitJccLabel("ne", "jrx_a4")
+        enc.emitJccLabel("ne", "jrx_fail")
         enc.emitJmpLabel("jrx_a4")
         enc.emitLabel("jrx_done")
         enc.emitEpilogue()
@@ -1011,14 +1014,14 @@ object PhotonRuntime {
         enc.emitMovRR("r10", "rcx")
         enc.emitCmpRI("rcx", 134217728)           // 0x08000000
         enc.emitJccLabel("jb", "jp_try_rdx")
-        enc.emitCmpRI("rcx", 536870912)           // 0x20000000
+        enc.emitCmpRI("rcx", 2130706432)          // 0x7F000000 [P41x] 上界放宽（提示区 0x40000000-0x70000000）
         enc.emitJccLabel("ja", "jp_try_rdx")
         enc.emitJmpLabel("jp_have_addr")
         enc.emitLabel("jp_try_rdx")
         enc.emitMovRR("r10", "rdx")
         enc.emitCmpRI("rdx", 134217728)
         enc.emitJccLabel("jb", "jp_try_r8")
-        enc.emitCmpRI("rdx", 536870912)
+        enc.emitCmpRI("rdx", 2130706432)          // 0x7F000000 [P41x]
         enc.emitJccLabel("ja", "jp_try_r8")
         enc.emitJmpLabel("jp_have_addr")
         enc.emitLabel("jp_try_r8")
@@ -1117,7 +1120,7 @@ object PhotonRuntime {
         // rcx ∈ [0x08000000, 0x20000000] ？
         enc.emitCmpRI("rcx", 134217728)          // 0x08000000
         enc.emitJccLabel("jb", "je_swapped")
-        enc.emitCmpRI("rcx", 536870912)          // 0x20000000
+        enc.emitCmpRI("rcx", 2130706432)         // 0x7F000000 [P41x] 上界放宽
         enc.emitJccLabel("ja", "je_swapped")
         enc.emitJmpLabel("je_go")
         enc.emitLabel("je_swapped")
@@ -5082,6 +5085,8 @@ object PhotonRuntime {
         val encMem = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitAuraMemUsedMb(encMem)
         writer.appendFunction(encMem.toHex(), "aura_mem_used_mb", PhotonObjectWriterUtils.joinRelocRecords(encMem.getRelocations()))
+        // [P41x] Allocator_used 别名（jit_vmhost main 引用裸名；同上纯追加）
+        writer.appendFunction(encMem.toHex(), "Allocator_used", PhotonObjectWriterUtils.joinRelocRecords(encMem.getRelocations()))
         val encHb = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitAuraHeapBump(encHb)
         writer.appendFunction(encHb.toHex(), "aura_heapbump", PhotonObjectWriterUtils.joinRelocRecords(encHb.getRelocations()))
@@ -5090,6 +5095,10 @@ object PhotonRuntime {
         val encCrd = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCpuRdtsc(encCrd)
         writer.appendFunction(encCrd.toHex(), "Cpu_rdtsc", PhotonObjectWriterUtils.joinRelocRecords(encCrd.getRelocations()))
+        // [P41x] rdtsc 别名：Cpu.aura 的 @native(asm="rdtsc") 桥以裸名引用，
+        // 宿主可达性骰漂移时链接 undefined symbol: rdtsc（实测）。纯追加
+        // 导出（同字节别名，不动既有函数布局）。
+        writer.appendFunction(encCrd.toHex(), "rdtsc", PhotonObjectWriterUtils.joinRelocRecords(encCrd.getRelocations()))
         val encCmf = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCpuMemFence(encCmf)
         writer.appendFunction(encCmf.toHex(), "Cpu_memFence", PhotonObjectWriterUtils.joinRelocRecords(encCmf.getRelocations()))
