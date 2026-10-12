@@ -1902,6 +1902,7 @@ object PhotonRuntime {
         enc.emitCallRel("__heap_oom")
         enc.emitLabel("b2s_ok")
         enc.emitStoreRIP("heapBump", "rax")
+        enc.emitMovRR("rbx", "rdx")            // rbx = dst（起始指针）
         enc.emitMovRR("rax", "rcx")
         enc.emitCmpRI("rax", 0)
         enc.emitJccLabel("ne", "b2s_true")
@@ -1941,7 +1942,7 @@ object PhotonRuntime {
         enc.emitXorRR("rax", "rax")
         enc.emitMovByteMemReg("rdx", "rax")
         enc.emitLabel("b2s_done")
-        enc.emitMovRR("rax", "rdx")
+        enc.emitMovRR("rax", "rbx")
         enc.emitStackLoad("rbx", -0x8)
         enc.emitEpilogue()
     }
@@ -4607,21 +4608,7 @@ object PhotonRuntime {
             PhotonObjectWriterUtils.joinRelocRecords(enc7g.getRelocations())
         )
 
-        val enc8a = X86EncoderUtils.emptyEncoder()
-        PhotonRuntime.emitIoFileExists(enc8a)
-        writer.appendFunction(
-            enc8a.toHex(),
-            "IO_fileExists",
-            PhotonObjectWriterUtils.joinRelocRecords(enc8a.getRelocations())
-        )
 
-        val enc8b = X86EncoderUtils.emptyEncoder()
-        PhotonRuntime.emitBoxNew(enc8b)
-        writer.appendFunction(
-            enc8b.toHex(),
-            "Box",
-            PhotonObjectWriterUtils.joinRelocRecords(enc8b.getRelocations())
-        )
 
         val enc8c = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionsTake(enc8c)
@@ -5240,13 +5227,7 @@ object PhotonRuntime {
         val enc7g = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitPtrIsNull(enc7g)
         writer.appendFunction(enc7g.toHex(), "ptrIsNull", PhotonObjectWriterUtils.joinRelocRecords(enc7g.getRelocations()))
-        val enc8a = X86EncoderUtils.emptyEncoder()
-        PhotonRuntime.emitIoFileExists(enc8a)
-        writer.appendFunction(enc8a.toHex(), "IO_fileExists", PhotonObjectWriterUtils.joinRelocRecords(enc8a.getRelocations()))
 
-        val enc8b = X86EncoderUtils.emptyEncoder()
-        PhotonRuntime.emitBoxNew(enc8b)
-        writer.appendFunction(enc8b.toHex(), "Box", PhotonObjectWriterUtils.joinRelocRecords(enc8b.getRelocations()))
 
         val enc8c = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionsTake(enc8c)
@@ -5749,13 +5730,7 @@ object PhotonRuntimeUtils {
         val enc7g = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitPtrIsNull(enc7g)
         writer.appendFunction(enc7g.toHex(), "ptrIsNull", PhotonObjectWriterUtils.joinRelocRecords(enc7g.getRelocations()))
-        val enc8a = X86EncoderUtils.emptyEncoder()
-        PhotonRuntime.emitIoFileExists(enc8a)
-        writer.appendFunction(enc8a.toHex(), "IO_fileExists", PhotonObjectWriterUtils.joinRelocRecords(enc8a.getRelocations()))
 
-        val enc8b = X86EncoderUtils.emptyEncoder()
-        PhotonRuntime.emitBoxNew(enc8b)
-        writer.appendFunction(enc8b.toHex(), "Box", PhotonObjectWriterUtils.joinRelocRecords(enc8b.getRelocations()))
 
         val enc8c = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitCollectionsTake(enc8c)
