@@ -1971,6 +1971,47 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
+    /// 编码 toStrN(rcx = 可空标量) rax = "null"（rcx==0）或 toStr(rcx)。
+    /// 可空类型原生表示中 null = 0；语言测试（06）要求打印 "null"。
+    fun emitToStrN(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x20)
+        enc.emitStackStore(-0x8, "rbx")
+        enc.emitCmpRI("rcx", 0)
+        enc.emitJccLabel("ne", "tsn_nonnull")
+        // "null "：bump 分配 8 字节，rbx = 起始
+        enc.emitMovRIP("rax", "heapBump")
+        enc.emitMovRIP("rdx", "heapArenaBase")
+        enc.emitAddRR("rdx", "rax")
+        enc.emitAddRI("rax", 8)
+        enc.emitMovRIP("r10", "heapCap")
+        enc.emitCmpRR("rax", "r10")
+        enc.emitJccLabel("le", "tsn_ok")
+        enc.emitCallRel("__heap_oom")
+        enc.emitLabel("tsn_ok")
+        enc.emitStoreRIP("heapBump", "rax")
+        enc.emitMovRR("rbx", "rdx")
+        enc.emitMovRI("rax", 110)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 117)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 108)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 108)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitXorRR("rax", "rax")
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitMovRR("rax", "rbx")
+        enc.emitStackLoad("rbx", -0x8)
+        enc.emitEpilogue()
+        enc.emitLabel("tsn_nonnull")
+        enc.emitCallRel("toStr")
+        enc.emitStackLoad("rbx", -0x8)
+        enc.emitEpilogue()
+    }
+
     /// 编码 take(rcx = list, rdx = n, r8 = memTok) rax = 前 n 元新列表。
     /// 经 Collections_newList / Collections_count / Collections_getAt /
     /// Collections_listAppend 组装。列表布局为运行库裸句柄。
@@ -4642,6 +4683,14 @@ object PhotonRuntime {
             PhotonObjectWriterUtils.joinRelocRecords(enc8f.getRelocations())
         )
 
+        val enc8g = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitToStrN(enc8g)
+        writer.appendFunction(
+            enc8g.toHex(),
+            "toStrN",
+            PhotonObjectWriterUtils.joinRelocRecords(enc8g.getRelocations())
+        )
+
         val enc8 = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitStrlen(enc8)
         writer.appendFunction(
@@ -5244,6 +5293,9 @@ object PhotonRuntime {
         val enc8f = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitChannelRecv(enc8f)
         writer.appendFunction(enc8f.toHex(), "channelRecv", PhotonObjectWriterUtils.joinRelocRecords(enc8f.getRelocations()))
+        val enc8g = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitToStrN(enc8g)
+        writer.appendFunction(enc8g.toHex(), "toStrN", PhotonObjectWriterUtils.joinRelocRecords(enc8g.getRelocations()))
 
         val enc8 = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitStrlen(enc8)
@@ -5747,6 +5799,9 @@ object PhotonRuntimeUtils {
         val enc8f = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitChannelRecv(enc8f)
         writer.appendFunction(enc8f.toHex(), "channelRecv", PhotonObjectWriterUtils.joinRelocRecords(enc8f.getRelocations()))
+        val enc8g = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitToStrN(enc8g)
+        writer.appendFunction(enc8g.toHex(), "toStrN", PhotonObjectWriterUtils.joinRelocRecords(enc8g.getRelocations()))
 
         val enc8 = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitStrlen(enc8)

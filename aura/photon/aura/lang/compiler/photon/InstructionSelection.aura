@@ -802,6 +802,9 @@ class InstructionSelector {
                 || name == "newChannel" || name == "channelSend" || name == "channelRecv") {
             return true
         }
+        if (name == "toStrN") {
+            return true
+        }
         // ⚠️ 名单**必须与 `PhotonRuntime.RUNTIME_SYMBOLS` 逐字一致**。
         // 旧实现只列了 println/toStr/strlen 这一小撮，而标准库里
         // `Memory.aura` / `Collections` 的方法体同样会被编译进用户目标文件
@@ -2254,7 +2257,11 @@ class InstructionSelector {
             }
             var convLhs: Int = lhsNode
             var convRhs: Int = rhsNode
-            if (this.concatConvCache == 1 && this.types.isString(val.type)
+            // P40x-l：门控放宽为 addIsStr（操作数启发）——`str + 整数变量`
+            // 的 Add 类型在前端弱类型下常为 Basic（非 String），旧门控跳过
+            // 转换 → strcat(str, 整数) → NULL 兜底空串（实测 06 nullInt=、
+            // 08 cores=）。逐操作数转换自证安全：String → 恒等、标量 → toStr。
+            if (this.concatConvCache == 1 && addIsStr
                     && this.lir != null && val.args.size >= 2) {
                 convLhs = this.emitToStrConvNode(lhs, lhsNode)
                 convRhs = this.emitToStrConvNode(rhs, rhsNode)
@@ -2388,7 +2395,14 @@ class InstructionSelector {
             }
         }
         var fname: String = "toStr"
-        if (this.types.isBool(argVal.type)) {
+        // P40x-l：可空类型（Int?/Bool?/…）与 null 字面量 → toStrN
+        //（null 渲染为 "null"；原生表示中 null = 0，语言测试 06 语义）
+        var aName: String = argTyName
+        if (aName == "" ) { aName = this.types.nameOf(argVal.type) }
+        if (argVal.aux == "null"
+                || (aName.length > 1 && (aName.charCodeAt(aName.length - 1) as Int) == 63)) {
+            fname = "toStrN"
+        } else if (this.types.isBool(argVal.type)) {
             fname = "boolToStr"
         } else {
             if (this.types.nameOf(argVal.type) == "Char") { fname = "charToStr" }
@@ -3087,6 +3101,19 @@ class InstructionSelector {
         // 2026-10-02：映射后仍无定义的裸名 → 唯一后缀匹配兜底（见
         // `resolveCalleeSymbol` 的说明；与可达性入队配套，定义必已被编码）。
         val resolvedName: String = this.resolveCalleeSymbol(funcName, recvTy)
+
+        // ── P40x-l：toString(<单实参>)（Parser 为 str + 非String / 插值合成）
+        // → emitToStrConvNode 按类型分派。runtime 裸 toString = 恒等占位
+        //（标量/null 被当串指针，实测 06 nullInt= 空串）。
+        if ((resolvedName == "toString" || funcName == "toString")
+                && args.size == 1) {
+            val a0Node: Int = this.resolveNode(args[0])
+            if (a0Node >= 0) {
+                val convId: Int = this.emitToStrConvNode(args[0], a0Node)
+                this.registerNode(vid, convId)
+                return convId
+            }
+        }
 
         // ── P40x：`<X>_toString` mangle 兜底 ──
         // 前端把非类接收者的 .toString() 按 接收者文本_method mangle（如
