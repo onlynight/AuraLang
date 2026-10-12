@@ -489,6 +489,19 @@ class HirLowerer {
     //                 防止把 toString 等误限定到不存在的 Class_toString）
     private var curTypeDecl: String = ""
 
+    // P40x-c：当前类型的父类名表（List 条目）。Parser 在 parseTypeDecl 已把
+    // 冒号后的首个名字（class Dog : Animal() 的 Animal）记入类型节点 ty 列；
+    // lowerTypeDecl 时落表。super.m() 据此解析到父类实现——此前 super 无
+    // 分支，落入隐式 this 解析 → 同名方法自递归（实测 test_super_only 栈溢出）。
+    // 类型必须 List<String>（String 在 AOT 隐式转换退化，实测驱动段错误）；
+    // 成员必须追加在 var 块末尾（对象槽位按声明序编号，插中段即崩）。
+    private var classParents: List<String> = arrayListOf<String>()
+
+    // P40x-e：已声明类型名表（CSV，逗号前导）。大写 Ident 接收者的类名约定
+    // 静态限定必须先验此表——顶层 val/const 同样大写开头（DEC_INT），此前
+    // 一律按类名限定并丢弃接收者 → DEC_INT_toString(mem)（无接收者值）。
+    private var knownTypes: String = ""
+
     // ⚠️ P237：类体方法降级的**接收者注入通道**。lowerStmt 的 Function 分支
     // 在类型体上下文里把它设为类名，lowerFunction 据此：① 方法名限定为
     // `Class_method`；② params 顶部注入 `this: Class` 形参（并登记
@@ -554,6 +567,7 @@ class HirLowerer {
             val dk: String = program.kindOf(declId)
             if (dk == "Class" || dk == "Struct" || dk == "Object") {
                 val tName: String = program.textOf(declId)
+                this.knownTypes = this.knownTypes + "," + tName
                 val tKids: List<Int> = program.kidsOfList(declId)
                 if (HirUtils.hirKidsCount(tKids) >= 1) {
                     this.preRegisterTypeMembers(tName, HirUtils.hirKidsAt(tKids, 0))
@@ -610,8 +624,53 @@ class HirLowerer {
             i = i + 1
         }
         if (mainId >= 0) {
-            // 已有 main：不合成（见方法注释）
-            return kids
+            // P40x-f：顶层 val/var 拼接进已存在 main 的体首（seed hir.rs
+            // splice 同款）。此前「已有 main 不合成」→ 顶层 val 存储丢失，
+            // 函数内引用读野槽（实测 p15：顶层 val .toString() 段错误）。
+            var valKids: List<Int> = HirUtils.hirNoKids()
+            var hasVal: Boolean = false
+            var j: Int = 0
+            while (j < HirUtils.hirKidsCount(kids)) {
+                val id: Int = HirUtils.hirKidsAt(kids, j)
+                val k: String = this.hir.kindOf(id)
+                if (k == "HirValDecl" || k == "HirVarDecl") {
+                    valKids = HirUtils.hirKidsAdd(valKids, id)
+                    hasVal = true
+                }
+                j = j + 1
+            }
+            if (!hasVal) { return kids }
+            val mKids: List<Int> = this.hir.kidsOfList(mainId)
+            if (HirUtils.hirKidsCount(mKids) < 1) { return kids }
+            val oldBody: Int = HirUtils.hirKidsAt(mKids, 0)
+            val bodyStmts: List<Int> = this.hir.kidsOfList(oldBody)
+            var newStmts: List<Int> = valKids
+            var si: Int = 0
+            while (si < HirUtils.hirKidsCount(bodyStmts)) {
+                newStmts = HirUtils.hirKidsAdd(newStmts, HirUtils.hirKidsAt(bodyStmts, si))
+                si = si + 1
+            }
+            val newBody: Int = this.hir.add("HirBlock", "", "", this.hir.spanOf(oldBody), newStmts)
+            var mNewKids: List<Int> = HirUtils.hirKidsAdd(HirUtils.hirNoKids(), newBody)
+            var mi: Int = 1
+            while (mi < HirUtils.hirKidsCount(mKids)) {
+                mNewKids = HirUtils.hirKidsAdd(mNewKids, HirUtils.hirKidsAt(mKids, mi))
+                mi = mi + 1
+            }
+            val newMain: Int = this.hir.add("HirFunction", "main", this.hir.tyOf(mainId),
+                this.hir.spanOf(mainId), mNewKids)
+            var outKids: List<Int> = HirUtils.hirNoKids()
+            j = 0
+            while (j < HirUtils.hirKidsCount(kids)) {
+                val id2: Int = HirUtils.hirKidsAt(kids, j)
+                if (id2 == mainId) {
+                    outKids = HirUtils.hirKidsAdd(outKids, newMain)
+                } else {
+                    outKids = HirUtils.hirKidsAdd(outKids, id2)
+                }
+                j = j + 1
+            }
+            return outKids
         }
         // 第二遍：无 main，收集顶层可执行语句。
         //
@@ -705,6 +764,7 @@ class HirLowerer {
             val dk: String = program.kindOf(declId)
             if (dk == "Class" || dk == "Struct" || dk == "Object") {
                 val tName: String = program.textOf(declId)
+                this.knownTypes = this.knownTypes + "," + tName
                 val tKids: List<Int> = program.kidsOfList(declId)
                 if (HirUtils.hirKidsCount(tKids) >= 1) {
                     this.preRegisterTypeMembers(tName, HirUtils.hirKidsAt(tKids, 0))
@@ -1098,6 +1158,11 @@ class HirLowerer {
         val prevInTypeBody: Boolean = this.inTypeBody
         this.curTypeDecl = name
         this.inTypeBody = true
+        // P40x-c：登记父类名（ty 列，Parser 已写入）
+        val parentName: String = this.cleanTy(ast.tyOf(id))
+        if (parentName != "" && parentName != name) {
+            this.classParents = this.kvAdd(this.classParents, name, parentName)
+        }
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
         if (kCount > 0) {
@@ -1898,6 +1963,21 @@ class HirLowerer {
         return this.kvGet(this.localVarTys, name)
     }
 
+    /// P40x-e：name 是否为已声明类型名（knownTypes CSV 精确匹配）。
+    private fun isKnownTypeName(name: String): Boolean {
+        if (name == "" || this.knownTypes == "") { return false }
+        var i: Int = 0
+        val n: Int = this.knownTypes.length
+        while (i + name.length + 1 <= n) {
+            if (this.knownTypes.charCodeAt(i) == 44
+                    && this.knownTypes.substring(i + 1, i + 1 + name.length) == name) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
     /// 类字段声明类型（typeMemberTys 查表，owner 为类/对象名）。
     private fun typeMemberTy(owner: String, field: String): String {
         if (owner == "" || field == "") { return "" }
@@ -1936,7 +2016,11 @@ class HirLowerer {
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         // List/Array/Set.get(i) / getAt(i) → Collections.getAt(collection, i)
-        if (kCount >= 2) {
+        // P40x-g：门槛从 kCount >= 2 放宽到 >= 1——零参方法调用（toString()/
+        // size()/isEmpty()…）此前被整体挡在接收者分派之外，直接落成裸名
+        //（实测 01-lexer：DEC_INT.toString() → @toString 裸名 → runtime 恒等
+        // 占位 → 标量值被当串指针段错误）。块内各特例自带参数校验，安全。
+        if (kCount >= 1) {
             val calleeId: Int = HirUtils.hirKidsAt(kids, 0)
             if (ast.kindOf(calleeId) == "Member" || ast.kindOf(calleeId) == "SafeAccess") {
                 val memberName: String = ast.textOf(calleeId)
@@ -2187,8 +2271,11 @@ class HirLowerer {
                             val first: String = recvName.substring(0, 1)
                             val fc: Int = first.charCodeAt(0)
                             if (fc >= 65 && fc <= 90) {  // 'A'..'Z'
-                                // 既有规则：大写开头（类名约定）
-                                qualified = recvName + "_" + ast.textOf(calleeId)
+                                // P40x-e：大写开头且确为已声明类型名才走静态
+                                // 限定；顶层 val/const 非类名 → 走按值路径
+                                if (this.isKnownTypeName(recvName)) {
+                                    qualified = recvName + "_" + ast.textOf(calleeId)
+                                }
                             } else {
                                 // 2026-10-02 接收者类型传播：小写接收者按
                                 // ① 局部声明类型（`val vm: VmRunner`）② 隐式 this
@@ -2204,6 +2291,11 @@ class HirLowerer {
                                 } else if ((rty.startsWith("List") || rty.startsWith("Map")) && ast.textOf(calleeId) == "size") {
                                     // 接口类型 List/Map 的 size → Collections.count（runtime 导出）
                                     qualified = "Collections.count"
+                                } else if (rty != "" && this.isScalarTy(rty) && ast.textOf(calleeId) == "toString") {
+                                    // P40x-g：标量接收者的 .toString() 直接定 toStr——
+                                    // 裸 toString 在 isel 会退化成 runtime 恒等占位
+                                    //（标量值被当串指针，实测 01-lexer §1.3 段错误）
+                                    qualified = "toStr"
                                 }
                             }
                         }
@@ -2256,8 +2348,21 @@ class HirLowerer {
                                 }
                             }
                         }
+                        if (Env.get("AURA_TOSTR_DIAG", "") == "1") {
+                            println("[TOS] recv=" + recvName + " known=" + toStr(if (this.isKnownTypeName(recvName)) 1 else 0)
+                                    + " rty=" + this.cleanTy(this.localVarTy(recvName)) + " member=" + ast.textOf(calleeId)
+                                    + " qualified=" + qualified)
+                        }
                         if (qualified != "") {
                             calleeName = qualified
+                        } else {
+                            calleeName = ast.textOf(calleeId)
+                        }
+                    } else if (ast.kindOf(recvId) == "Super") {
+                        // P40x-c：super.m() → 父类实现 Parent_m（静态分派）
+                        val parentCls: String = this.kvGet(this.classParents, this.curTypeDecl)
+                        if (parentCls != "" && this.csvContains(this.typeMethods, parentCls + "." + ast.textOf(calleeId))) {
+                            calleeName = parentCls + "_" + ast.textOf(calleeId)
                         } else {
                             calleeName = ast.textOf(calleeId)
                         }
@@ -2273,11 +2378,17 @@ class HirLowerer {
                     // 单例/extern 都会丢掉接收者、对齐普通函数 ABI（rcx=首实参）。
                     var recvHir: Int = -1
                     var keepRawRecv: Boolean = false
+                    if (ast.kindOf(recvId) == "Super") {
+                        // P40x-c：super 的实参形态就是 this
+                        recvHir = this.hir.leaf("HirVar", "this", ast.spanOf(recvId))
+                        keepRawRecv = true
+                    }
                     if (ast.kindOf(recvId) == "Ident") {
                         val rn: String = ast.textOf(recvId)
                         if (rn.length() > 0) {
                             val fc3: Int = rn.substring(0, 1).charCodeAt(0)
-                            if (fc3 >= 65 && fc3 <= 90) {
+                            // P40x-e：仅已知类型名保留原始接收者；顶层 val 走 lowerExpr
+                            if (fc3 >= 65 && fc3 <= 90 && this.isKnownTypeName(rn)) {
                                 recvHir = this.hir.leaf("HirVar", rn, ast.spanOf(recvId))
                                 keepRawRecv = true
                             }

@@ -352,9 +352,24 @@ class SsaBuilder {
     fun buildAllFunctions(src: Hir): Int {
         val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
         val n: Int = src.count
+        // P40x-f：名为 main 的 HirFunction 若有多个（顶层 splice 以新 main
+        // 替换旧 main，arena 中两者并存），只建最后一个（含拼接体）。
+        // main 在语料中唯一，此规则对其它同名函数零影响。
+        var lastMain: Int = -1
+        var pi: Int = 0
+        while (pi < n) {
+            if (src.kindOf(pi) == "HirFunction" && src.textOf(pi) == "main") {
+                lastMain = pi
+            }
+            pi = pi + 1
+        }
         var i: Int = 0
         while (i < n) {
             if (src.kindOf(i) == "HirFunction" && !this.isExternObjMethod(src, i)) {
+                if (src.textOf(i) == "main" && i != lastMain) {
+                    i = i + 1
+                    continue
+                }
                 this.dbgFuncCount = this.dbgFuncCount + 1
                 // 崩溃诊断：AURA_PHOTON_TRACE=1 时逐函数打印，定位精确崩溃点
                 if (traceOn) {
@@ -4247,17 +4262,21 @@ class SsaBuilder {
             // 两种都登记，多合成一个 `__new` 是无害的（幂等且体积可忽略）。
             if (src.kindOf(i) == "HirCall") {
                 val callee: String = src.textOf(i)
-                // ⚠️ 只对**没有 `init` 声明**的类补：这正是出问题的那一类
-                //（`class Span(a,b,c,d,e,f)` 主构造参数写法）。已声明 `init` 的类，
-                // 声明侧已经把正确元数登记好了，这里再按调用点补就是**纯过度生成** ——
-                // 实测自举 `Main.obj` 1.11MB → 1.73MB、耗时 43s → 265s，收益为零。
-                // 判据用 `initAritiesOf` 的返回：无任何登记时返回 ""。
-                if (callee != "" && this.isClassName(callee)
-                        && this.initAritiesOf(callee) == "") {
+                // ⚠️ P40x 改为按元数去重补登记。旧实现 initAritiesOf == "" 是
+                // 整类跳闸：首个调用点的元数定终身——同类后续不同元数的调用点
+                // 永不登记（实测语言测试 05-classes：Score("Math",90) 登记
+                // __new2 后，Score__new3 / Money__new2 永不合成 → 链接 undefined）。
+                if (callee != "" && this.isClassName(callee)) {
                     val kn: Int = HirUtils.hirKidsCount(src.kidsOfList(i))
                     if (kn > 0) {
-                        this.addCtorArity(callee, kn)
-                        this.addCtorArity(callee, kn - 1)
+                        val known: String = this.initAritiesOf(callee)
+                        if (known.indexOf("\n" + toStr(kn) + "\n") < 0) {
+                            this.addCtorArity(callee, kn)
+                        }
+                        val km1: Int = kn - 1
+                        if (km1 >= 0 && known.indexOf("\n" + toStr(km1) + "\n") < 0) {
+                            this.addCtorArity(callee, km1)
+                        }
                     }
                 }
             }

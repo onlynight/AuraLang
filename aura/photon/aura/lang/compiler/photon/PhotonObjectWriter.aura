@@ -909,6 +909,23 @@ class PhotonObjectWriter {
             this.dataSection = block
         }
         this.dataSection = this.normalizeHex(this.dataSection)
+        // [P40x-h] .data 原始字节必须覆盖全部声明符号。旧实现依赖
+        //「VirtualSize > raw 时加载器零填充」——但 COFF **目标文件**的
+        // VirtualSize 字段被 lld-link 忽略（按 SizeOfRawData 截断）→
+        // 尾部符号（heapArenaBase/heapCap/heapBump/envBuffer/…）与紧随的
+        // .bss（heapArena 本体）重叠 = 堆元数据长在堆里互相踩（实测：小程序
+        // toStr-后-strcat 段错误、寄存器呈常量+地址熔合值；VM 宿主因主对象
+        // .data 较大侥幸错开）。
+        val declaredP40x: Int = this.computeDataDeclaredSize()
+        var rawLenP40x: Int = this.hexByteCount(this.dataSection)
+        if (declaredP40x > rawLenP40x) {
+            var padBlock: String = "00"
+            val padChars: Int = (declaredP40x - rawLenP40x) * 2
+            while (padBlock.length < padChars) { padBlock = padBlock + padBlock }
+            if (padBlock.length > padChars) { padBlock = padBlock.substring(0, padChars) }
+            this.dataSection = this.dataSection + padBlock
+            rawLenP40x = this.hexByteCount(this.dataSection)
+        }
         // [MEM-FIX] .data 尾巴改为 **COFF 虚拟大小**（2026-10-09 内存回合）：
         // 旧实现把 .data 用零 hex 补齐到 `dataSymbolName` 声明的总大小——
         // runtime 的 `heapArena:67108864`（64MB 静态堆）于是产生 134M 字符

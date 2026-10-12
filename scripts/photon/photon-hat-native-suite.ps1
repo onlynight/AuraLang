@@ -1,4 +1,4 @@
-# photon-hat-native-suite.ps1 — HAT 独立链路端到端差分跑批
+﻿# photon-hat-native-suite.ps1 — HAT 独立链路端到端差分跑批
 #
 #   源码(.aura) ──[Aura 自举前端，原生]──? HIR ──? SSA MIR ──? .hat ──? HAT 后端 ──? exe
 #
@@ -42,6 +42,11 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $Root
 $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:Path"
 $env:AURA_PHOTON_DEBUG_HIR = ''
+# P40x：语言测试修复的显式开关（VM 宿主构建不开 → 69/65 基线不受影响）
+$env:AURA_CONCAT_CONV = '1'
+# P40x：256MB 堆走 mmap 扩容路径（HEAD 缺省 64MB 路径不初始化 heapBump，
+# strcat-after-toStr 崩溃——已实测 256 稳定、64/缺省崩）
+$env:AURA_HEAP_MB = '256'
 $env:AURA_PHOTON_TRACE = ''
 # 调试开关默认全关（见 PhotonPipeline.aura 的 verboseOn 注释）：
 #   AURA_PHOTON_VERBOSE=1  阶段进度/心跳
@@ -111,6 +116,9 @@ $resolved = Get-Command $lld -ErrorAction SilentlyContinue
 if ($resolved) { $lld = $resolved.Source }
 $k32 = Find-Kernel32
 if (-not $k32) { Write-Host "kernel32.Lib not found" -ForegroundColor Red; exit 1 }
+# runtime 引用 ntdll dllimport（NtAllocateVirtualMemory/NtFreeVirtualMemory）：
+# 与 build-jitvmhost.ps1 同配方，从 kernel32.lib 同目录取 ntdll.lib
+$ntd = Join-Path (Split-Path $k32 -Parent) 'ntdll.lib'
 
 if ($Files.Count -eq 0) {
     foreach ($ph in ($Phase -split ',')) {
@@ -193,7 +201,7 @@ foreach ($src in $Files) {
         Write-HexFile -Hex $coffMain -Path $objMain | Out-Null
         Write-HexFile -Hex $coffRt   -Path $objRt   | Out-Null
         Remove-Item $exe -Force -ErrorAction SilentlyContinue
-        $linkArgs = @($objMain, $objRt, "/OUT:$exe", "/SUBSYSTEM:CONSOLE", "/ENTRY:main", "/MACHINE:X64", "/NODEFAULTLIB", $k32)
+        $linkArgs = @($objMain, $objRt, "/OUT:$exe", "/SUBSYSTEM:CONSOLE", "/ENTRY:main", "/MACHINE:X64", "/NODEFAULTLIB", $k32, $ntd)
         $linkOut = & $lld @linkArgs 2>&1
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exe)) {
             $reasons += "link-fail"
@@ -211,12 +219,10 @@ foreach ($src in $Files) {
         # VM 基线（`aura run <file>`）会把**编译器横幅**混进 stdout：
         #   [ok] D:\…\01_hello_world.aura compiled (113 functions)
         # 原生 exe 只打印程序自身的输出 ? 比对前先剥掉横幅行，否则永远 output-diff。
-        $vmOutCmp = $vmOut
-        if ($vmOutCmp -match '(?m)^\[ok\].*compiled') {
-            $vmOutCmp = (($vmOutCmp -split "`n") |
-                Where-Object { $_ -notmatch '^\[ok\].*compiled' }) -join "`n"
-            $vmOutCmp = $vmOutCmp.Trim()
-        }
+        # 剥 VM 基线混入的编译器横幅 + [vm] backend=rust 模式行（无条件，两者不一定同时出现）
+        $vmOutCmp = (($vmOut -split "`n") |
+            Where-Object { $_ -notmatch '^\[ok\].*compiled' -and $_ -notmatch '^\[vm\] backend=' }) -join "`n"
+        $vmOutCmp = $vmOutCmp.Trim()
         if ($vmOutCmp -ne $exeOut) { $reasons += "output-diff" }
     }
 

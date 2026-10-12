@@ -412,6 +412,15 @@ class X86Emitter {
                 // 且 32KB/函数在深调用链上是巨额栈浪费。保留 2KB 兜底。
                 frame = frame + 2048
                 this.enc.emitPrologue(frame)
+                // P40x（AOT 语言测试轮）：独立 AOT 程序无 CRT——堆三变量
+                // heapArenaBase/heapCap/heapBump 全零，首个 strcat/toStr 即
+                // 堆崩（实测 26/26 语言测试全灭：拼接打出零页转储 +
+                // [OOM] HEAP FULL）。VM 宿主入口源码显式 `Heap.init()` 所以
+                // 从未暴露；用户程序没人调——main 序言后补一次 Heap_init
+                //（PhotonRuntime 侧已加幂等守卫，与宿主自身 init 共存安全）。
+                if (instrFunc == "main") {
+                    this.enc.emitCallRel("Heap_init")
+                }
                 this.canaryFrameSize = frame
                 this.canaryFuncIdx = this.canaryFuncIdx + 1
                 if (Env.get("AURA_X86_TRACE", "") == "1") {
