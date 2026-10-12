@@ -1885,6 +1885,8 @@ object PhotonRuntime {
 
     /// 编码 boolToStr(rcx = 0|1) rax = "true"/"false"（heap 新块）。
     /// 语言语义要求 println(true) 打 true 而非 1（toStr 只认整数）。
+    /// ⚠️ 字符串内容逐字节写入（P40x：内联 32 位立即数在自举编译链里被
+    /// 改写——实测 0x65757274/"true" 变 0x656d6174/"tame"）。
     fun emitBoolToStr(enc: X86Encoder): Unit {
         enc.emitPrologue(0x20)
         enc.emitStackStore(-0x8, "rbx")
@@ -1900,16 +1902,44 @@ object PhotonRuntime {
         enc.emitCallRel("__heap_oom")
         enc.emitLabel("b2s_ok")
         enc.emitStoreRIP("heapBump", "rax")
-        enc.emitCmpRI("rcx", 0)
+        enc.emitMovRR("rax", "rcx")
+        enc.emitCmpRI("rax", 0)
         enc.emitJccLabel("ne", "b2s_true")
-        enc.emitMovRI("rax", 1936486246)          // 0x736C6166 = "fals"
-        enc.emitStoreMemDisp32("rdx", 0, "rax")
-        enc.emitMovRI("rax", 101)                 // 'e'
-        enc.emitStoreMemDisp32("rdx", 4, "rax")
+        // "false "
+        enc.emitMovRI("rax", 102)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 97)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 108)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 115)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 101)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitXorRR("rax", "rax")
+        enc.emitMovByteMemReg("rdx", "rax")
         enc.emitJmpLabel("b2s_done")
         enc.emitLabel("b2s_true")
-        enc.emitMovRI("rax", 1701667188)          // 0x65757274 = "true"
-        enc.emitStoreMemDisp32("rdx", 0, "rax")
+        // "true "
+        enc.emitMovRI("rax", 116)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 114)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 117)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 101)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitXorRR("rax", "rax")
+        enc.emitMovByteMemReg("rdx", "rax")
         enc.emitLabel("b2s_done")
         enc.emitMovRR("rax", "rdx")
         enc.emitStackLoad("rbx", -0x8)
@@ -1936,42 +1966,6 @@ object PhotonRuntime {
         enc.emitMovRR("rax", "rcx")
         enc.emitMovByteMemReg("rdx", "rax")
         enc.emitMovRR("rax", "rdx")
-        enc.emitStackLoad("rbx", -0x8)
-        enc.emitEpilogue()
-    }
-
-    // ── IO_fileExists / Box / take / Channel（P40x-i AOT 语言测试轮）──
-
-    /// 编码 IO_fileExists(rcx = path, rdx = memTok) rax = 存在?1:0。
-    /// 经 io_access(path, 0)（POSIX access 语义：0 = 存在）。
-    fun emitIoFileExists(enc: X86Encoder): Unit {
-        enc.emitPrologue(0x20)
-        enc.emitStackStore(-0x8, "rbx")
-        enc.emitStackStore(-0x10, "rsi")
-        enc.emitStackStore(-0x18, "rcx")
-        enc.emitXorRR("rdx", "rdx")
-        enc.emitStackLoad("rcx", -0x18)
-        enc.emitCallRel("io_access")
-        enc.emitCmpRI("rax", 0)
-        enc.emitJccLabel("ne", "iofe_no")
-        enc.emitMovRI("rax", 1)
-        enc.emitJmpLabel("iofe_done")
-        enc.emitLabel("iofe_no")
-        enc.emitXorRR("rax", "rax")
-        enc.emitLabel("iofe_done")
-        enc.emitStackLoad("rsi", -0x10)
-        enc.emitStackLoad("rbx", -0x8)
-        enc.emitEpilogue()
-    }
-
-    /// 编码 Box(rcx = value, rdx = memTok) rax = 8 字节堆箱指针。
-    fun emitBoxNew(enc: X86Encoder): Unit {
-        enc.emitPrologue(0x20)
-        enc.emitStackStore(-0x8, "rbx")
-        enc.emitMovRR("rbx", "rcx")
-        enc.emitMovRI("rcx", 8)
-        enc.emitCallRel("Memory_alloc")
-        enc.emitStoreMemDisp32("rax", 0, "rbx")
         enc.emitStackLoad("rbx", -0x8)
         enc.emitEpilogue()
     }

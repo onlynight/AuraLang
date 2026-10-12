@@ -2073,6 +2073,49 @@ class InstructionSelector {
             return nodeId
         }
 
+        // ── P40x-k：Float/Double 常量物化为**其文本的 .rdata 串** ──
+        //
+        // 浮点值在语言测试里几乎只被打印（01-lexer §1.4、toString_implicit）；
+        // 数值路径的十进制跳字符解析会把 aux "3.14" 折叠成 314，打印时该值
+        // 被当串指针 → strlen(314) 段错误（实测）。物化为 "3.14" 串后：
+        // 打印路径全通；浮点算术退化为指针运算（diff 不崩，待 Float 定标专项）。
+        var fTyName: String = this.types.nameOf(typeId)
+        if (fTyName == "Float" || fTyName == "Double"
+                || endsWithStr(fTyName, "|Float") || endsWithStr(fTyName, "|Double")) {
+            var fLit: String = constVal0
+            if (fLit == "null") { fLit = "0.0" }
+            // 去掉类型后缀（3.14f / 3.14d / 1.5E10 尾部的 f/F/d/D）与下划线
+            var cleaned: String = ""
+            var ci: Int = 0
+            while (ci < fLit.length) {
+                val ch: Int = fLit.charCodeAt(ci)
+                if (ch != 95) { cleaned = cleaned + fLit.substring(ci, ci + 1) }
+                ci = ci + 1
+            }
+            var cut: Int = cleaned.length
+            while (cut > 1) {
+                val last: Int = cleaned.charCodeAt(cut - 1)
+                if ((last >= 65 && last <= 70) || (last >= 97 && last <= 102) || last == 100 || last == 68) {
+                    cut = cut - 1
+                } else {
+                    break
+                }
+            }
+            // 尾部字母剥除仅当剩余部分形如数字（含 ./e/E/+/-）——保守：
+            // 只要剥过就重查，剥到不以字母结尾为止
+            fLit = cleaned.substring(0, cut)
+            this.stringConstAdd(fLit)
+
+            val fNodeName: String = "@str." + toStr(this.strConstCount)
+            this.strConstCount = this.strConstCount + 1
+            val fNodeId: Int = this.dag.addNode("Const", val.op, val.type,
+                                                "", "", "", this.curChain, fNodeName)
+            this.registerNode(vid, fNodeId)
+            val fNodes: String = MachineDagUtils.toStr(fNodeId)
+            this.dag.selectPattern(63, fNodes, fNodeId)
+            return fNodeId
+        }
+
         // 数值常量：**保留符号**（旧实现把 '-' 剥掉后仅用 `isNeg` 标记却从不使用，
         // 负数常量被实体化成正数）。
         // null 常量（SsaBuilder zeroValueOf / 字面量 null 的 aux="null"，经
@@ -2285,7 +2328,11 @@ class InstructionSelector {
         // 类型名可能带 #public| 限定前缀（函数签名家族），裸名/限定名都认
         var argTyName: String = this.types.nameOf(argVal.type)
         if (this.types.isString(argVal.type) || argTyName == "String"
-                || endsWithStr(argTyName, "|String")) {
+                || endsWithStr(argTyName, "|String")
+                || argTyName == "Float" || argTyName == "Double"
+                || endsWithStr(argTyName, "|Float") || endsWithStr(argTyName, "|Double")) {
+            // String 恒等；Float/Double 恒等（P40x-k：浮点常量已物化为文本串，
+            // 值即 C 串指针——再 toStr 会把指针打成十进制）
             return argNode
         }
         // 调用实参：优先查被调在 LIR 的返回类型（自举前端调用 LIR 类型不可靠
@@ -2885,8 +2932,12 @@ class InstructionSelector {
         // ⇒ 3 参的 `add` 只可能是「集合 add + 内存链 token」，2 参的 `keys` 只可能是
         // `HashMap_keys`。前面基于接收者类型/MemToken 的判定在这些调用点上都不命中
         //（接收者类型常被标注成 `Basic`，见 HAT），故在此按元数兜底。
-        if (name == "add" && argCount >= 3) { return "Collections_listAppend" }
-        if (name == "keys" && argCount >= 2) { return "HashMap_keys" }
+        // P40x-l：元数兜底加 **lastIsMem 门槛**——集合约定的 add(list, item, mem)
+        // 尾参恒为 mem token；用户同名重载 add(1, 2, 3) 无 mem 尾参。无门槛时
+        // 用户三参 add 被劫持成 listAppend（实测 17-function-overload：
+        // add(1,2,3) → Collections_push 段错误）。
+        if (name == "add" && lastIsMem && argCount >= 3) { return "Collections_listAppend" }
+        if (name == "keys" && lastIsMem && argCount >= 2) { return "HashMap_keys" }
         // Collections.listRemove(list, idx) → 运行时移除元素
         if (name == "aura.lang.std.Collections.listRemove" || name == "Collections.listRemove"
             || name == ".Collections.listRemove" || name == "remove") { return "Collections_listPop" }
