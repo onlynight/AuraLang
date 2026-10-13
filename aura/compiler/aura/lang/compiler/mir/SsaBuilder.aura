@@ -589,11 +589,7 @@ class SsaBuilder {
         } else if (kind == "HirFor") {
             // R55: for-in 循环——降级为 while 循环。
             // HIR 形状：HirFor("", "", sp, [HirVarDecl(name), iterable, HirBlock(body)])。
-            // 迭代器可以是任意表达式（HirCall(__range, ...) / HirVar(list) / 等）。
-            // 降级为：i = 0; while (i < count(list)) { name = getAt(list, i); body; i = i + 1 }
-            // NOTE: buildFor 会导致 AOT 编译错误（member access on non-pointer value），
-            // 暂时跳过。待 AOT 编译器修复后重新启用。
-            // this.buildFor(src, id)
+            this.buildFor(src, id)
         } else if (kind == "HirBlock") {
             this.buildBlock(src, id)
         } else if (kind == "HirBreak") {
@@ -1905,10 +1901,6 @@ class SsaBuilder {
             } else {
                 this.loopPhiVarsStack = this.loopPhiVarsStack.substring(pIdx + 1)
             }
-        }
-    }
-            // 实际上，循环变量在循环外不可见，但 varMap 管理上，
-            // buildWhile 也没有清理，所以保持一致。
         }
     }
     fun buildBlock(src: Hir, id: Int) {
