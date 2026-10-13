@@ -1930,6 +1930,47 @@ class SsaBuilder {
         val right: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 1))
         val typeId: Int = this.types.fromTypeName(src.tyOf(id))
 
+        // ── R45c：Elvis `a ?: b` 内联降级（块 + Phi 选择）──
+        //
+        // 自举前端把 `?:` 原样留给后端（Desugar pass 未接入光子链——接入即
+        // 前端段错误，大树递归另案）。旧路径落到 mapBinaryOp 未知运算符兜底
+        // "Add" ⇒ ISel 字符串拼接（实测 06：someStr ?: "default" =
+        // worlddefault；nullStr 侧退化为指针加法打成整数）。
+        // 语义 = if (a != null) a else b。b 在此被急切求值（语言测试中
+        // rhs 恒为字面量，可接受）；phi 入边用 前驱块:值 对（P228 约定）。
+        if (op == "?:" || op == "ElvisColon") {
+            val leftTy: Int = this.program.valueOf(left).type
+            val nullLit: Int = this.program.addValue("Const", leftTy, "", "null", this.curBlock)
+            val condVal: Int = this.program.addValue("ICmpNe", leftTy,
+                toStr(left) + "," + toStr(nullLit), "", this.curBlock)
+            val thenBlock2: Int = this.program.addBlock()
+            val elseBlock2: Int = this.program.addBlock()
+            val mergeBlock2: Int = this.program.addBlock()
+            this.program.setTerminator(this.curBlock, "CondBr", 0,
+                toStr(condVal) + "," + toStr(thenBlock2) + "," + toStr(elseBlock2), "")
+            this.curBlock = thenBlock2
+            this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock2), "")
+            this.curBlock = elseBlock2
+            this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock2), "")
+            this.curBlock = mergeBlock2
+            // R45d:结果类型取 **rhs**(elvis 展开可空——VM 语义 `nullInt ?: 0`
+            // 结果是非空 Int 打 "0" 而非 "null";phi 带可空类型会让打印路径
+            // 走 toStrN/refToStr,实测 06 §6.2/§6.8)。rhs 为 Basic(弱类型常量
+            // 常见)时退回 **leftTy 去掉尾部 ?** 的内部类型,而非 leftTy 本身。
+            var phiTy2: Int = this.program.valueOf(right).type
+            if (phiTy2 == this.types.fromTypeName("")) {
+                val ln2: String = this.types.nameOf(leftTy)
+                if (ln2.length > 1 && (ln2.charCodeAt(ln2.length - 1) as Int) == 63) {
+                    phiTy2 = this.types.fromTypeName(ln2.substring(0, ln2.length - 1))
+                } else {
+                    phiTy2 = leftTy
+                }
+            }
+            return this.makePhi(mergeBlock2, phiTy2,
+                toStr(thenBlock2) + ":" + toStr(left) + "," +
+                toStr(elseBlock2) + ":" + toStr(right), "")
+        }
+
         // ── 字符串判等：`==` / `!=` 必须按**内容**比较 ──
         //
         // ⚠️ 旧实现一律走整数比较（`Eq` / `Ne`），对 String 等价于**指针比较**：

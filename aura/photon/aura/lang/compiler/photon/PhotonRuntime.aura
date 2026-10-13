@@ -2299,7 +2299,38 @@ object PhotonRuntime {
     fun emitRefToStr(enc: X86Encoder): Unit {
         enc.emitPrologue(0x40)
         enc.emitStackStore(-0x8, "rbx")
+        // R45d:obj==0 ⇒ "null"(可空值经弱类型 concat 路径流入,类型名丢失;
+        // VM 对 null 对象打 "null",与 toStrN 一致)
+        enc.emitCmpRI("rcx", 0)
+        enc.emitJmpLabel("ne", "rfs_search")
+        enc.emitMovRIP("rax", "heapBump")
+        enc.emitMovRIP("rdx", "heapArenaBase")
+        enc.emitAddRR("rdx", "rax")
+        enc.emitAddRI("rax", 8)
+        enc.emitMovRIP("r10", "heapCap")
+        enc.emitCmpRR("rax", "r10")
+        enc.emitJccLabel("le", "rfs_nullok")
+        enc.emitCallRel("__heap_oom")
+        enc.emitLabel("rfs_nullok")
+        enc.emitStoreRIP("heapBump", "rax")
+        enc.emitMovRI("rax", 110)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 117)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 108)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 108)
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitXorRR("rax", "rax")
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitMovRR("rax", "rdx")
+        enc.emitJmpLabel("rfs_out")
         // ── 二分:lower = r10,upper = [-0x10],mid = [-0x18] ──
+        enc.emitLabel("rfs_search")
         enc.emitMovRIP("rax", "refIdxCount")
         enc.emitStackStore(-0x10, "rax")
         enc.emitXorRR("r10", "r10")
@@ -2384,6 +2415,7 @@ object PhotonRuntime {
         enc.emitAddRI("r10", 8)
         enc.emitMovRR("rdx", "r10")
         enc.emitCallRel("strcat")
+        enc.emitLabel("rfs_out")
         enc.emitStackLoad("rbx", -0x8)
         enc.emitEpilogue()
     }
@@ -5020,7 +5052,7 @@ object PhotonRuntime {
     /// Pipeline 以 `RUNTIME_SYMBOLS + BUILD_ID` 作为 aura_runtime.obj 的缓存
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
-    val BUILD_ID: String = "p302-eaximm32"
+    val BUILD_ID: String = "p303-refnull"
     val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
