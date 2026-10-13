@@ -79,7 +79,7 @@ class InstructionSelector {
     /// 桩（getAt 恒返回空串 —— `Env.get` 历史落点），要么布局分叉。保留名单
     /// 会把 guest 真实现抑制掉（`!isRuntimeSymbol` 跳过发射），实测
     /// `tl.get(0)` 返回空串。仅保留 guest 没有的 clear/hashMapPut。
-    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,RegionEnter,RegionReset,io_open,io_close,io_read,io_write,io_access,Collections.clear,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,aura_heapbump,Heap_init,Heap_mmap,boolToStr,charToStr,aura_isOfType,refToStr,String_contains,String_toUpperCase"
+    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,RegionEnter,RegionReset,io_open,io_close,io_read,io_write,io_access,Collections.clear,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,aura_heapbump,Heap_init,Heap_mmap,boolToStr,charToStr,aura_isOfType,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists"
 
     /// `computeReachable` 的列表形式结果（供 `select()` 免分配查表）。
     private var reachableNames: List<String> = arrayListOf<String>()
@@ -2815,6 +2815,21 @@ class InstructionSelector {
             // R44g：substring 落 guest 定义同样受接收者断裂影响；runtime 已有
             // String_substring 臂（rcx=str, rdx=begin, r8=end），直接映射。
             if (name == "substring") { return "String_substring" }
+            // R44i：Path.join/basename——guest 单例方法接收者断裂家族，
+            // runtime 臂零分配/组合实现（13-stdlib §13.5）。
+            if (name == "Path_join" || name == "Path.join" || name == "join") { return "Path_join" }
+            if (name == "Path_basename" || name == "Path.basename" || name == "basename") { return "Path_basename" }
+            // R44i：Env.has——VM 空环境语义恒 false；落 guest 即接收者断裂崩溃。
+            if (name == "Env_has" || name == "Env.has") { return "Env_has" }
+            // R44i：FileUtils 三件套——VM 沙箱语义(写失败打消息/读空/不存在)。
+            if (name == "FileUtils_writeText" || name == "FileUtils.writeText" || name == "writeText") { return "FileUtils_writeText" }
+            // R44i：IO.fileExists 的调用点被解析到 guest Stdio_fileExists(模块真名
+            // 是 Stdio;实测 probe_io main→Stdio_fileExists,接收者断裂 ⇒ 恒 true)。
+            // 直接映射 runtime IO_fileExists 臂(io_access 真实语义)。
+            if (name == "IO_fileExists" || name == "IO.fileExists"
+                    || name == "Stdio_fileExists" || name == "fileExists") { return "IO_fileExists" }
+            if (name == "FileUtils_readText" || name == "FileUtils.readText" || name == "readText") { return "FileUtils_readText" }
+            if (name == "FileUtils_exists" || name == "FileUtils.exists" || name == "exists") { return "FileUtils_exists" }
         }
         // 堆列表：`arr[i] = v` 由 HIR 降级为 `.Collections.set(arr, i, v)`
         //（返回容器本身），对应 runtime 的 `__list_setat`。
