@@ -805,6 +805,9 @@ class InstructionSelector {
         if (name == "toStrN") {
             return true
         }
+        if (name == "toStrN") {
+            return true
+        }
         // ⚠️ 名单**必须与 `PhotonRuntime.RUNTIME_SYMBOLS` 逐字一致**。
         // 旧实现只列了 println/toStr/strlen 这一小撮，而标准库里
         // `Memory.aura` / `Collections` 的方法体同样会被编译进用户目标文件

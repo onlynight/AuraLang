@@ -2001,6 +2001,7 @@ object PhotonRuntime {
         enc.emitIncRR("rdx")
         enc.emitMovRI("rax", 108)
         enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
         enc.emitXorRR("rax", "rax")
         enc.emitMovByteMemReg("rdx", "rax")
         enc.emitMovRR("rax", "rbx")
