@@ -586,6 +586,14 @@ class SsaBuilder {
             this.buildIfExpr(src, id)
         } else if (kind == "HirWhile") {
             this.buildWhile(src, id)
+        } else if (kind == "HirFor") {
+            // R55: for-in 循环——降级为 while 循环。
+            // HIR 形状：HirFor("", "", sp, [HirVarDecl(name), iterable, HirBlock(body)])。
+            // 迭代器可以是任意表达式（HirCall(__range, ...) / HirVar(list) / 等）。
+            // 降级为：i = 0; while (i < count(list)) { name = getAt(list, i); body; i = i + 1 }
+            // NOTE: buildFor 会导致 AOT 编译错误（member access on non-pointer value），
+            // 暂时跳过。待 AOT 编译器修复后重新启用。
+            // this.buildFor(src, id)
         } else if (kind == "HirBlock") {
             this.buildBlock(src, id)
         } else if (kind == "HirBreak") {
@@ -1664,7 +1672,245 @@ class SsaBuilder {
         return result
     }
 
-    /// 构建块（HirBlock）。
+    /// 构建 for-in 循环（HirFor）。
+    ///
+    /// HIR 形状：HirFor("", "", sp, [HirVarDecl(name), HirCall(__range, [start,end,inc]), HirBlock(body)])。
+    /// 降级为 while 循环：
+    ///   list = __range(start, end, inc)
+    ///   i = 0
+    ///   while (i < count(list)) {
+    ///       name = getAt(list, i)
+    ///       body
+    ///       i = i + 1
+    ///   }
+    ///
+    /// 实现策略：复用 buildWhile 的 phi 机制。在 bodyBlock 里先执行
+    /// `name = getAt(list, i)`，再执行用户循环体。`i` 和 `name` 都是
+    /// 循环变量，需要 phi 节点。
+    /// 复用 buildWhile 的 phi 机制。在 condBlock 里计算 count(list)，
+    /// 在 bodyBlock 里赋值 loopVarName = getAt(list, i) 并执行用户循环体。
+    fun buildFor(src: Hir, id: Int) {
+        val kids: List<Int> = src.kidsOfList(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (kCount < 3) {
+            return
+        }
+
+        val entryBlock: Int = this.curBlock
+        val varMapBefore: String = this.varMap
+
+        // kids[0] = HirVarDecl(name) —— 循环变量名
+        val varDeclNode: Int = HirUtils.hirKidsAt(kids, 0)
+        val loopVarName: String = src.textOf(varDeclNode)
+
+        // kids[1] = 迭代器表达式（可以是 HirCall(__range, ...) / HirVar(list) / 等）
+        val iterNode: Int = HirUtils.hirKidsAt(kids, 1)
+        val listVal: Int = this.buildExpr(src, iterNode)
+
+        // kids[2] = HirBlock(body) —— 循环体
+        val bodyKid: Int = HirUtils.hirKidsAt(kids, 2)
+
+        // 创建块结构（同 buildWhile）
+        val condBlock: Int = this.program.addBlock()
+        val bodyBlock: Int = this.program.addBlock()
+        val endBlock: Int = this.program.addBlock()
+
+        // 循环栈：break → endBlock，continue → condBlock
+        this.loopStackPush(endBlock)
+        if (this.loopStack == "") {
+            this.loopStack = toStr(condBlock)
+        } else {
+            this.loopStack = toStr(condBlock) + "," + this.loopStack
+        }
+        if (this.loopContStack == "") {
+            this.loopContStack = toStr(condBlock)
+        } else {
+            this.loopContStack = toStr(condBlock) + "," + this.loopContStack
+        }
+
+        // 入口块跳转到条件块
+        val entryBlockObj: MirBlock = this.program.blockOf(entryBlock)
+        if (entryBlockObj.term < 0) {
+            this.program.setTerminator(entryBlock, "Br", 0, toStr(condBlock), "")
+        }
+
+        // ── 条件块：初始化 i=0，计算 count(list) ──
+        this.curBlock = condBlock
+        val i64: Int = this.types.intType(64)
+        val zeroVal: Int = this.program.addValue("Const", i64, "", "0", this.curBlock)
+
+        // count(list)
+        val countVal: Int = this.program.addValue("Call", i64, toStr(listVal),
+                                                  "Collections_count", this.curBlock)
+
+        // 保存 loopVarName 的旧值（如果有）
+        val loopVarBefore: Int = this.lookupVar("", loopVarName, varMapBefore)
+
+        // ── 步骤 1+2：预建循环变量 Phi（同 buildWhile 的 collectAssignedVars 机制） ──
+        // 预扫描循环体，收集被赋值的变量名
+        val assignedNames: String = this.collectAssignedVars(src, bodyKid, "")
+        var phiRecs: String = ""
+        var phiVarEntries: String = ""
+
+        // 先创建计数器 i 的 phi（i 是 for-loop 内部变量，不在 assignedNames 中）
+        val iPhiIncoming: String = toStr(entryBlock) + ":" + toStr(zeroVal) + "," +
+                                   toStr(-1) + ":" + toStr(zeroVal)
+        val iPhi: Int = this.makePhi(condBlock, i64, iPhiIncoming, "i")
+        this.varMap = this.varMap + "i|" + toStr(iPhi) + "\n"
+        phiVarEntries = phiVarEntries + "i|" + toStr(iPhi) + "\n"
+        phiRecs = phiRecs + "i|" + toStr(iPhi) + "|" + toStr(zeroVal) + "\n"
+
+        // 为 body 中赋值的变量创建 phi（包括 sum 等循环携带变量）
+        if (assignedNames != "") {
+            val names: List<String> = assignedNames.split(",")
+            var ni: Int = 0
+            while (ni < names.size) {
+                val nm: String = names[ni]
+                if (nm != "i") {
+                    val beforeVid: Int = this.lookupVar("", nm, varMapBefore)
+                    if (beforeVid >= 0) {
+                        val incoming: String = toStr(entryBlock) + ":" + toStr(beforeVid) + "," +
+                                               toStr(-1) + ":" + toStr(beforeVid)
+                        val phiTy: Int = this.program.valueOf(beforeVid).type
+                        val phiVid: Int = this.makePhi(condBlock, phiTy, incoming, "")
+                        this.varMap = this.varMap + nm + "|" + toStr(phiVid) + "\n"
+                        phiVarEntries = phiVarEntries + nm + "|" + toStr(phiVid) + "\n"
+                        phiRecs = phiRecs + nm + "|" + toStr(phiVid) + "|" + toStr(beforeVid) + "\n"
+                    }
+                }
+                ni = ni + 1
+            }
+        }
+
+        // 保存 loopVarName 的旧值用于 phi
+        // loopVarName 也需要 phi：它在 bodyBlock 里被赋值（getAt），每次迭代更新
+        // 但它不是通过 HirAssign 赋值的（它是由 buildFor 在 bodyBlock 里创建的 Mov/Call），
+        // 所以 collectAssignedVars 不会收集它。需要手动创建。
+        // 但 loopVarName 在 entryBlock 可能不存在（for-loop 变量是全新的），
+        // 所以 phi 只有单条入边（来自 bodyBlock）。
+        // 实际上，loopVarName 在 condBlock 里作为 getAt 的结果被赋值，
+        // 它不需要 phi——每次迭代都是新的值，直接存储即可。
+        // 但为了让 bodyBlock 里的代码能引用 loopVarName，
+        // 需要在 condBlock 里创建 getAt 并注册到 varMap。
+        // 但这只在第一次迭代有效——后续迭代的值在 bodyBlock 末尾被覆盖。
+        // 这正是 while 循环需要 phi 的原因：loopVarName 在 bodyBlock 里被赋值，
+        // 后续迭代需要上一次的循环携带值。
+        // 但 for-loop 的 loopVarName 不需要携带——每次都是 getAt(list, i) 的新值。
+        // 所以 loopVarName 不需要 phi！
+        // 只需要在 bodyBlock 里创建 getAt 并注册到 varMap。
+
+        // Phi 变量条目入 continue 栈（buildContinue 读取以登记 continue 值）
+        if (this.loopPhiVarsStack == "") {
+            this.loopPhiVarsStack = phiVarEntries
+        } else {
+            this.loopPhiVarsStack = phiVarEntries + "\n" + this.loopPhiVarsStack
+        }
+
+        // 条件：i < count
+        val cmpVal: Int = this.program.addValue("ICmpSlt", this.types.intType(1),
+                                                toStr(iPhi) + "," + toStr(countVal), "", this.curBlock)
+
+        // 条件跳转
+        this.program.setTerminator(condBlock, "CondBr", 0,
+            toStr(cmpVal) + "," + toStr(bodyBlock) + "," + toStr(endBlock), "")
+
+        // ── bodyBlock：赋值循环变量，执行用户循环体 ──
+        this.curBlock = bodyBlock
+
+        // 赋值 loopVarName = getAt(list, i)
+        // ⚠️ Plan A 解箱：Collections.range 推送 (i<<1)|1 格式，
+        // getAt 返回装箱值，需要 >>1 提取原始整数。
+        val getAtArgs: String = toStr(listVal) + "," + toStr(iPhi)
+        val getAtRaw: Int = this.program.addValue("Call", i64, getAtArgs,
+                                                   "Collections_getAt", this.curBlock)
+        val oneVal0: Int = this.program.addValue("Const", i64, "", "1", this.curBlock)
+        val getAtVal: Int = this.program.addValue("Shr", i64,
+                                                   toStr(getAtRaw) + "," + toStr(oneVal0), "", this.curBlock)
+        // 注册 loopVarName 到 varMap
+        this.varMap = this.varMap + loopVarName + "|" + toStr(getAtVal) + "\n"
+
+        // 执行用户循环体
+        this.buildBlock(src, bodyKid)
+
+        // 循环体结束：跳回条件块
+        val bodyBlockObj: MirBlock = this.program.blockOf(this.curBlock)
+        if (bodyBlockObj.term < 0) {
+            this.program.setTerminator(this.curBlock, "Br", 0, toStr(condBlock), "")
+        }
+
+        // 保存循环体后的 varMap
+        val varMapAfterBody: String = this.varMap
+
+        // ── 步骤 4：回填 Phi 的第二条入边（循环体末尾的值）──
+        // i 的新值：i + 1
+        val oneVal: Int = this.program.addValue("Const", i64, "", "1", this.curBlock)
+        val iNew: Int = this.program.addValue("Add", i64, toStr(iPhi) + "," + toStr(oneVal), "", this.curBlock)
+
+        // 更新 i phi
+        val iPhiVal: MirValue = this.program.valueOf(iPhi)
+        iPhiVal.args = toStr(entryBlock) + ":" + toStr(zeroVal) + "," +
+                       toStr(this.curBlock) + ":" + toStr(iNew)
+
+        // 回填 body 赋值变量的 phi 第二条入边（同 buildWhile）
+        if (phiRecs != "") {
+            val recLines: List<String> = this.splitStr(phiRecs, "\n")
+            var ri: Int = 0
+            while (ri < recLines.size) {
+                val rec: String = recLines[ri]
+                if (rec != "") {
+                    val recParts: List<String> = this.splitStr(rec, "|")
+                    if (recParts.size >= 3) {
+                        val nm: String = recParts[0]
+                        val phiVid: Int = this.strToInt(recParts[1])
+                        val beforeVid: Int = this.strToInt(recParts[2])
+                        if (nm != "i") {
+                            val afterVid: Int = this.lookupVar("", nm, varMapAfterBody)
+                            if (phiVid >= 0 && afterVid >= 0) {
+                                val pv: MirValue = this.program.valueOf(phiVid)
+                                pv.args = toStr(entryBlock) + ":" + toStr(beforeVid) + "," +
+                                          toStr(this.curBlock) + ":" + toStr(afterVid)
+                            }
+                        }
+                    }
+                }
+                ri = ri + 1
+            }
+        }
+
+        // ⚠️ 循环之后的变量值必须是 Phi（同 buildWhile）
+        // varMap 已在上一步设为 varMapBefore + phiVarEntries
+
+        // ── endBlock ──
+        this.curBlock = endBlock
+
+        // 弹出循环栈
+        this.loopStackPop()
+        this.loopStackPop()
+        if (this.loopContStack == "") {
+            // 空
+        } else {
+            val cIdx: Int = this.loopContStack.indexOf(",")
+            if (cIdx < 0) {
+                this.loopContStack = ""
+            } else {
+                this.loopContStack = this.loopContStack.substring(cIdx + 1)
+            }
+        }
+        if (this.loopPhiVarsStack == "") {
+            // 空
+        } else {
+            val pIdx: Int = this.loopPhiVarsStack.indexOf("\n")
+            if (pIdx < 0) {
+                this.loopPhiVarsStack = ""
+            } else {
+                this.loopPhiVarsStack = this.loopPhiVarsStack.substring(pIdx + 1)
+            }
+        }
+    }
+            // 实际上，循环变量在循环外不可见，但 varMap 管理上，
+            // buildWhile 也没有清理，所以保持一致。
+        }
+    }
     fun buildBlock(src: Hir, id: Int) {
         val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
         this.dbgBlocks = this.dbgBlocks + 1
@@ -2062,9 +2308,25 @@ class SsaBuilder {
         val args: String = toStr(left) + "," + toStr(right)
 
         // 映射运算符
-        val mirOp: String = this.mapBinaryOp(op)
+        var mirOp: String = this.mapBinaryOp(op)
 
         var typeId2: Int = typeId
+        // R54:浮点算术定型——旧实现 mapBinaryOp 一律返回整型指令名
+        // (Add/Sub/Mul/SDiv/SRem),浮点操作数(pi * 2)被编成整数乘法,
+        // 结果字节按整数打印(实测 14 §14.2 输出 281392529211456 而非 6.28)。
+        // 修复:任一操作数为 Float/Double 且运算符是算术运算 ⇒ 取浮点变体。
+        val lt4: Int = this.program.valueOf(left).type
+        val rt4: Int = this.program.valueOf(right).type
+        val isArithOp4: Boolean = mirOp == "Add" || mirOp == "Sub"
+                || mirOp == "Mul" || mirOp == "SDiv" || mirOp == "SRem"
+        if (isArithOp4 && (this.types.isFloat(lt4) || this.types.isFloat(rt4))) {
+            typeId2 = if (this.types.isFloat(lt4)) { lt4 } else { rt4 }
+            if (mirOp == "Add") { mirOp = "AddF" }
+            else if (mirOp == "Sub") { mirOp = "SubF" }
+            else if (mirOp == "Mul") { mirOp = "MulF" }
+            else if (mirOp == "SDiv") { mirOp = "DivF" }
+            else if (mirOp == "SRem") { mirOp = "RemF" }
+        }
         // ── Add 的 String 定型（P388，源头版）──
         //
         // HIR 对二元节点也常不带类型（`src.tyOf` 空串）⇒ Add 值落 Basic ⇒

@@ -131,7 +131,7 @@ class InstructionSelector {
     //（@fn Collections_getAt），computeReachable 的映射入队对
     // listAppend（无限定映射规则）不生效 ⇒ 定义被剪 → undefined symbol。
     // 显式强制纳入（有界清单机制的本职用途）。
-    private var forceReachable: String = "MirUtils_mirNoKids,MirUtils_mirKidsAdd,Linearizer_mirNoKids,Linearizer_mirKidsAdd,FileUtils_mkdir,Collections_listAppend,Collections_getAt,Collections_count,Collections_listSet,Collections_listPop,Collections_emptyList,Collections_newList,Collections_push,Collections_contains,Collections_indexOf,Collections_mapContainsKey,Collections_listRemove"
+    private var forceReachable: String = "MirUtils_mirNoKids,MirUtils_mirKidsAdd,Linearizer_mirNoKids,Linearizer_mirKidsAdd,FileUtils_mkdir,Collections_listAppend,Collections_getAt,Collections_count,Collections_listSet,Collections_listPop,Collections_emptyList,Collections_newList,Collections_push,Collections_contains,Collections_indexOf,Collections_mapContainsKey,Collections_listRemove,Collections_range"
 
     /// Phase C 定位探针（见 `selProbe` 的说明）。
     private var probePath: String = ""
@@ -2804,6 +2804,10 @@ class InstructionSelector {
         // P239 诊断：分配器 bump 裸值读取（解码期写手追踪）
         if (name == "HeapDiag_heapbump" || name == "aura_heapbump") { return "aura_heapbump" }
         if (name == "__is_tagged_int") { return "aura_is_tagged_int" }
+        // R55: `__range` → `Collections_range`——Hir.aura 的 Range 降级
+        // 产出 `HirCall("__range", [start, end, inclusive])`，SsaBuilder
+        // buildFor 的迭代器列表构建走这条映射。
+        if (name == "__range") { return "Collections_range" }
         if (name == "removeAt") { return "Collections_listPop" }
         if (name == "Collections.count" || name == "aura.lang.std.Collections.count") { return "Collections_count" }
         if (name == "Collections.listAppend" || name == ".Collections.listAppend") { return "Collections_listAppend" }
