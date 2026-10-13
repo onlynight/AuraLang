@@ -1081,7 +1081,11 @@ class HirLowerer {
             // 2026-10-02：注解在解析器侧丢失（实测 `val vm: VmRunner = VmRunner()`
             // 的节点 ty 只剩 "#public|"）时，从构造器调用推断 —— 大写命名的
             // 初始化调用即类名。
-            if ((this.cleanTy(ty) == "" || this.isScalarTy(this.cleanTy(ty))) && initHirId >= 0
+            // R51：**只认空类型**，不再认标量类型。旧门槛 `ty == "" || isScalarTy(ty)`
+            // 会在 `val a = Vec2()`（Vec2 是小写开头的类）这类形态上把已推断出的
+            // 正确标量类型整体覆盖成 callee 名，下游 localTypes 记成
+            // `a|Vec2` ⇒ 接收者定型错位（见 R51val/R51var 探针）。
+            if (this.cleanTy(ty) == "" && initHirId >= 0
                 && this.hir.kindOf(initHirId) == "HirCall") {
                 val calleeNm: String = this.hir.textOf(initHirId)
                 if (calleeNm.length() > 0) {
@@ -1122,7 +1126,8 @@ class HirLowerer {
                 ty = this.hir.tyOf(initHirId)
             }
             // 2026-10-02：同 lowerValDecl —— 注解丢失时从构造器调用推断类型。
-            if ((this.cleanTy(ty) == "" || this.isScalarTy(this.cleanTy(ty))) && initHirId >= 0
+            // R51：同 lowerValDecl，只认空类型（见那里的说明）。
+            if (this.cleanTy(ty) == "" && initHirId >= 0
                 && this.hir.kindOf(initHirId) == "HirCall") {
                 val calleeNm: String = this.hir.textOf(initHirId)
                 if (calleeNm.length() > 0) {
@@ -1600,6 +1605,43 @@ class HirLowerer {
 
     // ── 表达式降级 ──
 
+    /// R51:radix 文本 → 十进制文本(跳过非法字符与下划线)。
+    private fun radixToDec(text: String, radix: Int, from: Int): String {
+        var v: Int = 0
+        var i: Int = from
+        while (i < text.length) {
+            val ch: Int = text.charCodeAt(i)
+            var d: Int = -1
+            if (ch >= 48 && ch <= 57) { d = ch - 48 }
+            else if (ch >= 97 && ch <= 122) { d = ch - 87 }   // a-z → 10-35
+            else if (ch >= 65 && ch <= 90) { d = ch - 55 }    // A-Z → 10-35
+            if (d >= 0 && d < radix) {
+                v = v * radix + d
+            }
+            i = i + 1
+        }
+        return this.intToDec(v)
+    }
+
+    /// R51:Int → 十进制文本。
+    private fun intToDec(v: Int): String {
+        if (v == 0) { return "0" }
+        var out: String = ""
+        var n: Int = v
+        var neg: Boolean = false
+        if (n < 0) {
+            neg = true
+            n = -n
+        }
+        while (n > 0) {
+            val d: Int = n % 10
+            out = String.fromCharCode(48 + d) + out
+            n = (n - d) / 10
+        }
+        if (neg) { out = "-" + out }
+        return out
+    }
+
     /// 降级表达式。
     fun lowerExpr(ast: Ast, id: Int): Int {
         val kind: String = ast.kindOf(id)
@@ -1610,7 +1652,18 @@ class HirLowerer {
 
         // 字面量（携带类型信息，供 AOT 发射器选择表示；Phase 6.5.5/6.5.7）
         if (kind == "IntLiteral") {
-            return this.hir.add("HirLit", text, "Int", sp, HirUtils.hirNoKids())
+            // R51:radix 字面量归一——lexer 保留 0x/0b 前缀,而 ISel 数值解析
+            // 只认十进制(实测 01:0xFF→0、0b1100→1100)。此处转十进制文本。
+            var litText: String = text
+            if (litText.length > 2 && litText.charCodeAt(0) == 48) {
+                val c1: Int = litText.charCodeAt(1)
+                if (c1 == 120 || c1 == 88) {
+                    litText = this.radixToDec(litText, 16, 2)
+                } else if (c1 == 98 || c1 == 66) {
+                    litText = this.radixToDec(litText, 2, 2)
+                }
+            }
+            return this.hir.add("HirLit", litText, "Int", sp, HirUtils.hirNoKids())
         } else if (kind == "FloatLiteral" || kind == "DoubleLiteral") {
             return this.hir.add("HirLit", text, "Double", sp, HirUtils.hirNoKids())
         } else if (kind == "StringLiteral") {
@@ -1618,7 +1671,13 @@ class HirLowerer {
         } else if (kind == "BoolLiteral") {
             return this.hir.add("HirLit", text, "Boolean", sp, HirUtils.hirNoKids())
         } else if (kind == "CharLiteral") {
-            return this.hir.add("HirLit", text, "Char", sp, HirUtils.hirNoKids())
+            // R51:Char 字面量值 = 码点。旧实现文本 "A" 直落 ⇒ ISel 物化为串
+            // "A" ⇒ toString 走 toStr 臂按数字解析 "A" ⇒ 0(实测 01:0/5/0)。
+            var cpText: String = "0"
+            if (text.length > 0) {
+                cpText = this.intToDec(text.charCodeAt(0))
+            }
+            return this.hir.add("HirLit", cpText, "Char", sp, HirUtils.hirNoKids())
         } else if (kind == "NullLiteral") {
             return this.hir.add("HirLit", "null", "Any", sp, HirUtils.hirNoKids())
         }
@@ -1981,6 +2040,28 @@ class HirLowerer {
         return false
     }
 
+    /// R51：从 Member/Ident 嵌套链重建完整点分名。
+    ///
+    /// `aura.string.length` 的 AST 形态是
+    ///   Member(length, kid= Member(string, kid= Ident(aura)))
+    /// 递归把每层文本用 `.` 拼起来。遇到非 Member/Ident 节点（例如
+    /// `This`、`Call`、`Literal`）即停止——那意味着基座是「值」而非「路径」，
+    /// 返回已收集的部分供调用方判定。
+    private fun collectQualifiedName(ast: Ast, id: Int): String {
+        if (id < 0) { return "" }
+        val k: String = ast.kindOf(id)
+        if (k != "Member" && k != "Ident") { return ast.textOf(id) }
+        val own: String = ast.textOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
+        val kc: Int = HirUtils.hirKidsCount(kids)
+        if (kc == 0) { return own }
+        // 取最后一个 kid 作为基座（约定：Member 的 kid 列表里第一个/唯一是基座）
+        val baseId: Int = HirUtils.hirKidsAt(kids, kc - 1)
+        val baseName: String = this.collectQualifiedName(ast, baseId)
+        if (baseName == "") { return own }
+        return baseName + "." + own
+    }
+
     /// 类字段声明类型（typeMemberTys 查表，owner 为类/对象名）。
     private fun typeMemberTy(owner: String, field: String): String {
         if (owner == "" || field == "") { return "" }
@@ -2017,6 +2098,62 @@ class HirLowerer {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
+
+        // ── R51：`aura.string.length(s)` / `aura.string.size(s)` 归一 ──
+        //
+        // `aura.string.*` 是 stdlib 的老式**包对象**写法（14-string-interp.aura 等），
+        // 但 `String.length` 在 `aura.core/aura/lang/String.aura` 里是**属性**、
+        // 运行库也没有 `aura.string.length` 这个 C 函数 ⇒ 直译成
+        // `@aura_string_length`（lld-link: undefined symbol）或退化成
+        // `@StringBuilder_length`（把字符串指针当 StringBuilder 读字段 ⇒
+        // 0xC0000005）。两种落法都是死路，必须在此改写成 `s.length()`。
+        //
+        // 实现上**改写 AST 调用节点本身**（把 callee 换成裸 `Member(length)`，
+        // 实参整体右移一格），然后**重新调用 lowerCall**：这样复用全部既有降级逻辑
+        // （`Member` → 接收者前置、裸成员名），不必复制分支。
+        //
+        // 只认**恰好两段**限定名（`pkg.member`）：`aura.lang.std.Math.max(a,b)` 这类
+        // 三/四段形态是真正的 std 类静态调用，走 `stdClassReceiver` 既有路径。
+        //
+        // AST 形态：解析器对 `aura.string.length` 产出
+        //   Call( Member(length, kid= Member(string, kid= Ident(aura))),  Ident(name) )
+        // 递归把整条 Member/Ident 链的文本拼成 "aura.string.length"。
+        val r51callee: Int = HirUtils.hirKidsAt(kids, 0)
+        if (HirUtils.hirKidsCount(kids) >= 2
+                && ast.kindOf(r51callee) == "Member") {
+            val cText: String = this.collectQualifiedName(ast, r51callee)
+            val nC: Int = cText.length
+            // 判定「点分路径 + 末段为 length/size」：`cText` 以 `.length`/`.size`
+            // 结尾，去掉该后缀后仍非空。不限定前缀段数——`aura.string.length`
+            // （3 段）、`string.length`（2 段）都是老式**包对象**写法，
+            // 都应改写成成员调用；前缀段数不影响语义。
+            val tailLen: String = ".length"
+            val tailSz: String = ".size"
+            val mem: String = ""
+            if (cText.endsWith(tailLen)) {
+                val prefix: String = cText.substring(0, nC - tailLen.length)
+                if (prefix != "") {
+                    mem = "length"
+                }
+            } else if (cText.endsWith(tailSz)) {
+                val prefix: String = cText.substring(0, nC - tailSz.length)
+                if (prefix != "") {
+                    mem = "size"
+                }
+            }
+            if (mem != "") {
+                val newCallee: Int = this.ast.leaf("Member", mem, ast.spanOf(r51callee))
+                var nk: String = toStr(newCallee)
+                var ci: Int = 1
+                while (ci < kCount) {
+                    nk = nk + "," + toStr(HirUtils.hirKidsAt(kids, ci))
+                    ci = ci + 1
+                }
+                val nid: Int = this.ast.add("Call", "", "", sp, nk)
+                // 递归降级改写后的调用。深度 1 即返回：改写结果不含点分 callee。
+                return this.lowerCall(ast, nid)
+            }
+        }
 
         // List/Array/Set.get(i) / getAt(i) → Collections.getAt(collection, i)
         // P40x-g：门槛从 kCount >= 2 放宽到 >= 1——零参方法调用（toString()/
