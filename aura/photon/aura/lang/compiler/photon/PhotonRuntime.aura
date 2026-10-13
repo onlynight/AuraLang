@@ -2302,7 +2302,7 @@ object PhotonRuntime {
         // R45d:obj==0 ⇒ "null"(可空值经弱类型 concat 路径流入,类型名丢失;
         // VM 对 null 对象打 "null",与 toStrN 一致)
         enc.emitCmpRI("rcx", 0)
-        enc.emitJmpLabel("ne", "rfs_search")
+        enc.emitJccLabel("ne", "rfs_search")
         enc.emitMovRIP("rax", "heapBump")
         enc.emitMovRIP("rdx", "heapArenaBase")
         enc.emitAddRR("rdx", "rax")

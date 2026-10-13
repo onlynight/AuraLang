@@ -2434,6 +2434,10 @@ class InstructionSelector {
                 fname = "refToStr"
             }
         }
+        if (Env.get("AURA_MAP_TRACE", "") == "1") {
+            println("[conv] argTy=[" + argTyName + "] eff=[" + this.types.nameOf(argVal.type)
+                    + "] op=[" + argVal.op + "] -> " + fname)
+        }
         val strTy: Int = this.types.fromTypeName("String")
         val convId: Int = this.dag.addNode("Value", "Call", strTy,
                                            "", "", "", this.curChain, fname)
