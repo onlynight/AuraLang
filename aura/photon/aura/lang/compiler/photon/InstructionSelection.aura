@@ -2552,10 +2552,22 @@ class InstructionSelector {
             val srcId: Int = val.args[0]
             val srcNode: Int = this.resolveNode(srcId)
             if (srcNode >= 0) {
+                // R52: Mov 必须是**真实的寄存器→寄存器拷贝**，不能把
+                // vid 别名到 srcNode。旧实现 selectPattern(7, srcNode, srcNode)
+                // 产出自拷贝 `mov %rax, %rax`，且 registerNode(vid, srcNode)
+                // 让 Mov 结果与源共享同一 DAG 节点 ⇒ 当源是 Phi 时，
+                // phi 回边 MOV 把新值写入共享节点，Mov 快照退化为空操作：
+                // `val temp = fib; fib = fib+fib2; fib2 = temp` 中 temp
+                // 与 fib 同槽，fib 回边先执行覆盖了 temp 的值 ⇒
+                // fib2 = new_fib（而非 old_fib）⇒ 循环输出 0,1,2,4,8
+                // 而非 0,1,1,2,3（实测 04-control-flow §4.8）。
+                // 修复：为 Mov 结果创建**独立 DAG 节点**作为 MOV 目标。
+                val dstNode: Int = this.dag.addNode("Value", "Mov", val.type,
+                                                    "", "", "", this.curChain, "")
                 val nodes: String = MachineDagUtils.toStr(srcNode)
-                this.dag.selectPattern(7, nodes, srcNode)
-                this.registerNode(vid, srcNode)
-                return srcNode
+                this.dag.selectPattern(7, nodes, dstNode)
+                this.registerNode(vid, dstNode)
+                return dstNode
             }
         }
         val nodeId: Int = this.dag.addNode("Value", "Mov", val.type,

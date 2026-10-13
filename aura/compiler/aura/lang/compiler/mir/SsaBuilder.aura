@@ -647,7 +647,23 @@ class SsaBuilder {
         // 降级初始化表达式
         var initVal: Int = -1
         if (kCount > 0) {
-            initVal = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+            val initNode: Int = HirUtils.hirKidsAt(kids, 0)
+            initVal = this.buildExpr(src, initNode)
+            // R52: val temp = fib —— 初始化来自 HirVar 且该变量解析到 Phi
+            // (循环变量)时，必须物化一份独立 SSA 值(Mov 快照)。否则
+            // temp 别名 fib 的 Phi，后续 `fib2 = temp` 的回边指向 fib 的
+            // Phi 本身 ⇒ fib2_next = fib_current(而非 fib_old) ⇒
+            // 循环里 `temp = fib; fib = fib + fib2; fib2 = temp`
+            // 退化为 `fib = 2*fib`(fib2 恒等于当前 fib)⇒
+            // 实测 04-control-flow 的 §4.8 输出 0,1,2,4,8 而非 0,1,1,2,3。
+            // 仅对 Phi 做快照：非 Phi(常量/普通值)无需物化。
+            if (src.kindOf(initNode) == "HirVar" && initVal >= 0) {
+                val iv: MirValue = this.program.valueOf(initVal)
+                if (iv.isPhi()) {
+                    initVal = this.program.addValue("Mov", iv.type,
+                            toStr(initVal), varName, this.curBlock)
+                }
+            }
         } else {
             // 无初始化：创建零值常量
             val varTy: String = src.tyOf(id)
