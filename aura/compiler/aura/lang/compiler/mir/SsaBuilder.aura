@@ -1939,7 +1939,14 @@ class SsaBuilder {
 
         val left: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
         val right: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 1))
-        val typeId: Int = this.types.fromTypeName(src.tyOf(id))
+        // R49:算术结果解包可空后缀——sema 对 `e1 + e2`(e 为 Int?)定型 "Int?",
+        // 值类型带 ? ⇒ toString 走 toStrN ⇒ 0 打 "null"(实测 06 最后一行
+        // (null ?: 0)+(null ?: 0))。elvis 已收敛空值,算术结果按内部类型。
+        var tn2: String = src.tyOf(id)
+        if (tn2.length > 1 && (tn2.charCodeAt(tn2.length - 1) as Int) == 63) {
+            tn2 = tn2.substring(0, tn2.length - 1)
+        }
+        val typeId: Int = this.types.fromTypeName(tn2)
 
         // ── R45c：Elvis `a ?: b` 内联降级（块 + Phi 选择）──
         //
