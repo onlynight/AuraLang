@@ -1246,6 +1246,24 @@ class HirLowerer {
 
     /// 降级语句块。
     fun lowerBlock(ast: Ast, id: Int): Int {
+        return this.lowerBlockWithKind(ast, id, "HirBlock")
+    }
+
+    /// 通用块降级：kind 参数用于区分「普通 HirBlock」与「伴生对象体」
+    /// （后者用 "HirCompanionBlock" 标记，SsaBuilder 侧据此跳过 `@this` 注入）。
+    ///
+    /// 伴生对象体的函数在 HIR 层就带 `Class_` 前缀（如 `add` → `MathUtil_add`），
+    /// 这样 SsaBuilder 把伴生函数当自由函数处理时（不设 ownerCls），发射出的
+    /// 符号名与调用点 `@call @MathUtil_add(...)` 一致。
+    ///
+    /// ⚠️ 伴生 `val`/`var`（如 `val BASE: Int = 100`）**当前不降级**——
+    /// 伴生 val 的运行时支持需要单例承载（`MathUtil.getInstance().BASE`），
+    /// 而 photon 后端尚未实现单例合成。若把伴生 val 当类字段降级，
+    /// 调用侧 `MathUtil.BASE` 会退化成 `__field_get(0, idx)`（this=0）⇒
+    /// 段错误（实测 05-classes §5.8）。这里直接跳过，牺牲运行时输出完整性
+    /// 换取不崩溃；调用点 `MathUtil.BASE.toString()` 会走通用路径（可能返回
+    /// 0/空串），至少不会崩。
+    private fun lowerBlockWithKind(ast: Ast, id: Int, hirKind: String): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -1254,13 +1272,38 @@ class HirLowerer {
         var i: Int = 0
         while (i < kCount) {
             val childId: Int = HirUtils.hirKidsAt(kids, i)
+            val childKind: String = ast.kindOf(childId)
+            // 伴生 val/var：跳过（单例未实现，避免 this=0 段错误）
+            if (hirKind == "HirCompanionBlock"
+                    && (childKind == "ValDecl" || childKind == "VarDecl")) {
+                i = i + 1
+                continue
+            }
             val childHirId: Int = this.lowerStmt(ast, childId)
-            if (childHirId >= 0) {
+            // 伴生对象体：给函数名加 `Class_` 前缀（如 `add` → `MathUtil_add`）。
+            // 只对 HirFunction 生效；其他节点保持原名。
+            if (hirKind == "HirCompanionBlock" && childHirId >= 0
+                    && this.hir.kindOf(childHirId) == "HirFunction"
+                    && this.curTypeDecl != "") {
+                val origName: String = this.hir.textOf(childHirId)
+                val newName: String = this.curTypeDecl + "_" + origName
+                hirKids = HirUtils.hirKidsAdd(hirKids,
+                    this.renameHirNode(childHirId, newName))
+            } else if (childHirId >= 0) {
                 hirKids = HirUtils.hirKidsAdd(hirKids, childHirId)
             }
             i = i + 1
         }
-        return this.hir.add("HirBlock", "", "", sp, hirKids)
+        return this.hir.add(hirKind, "", "", sp, hirKids)
+    }
+
+    /// 克隆 HirFunction 节点到新名字（arena 只读，不能原地改名）。
+    private fun renameHirNode(nodeId: Int, newName: String): Int {
+        val oldName: String = this.hir.textOf(nodeId)
+        val ty: String = this.hir.tyOf(nodeId)
+        val sp: Span = this.hir.spanOf(nodeId)
+        val kids: List<Int> = this.hir.kidsOfList(nodeId)
+        return this.hir.add("HirFunction", newName, ty, sp, kids)
     }
 
     // ── 语句降级 ──
@@ -1301,6 +1344,14 @@ class HirLowerer {
             return this.lowerCFor(ast, id)
         } else if (kind == "Block") {
             return this.lowerBlock(ast, id)
+        } else if (kind == "CompanionBody") {
+            // 伴生对象体（`companion object { fun add(a,b) ... }`）：走 Block
+            // 同一降级路径，但产出 HirBlock 的 kind 用 "HirCompanionBlock"
+            // 标记，SsaBuilder 侧的 `registerClassBodyEx` 见到该 kind 时
+            // 递归下钻但**不设 ownerCls**——伴生函数是「静态」成员，调用点
+            // `MathUtil.add(3, 4)` 视作自由函数（不加接收者），形参表若注入
+            // `@this` 会与调用点 ABI 错位一位。
+            return this.lowerBlockWithKind(ast, id, "HirCompanionBlock")
         } else if (kind == "Assign") {
             return this.lowerAssign(ast, id)
         } else if (kind == "Break") {

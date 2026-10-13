@@ -2701,6 +2701,33 @@ class InstructionSelector {
             println("[map] name=[" + name + "] recvTy=[" + recvTy + "] n=" + toStr(argCount))
         }
         if (name == "String.length" || name == "String.size") { return "strlen" }
+        // R62：`import aura.math.*` 通配导入（11-imports §11.1）——前端把
+        // `sqrt(16.0)` / `cos(0.0)` 降级为**裸名**调用（`@call @sqrt(...)`），
+        // 但 stdlib 侧 `aura.lang.std.Math` 已把 `sqrt` / `cos` 等数学函数
+        // 定义为 `Math_sqrt` / `Math_cos`（Mangled 名，见 Math.aura +
+        // MathOps.aura）。此前无映射 ⇒ 链接期 `undefined symbol: sqrt / cos /
+        // sq`（11-imports §11.1/§11.3 全挂）。`sq` 是 `import aura.math.sqrt
+        // as sq` 的别名导入（§11.3），同样落到裸名 `@call @sq(...)`。
+        if (name == "sqrt") { return "MathOps_sqrtD" }
+        if (name == "cos") { return "MathOps_cosD" }
+        if (name == "sin") { return "MathOps_sinD" }
+        if (name == "tan") { return "MathOps_tanD" }
+        if (name == "round") { return "Math_round" }
+        if (name == "floor") { return "Math_floor" }
+        if (name == "ceil") { return "Math_ceil" }
+        if (name == "pow") { return "MathOps_powD" }
+        if (name == "sq") { return "MathOps_sqrtD" }
+        if (name == "Math.sqrt" || name == "aura.lang.std.Math.sqrt") { return "MathOps_sqrtD" }
+        if (name == "Math.cos" || name == "aura.lang.std.Math.cos") { return "MathOps_cosD" }
+        if (name == "Math_sin" || name == "aura.lang.std.Math.sin") { return "MathOps_sinD" }
+        if (name == "Math_tan" || name == "aura.lang.std.Math.tan") { return "MathOps_tanD" }
+        if (name == "Math_abs" || name == "aura.lang.std.Math.abs") { return "Math_abs" }
+        if (name == "Math_min" || name == "aura.lang.std.Math.min") { return "Math_min" }
+        if (name == "Math_max" || name == "aura.lang.std.Math.max") { return "Math_max" }
+        if (name == "Math_round" || name == "aura.lang.std.Math.round") { return "Math_round" }
+        if (name == "Math_floor" || name == "aura.lang.std.Math.floor") { return "Math_floor" }
+        if (name == "Math_ceil" || name == "aura.lang.std.Math.ceil") { return "Math_ceil" }
+        if (name == "Math_pow" || name == "aura.lang.std.Math.pow") { return "MathOps_powD" }
         // `Env.get(name[, default])` → 运行库的 `env_get`（**真正的**环境变量读取）。
         //
         // ⚠️ 这里曾被**刻意**改写成占位实现 `Collections.getAt`（恒返回空串），

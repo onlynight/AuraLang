@@ -4112,6 +4112,28 @@ class SsaBuilder {
         return this.registerClassBodyEx(src, cls, blockId, startIdx, classNode, false)
     }
 
+    /// R62：伴生对象体降级。伴生函数在 HIR 层已带 `Class_` 前缀
+    /// （见 Hir.aura `lowerBlockWithKind` 的 "HirCompanionBlock" 分支），
+    /// 此处登记为**自由函数**：不设 ownerCls（否则 buildFunction 会再加
+    /// 一层前缀变成 `MathUtil_MathUtil_add`）、不加 addClassMethod（伴生
+    /// 函数不是实例方法，接收者定型用不上）。
+    ///
+    /// 伴生 `val`/`var`（如 `val BASE: Int = 100`）：暂不登记为字段——
+    /// 后续 `MathUtil.BASE` 走 `__field_get` 时会因 `rawFieldIndex` 未命中
+    /// 退化成通用路径（可能返回 0/崩溃）。要正确支持需单例承载伴生 val，
+    /// 留作后续轮次。当前先解决函数调用链接失败。
+    private fun registerCompanionBody(src: Hir, blockId: Int, startIdx: Int): Int {
+        val kids: List<Int> = src.kidsOfList(blockId)
+        val kn: Int = HirUtils.hirKidsCount(kids)
+        var j: Int = 0
+        while (j < kn) {
+            // 伴生函数：名字已带前缀，作为自由函数发射，不注入 @this。
+            // 无需调用 addMethodOwner / addClassMethod / addField。
+            j = j + 1
+        }
+        return startIdx
+    }
+
     /// `registerClassBody` 的实现体；`isExternDecl` 表示**当前声明**是
     /// `extern interface`（只有它的成员才登记进 `externMethodsCsv`）。
     ///
@@ -4147,6 +4169,19 @@ class SsaBuilder {
             } else if (ck == "HirBlock") {
                 // 嵌套块（极少见）：继续下钻
                 idx = this.registerClassBody(src, cls, child, idx, classNode)
+            } else if (ck == "HirCompanionBlock") {
+                // ⚠️ R62：伴生对象体（`companion object { fun add(a,b) ... }`）。
+                // 伴生函数是「静态」成员：调用点 `MathUtil.add(3, 4)` 视作
+                // 自由函数（不加接收者），SsaBuilder `buildFunction` 若注入
+                // `@this` 形参，调用点与定义 ABI 错位一位（实测 05-classes
+                // §5.8 段错误）。
+                //
+                // HIR 层已把伴生函数名从 `add` 改为 `MathUtil_add`
+                // （`lowerBlockWithKind` 里加前缀，见 Hir.aura 同处注释）。
+                // 这里不再设 ownerCls（否则 buildFunction 会再加一层前缀变
+                // 成 `MathUtil_MathUtil_add`），也不加 addClassMethod
+                // （伴生函数不是实例方法，接收者定型用不上）。
+                idx = this.registerCompanionBody(src, child, idx)
             }
             j = j + 1
         }

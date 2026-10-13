@@ -1152,10 +1152,37 @@ class Parser {
         if (k == "Ident") {
             val modw: String = this.prsCurLit()
             // `companion object { … }`（伴生对象）：`companion` 是普通标识符。
-            // 不跳过会被当作表达式语句，整个类体反同步并崩溃。
+            // R62：把伴生对象体（`{ fun add(a: Int, b: Int): Int = ... }`）的内容
+            //      **摊平**为当前类体的直接子节点，让伴生 `fun`/`val`/`var` 走
+            //      与同类其他成员相同的降级路径（Hir.aura `lowerBlock` → `lowerStmt`
+            //      → `lowerFunction`，用 `curTypeDecl` 打 `MathUtil_add` 之类的
+            //      限定名）。此前把 `Object { … }` 整段当 `parseTypeDecl("Object")`
+            //      解析，`prsExpectName` 在 `{` 处失败且**不消费令牌**，`fun add`
+            //      等节点全部丢失，`MathUtil.add(3, 4)` 发射为未定义调用（实测
+            //      05-classes §5.8 链接报 undefined: MathUtil_add / MathUtil_multiply）。
             if (modw == "companion" && this.prsKind(this.pos + 1) == "Object") {
-                this.prsAdvance()
-                return this.parseStatement()
+                this.prsAdvance()      // 消费 `companion`
+                if (this.prsCheck("Object")) {
+                    this.prsAdvance()  // 消费 `object`
+                }
+                // `companion object Name { … }`：名字可选，若存在则消费
+                if (this.prsIsNameToken()) {
+                    this.prsAdvance()
+                }
+                if (this.prsCheck("LBrace")) {
+                    // 用特殊 kind "CompanionBody" 标记伴生对象体，供 HIR 侧
+                    // `lowerBlock`/`lowerStmt` 分支识别：伴生 `fun` 不注入
+                    // `@this`（保持 free-func 调用 ABI），伴生 `val`/`var`
+                    // 走类型体成员的降级但**不改名**（避免 `Class_val` 歧义）。
+                    val bodyId: Int = this.parseBlock()
+                    val bodyKids: String = this.ast.kidsOf(bodyId)
+                    if (bodyKids == "") {
+                        return bodyId
+                    }
+                    return this.ast.add("CompanionBody", "", "", this.ast.spanOf(bodyId), bodyKids)
+                }
+                // 无体伴生对象（`companion object Foo`）：直接吞掉名字
+                return this.ast.leaf("Empty", "", this.prsCurSpan())
             }
             if (modw == "tailrec" || modw == "operator" || modw == "infix"
                 || modw == "abstract" || modw == "open") {
