@@ -738,7 +738,18 @@ class SsaBuilder {
         // 多分支汇合时错配，实测 decodeNumeric 的 name/a0/a1 串值互相
         // 串块：迭代 1 的 name 泄漏进迭代 2）。
         this.curBlock = mergeBlock
-        val phiType: Int = this.program.valueOf(thenVal).type
+        // phi 类型:HIR 声明类型优先(安全调用 `recv?.len` 的 HirIfExpr 带
+        // "Int?" —— then 实值是 strlen 的 Int,旧实现取 then 类型 ⇒ 可空性
+        // 丢失 ⇒ nullLen.toString() 打 "0" 而非 "null",实测 06 §6.4)。
+        // 声明缺失时退 then 实值类型。
+        var phiType: Int = this.program.valueOf(thenVal).type
+        val declTy: String = src.tyOf(id)
+        if (declTy != "") {
+            val declId: Int = this.types.fromTypeName(declTy)
+            if (declId >= 0) {
+                phiType = declId
+            }
+        }
         return this.makePhi(mergeBlock, phiType,
             toStr(thenBlock) + ":" + toStr(thenVal) + "," +
             toStr(elseBlock) + ":" + toStr(elseVal), "")
@@ -1940,8 +1951,12 @@ class SsaBuilder {
         // rhs 恒为字面量，可接受）；phi 入边用 前驱块:值 对（P228 约定）。
         if (op == "?:" || op == "ElvisColon") {
             val leftTy: Int = this.program.valueOf(left).type
-            val nullLit: Int = this.program.addValue("Const", leftTy, "", "null", this.curBlock)
-            val condVal: Int = this.program.addValue("ICmpNe", leftTy,
+            // null 哨兵用整型 0(aux "null" 会被 ISel 当字符串常量物化 ⇒
+            // 两个 "null" 常量物化为不同 @str ⇒ Ne 恒真 ⇒ 恒取 then 分支,
+            // 实测 (null ?: 0)+(null ?: 0) 打 "null")。null 即 0 的指针语义。
+            val i64Ty: Int = this.types.intType(64)
+            val nullLit: Int = this.program.addValue("Const", i64Ty, "", "0", this.curBlock)
+            val condVal: Int = this.program.addValue("ICmpNe", i64Ty,
                 toStr(left) + "," + toStr(nullLit), "", this.curBlock)
             val thenBlock2: Int = this.program.addBlock()
             val elseBlock2: Int = this.program.addBlock()

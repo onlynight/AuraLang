@@ -1703,9 +1703,12 @@ class HirLowerer {
             return this.lowerMember(ast, id)
         }
 
-        // 安全调用 `?.`：近似降级为普通成员访问（完整空安全检查留待运行时）
+        // 安全调用 `?.`：降级为 `if (recv != null) recv.name else null`。
+        // 旧实现近似为普通成员访问（"空安全检查留待运行时"但运行时并无该
+        // 语义）⇒ null 接收者照样求值成员 ⇒ nullStr?.length 打 0 而非 null
+        //（实测 06 §6.4）。
         if (kind == "SafeAccess") {
-            return this.lowerMember(ast, id)
+            return this.lowerSafeAccess(ast, id)
         }
 
         // 下标访问
@@ -2443,6 +2446,40 @@ class HirLowerer {
             mty = "Int"
         }
         return this.hir.add("HirMember", memberName, mty, sp, hirKids)
+    }
+
+    /// 降级安全调用 `recv?.name` → `if (recv != null) recv.name else null`。
+    /// SafeAccess 节点与 Member 同形（text=成员名,kids=[接收者]）,
+    /// lowerMember 可原样复用。结果类型取 ast.tyOf,缺失按 length/size
+    /// → Int?、其余 → Int? 兜底（可空语义,phi/toStrN 据此打 null）。
+    fun lowerSafeAccess(ast: Ast, id: Int): Int {
+        val memberName: String = ast.textOf(id)
+        val sp: Span = ast.spanOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (kCount < 1) {
+            return -1
+        }
+        val memberHir: Int = this.lowerMember(ast, id)
+        var resTy: String = ast.tyOf(id)
+        if (resTy == "") {
+            resTy = "Int?"
+            if (memberName == "length" || memberName == "size") {
+                resTy = "Int?"
+            }
+        }
+        val recvHir: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(kids, 0))
+        if (recvHir < 0) {
+            return memberHir
+        }
+        val nullLit: Int = this.hir.add("HirLit", "null", resTy, sp, HirUtils.hirNoKids())
+        var condKids: List<Int> = HirUtils.hirKidsAdd(HirUtils.hirNoKids(), recvHir)
+        condKids = HirUtils.hirKidsAdd(condKids, nullLit)
+        val cond: Int = this.hir.add("HirBinary", "!=", "Boolean", sp, condKids)
+        var ifKids: List<Int> = HirUtils.hirKidsAdd(HirUtils.hirNoKids(), cond)
+        ifKids = HirUtils.hirKidsAdd(ifKids, memberHir)
+        ifKids = HirUtils.hirKidsAdd(ifKids, nullLit)
+        return this.hir.add("HirIfExpr", "", resTy, sp, ifKids)
     }
 
     /// 降级下标访问表达式。
