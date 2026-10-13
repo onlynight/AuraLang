@@ -1833,14 +1833,19 @@ class HirLowerer {
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
         var opTy: String = ""
+        var firstTy: String = ""
         var i: Int = 0
         while (i < kCount) {
             val childId: Int = HirUtils.hirKidsAt(kids, i)
             val childHirId: Int = this.lowerExpr(ast, childId)
             if (childHirId >= 0) {
                 hirKids = HirUtils.hirKidsAdd(hirKids, childHirId)
-                if (this.hir.tyOf(childHirId) == "String") {
+                val cty: String = this.hir.tyOf(childHirId)
+                if (cty == "String") {
                     opTy = "String"
+                }
+                if (i == 0 && firstTy == "") {
+                    firstTy = cty
                 }
             }
             i = i + 1
@@ -1849,7 +1854,13 @@ class HirLowerer {
         if (normOp != "+" && normOp != "&&" && normOp != "||" &&
             normOp != "==" && normOp != "!=" && normOp != "<" &&
             normOp != ">" && normOp != "<=" && normOp != ">=") {
-            opTy = ""
+            // R53:算术运算(-,*,/,%)结果类型 = 左操作数类型(取宽)。
+            // 旧实现 opTy 一律置空 ⇒ val r = pi * 2 的 HIR 类型为 ""
+            // ⇒ lowerValDecl 推断 r 的类型为空 ⇒ Emit.inferType("r")
+            // 回落 "i32" ⇒ r.toString() 走装箱整数路径(把 double 的
+            // 8 字节按奇偶判指针/整数)⇒ 实测 14-string-interp §14.2
+            // 输出 281392529211456 而非 6.28。
+            opTy = firstTy
         }
         return this.hir.add("HirBinary", normOp, opTy, sp, hirKids)
     }
