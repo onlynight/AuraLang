@@ -1641,6 +1641,12 @@ class SsaBuilder {
 
         // 继续构建结束块
         this.curBlock = endBlock
+
+        // R58: 创建循环后的新块——endBlock 是循环退出块，不应包含循环后的代码。
+        // 设置 endBlock → Br → 新块，后续代码在新块中构建。
+        val afterBlock2: Int = this.program.addBlock()
+        this.program.setTerminator(endBlock, "Br", 0, toStr(afterBlock2), "")
+        this.curBlock = afterBlock2
     }
 
     /// 递归收集 HIR 子树中被赋值（`HirAssign`）的变量名，返回逗号分隔串（去重）。
@@ -1942,6 +1948,12 @@ class SsaBuilder {
 
         // ── endBlock ──
         this.curBlock = endBlock
+
+        // R58: 创建循环后的新块——endBlock 是循环退出块，不应包含循环后的代码。
+        // 设置 endBlock → Br → 新块，后续代码在新块中构建。
+        val afterBlock: Int = this.program.addBlock()
+        this.program.setTerminator(endBlock, "Br", 0, toStr(afterBlock), "")
+        this.curBlock = afterBlock
 
         // 弹出循环栈
         this.loopStackPop()
