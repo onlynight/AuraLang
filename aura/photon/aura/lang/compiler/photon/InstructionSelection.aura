@@ -3432,6 +3432,11 @@ class InstructionSelector {
         if (op == "SRem") { return 15 }  // rem %dst, @imm
         if (op == "Shl") { return 18 }   // shl %dst, %src
         if (op == "Shr") { return 19 }   // shr %dst, %src
+        // R57: 浮点运算——xmm 寄存器 VEX 指令
+        if (op == "AddF") { return 70 }  // vaddpd %dst, %src
+        if (op == "SubF") { return 71 }  // vsubpd %dst, %src
+        if (op == "MulF") { return 72 }  // vmulpd %dst, %src
+        if (op == "DivF") { return 73 }  // vdivpd %dst, %src
         return 1  // fallback to add
     }
 

@@ -655,6 +655,11 @@ object MachineDagUtils {
         if (patternId == 50) { return "call %func" }
         // 字符串地址加载（lea %dst, @sym）
         if (patternId == 63) { return "lea %dst, @sym" }
+        // R57: 浮点算术运算（xmm 寄存器，SSE2）
+        if (patternId == 70) { return "addpd %dst, %src" }
+        if (patternId == 71) { return "subpd %dst, %src" }
+        if (patternId == 72) { return "mulpd %dst, %src" }
+        if (patternId == 73) { return "divpd %dst, %src" }
         // 默认
         return "nop"
     }
@@ -695,6 +700,8 @@ object MachineDagUtils {
         if (patternId == 40) { return 1 }
         if (patternId == 50) { return 4 + 16 }
         if (patternId == 63) { return 4 } // lea %dst, @sym — side effect (loads address)
+        // R57: 浮点算术——sideEffect(4)
+        if (patternId == 70 || patternId == 71 || patternId == 72 || patternId == 73) { return 4 }
         return 0
     }
 

@@ -364,6 +364,68 @@ class X86Encoder {
         this.emitBinOp(dst, src, 0x31)
     }
 
+    // ── R57: 浮点运算编码（xmm 寄存器）──
+
+    /// 编码 xmm 二元浮点运算（xmm, xmm 形式）。
+    ///
+    /// 使用 SSE2 指令集（0F xx ModRM，xmm0-xmm7）。
+    /// xmm8-xmm15 需要 VEX 前缀，当前不支持（寄存器分配器只分配
+    /// rbx/rsi/rdi/r12-r15，对应 xmm3/xmm6/xmm7/xmm12-xmm15）。
+    ///
+    /// opcode: 0x58=addpd, 0x5C=subpd, 0x59=mulpd, 0x5E=divpd
+    private fun emitSseFloatBinary(dst: String, src: String, sseOpcode: Int): Unit {
+        val dstNum: Int = this.xmmNum(dst)
+        val srcNum: Int = this.xmmNum(src)
+        // 0F 前缀 + opcode
+        this.writeByte(0x0F)
+        this.writeByte(sseOpcode)
+        // ModRM: mod=11 (reg,reg), reg=dst[3:0], r/m=src[3:0]
+        // 仅支持 xmm0-xmm7（不需要 REX 前缀）
+        val modrm: Int = 0xC0 | ((dstNum & 0x0F) << 3) | (srcNum & 0x0F)
+        this.writeByte(modrm)
+    }
+
+    /// 获取 xmm 寄存器编号。
+    private fun xmmNum(reg: String): Int {
+        if (reg == "xmm0")  { return 0 }
+        if (reg == "xmm1")  { return 1 }
+        if (reg == "xmm2")  { return 2 }
+        if (reg == "xmm3")  { return 3 }
+        if (reg == "xmm4")  { return 4 }
+        if (reg == "xmm5")  { return 5 }
+        if (reg == "xmm6")  { return 6 }
+        if (reg == "xmm7")  { return 7 }
+        if (reg == "xmm8")  { return 8 }
+        if (reg == "xmm9")  { return 9 }
+        if (reg == "xmm10") { return 10 }
+        if (reg == "xmm11") { return 11 }
+        if (reg == "xmm12") { return 12 }
+        if (reg == "xmm13") { return 13 }
+        if (reg == "xmm14") { return 14 }
+        if (reg == "xmm15") { return 15 }
+        return 0
+    }
+
+    /// 编码 addpd dst, src（xmm, xmm）。
+    fun emitAddpd(dst: String, src: String): Unit {
+        this.emitSseFloatBinary(dst, src, 0x58)
+    }
+
+    /// 编码 subpd dst, src（xmm, xmm）。
+    fun emitSubpd(dst: String, src: String): Unit {
+        this.emitSseFloatBinary(dst, src, 0x5C)
+    }
+
+    /// 编码 mulpd dst, src（xmm, xmm）。
+    fun emitMulpd(dst: String, src: String): Unit {
+        this.emitSseFloatBinary(dst, src, 0x59)
+    }
+
+    /// 编码 divpd dst, src（xmm, xmm）。
+    fun emitDivpd(dst: String, src: String): Unit {
+        this.emitSseFloatBinary(dst, src, 0x5E)
+    }
+
     /// 编码 NOT r/m64（REX.W F7 /2）。
     ///
     /// ⚠️ 与 emitMovRI 组合产生字节流歧义时（如 `mov rcx, -1` 紧跟
@@ -1281,6 +1343,14 @@ class X86Encoder {
         if (cond == "no") return 1                                  // JNO
         if (cond == "np") return 11                                 // JNP
         if (cond == "p") return 10                                  // JP
+        // [P41x] j 前缀别名：allocRWX 的 "jg" 曾未命中映射 → 静默回落 JE
+        //（0x7FFFFFFF 越界守卫失效，反汇编 0f 84 实证）。
+        if (cond == "jg") return 15                                 // JG
+        if (cond == "jl") return 12                                 // JL
+        if (cond == "jle") return 14                                // JLE
+        if (cond == "jge") return 13                                // JGE
+        if (cond == "je") return 4                                  // JE
+        if (cond == "jne") return 5                                 // JNE
         return 4  // 默认 JE
     }
 
