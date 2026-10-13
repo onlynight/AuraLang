@@ -79,7 +79,7 @@ class InstructionSelector {
     /// 桩（getAt 恒返回空串 —— `Env.get` 历史落点），要么布局分叉。保留名单
     /// 会把 guest 真实现抑制掉（`!isRuntimeSymbol` 跳过发射），实测
     /// `tl.get(0)` 返回空串。仅保留 guest 没有的 clear/hashMapPut。
-    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,RegionEnter,RegionReset,io_open,io_close,io_read,io_write,io_access,Collections.clear,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,aura_heapbump,Heap_init,Heap_mmap,boolToStr,charToStr,aura_isOfType"
+    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,RegionEnter,RegionReset,io_open,io_close,io_read,io_write,io_access,Collections.clear,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,aura_heapbump,Heap_init,Heap_mmap,boolToStr,charToStr,aura_isOfType,refToStr,String_contains,String_toUpperCase"
 
     /// `computeReachable` 的列表形式结果（供 `select()` 免分配查表）。
     private var reachableNames: List<String> = arrayListOf<String>()
@@ -2351,6 +2351,19 @@ class InstructionSelector {
             val auxName: String = argVal.aux
             // 成员调用的 aux 是裸名（X.m() → aux="m"），先解析
             val resolvedCallee: String = this.resolveCalleeSymbol(auxName, "")
+            // R44e：被调是 Box 臂或构造器（<Class>_init/__new*）⇒ 返回堆指针，
+            // LIR 类型却常被标成 Int（前端对 runtime 臂无签名）→ 类型分派会走
+            // toStr 把指针打整数（实测 10-memory Box: 140700…）。直接 refToStr。
+            if (resolvedCallee == "Box" || endsWithStr(resolvedCallee, "_init")
+                    || endsWithStr(resolvedCallee, "__new")) {
+                val objConv: Int = this.dag.addNode("Value", "Call",
+                                                    this.types.fromTypeName("String"),
+                                                    "", "", "", this.curChain, "refToStr")
+                val objNode: DagNode = this.dag.nodeOf(objConv)
+                objNode.args = MachineDagUtils.toStr(argNode)
+                this.dag.selectPattern(50, MachineDagUtils.toStr(objConv), -1)
+                return objConv
+            }
             var fi: Int = 0
             var found: Boolean = false
             while (fi < this.lirFuncNames.size) {
@@ -2408,7 +2421,18 @@ class InstructionSelector {
         } else if (this.types.isBool(argVal.type)) {
             fname = "boolToStr"
         } else {
-            if (this.types.nameOf(argVal.type) == "Char") { fname = "charToStr" }
+            val tn: String = this.types.nameOf(argVal.type)
+            if (tn == "Char") {
+                fname = "charToStr"
+            } else if (tn != "Int" && tn != "Long" && tn != "Short" && tn != "Byte"
+                    && tn != "Basic" && tn != ""
+                    && !endsWithStr(tn, "|Int") && !endsWithStr(tn, "|Long")
+                    && !endsWithStr(tn, "|Short") && !endsWithStr(tn, "|Byte")) {
+                // R44e：非标量非可空 ⇒ 对象类型。VM 参考把对象隐式转串渲染为
+                // <ref#N>（N = 创建序号，字符串/列表不编号）——旧路径发 toStr
+                // 把对象指针当整数打印（实测 10-memory §10.3 Box: 140700…）。
+                fname = "refToStr"
+            }
         }
         val strTy: Int = this.types.fromTypeName("String")
         val convId: Int = this.dag.addNode("Value", "Call", strTy,
@@ -2652,6 +2676,9 @@ class InstructionSelector {
     /// 是同一策略：按接收者类型把裸名补齐。
     private fun mapStdlibFuncName(name: String, recvTy: String, argCount: Int,
                                   lastIsMem: Boolean): String {
+        if (Env.get("AURA_MAP_TRACE", "") == "1") {
+            println("[map] name=[" + name + "] recvTy=[" + recvTy + "] n=" + toStr(argCount))
+        }
         if (name == "String.length" || name == "String.size") { return "strlen" }
         // `Env.get(name[, default])` → 运行库的 `env_get`（**真正的**环境变量读取）。
         //
@@ -2779,6 +2806,15 @@ class InstructionSelector {
             if (name == "substringAfter") { return "String_substringAfter" }
             if (name == "substringBefore") { return "String_substringBefore" }
             if (name == "split") { return "String_split" }
+            // R44f：裸 contains 兜底是 Collections_contains（列表句柄语义）——
+            // String 接收者走它会把串当列表解引用段错误（实测 13 §13.2）。
+            // 限定名形态 Collections.contains（recvTy=String 实测 probe_13_2）同治。
+            if (name == "contains" || name == "Collections.contains") { return "String_contains" }
+            // R44g：guest toUpperCase 在 AOT 下接收者断裂（rcx=0 ⇒ 空串），以臂绕过。
+            if (name == "toUpperCase" || name == "String_toUpperCase") { return "String_toUpperCase" }
+            // R44g：substring 落 guest 定义同样受接收者断裂影响；runtime 已有
+            // String_substring 臂（rcx=str, rdx=begin, r8=end），直接映射。
+            if (name == "substring") { return "String_substring" }
         }
         // 堆列表：`arr[i] = v` 由 HIR 降级为 `.Collections.set(arr, i, v)`
         //（返回容器本身），对应 runtime 的 `__list_setat`。
@@ -2967,6 +3003,26 @@ class InstructionSelector {
                     || recvTy == "Char" || recvTy == "Short" || recvTy == "Byte")) {
             return "toStr"
         }
+        // ── P40x-m：裸 toStr 的接收者是 Any / 未知时 → toStrN ──
+        // channelRecv 等返回 Any 的值可能是 null（原生表示 0）；VM 参考的
+        // 裸 toStr 是 null 感知的（08-concurrency recv1=null）。标量接收者
+        // （上一分支形态）保持 toStr 不变；String 恒等不经过这里。
+        if (name == "toStr"
+                && (recvTy == "Any" || recvTy == "Any?" || recvTy == ""
+                    || recvTy == "Basic")) {
+            return "toStrN"
+        }
+        // R44g：裸 toStr(Boolean) → boolToStr（VM 打 true/false，runtime toStr 只认整数打 1/0）。
+        if (name == "toStr" && (recvTy == "Boolean" || recvTy == "Bool")) { return "boolToStr" }
+        // ── P40x-m：Thread / Channel extern 单例 → runtime 原语臂 ──
+        // guest 包装的内部原语调用被前端解析成返回 0 的裸桩（实测
+        // 08-concurrency cores=0）；调用点直接映射到 runtime 同名臂。
+        // VM 参考语义：threadId=1（主线程仿真）、parallelism==cores。
+        if (name == "Thread_availableCores" || name == "Thread.availableCores") { return "ThreadOps_cores" }
+        if (name == "Thread_parallelism" || name == "Thread.parallelism") { return "ThreadOps_cores" }
+        if (name == "Thread_id" || name == "Thread.id") { return "ThreadOps_currentId" }
+        if (name == "cores") { return "ThreadOps_cores" }
+        if (name == "currentId") { return "ThreadOps_currentId" }
         // ── P40x-b：点归一兜底 ──
         // 限定名 Collections.pairOf 的模块定义是下划线形态 Collections_pairOf
         //（HAT 实测 01-lexer）。emitCall 侧 resolveCalleeSymbol 点归一后发射，

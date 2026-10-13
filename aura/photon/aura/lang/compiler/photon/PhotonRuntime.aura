@@ -552,15 +552,14 @@ object PhotonRuntime {
         enc.emitXorRR("r8", "r8")
         enc.emitXorRR("r9", "r9")
         SyscallEmitter.emitSyscall(enc, 0x08)  // NtWriteFile（本ntdll 实测 0x08
-        // ── 第二NtWriteFile：写CRLF ──
-        enc.emitStoreByteMemImm8(PhotonRuntime.OFF_NEWLINE, 0x0D)
-        enc.emitStoreByteMemImm8(PhotonRuntime.OFF_NEWLINE + 1, 0x0A)
+        // ── 第二NtWriteFile：写LF(R44d: 原 CRLF 0x0D 0x0A → 与 VM 参考一致的裸 0x0A)──
+        enc.emitStoreByteMemImm8(PhotonRuntime.OFF_NEWLINE, 0x0A)
 
         enc.emitLeaStack("rax", PhotonRuntime.OFF_IOBLOCK)
         enc.emitStackStore(PhotonRuntime.OFF_ARG5, "rax")
         enc.emitLeaStack("rax", PhotonRuntime.OFF_NEWLINE)
         enc.emitStackStore(PhotonRuntime.OFF_ARG6, "rax")
-        enc.emitMovRI32("rax", 2)
+        enc.emitMovRI32("rax", 1)
         enc.emitStackStore(PhotonRuntime.OFF_ARG7, "rax")
         enc.emitXorRR("rax", "rax")
         enc.emitStackStore(PhotonRuntime.OFF_ARG8, "rax")
@@ -1973,6 +1972,291 @@ object PhotonRuntime {
 
     /// 编码 toStrN(rcx = 可空标量) rax = "null"（rcx==0）或 toStr(rcx)。
     /// 可空类型原生表示中 null = 0；语言测试（06）要求打印 "null"。
+    // ── IO_fileExists / Box(R44 恢复: R40/R41 重写 boolToStr 区域时误删)──
+
+    /// 编码 IO_fileExists(rcx = path, rdx = memTok) rax = 存在?1:0。
+    /// 经 io_access(path, 0)（POSIX access 语义：0 = 存在）。
+    fun emitIoFileExists(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x20)
+        enc.emitStackStore(-0x8, "rbx")
+        enc.emitStackStore(-0x10, "rsi")
+        enc.emitStackStore(-0x18, "rcx")
+        enc.emitXorRR("rdx", "rdx")
+        enc.emitStackLoad("rcx", -0x18)
+        enc.emitCallRel("io_access")
+        enc.emitCmpRI("rax", 0)
+        enc.emitJccLabel("ne", "iofe_no")
+        enc.emitMovRI("rax", 1)
+        enc.emitJmpLabel("iofe_done")
+        enc.emitLabel("iofe_no")
+        enc.emitXorRR("rax", "rax")
+        enc.emitLabel("iofe_done")
+        enc.emitStackLoad("rsi", -0x10)
+        enc.emitStackLoad("rbx", -0x8)
+        enc.emitEpilogue()
+    }
+
+    /// 编码 Box(rcx = value, rdx = memTok) rax = 8 字节堆箱指针。
+    fun emitBoxNew(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x20)
+        enc.emitStackStore(-0x8, "rbx")
+        enc.emitMovRR("rbx", "rcx")
+        enc.emitMovRI("rcx", 8)
+        enc.emitCallRel("Memory_alloc")
+        enc.emitStoreMemDisp32("rax", 0, "rbx")
+        // R44e:Box 也是 VM 参考里的编号对象
+        enc.emitMovRIP("r10", "refIdxCount")
+        enc.emitCmpRI("r10", 32768)
+        enc.emitJccLabel("ge", "bx_refdone")
+        enc.emitLeaRIP("r11", "refIdxArr")
+        enc.emitShlRI("r10", 3)
+        enc.emitAddRR("r11", "r10")
+        enc.emitStoreMemDisp32("r11", 0, "rax")
+        enc.emitMovRIP("r10", "refIdxCount")
+        enc.emitIncRR("r10")
+        enc.emitStoreRIP("refIdxCount", "r10")
+        enc.emitLabel("bx_refdone")
+        enc.emitStackLoad("rbx", -0x8)
+        enc.emitEpilogue()
+    }
+
+    /// R44g: String_toUpperCase(rcx = s) rax = 新 bump 串(A-Z 提升 a-z)。
+    /// guest 版在 AOT 下接收者传不进去(rcx=0 ⇒ length=0 ⇒ 空串),以臂绕过。
+    fun emitStringToUpper(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x40)
+        enc.emitStackStore(-0x8, "rbx")
+        enc.emitMovRR("rbx", "rcx")                  // src
+        // len → [-0x10]
+        enc.emitMovRR("rax", "rbx")
+        enc.emitXorRR("rdx", "rdx")
+        enc.emitLabel("su_l1")
+        enc.emitCmpByteMemImm8("rax", 0)
+        enc.emitJccLabel("eq", "su_l1d")
+        enc.emitIncRR("rax")
+        enc.emitIncRR("rdx")
+        enc.emitJmpLabel("su_l1")
+        enc.emitLabel("su_l1d")
+        enc.emitStackStore(-0x10, "rdx")
+        // bump:len+1
+        enc.emitMovRIP("rax", "heapBump")
+        enc.emitMovRIP("rdx", "heapArenaBase")
+        enc.emitAddRR("rdx", "rax")
+        enc.emitStackLoad("r10", -0x10)
+        enc.emitIncRR("r10")
+        enc.emitAddRR("rax", "r10")
+        enc.emitMovRIP("r11", "heapCap")
+        enc.emitCmpRR("rax", "r11")
+        enc.emitJccLabel("le", "su_ok")
+        enc.emitCallRel("__heap_oom")
+        enc.emitLabel("su_ok")
+        enc.emitStoreRIP("heapBump", "rax")
+        // rdx = dst 基址 = arenaBase + (heapBump - (len+1));r10 仍持 len+1
+        enc.emitMovRIP("r11", "heapBump")
+        enc.emitSubRR("r11", "r10")
+        enc.emitMovRIP("rdx", "heapArenaBase")
+        enc.emitAddRR("rdx", "r11")                  // rdx = dst 基址
+        enc.emitStackLoad("r11", -0x10)              // r11 = len
+        enc.emitXorRR("r10", "r10")                  // i = 0
+        enc.emitJmpLabel("su_cond")
+        enc.emitLabel("su_loop")
+        enc.emitLoadIndexed8("rax", "rbx", "r10", 0)
+        enc.emitCmpRI("rax", 97)
+        enc.emitJccLabel("l", "su_raw")
+        enc.emitCmpRI("rax", 122)
+        enc.emitJccLabel("g", "su_raw")
+        enc.emitSubRI("rax", 32)
+        enc.emitLabel("su_raw")
+        enc.emitStoreIndexed8("rdx", "r10", 0, "rax")
+        enc.emitIncRR("r10")
+        enc.emitLabel("su_cond")
+        enc.emitCmpRR("r10", "r11")
+        enc.emitJccLabel("l", "su_loop")
+        // NUL 终止:[dst+len]
+        enc.emitXorRR("rax", "rax")
+        enc.emitStoreIndexed8("rdx", "r11", 0, "rax")
+        enc.emitMovRR("rax", "rdx")
+        enc.emitStackLoad("rbx", -0x8)
+        enc.emitEpilogue()
+    }
+
+    /// R44f: String_contains(rcx = hay, rdx = needle) rax = 0|1。
+    /// 裸 contains 被劫持到 Collections_contains 时字符串被当列表句柄
+    /// (items 指针 @[str+16])解引用段错误(实测 13-stdlib §13.2)。
+    /// 朴素子串搜索:len2==0 → 1;len2>len1 → 0。
+    fun emitStringContains(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x40)
+        enc.emitStackStore(-0x8, "rbx")
+        enc.emitStackStore(-0x10, "rsi")
+        enc.emitMovRR("rbx", "rcx")                  // hay
+        enc.emitMovRR("rsi", "rdx")                  // needle
+        // len1 → [-0x18]
+        enc.emitMovRR("rax", "rbx")
+        enc.emitXorRR("rdx", "rdx")
+        enc.emitLabel("sc_l1")
+        enc.emitCmpByteMemImm8("rax", 0)
+        enc.emitJccLabel("eq", "sc_l1d")
+        enc.emitIncRR("rax")
+        enc.emitIncRR("rdx")
+        enc.emitJmpLabel("sc_l1")
+        enc.emitLabel("sc_l1d")
+        enc.emitStackStore(-0x18, "rdx")
+        // len2 → [-0x20]
+        enc.emitMovRR("rax", "rsi")
+        enc.emitXorRR("rdx", "rdx")
+        enc.emitLabel("sc_l2")
+        enc.emitCmpByteMemImm8("rax", 0)
+        enc.emitJccLabel("eq", "sc_l2d")
+        enc.emitIncRR("rax")
+        enc.emitIncRR("rdx")
+        enc.emitJmpLabel("sc_l2")
+        enc.emitLabel("sc_l2d")
+        enc.emitStackStore(-0x20, "rdx")
+        // needle 空 → 恒命中
+        enc.emitCmpRI("rdx", 0)
+        enc.emitJccLabel("eq", "sc_yes")
+        // i = 0;i <= len1-len2
+        enc.emitMovRR("rdx", "rbx")                  // rdx 复用:上限 = len1-len2
+        enc.emitStackLoad("rax", -0x18)
+        enc.emitSubRR("rdx", "rax")                  // rdx = len1 - len2(有符号足够)
+        enc.emitXorRR("r9", "r9")                    // i = 0(r9 callee-saved,保存)
+        enc.emitStackStore(-0x28, "r9")
+        enc.emitJmpLabel("sc_outer")
+        enc.emitLabel("sc_next")
+        enc.emitStackLoad("r9", -0x28)
+        enc.emitIncRR("r9")
+        enc.emitStackStore(-0x28, "r9")
+        enc.emitLabel("sc_outer")
+        enc.emitStackLoad("r9", -0x28)
+        enc.emitCmpRR("r9", "rdx")
+        enc.emitJccLabel("g", "sc_no")
+        // 内层:j = 0 逐字节比对 needle[j] vs hay[i+j]
+        enc.emitXorRR("r10", "r10")
+        enc.emitJmpLabel("sc_incond")
+        enc.emitLabel("sc_in")
+        // r8 = hay[i+j]:基 rbx + i(一次加)+ 变址 j
+        enc.emitMovRR("rcx", "rbx")
+        enc.emitStackLoad("r11", -0x28)
+        enc.emitAddRR("rcx", "r11")
+        enc.emitLoadIndexed8("r8", "rcx", "r10", 0)
+        // r11 = needle[j]
+        enc.emitLoadIndexed8("r11", "rsi", "r10", 0)
+        enc.emitCmpRR("r8", "r11")
+        enc.emitJccLabel("ne", "sc_next")
+        enc.emitIncRR("r10")
+        enc.emitLabel("sc_incond")
+        // needle[j]==0 ⇒ 全匹配
+        enc.emitMovRR("rcx", "rsi")
+        enc.emitAddRR("rcx", "r10")
+        enc.emitCmpByteMemImm8("rcx", 0)
+        enc.emitJccLabel("ne", "sc_in")
+        enc.emitJmpLabel("sc_yes")
+        enc.emitLabel("sc_no")
+        enc.emitXorRR("rax", "rax")
+        enc.emitJmpLabel("sc_done")
+        enc.emitLabel("sc_yes")
+        enc.emitMovRI("rax", 1)
+        enc.emitLabel("sc_done")
+        enc.emitStackLoad("rsi", -0x10)
+        enc.emitStackLoad("rbx", -0x8)
+        enc.emitEpilogue()
+    }
+
+    /// R44e: refToStr(rcx = obj) rax = "<ref#N>"(N = 分配序)。
+    /// VM 参考把对象隐式转串渲染为 <ref#N>(N = 对象创建序号,字符串/列表不编号)。
+    /// refIdxArr 由 emitObjectAlloc / emitBoxNew 按分配序登记(bump 地址单调),
+    /// 此处二分定位;未命中(理论不可达)返回 <ref#-1>。
+    fun emitRefToStr(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x40)
+        enc.emitStackStore(-0x8, "rbx")
+        // ── 二分:lower = r10,upper = [-0x10],mid = [-0x18] ──
+        enc.emitMovRIP("rax", "refIdxCount")
+        enc.emitStackStore(-0x10, "rax")
+        enc.emitXorRR("r10", "r10")
+        enc.emitJmpLabel("rfs_cond")
+        enc.emitLabel("rfs_loop")
+        enc.emitMovRR("r9", "r10")
+        enc.emitStackLoad("rax", -0x10)
+        enc.emitAddRR("r9", "rax")
+        enc.emitShrRI("r9", 1)
+        enc.emitStackStore(-0x18, "r9")
+        enc.emitShlRI("r9", 3)
+        enc.emitLeaRIP("r11", "refIdxArr")
+        enc.emitAddRR("r11", "r9")
+        enc.emitMovMemDisp32("rdx", "r11", 0)
+        enc.emitCmpRR("rdx", "rcx")
+        enc.emitJccLabel("eq", "rfs_found")
+        enc.emitJccLabel("a", "rfs_upper")
+        enc.emitIncRR("r10")
+        enc.emitJmpLabel("rfs_cond")
+        enc.emitLabel("rfs_upper")
+        enc.emitStackLoad("rax", -0x18)
+        enc.emitStackStore(-0x10, "rax")
+        enc.emitLabel("rfs_cond")
+        enc.emitStackLoad("rax", -0x10)
+        enc.emitCmpRR("r10", "rax")
+        enc.emitJccLabel("l", "rfs_loop")
+        // 未命中:mid = -1
+        enc.emitMovRI("rax", -1)
+        enc.emitStackStore(-0x18, "rax")
+        // ── found:渲染 "<ref#" + dec(mid) + ">" ──
+        enc.emitLabel("rfs_found")
+        // 16 字节 bump:pfx("<ref#"+NUL) @+0,gt(">"+NUL) @+8
+        enc.emitMovRIP("rax", "heapBump")
+        enc.emitMovRIP("rdx", "heapArenaBase")
+        enc.emitAddRR("rdx", "rax")
+        enc.emitAddRI("rax", 16)
+        enc.emitMovRIP("r10", "heapCap")
+        enc.emitCmpRR("rax", "r10")
+        enc.emitJccLabel("le", "rfs_ok")
+        enc.emitCallRel("__heap_oom")
+        enc.emitLabel("rfs_ok")
+        enc.emitStoreRIP("heapBump", "rax")
+        enc.emitMovRR("rbx", "rdx")
+        enc.emitMovRI("rax", 60)                 // '<'
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 114)                // 'r'
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 101)                // 'e'
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 102)                // 'f'
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 35)                 // '#'
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitXorRR("rax", "rax")              // NUL @+5
+        enc.emitMovByteMemReg("rdx", "rax")
+        // gt @+8:rdx 当前 = rbx+5(NUL 写入点,无自增)→ 三次 inc 到 +8
+        enc.emitIncRR("rdx")
+        enc.emitIncRR("rdx")
+        enc.emitIncRR("rdx")
+        enc.emitMovRI("rax", 62)                 // '>'
+        enc.emitMovByteMemReg("rdx", "rax")
+        enc.emitIncRR("rdx")
+        enc.emitXorRR("rax", "rax")
+        enc.emitMovByteMemReg("rdx", "rax")
+        // digits = toStr(mid)
+        enc.emitStackLoad("rcx", -0x18)
+        enc.emitCallRel("toStr")
+        // s1 = strcat(pfx, digits)
+        enc.emitMovRR("rcx", "rbx")
+        enc.emitMovRR("rdx", "rax")
+        enc.emitCallRel("strcat")
+        // s2 = strcat(s1, gt)
+        enc.emitMovRR("rcx", "rax")
+        enc.emitLeaRIP("rdx", "heapArenaBase")
+        // gt 地址 = rbx+8——rbx 被 strcat 保存/恢复(callee-saved),仍有效
+        enc.emitMovRR("r10", "rbx")
+        enc.emitAddRI("r10", 8)
+        enc.emitMovRR("rdx", "r10")
+        enc.emitCallRel("strcat")
+        enc.emitStackLoad("rbx", -0x8)
+        enc.emitEpilogue()
+    }
+
     fun emitToStrN(enc: X86Encoder): Unit {
         enc.emitPrologue(0x20)
         enc.emitStackStore(-0x8, "rbx")
@@ -2568,6 +2852,19 @@ object PhotonRuntime {
         // 返回原始地址
         enc.emitStackLoad("rax", -0x20)
 
+        // R44e:登记分配序(refIdxArr[refIdxCount++] = addr;cap 32768)
+        enc.emitMovRIP("r10", "refIdxCount")
+        enc.emitCmpRI("r10", 32768)
+        enc.emitJccLabel("ge", "oa_refdone")
+        enc.emitLeaRIP("r11", "refIdxArr")
+        enc.emitShlRI("r10", 3)
+        enc.emitAddRR("r11", "r10")
+        enc.emitStoreMemDisp32("r11", 0, "rax")
+        enc.emitMovRIP("r10", "refIdxCount")
+        enc.emitIncRR("r10")
+        enc.emitStoreRIP("refIdxCount", "r10")
+        enc.emitLabel("oa_refdone")
+
         enc.emitLabel("oa_fail")
         // 恢复 callee-saved
         enc.emitStackLoad("rsi", -0x38)
@@ -2825,8 +3122,13 @@ object PhotonRuntime {
     }
 
     fun emitThreadOpsCores(enc: X86Encoder): Unit {
-        enc.emitPrologue(0)
-        enc.emitMovRI("eax", 1)
+        // R44b: 真实逻辑核数。VM 参考打印 cores=12/parallelism=12(本机实测);
+        // 旧桩恒返回 1(guest 侧另一 0 桩 ⇒ EXE 打 0)。0xFFFF = ALL_PROCESSOR_GROUPS。
+        enc.emitPrologue(0x20)
+        enc.emitMovRI("ecx", 65535)
+        enc.emitCallImport("GetActiveProcessorCount")
+        enc.writeByte(0x89)                          // mov eax, eax(返回 DWORD,零扩展)
+        enc.writeByte(0xC0)
         enc.emitEpilogue()
     }
 
@@ -4431,8 +4733,8 @@ object PhotonRuntime {
     /// Pipeline 以 `RUNTIME_SYMBOLS + BUILD_ID` 作为 aura_runtime.obj 的缓存
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
-    val BUILD_ID: String = "p288-allocrwx"
-    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect"
+    val BUILD_ID: String = "p292-strupper"
+    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect,refToStr,String_contains,String_toUpperCase"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
     fun buildRuntimeObject(): String {
@@ -4540,14 +4842,14 @@ object PhotonRuntime {
             PhotonObjectWriterUtils.joinRelocRecords(encTs.getRelocations())
         )
         val encTid = X86EncoderUtils.emptyEncoder()
-        PhotonRuntime.emitThreadOpsStubs(encTid)   // -1；currentId 语义上应为正，装载链不触达
+        PhotonRuntime.emitThreadOpsCurrentId(encTid)  // R44c: =1(VM 参考主线程语义);旧注册 emitThreadOpsStubs 恒 -1
         writer.appendFunction(
             encTid.toHex(),
             "ThreadOps_currentId",
             PhotonObjectWriterUtils.joinRelocRecords(encTid.getRelocations())
         )
         val encTcp = X86EncoderUtils.emptyEncoder()
-        PhotonRuntime.emitThreadOpsStubs(encTcp)
+        PhotonRuntime.emitThreadOpsCores(encTcp)      // R44c: 真实核数(GetActiveProcessorCount);旧注册 emitThreadOpsStubs 恒 -1
         writer.appendFunction(
             encTcp.toHex(),
             "ThreadOps_cores",
@@ -4648,6 +4950,46 @@ object PhotonRuntime {
             enc7g.toHex(),
             "ptrIsNull",
             PhotonObjectWriterUtils.joinRelocRecords(enc7g.getRelocations())
+        )
+
+        val enc8a = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitIoFileExists(enc8a)
+        writer.appendFunction(
+            enc8a.toHex(),
+            "IO_fileExists",
+            PhotonObjectWriterUtils.joinRelocRecords(enc8a.getRelocations())
+        )
+
+        val enc8b = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitBoxNew(enc8b)
+        writer.appendFunction(
+            enc8b.toHex(),
+            "Box",
+            PhotonObjectWriterUtils.joinRelocRecords(enc8b.getRelocations())
+        )
+
+        val enc8g = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitRefToStr(enc8g)
+        writer.appendFunction(
+            enc8g.toHex(),
+            "refToStr",
+            PhotonObjectWriterUtils.joinRelocRecords(enc8g.getRelocations())
+        )
+
+        val enc8h = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStringContains(enc8h)
+        writer.appendFunction(
+            enc8h.toHex(),
+            "String_contains",
+            PhotonObjectWriterUtils.joinRelocRecords(enc8h.getRelocations())
+        )
+
+        val enc8i = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStringToUpper(enc8i)
+        writer.appendFunction(
+            enc8i.toHex(),
+            "String_toUpperCase",
+            PhotonObjectWriterUtils.joinRelocRecords(enc8i.getRelocations())
         )
 
 
@@ -5181,7 +5523,7 @@ object PhotonRuntime {
         // @str.0 = 空串）。@str.1/2/3 = "Null"/"Int"/"String" 供
         // `aura_typeof`（Plan A 折叠）使用，2026-10-06。
         writer.stringConsts = "0|4|Null3|Int6|String"
-        writer.bssSymbolName = "heapArena:67108864"  // [MEM-FIX] 静态堆 → .bss（文件零字节,加载器零填充）
+        writer.bssSymbolName = "heapArena:67108864,refIdxArr:262144,refIdxCount:8"  // [MEM-FIX] 静态堆 → .bss（文件零字节,加载器零填充）
         writer.buildSymbols(writer.functions, writer.stringConsts)
         // 分片模式：跳过 writer 终归并（134M 字符级驻留，见 emitPieces 说明）
         if (this.rtPiecesMode) {
@@ -5277,6 +5619,25 @@ object PhotonRuntime {
         val enc7g = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitPtrIsNull(enc7g)
         writer.appendFunction(enc7g.toHex(), "ptrIsNull", PhotonObjectWriterUtils.joinRelocRecords(enc7g.getRelocations()))
+        val enc8a = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitIoFileExists(enc8a)
+        writer.appendFunction(enc8a.toHex(), "IO_fileExists", PhotonObjectWriterUtils.joinRelocRecords(enc8a.getRelocations()))
+
+        val enc8b = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitBoxNew(enc8b)
+        writer.appendFunction(enc8b.toHex(), "Box", PhotonObjectWriterUtils.joinRelocRecords(enc8b.getRelocations()))
+
+        val enc8g = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitRefToStr(enc8g)
+        writer.appendFunction(enc8g.toHex(), "refToStr", PhotonObjectWriterUtils.joinRelocRecords(enc8g.getRelocations()))
+
+        val enc8h = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStringContains(enc8h)
+        writer.appendFunction(enc8h.toHex(), "String_contains", PhotonObjectWriterUtils.joinRelocRecords(enc8h.getRelocations()))
+
+        val enc8i = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStringToUpper(enc8i)
+        writer.appendFunction(enc8i.toHex(), "String_toUpperCase", PhotonObjectWriterUtils.joinRelocRecords(enc8i.getRelocations()))
 
 
         val enc8c = X86EncoderUtils.emptyEncoder()
@@ -5699,7 +6060,7 @@ object PhotonRuntime {
         //
         // 常量池编码是「`<十进制长度>|<载荷>` 首尾相接」，空载荷即 `0|`。
         writer.stringConsts = "0|"
-        writer.bssSymbolName = "heapArena:67108864"  // [MEM-FIX] 静态堆 → .bss（文件零字节,加载器零填充）
+        writer.bssSymbolName = "heapArena:67108864,refIdxArr:262144,refIdxCount:8"  // [MEM-FIX] 静态堆 → .bss（文件零字节,加载器零填充）
         writer.buildSymbols(writer.functions, writer.stringConsts)
         writer.emit()
         return writer.writeObjectHexFile(path)
@@ -5783,6 +6144,25 @@ object PhotonRuntimeUtils {
         val enc7g = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitPtrIsNull(enc7g)
         writer.appendFunction(enc7g.toHex(), "ptrIsNull", PhotonObjectWriterUtils.joinRelocRecords(enc7g.getRelocations()))
+        val enc8a = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitIoFileExists(enc8a)
+        writer.appendFunction(enc8a.toHex(), "IO_fileExists", PhotonObjectWriterUtils.joinRelocRecords(enc8a.getRelocations()))
+
+        val enc8b = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitBoxNew(enc8b)
+        writer.appendFunction(enc8b.toHex(), "Box", PhotonObjectWriterUtils.joinRelocRecords(enc8b.getRelocations()))
+
+        val enc8g = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitRefToStr(enc8g)
+        writer.appendFunction(enc8g.toHex(), "refToStr", PhotonObjectWriterUtils.joinRelocRecords(enc8g.getRelocations()))
+
+        val enc8h = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStringContains(enc8h)
+        writer.appendFunction(enc8h.toHex(), "String_contains", PhotonObjectWriterUtils.joinRelocRecords(enc8h.getRelocations()))
+
+        val enc8i = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStringToUpper(enc8i)
+        writer.appendFunction(enc8i.toHex(), "String_toUpperCase", PhotonObjectWriterUtils.joinRelocRecords(enc8i.getRelocations()))
 
 
         val enc8c = X86EncoderUtils.emptyEncoder()
@@ -6205,7 +6585,7 @@ object PhotonRuntimeUtils {
         //
         // 常量池编码是「`<十进制长度>|<载荷>` 首尾相接」，空载荷即 `0|`。
         writer.stringConsts = "0|"
-        writer.bssSymbolName = "heapArena:67108864"  // [MEM-FIX] 静态堆 → .bss（文件零字节,加载器零填充）
+        writer.bssSymbolName = "heapArena:67108864,refIdxArr:262144,refIdxCount:8"  // [MEM-FIX] 静态堆 → .bss（文件零字节,加载器零填充）
         writer.buildSymbols(writer.functions, writer.stringConsts)
         writer.emit()
         return writer.writeObjectHexFile(path)
