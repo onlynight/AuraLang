@@ -1946,7 +1946,19 @@ class SsaBuilder {
         if (tn2.length > 1 && (tn2.charCodeAt(tn2.length - 1) as Int) == 63) {
             tn2 = tn2.substring(0, tn2.length - 1)
         }
-        val typeId: Int = this.types.fromTypeName(tn2)
+        var typeId: Int = this.types.fromTypeName(tn2)
+        // R49b:tyOf 缺失(Basic)时按「两操作数同型」定型——val d = e1 + e2
+        // 的 Add 落 Basic ⇒ 值类型 Basic ⇒ toString 转换走 toStrN ⇒ 0 打
+        // "null"(实测 06 最后一行;操作数是 elvis phi 时 a/b 走 toStr 而
+        // c/d 走 toStrN 的分野即在此)。两操作数同型且非 Basic ⇒ 采用。
+        if (typeId == this.types.fromTypeName("")) {
+            val lt3: Int = this.program.valueOf(left).type
+            val rt3: Int = this.program.valueOf(right).type
+            val bsc3: Int = this.types.fromTypeName("")
+            if (lt3 == rt3 && lt3 != bsc3) {
+                typeId = lt3
+            }
+        }
 
         // ── R45c：Elvis `a ?: b` 内联降级（块 + Phi 选择）──
         //

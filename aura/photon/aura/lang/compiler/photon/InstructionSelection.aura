@@ -2335,6 +2335,11 @@ class InstructionSelector {
     /// toString(42) 原样返回 42 → strcat 解引用地址 42 段错误。
     private fun emitToStrConvNode(argLirId: Int, argNode: Int): Int {
         val argVal: LirValue = this.lir.valueOf(argLirId)
+        if (Env.get("AURA_CONV_ENTRY", "") == "1") {
+            println("[convE] op=[" + argVal.op + "] aux=[" + argVal.aux
+                    + "] ty=" + MachineDagUtils.toStr(argVal.type)
+                    + "=[" + this.types.nameOf(argVal.type) + "]")
+        }
         // 类型名可能带 #public| 限定前缀（函数签名家族），裸名/限定名都认
         var argTyName: String = this.types.nameOf(argVal.type)
         if (this.types.isString(argVal.type) || argTyName == "String"
