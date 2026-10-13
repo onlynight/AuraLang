@@ -1846,6 +1846,38 @@ class SsaBuilder {
         val iPhiVal: MirValue = this.program.valueOf(iPhi)
         iPhiVal.args = toStr(entryBlock) + ":" + toStr(zeroVal) + "," +
                        toStr(this.curBlock) + ":" + toStr(iNew)
+        // R58: i phi 的 continue 点值
+        var ci2: Int = 0
+        val recsLen2: Int = this.loopContRecs.length
+        while (ci2 < recsLen2) {
+            var eEnd2: Int = ci2
+            while (eEnd2 < recsLen2) {
+                if ((this.loopContRecs.charCodeAt(eEnd2) as Int) == 10) { break }
+                eEnd2 = eEnd2 + 1
+            }
+            val rec2: String = this.loopContRecs.substring(ci2, eEnd2)
+            if (rec2 != "") {
+                var p1: Int = -1
+                var p2: Int = -1
+                var k: Int = 0
+                while (k < rec2.length) {
+                    if ((rec2.charCodeAt(k) as Int) == 124) {
+                        if (p1 < 0) { p1 = k } else { if (p2 < 0) { p2 = k; break } }
+                    }
+                    k = k + 1
+                }
+                if (p1 > 0 && p2 > p1) {
+                    val recCond: String = rec2.substring(0, p1)
+                    val recPhi: String = rec2.substring(p1 + 1, p2)
+                    val recVid: String = rec2.substring(p2 + 1, rec2.length)
+                    if (recCond == toStr(condBlock) && recPhi == toStr(iPhi)) {
+                        iPhiVal.args = iPhiVal.args + "," + recVid
+                    }
+                }
+            }
+            if (eEnd2 >= recsLen2) { break }
+            ci2 = eEnd2 + 1
+        }
 
         // 回填 body 赋值变量的 phi 第二条入边（同 buildWhile）
         if (phiRecs != "") {
@@ -1865,6 +1897,38 @@ class SsaBuilder {
                                 val pv: MirValue = this.program.valueOf(phiVid)
                                 pv.args = toStr(entryBlock) + ":" + toStr(beforeVid) + "," +
                                           toStr(this.curBlock) + ":" + toStr(afterVid)
+                                // R58: continue 点值——追加为额外入边（同 buildWhile）
+                                var ci2: Int = 0
+                                val recsLen2: Int = this.loopContRecs.length
+                                while (ci2 < recsLen2) {
+                                    var eEnd2: Int = ci2
+                                    while (eEnd2 < recsLen2) {
+                                        if ((this.loopContRecs.charCodeAt(eEnd2) as Int) == 10) { break }
+                                        eEnd2 = eEnd2 + 1
+                                    }
+                                    val rec2: String = this.loopContRecs.substring(ci2, eEnd2)
+                                    if (rec2 != "") {
+                                        var p1: Int = -1
+                                        var p2: Int = -1
+                                        var k: Int = 0
+                                        while (k < rec2.length) {
+                                            if ((rec2.charCodeAt(k) as Int) == 124) {
+                                                if (p1 < 0) { p1 = k } else { if (p2 < 0) { p2 = k; break } }
+                                            }
+                                            k = k + 1
+                                        }
+                                        if (p1 > 0 && p2 > p1) {
+                                            val recCond: String = rec2.substring(0, p1)
+                                            val recPhi: String = rec2.substring(p1 + 1, p2)
+                                            val recVid: String = rec2.substring(p2 + 1, rec2.length)
+                                            if (recCond == toStr(condBlock) && recPhi == toStr(phiVid)) {
+                                                pv.args = pv.args + "," + recVid
+                                            }
+                                        }
+                                    }
+                                    if (eEnd2 >= recsLen2) { break }
+                                    ci2 = eEnd2 + 1
+                                }
                             }
                         }
                     }
