@@ -2464,6 +2464,16 @@ const char *aura_env_get(const char *name) {
     return p;
 }
 
+/*
+ * env_get: 运行时 obj 中 `Heap_init` 调用的符号名（Photon 编译器映射 `Env.get` → `env_get`）。
+ * 原运行时 obj 中是 stub（返回 rdx 或自指针），导致 `Heap_init` 读不到 `AURA_HEAP_MB`，
+ * 堆初始化失败（`__list_alloc` 返回 0），所有列表操作输出 "null"。
+ * 此实现转发到 `aura_env_get`，提供真正的环境变量读取。
+ */
+const char *env_get(const char *name) {
+    return aura_env_get(name);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * AOT 调用点符号层（sanitize(aura.lang.std.X.y)）
  *
@@ -4153,6 +4163,7 @@ static AuraFnEnt g_fn_table[AURA_FN_COUNT] = {
     AURA_FN(aura_encoding_base64Decode),
     AURA_FN(aura_encoding_base64Encode),
     AURA_FN(aura_env_get),
+    AURA_FN(env_get),
     AURA_FN(aura_env_has),
     AURA_FN(aura_env_platform),
     AURA_FN(aura_free),
