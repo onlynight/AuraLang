@@ -4422,7 +4422,6 @@ object PhotonRuntime {
         // ── 默认：base = &heapArena, cap = 67100768 ──
         enc.emitLeaRIP("rax", "heapArena")
         enc.emitStoreRIP("heapArenaBase", "rax")
-        enc.emitStoreRIP("heapBump", "rax")  // ← 修复：初始化 heapBump
         enc.emitMovRI("rax", 67100768)
         enc.emitStoreRIP("heapCap", "rax")
         // ── 把环境变量名 "AURA_HEAP_MB" 写入 heapMbName（12 字符 + NUL）──
