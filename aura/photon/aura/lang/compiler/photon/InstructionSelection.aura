@@ -846,6 +846,86 @@ class InstructionSelector {
         return out
     }
 
+    /// 把科学计数法文本（形如 `1.5e10` / `1.2E-3`）展开为十进制文本
+    /// （VM 参考：`15000000000.0` / `0.0012`）。
+    ///
+    /// 纯字符串算法：把 mantissa 视为整数分数，按指数位置重新摆放小数点。
+    /// `expIdx` 是 e/E 在原串中的下标；mantissa 在 `[0, expIdx)`，
+    /// 指数（含 +/-）在 `(expIdx, end)`。
+    private fun sciNotationToDecimal(s: String, expIdx: Int): String {
+        var mantText: String = s.substring(0, expIdx)
+        val expText: String = s.substring(expIdx + 1)
+        // 解析 mantissa 的符号
+        var mantNeg: Boolean = false
+        var mStart: Int = 0
+        if (mantText.length > 0) {
+            val mc0: Int = mantText.charCodeAt(0)
+            if (mc0 == 45) { mantNeg = true; mStart = 1 }
+            else if (mc0 == 43) { mStart = 1 }
+        }
+        // 收集 mantissa 的纯数字字符序列与小数点位置
+        var digits: String = ""
+        var dotAt: Int = -1  // 小数点在 digits 中的下标（若 mantissa 带小数点）
+        var di: Int = mStart
+        var digitsStart: Int = mStart
+        while (di < mantText.length) {
+            val c: Int = mantText.charCodeAt(di)
+            if (c == 46) {
+                // 记录小数点：位于「下一个数字字符」在 digits 中的位置
+                dotAt = digits.length
+                di = di + 1
+            } else if (c >= 48 && c <= 57) {
+                digits = digits + mantText.substring(di, di + 1)
+                di = di + 1
+            } else {
+                di = di + 1
+            }
+        }
+        if (digits.length == 0) { return "0.0" }
+        // 解析指数
+        var expNeg: Boolean = false
+        var eStart: Int = 0
+        if (expText.length > 0) {
+            val ec0: Int = expText.charCodeAt(0)
+            if (ec0 == 45) { expNeg = true; eStart = 1 }
+            else if (ec0 == 43) { eStart = 1 }
+        }
+        var exp: Int = 0
+        var ei: Int = eStart
+        while (ei < expText.length) {
+            val c: Int = expText.charCodeAt(ei)
+            if (c >= 48 && c <= 57) { exp = exp * 10 + (c - 48) }
+            ei = ei + 1
+        }
+        if (expNeg) { exp = -exp }
+        // 有效小数点位置：在 digits 中的索引
+        // 无小数点时视为 digits 末尾（如 "15" × 10^0 = 15.）
+        var dotPos: Int
+        if (dotAt >= 0) { dotPos = dotAt } else { dotPos = digits.length }
+        // 新的小数点位置 = 原位置 + 指数
+        var newDotPos: Int = dotPos + exp
+        // 前导 / 后随补零
+        var result: String = ""
+        if (newDotPos < 0) {
+            // 如 0.0012e0 展开：整数部分为 0，小数部分前补 |newDotPos| 个 0
+            result = "0."
+            var k: Int = 0
+            while (k < -newDotPos) { result = result + "0"; k = k + 1 }
+            result = result + digits
+        } else if (newDotPos >= digits.length) {
+            // 如 1.5e10 = 15000000000
+            result = digits
+            var k: Int = 0
+            while (k < newDotPos - digits.length) { result = result + "0"; k = k + 1 }
+        } else {
+            result = digits.substring(0, newDotPos) + "." + digits.substring(newDotPos)
+        }
+        if (mantNeg) { result = "-" + result }
+        // VM 参考：整数值浮点以 ".0" 结尾（3.14 → "3.14"、15000000000 → "15000000000.0"）
+        if (result.indexOf(".") < 0) { result = result + ".0" }
+        return result
+    }
+
     /// 逗号分隔名表中是否包含指定名字。
     private fun nameInList(list: String, name: String): Boolean {
         val parts: List<String> = LirUtils.splitArgs(list)
@@ -2090,7 +2170,10 @@ class InstructionSelector {
                 || endsWithStr(fTyName, "|Float") || endsWithStr(fTyName, "|Double")) {
             var fLit: String = constVal0
             if (fLit == "null") { fLit = "0.0" }
-            // 去掉类型后缀（3.14f / 3.14d / 1.5E10 尾部的 f/F/d/D）与下划线
+            // 去掉类型后缀（3.14f / 3.14d）与下划线。
+            // ⚠️ 尾部字母剥除必须**只剥 f/F/d/D**（类型标记），且仅在**最后一个字母
+            //    之前没有 e/E 且其后是指数部分**时执行——否则 `1.5e10` 会被误剥成
+            //    `1.5e1`、`1.2E-3` 被剥成 `1.2E-`（P40x-k 回归，实测 01-lexer §1.4）。
             var cleaned: String = ""
             var ci: Int = 0
             while (ci < fLit.length) {
@@ -2099,17 +2182,45 @@ class InstructionSelector {
                 ci = ci + 1
             }
             var cut: Int = cleaned.length
-            while (cut > 1) {
-                val last: Int = cleaned.charCodeAt(cut - 1)
-                if ((last >= 65 && last <= 70) || (last >= 97 && last <= 102) || last == 100 || last == 68) {
-                    cut = cut - 1
-                } else {
-                    break
+            // 定位最后一个 e/E 位置（若有）——作为后缀剥除的边界
+            var expIdx: Int = -1
+            var ei: Int = 0
+            while (ei < cleaned.length) {
+                val c: Int = cleaned.charCodeAt(ei)
+                if (c == 101 || c == 69) {
+                    // 前一字符必须是数字/小数点（避免匹配非数值 e，如标识符）
+                    val prevOk: Boolean = ei > 0
+                    val nextOk: Boolean = ei + 1 < cleaned.length
+                    if (prevOk && nextOk) {
+                        val pc: Int = cleaned.charCodeAt(ei - 1)
+                        val nc: Int = cleaned.charCodeAt(ei + 1)
+                        val pNum: Boolean = (pc >= 48 && pc <= 57) || pc == 46
+                        val nSym: Boolean = (nc >= 48 && nc <= 57) || nc == 45 || nc == 43
+                        if (pNum && nSym) { expIdx = ei }
+                    }
                 }
+                ei = ei + 1
             }
-            // 尾部字母剥除仅当剩余部分形如数字（含 ./e/E/+/-）——保守：
-            // 只要剥过就重查，剥到不以字母结尾为止
+            // 后缀剥除的搜索起点：如果有 e/E 指数，只能在指数部分之后剥
+            var suffixStart: Int = if (expIdx >= 0) expIdx + 1 else 0
+            var j: Int = cleaned.length - 1
+            while (j >= suffixStart) {
+                val c: Int = cleaned.charCodeAt(j)
+                // 只剥 f/F/d/D（类型标记），不动其他字母
+                if (c == 102 || c == 70 || c == 100 || c == 68) {
+                    j = j - 1
+                } else { break }
+            }
+            cut = j + 1
+            if (cut < 1) { cut = 1 }
             fLit = cleaned.substring(0, cut)
+            // R64a：科学计数法 → 等价十进制文本。
+            // aux 里 `1.5e10` 直接物化为串 → toString 路径读指针，打印出原文本；
+            // VM 参考把 1.5e10 打成 15000000000.0、1.2E-3 打成 0.0012。
+            // 编译期做 mantissa × 10^exp 的十进制字符串展开。
+            if (expIdx >= 0) {
+                fLit = this.sciNotationToDecimal(cleaned, expIdx)
+            }
             this.stringConstAdd(fLit)
 
             val fNodeName: String = "@str." + toStr(this.strConstCount)
