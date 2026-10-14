@@ -1852,7 +1852,20 @@ class SsaBuilder {
         val iPhiVal: MirValue = this.program.valueOf(iPhi)
         iPhiVal.args = toStr(entryBlock) + ":" + toStr(zeroVal) + "," +
                        toStr(this.curBlock) + ":" + toStr(iNew)
-        // R58: i phi 的 continue 点值
+        // R58: i phi 的 continue 点值——修正「continue 跳过 latch 导致 i 永不递增」
+        // （2026-10-14 R63）。
+        //
+        // 根因：buildFor 的循环体在 bodyBlock 里执行，其中 buildContinue
+        // 为 `i` 登记的是 `Mov(iPhi)`（原值拷贝，定义于 continue 前驱块）。
+        // 但 for-loop 的 `i` 递增在 latch 块末尾 `iNew = iPhi + 1`，
+        // continue 跳过 latch 块 ⇒ i 的 continue 入边拿到未递增值 ⇒
+        // 循环条件 `i < count` 永不满足，无限循环（实测 04-control-flow
+        // §4.10 两个 for 都死循环）。
+        //
+        // 修法：buildContinue 在 for-loop 内为 `i` 直接生成 `Add(iPhi, 1)`
+        // 而非 `Mov(iPhi)`——Add 定义于 continue 前驱块（与 Mov 位置一致），
+        // 作为 continue 入边值，等价于「continue 跳过用户体但仍执行 i++」。
+        // while 循环栈顶首个变量名不会是 "i"，故此特化只影响 for-loop。
         var ci2: Int = 0
         val recsLen2: Int = this.loopContRecs.length
         while (ci2 < recsLen2) {
@@ -5390,15 +5403,36 @@ class SsaBuilder {
                     val nm: String = entry.substring(0, bar)
                     val curVid: Int = this.mapVidOf(this.varMap, nm)
                     if (curVid >= 0) {
-                        // Mov 值定义于本块：phi 入边匹配（ISel pass2）按
-                        // 「入边值定义块 == 前驱块」精确配对；curVid 的定义
-                        // 块是 continue 前驱的支配者，精确匹配永远轮不到
-                        // continue 边（2026-10-05 probe_break/runner 实证）。
-                        val mvVid: Int = this.program.addValue("Mov",
-                                this.program.valueOf(curVid).type, toStr(curVid),
-                                "", this.curBlock)
+                        // ── for 计数器递增特化（R63）──
+                        // 栈顶 phiVarEntries 的第一个变量名恒为 "i"（buildFor
+                        // 在收集其他变量前先创建 i phi 并压栈首位）。
+                        // 对 `i` 生成 `Add(iPhi, 1)`——定义于 continue 前驱块
+                        // 本身（与 Mov 位置一致），作为 continue 入边值，等价
+                        // 于「continue 跳过用户体但仍执行 i++」。避免 i 的
+                        // continue 入边拿到未递增值（导致循环条件永不满足，
+                        // 04-control-flow §4.10 两个 for 都死循环）。
+                        // while 循环栈顶首个变量名不会是 "i"（buildWhile 不
+                        // 创建名为 i 的 phi），故此特化只影响 for-loop。
+                        // ⚠️ 依赖 buildFor 的压栈顺序（i 在首位），故用栈顶
+                        // 段首个条目的名字匹配——若将来调整 buildFor 需同步。
+                        var contVid: Int = -1
+                        // 判断本条目是否为栈顶段首条目（对应对应 i 变量）
+                        var isFirstEntry: Boolean = (i == 0)
+                        if (isFirstEntry && nm == "i") {
+                            val iType: Int = this.program.valueOf(curVid).type
+                            val oneCst: Int = this.program.addValue("Const", iType, "", "1", this.curBlock)
+                            contVid = this.program.addValue("Add", iType, toStr(curVid) + "," + toStr(oneCst), "", this.curBlock)
+                        } else {
+                            // Mov 值定义于本块：phi 入边匹配（ISel pass2）按
+                            // 「入边值定义块 == 前驱块」精确配对；curVid 的定义
+                            // 块是 continue 前驱的支配者，精确匹配永远轮不到
+                            // continue 边（2026-10-05 probe_break/runner 实证）。
+                            contVid = this.program.addValue("Mov",
+                                    this.program.valueOf(curVid).type, toStr(curVid),
+                                    "", this.curBlock)
+                        }
                         this.loopContRecs = this.loopContRecs + toStr(target) + "|" +
-                                entry.substring(bar + 1) + "|" + toStr(mvVid) + "\n"
+                                entry.substring(bar + 1) + "|" + toStr(contVid) + "\n"
                     }
                 }
             }
