@@ -787,7 +787,38 @@ class X86Emitter {
             val nodeId: Int = MachineDagUtils.strToInt(nodes[0])
             val node: DagNode = dag.nodeOf(nodeId)
             val dstRaw: String = this.regOfNode(node)
-            val imm: Int = MachineDagUtils.strToInt(node.aux)
+            val aux: String = node.aux
+            // R65：`Long` 字面量（aux 带 `L`/`l` 后缀）或数值超出 int32
+            // 范围的十进制字面量（如 `4294967296`）必须走 64 位立即数路径。
+            // 旧实现无条件 `strToInt`（32 位累加）+ `emitMovRI`（imm32），
+            // 把 `4294967296` 截成 `0`，下游 `hex8` 等 Long 除/模链产出垃圾
+            //（实测 p16：`hex8(100)` 打 20 位十六进制）。
+            // 关键点：Aura 源里 `4294967296` 无后缀，Lexer 只有 IntLiteral
+            // 一种 kind，Hir 侧仍落成 HirLit + Int，HAT 侧也是 `@i32_const
+            // 4294967296 : Int`。X86Emitter 只能靠 aux 文本兜底。
+            var isLong: Boolean = false
+            if (aux.length > 0) {
+                val lastCh: Int = aux.charCodeAt(aux.length - 1)
+                if (lastCh == 76 || lastCh == 108) {  // 'L' 或 'l'
+                    isLong = true
+                }
+            }
+            if (!isLong) {
+                isLong = this.isDecimalOutRangeInt32(aux)
+            }
+            if (isLong) {
+                // 剥 `L`/`l` 后缀（若是 `4294967296L`）。
+                var numStr: String = aux
+                if (numStr.length > 0) {
+                    val lc2: Int = numStr.charCodeAt(numStr.length - 1)
+                    if (lc2 == 76 || lc2 == 108) {
+                        numStr = numStr.substring(0, numStr.length - 1)
+                    }
+                }
+                this.emitLargeImmediate(dstRaw, numStr)
+                return
+            }
+            val imm: Int = MachineDagUtils.strToInt(aux)
             // ⚠️ `dst` 可能是栈引用（`stack:-N`）。直接喂给 `emitMovRI` 会被
             // `regNum` 解析成 0（= rax）⇒ 生成 `mov $imm, %rax`，**永不落槽** ✗。
             // 实测自举 `Main.exe` 的 `cliEnvArgCount`：`var n: Int = 0` /
@@ -802,6 +833,117 @@ class X86Emitter {
                 this.enc.emitMovRI(dstRaw, imm)
             }
         }
+    }
+
+    /// 十进制字符串是否超出 int32 有符号范围。
+    ///
+    /// R65：`4294967296` 无后缀字面量在 Lexer/Hir 里仍是 Int 类型，
+    /// 但值超 int32 上限，AOT 侧 strToInt 会 32 位截断成 0。判定按字符串。
+    private fun isDecimalOutRangeInt32(text: String): Boolean {
+        if (text.length == 0) { return false }
+        var s: String = text
+        val lc: Int = s.charCodeAt(s.length - 1)
+        if (lc == 76 || lc == 108) {
+            s = s.substring(0, s.length - 1)
+        }
+        if (s.length == 0) { return false }
+        var i: Int = 0
+        var neg: Boolean = false
+        if (s.charCodeAt(0) == 45) {  // '-'
+            neg = true
+            i = 1
+        } else if (s.charCodeAt(0) == 43) {  // '+'
+            i = 1
+        }
+        val start: Int = i
+        while (i < s.length) {
+            val c: Int = s.charCodeAt(i)
+            if (c < 48 || c > 57) { return false }
+            i = i + 1
+        }
+        if (start == s.length) { return false }  // 只有符号无数字
+        val len: Int = i - start
+        if (len > 10) { return true }
+        if (len < 10) { return false }
+        val maxStr: String = "2147483648"
+        var j: Int = 0
+        while (j < 10) {
+            val sc: Int = s.charCodeAt(start + j) - 48
+            val mc: Int = maxStr.charCodeAt(j) - 48
+            if (sc != mc) {
+                return sc > mc
+            }
+            j = j + 1
+        }
+        // 恰好 |v| == 2147483648：pos 时超，neg 时不超
+        return !neg
+    }
+
+    /// 十进制字符串 → (lo32, hi32) 两段（有符号 64 位值）。
+    ///
+    /// R65：`total = total * 10 + digit` 在 AOT 侧会被 32 位常量折叠截断
+    /// （`4294967296` 打 0），所以改成 (hi, lo) 双段累加：每步 lo*10 + d，
+    /// 若 lo 溢出 int32 就把进位加到 hi。lo 始终 < 2^32。
+    /// `hi * 10` 和 `lo * 10` 都是变量运算（i 变化时 hi/lo 变化），
+    /// 编译期不会折叠。
+    /// 十进制字符串 → 目标寄存器（64 位有符号值）。
+    ///
+    /// R65c：Aura 编译期常量折叠是 32 位，字面量 `4294967296` 会被折叠成 0。
+    /// 用 `IMUL r64, imm32` + `ADD r64, imm32` 链逐位累加，每步都是 64 位
+    /// REX.W 运算（Aura Int 运行时 64 位），避免任何 2^32 字面量。
+    ///
+    /// 算法：value = 0; for each digit d: value = value * 10 + d。
+    /// 每步 emitImulRI(dst, 10) + emitAddRI(dst, d)。
+    private fun emitLargeImmediate(dstRaw: String, numStr: String): Unit {
+        // 剥负号
+        var neg: Boolean = false
+        var s: String = numStr
+        if (s.length > 0 && s.charCodeAt(0) == 45) {
+            neg = true
+            s = s.substring(1, s.length)
+        } else if (s.length > 0 && s.charCodeAt(0) == 43) {
+            s = s.substring(1, s.length)
+        }
+        // 目标寄存器：栈引用走 r10
+        var dstReg: String = dstRaw
+        if (this.isStackRef(dstRaw)) {
+            dstReg = "r10"
+        }
+        // 初始化为 0
+        this.enc.emitMovRI(dstReg, 0)
+        // R61:emitImulRR(dst, src) 编码 = Intel `imul dst, src`（Reg=dst，R/M=src）。
+        // 每轮：dstReg = dstReg * 10 + d。r11 作为 scratch 承载系数 10。
+        var ci: Int = 0
+        while (ci < s.length) {
+            val dc: Int = s.charCodeAt(ci)
+            if (dc >= 48 && dc <= 57) {
+                val d: Int = dc - 48
+                this.enc.emitMovRI("r11", 10)
+                this.enc.emitImulRR(dstReg, "r11")
+                this.enc.emitAddRI(dstReg, d)
+            }
+            ci = ci + 1
+        }
+        // 处理负号：neg r64
+        if (neg) {
+            this.enc.emitNegRR(dstReg)
+        }
+        // 存回栈槽
+        if (this.isStackRef(dstRaw)) {
+            this.storeDstReg(dstRaw, "r10")
+        }
+    }
+
+    /// 无符号 32 位比较：a < b。
+    ///
+    /// R65：不能用 `xor`（AOT 路径下 `3 xor 1 = 3`，xor 完全 no-op）。
+    private fun u32Less(a: Int, b: Int): Boolean {
+        if (a < 0) {
+            if (b >= 0) { return false }
+            return a > b
+        }
+        if (b < 0) { return true }
+        return a < b
     }
 
     private fun emitMovRR(instr: DagInstruction, dag: MachineDag): Unit {
@@ -1146,7 +1288,12 @@ class X86Emitter {
             val sDisp: Int = 0x20 + (si - 4) * 8
             // 整数常量：mov r11, imm
             if (sNode.kind == "Const" && !sNode.aux.startsWith("@str.")) {
-                this.enc.emitMovRI("r11", MachineDagUtils.strToInt(sNode.aux))
+                // R65：大整数（超 int32）走 emitLargeImmediate
+                if (this.isDecimalOutRangeInt32(sNode.aux)) {
+                    this.emitLargeImmediate("r11", sNode.aux)
+                } else {
+                    this.enc.emitMovRI("r11", MachineDagUtils.strToInt(sNode.aux))
+                }
                 this.enc.emitStoreMemDisp32("rsp", sDisp, "r11")
                 si = si + 1
                 continue
@@ -1278,7 +1425,12 @@ class X86Emitter {
                 println("    [X86][PM] pick=" + toStr(picked) + " kind=" + pk + " src=" + ps + " -> " + pt)
             }
             if (pk == "imm") {
-                this.enc.emitMovRI(pt, MachineDagUtils.strToInt(ps))
+                // R65：大整数（超 int32）走 emitLargeImmediate
+                if (this.isDecimalOutRangeInt32(ps)) {
+                    this.emitLargeImmediate(pt, ps)
+                } else {
+                    this.enc.emitMovRI(pt, MachineDagUtils.strToInt(ps))
+                }
             } else if (pk == "str") {
                 this.enc.emitLeaRIP(pt, ps)
             } else {

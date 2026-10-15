@@ -4593,6 +4593,27 @@ class SsaBuilder {
             if ((bare == "length" || bare == "size") && recvTy == "String") {
                 return "strlen"
             }
+            // 0.6) **字符串 `.substring()`**：`String` 是标量类型，
+            // `isClassName("String")` 恒为 false，若不在这里映射，会落到
+            // 「全局唯一属主」兜底——一旦任一被链接的类（例如
+            // `PhotonPipeline`，见 `JitBackend` 引入）恰好声明了私有
+            // `substring` 方法，`uniqueMethodOwner("substring")` 就会返回
+            // 该类名，`s.substring(0, 4)` 被误限定为
+            // `@PhotonPipeline_substring(s, 0, 4, mem)`——那个类方法签名
+            // 是 `(s, start, end)` 三参，多一个 mem 实参被当作返回类型，
+            // 最终生成"无条件返回字面量"的错误代码（2026-10-15 复现：
+            // p16_guard_deopt_test 的 trampoline.hex.substring 全部为空）。
+            // 与 `strlen` 一致：直映射到运行库的 `String_substring` 扁平符号。
+            //
+            // ⚠️ 只映射 `substring`（当前实测受唯一属主 bug 影响的方法）。
+            // `startsWith` / `endsWith` / `charCodeAt` 等其它 String 成员
+            // 目前**不受**该 bug 影响——因为它们要么被运行库以裸名导出
+            // （`isRuntimeBareName` 早期命中），要么属主表尚未出现歧义；
+            // 扩大白名单会引入 `duplicate symbol: String_endsWith` 之类
+            // 链接冲突（2026-10-15 p19 复现）。
+            if (bare == "substring" && recvTy == "String") {
+                return "String_substring"
+            }
         }
 
         if (this.classMethods == "") {
