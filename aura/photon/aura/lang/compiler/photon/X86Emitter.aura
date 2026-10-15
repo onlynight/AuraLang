@@ -1235,6 +1235,24 @@ class X86Emitter {
                 // 逐字符读取是第二热调用窗（每字符一层），与 Memory.read
                 // 同款内联。指令序列与 PhotonRuntime.emitCharCodeAt 一致。
                 this.enc.emitMovzxRegMemIndexed("eax", "rcx", "rdx")
+            } else if (funcName == "Env_probe1") {
+                // [P5-②] 2026-10-15：内联 1 参 env 探针——序列与
+                // PhotonRuntime.emitEnvProbe1 一致，但 IAT 调用就地发出
+                // （__imp_GetEnvironmentVariableA 由 kernel32.Lib 解析，
+                // 与 runtime obj 同机制）。envBuffer 引 runtime obj 的
+                // .data 符号（跨 obj 链接解析）。
+                // 背景：探针实参（.rdata 常量指针）在调用窗被腐坏成
+                // 立即数垃圾（gdb 实测 rcx=-203 直达 strlen）→
+                // GetEnvironmentVariableA 内部 strlen 越界。内联省掉
+                // 一层 call 窗；rcx=name 就地消费。
+                this.enc.emitLeaRIP("rdx", "envBuffer")
+                this.enc.emitMovRI32("r8d", 4096)
+                this.enc.emitXorRR("r9", "r9")
+                this.enc.emitCallImport("GetEnvironmentVariableA")
+                this.enc.emitTestRR("rax", "rax")
+                this.enc.emitSetcc("eax", "ne")
+                // 零扩展：GetEnvVarA 返回值是长度（可 ≥256），setcc 只写 al
+                this.enc.emitMovzxRegReg8("rax", "rax")
             } else if (funcName != "" && funcName != "@imm") {
                 this.enc.emitCallRel(funcName)
             }

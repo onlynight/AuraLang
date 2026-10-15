@@ -77,6 +77,15 @@ fun jitVehInstall(): Int
 /// （实测 t0=t1=0、WALL-MS 恒 0）。0 参调用没有实参窗。
 fun clockNowMs(): Long
 
+/// 1 参 env 探针（runtime `Env_probe1`）：rcx = NUL 结尾名字，存在 → 1。
+///
+/// 2026-10-15 P5-②：双参 env_get(name, default) 的 name 指针在部分
+/// 布局下被轮盘腐坏（恒返回 default）——基准门控只回答「存在与否」，
+/// 走 1 参形态。⚠️ 实参必须传**堆指针**（Memory.alloc + 逐字节内联写
+/// 构造），不能传字符串字面量——字面量常量在调用窗物化时同样被腐坏
+/// （gdb 实测 rcx=-203 直达 GetEnvironmentVariableA 内部 strlen）。
+fun benchGateRaw(p: Long): Int
+
 fun jitSelfTest(): Unit {
     println("=== P1-3 NATIVE JIT SELFTEST (in native VM host) ===")
     // VEH 转储默认关闭：handler 不过滤异常码，first-chance 风暴会干扰
@@ -289,104 +298,88 @@ fun main(): Int {
     val aucPath: String = "build/vm/current.auc"
     val selftest: String = Env.get("AURA_VM_SELFTEST", "")
 
-    // ── JIT 基准模式（bench-jit-aot-vm.ps1 用）：手编机器码经
-    // JitBackend 真实装载/回填/RX 后 executeNative 执行，ClockImpl
-    // 单调时钟进程内计时。负载：
-    //   sum: n=1e9 循环累加（寄存器内，单次 JIT 调用）
-    //   fib: 递归 fib(40)（调用密集）
-    // ⚠️ Env.get 返回共享 envBuffer 指针（P292 同族）——下一次 Env.get
-    // 会覆盖内容。读取后立即经 strcat 拷贝到 arena（"" + s）。
-    val bench: String = "" + Env.get("AURA_BENCH_JIT", "")
-    println("[BENCH-KIND]<" + bench + ">")
-    // ⚠️ 2026-10-15：工作负载选择改走**整数**比较（AURA_BENCH_KIND：
-    // 1=sum 2=fib）。实测当前发射器布局下 bench=="sum" 的 streq 窗口
-    // 腐坏（恒 false → 恒走 else → sum 请求跑到 fib 代码上，fib(1000)
-    // 指数递归把栈打成筛子）。整数 icmp 无调用窗，轮盘免疫。
-    // AURA_BENCH_JIT 仍读取（bench 脚本兼容 + [BENCH] kind= 标签），
-    // 但不再参与分支。
-    val kindStr: String = "" + Env.get("AURA_BENCH_KIND", "")
-    val kind: Int = JitStackMapUtils.parseInt(kindStr)
-    if (kind == 1 || kind == 2) {
+    // ── JIT 基准（bench-jit-aot-vm.ps1 用）：**去输入化** ──
+    //
+    // 2026-10-15 P5-②：固定跑 sum(1e9) + fib(25)，一轮输出两组
+    // 「标记行 + 裸值行」，脚本按行解析。旧版经 env 传 n/kind——
+    // 双参 extern env_get(name, default) 的 name 指针在部分发射器
+    // 布局下被轮盘腐坏 → 查找失败恒返回 default（gdb 实证：
+    // AURA_BENCH_N 读成 default 1e9 → fib(1e9) 递归打穿 16MB 栈；
+    // AURA_BENCH_KIND 的 streq 比较窗同样腐坏 → sum 恒走 else）。
+    // 本块只剩轮盘免疫形态：0/1 参 extern（executeNative0→call0、
+    // clockNowMs、benchGate→Env_probe1）+ Memory.* 内联 + 整数比较。
+    // 门控 = benchGateRaw(堆上构造的 "AURA_BENCH")。
+    // ⚠️ 探针名不走字符串字面量：字面量经 extern 实参窗物化时被腐坏
+    // （gdb 实测 rcx=-203）；Memory.write 是内联 mov，alloc 是全程序
+    // 依赖的稳定 1 参原语（98 个调用点零事故）。
+    val gateName: Long = Memory.alloc(16)
+    Memory.write(gateName, 65)         // A
+    Memory.write(gateName + 1, 85)     // U
+    Memory.write(gateName + 2, 82)     // R
+    Memory.write(gateName + 3, 65)     // A
+    Memory.write(gateName + 4, 95)     // _
+    Memory.write(gateName + 5, 66)     // B
+    Memory.write(gateName + 6, 69)     // E
+    Memory.write(gateName + 7, 78)     // N
+    Memory.write(gateName + 8, 67)     // C
+    Memory.write(gateName + 9, 72)     // H
+    Memory.write(gateName + 10, 0)
+    if (benchGateRaw(gateName) == 1) {
         Heap.init()
-        val nStr: String = "" + Env.get("AURA_BENCH_N", "1000000000")
-        val n: Int = JitStackMapUtils.parseInt(nStr)
         val be = JitBackend()
         be.enableNativeExec()
-        // ⚠️ P5-① 对策：n 经**数据槽**传递（写入 JIT 区 +64 处 8 字节），
-        // 机器码 `mov r8/rcx, [rip+disp]` 读取——executeNative(entry, 0)
-        // 单参形态，绕开 2 参 extern 的实参丢失轮盘。
-        var hex: String = ""
-        if (kind == 1) {
-            // 0: mov r8,[rip+57](7B) 7:xor eax,eax 9:xor ecx,ecx 11:cmp rcx,r8(3)
-            // 14: jge +8→24 16: add rax,rcx 19: inc rcx 22: jmp 11 24: ret
-            // 数据槽 @+64
-            hex = "4C8B053900000031C031C94C39C17D084801C848FFC1EBF3C3"
+        // n 经**数据槽**传递（写入 JIT 区 +64 处 8 字节；可覆写），
+        // 机器码 `mov r8/rcx, [rip+disp]` 读取——call0 单参形态，
+        // 绕开 2 参 extern 的实参丢失轮盘。
+        // -- sum(n)：0: mov r8,[rip+0x39](7B) 7:xor eax,eax 9:xor ecx,ecx
+        //    11:cmp rcx,r8(3) 14: jge +8→24 16: add rax,rcx 19: inc rcx
+        //    22: jmp 11 24: ret；槽 @+64 --
+        val sumEntry = be.emitFunction("bench_sum", "4C8B053900000031C031C94C39C17D084801C848FFC1EBF3C3")
+        if (sumEntry == 0) {
+            println("[BENCH-SUM-ERROR]")
         } else {
-            // 0: mov rcx,[rip+0x39](7B) 7: jmp +7→16 | fib@16: cmp rcx,2(3)
-            // 19: jge +3→24 21: mov eax,ecx(2) 23: ret 24: push rsi
-            // 25: push rbx 26: mov rsi,rcx 29: lea rcx,[rsi-1] 33: call -22→16
-            // 38: mov rbx,rax 41: lea rsi,[rsi-2] 45: call -34→16 50: add rax,rbx
-            // 53: pop rbx 54: pop rsi 55: ret
-            // 入口 mov rcx,[rip+0x39] → 数据槽 @+64（fib 体 @16 起）。
-            // ⚠️ 2026-10-15 修两处手编 bug（gdb 栈取证）：
-            //   1) 自调 disp 差 1（目标 15——靠 nop 滑进 16 碰巧能用），
-            //      现精确指向 fib@16（E8EAFFFFFF / E8DEFFFFFF）。
-            //   2) jge +4 实际落在 push rbx（跳过 push rsi）→ 每层递归
-            //      少 push 一个、返回时 pop 两个 → rsp 每层上漂 8 字节，
-            //      fib(40) 递归数百层后 push 打到 JIT 块外的未映射页
-            //      （gdb 实测 rsp=0x404000、rip 落在 mov rsi,rcx 中段）。
-            //      根因：早期把 3 字节 lea eax,[rcx-1] 缩成 2 字节
-            //      mov eax,ecx 时 jge 位移没跟着减。现 +3 精确指向 push rsi。
-            hex = "488B0D39000000EB079090909090909083F9027D038BC1C356534889CE488D4EFFE8EAFFFFFF4889C3488D76FEE8DEFFFFFF4801D85B5EC3"
+            Memory.write64((sumEntry + 64) as Long, 1000000 as Long)
+            val sumChk: Long = be.executeNative0(sumEntry)
+            println("[BENCH-SUM-CHK]")
+            println(toStr(sumChk as Int))          // 期望 499999500000
+            Memory.write64((sumEntry + 64) as Long, 1000000000 as Long)
+            val s0: Long = clockNowMs()
+            val sumR: Long = be.executeNative0(sumEntry)
+            val s1: Long = clockNowMs()
+            println("[BENCH-SUM-RESULT]")
+            println(toStr(sumR as Int))            // 期望 499999999500000000
+            println("[BENCH-SUM-WALL]")
+            println(JitStackMapUtils.intToStr((s1 - s0) as Int))
         }
-        val entry = be.emitFunction("bench_fn", hex)
-        if (entry == 0) {
-            println("[BENCH-ERROR] emitFunction returned 0")
-            return 1
+        // -- fib(25)：递归手编（基例 eax=ecx）--
+        // 0: mov rcx,[rip+0x39](7B) 7: jmp +7→16 | fib@16: cmp rcx,2(3)
+        // 19: jge +3→24 21: mov eax,ecx(2) 23: ret 24: push rsi 25: push rbx
+        // 26: mov rsi,rcx 29: lea rcx,[rsi-1] 33: call -22→16 38: mov rbx,rax
+        // 41: lea rcx,[rsi-2] 45: lea rsi,[rsi-2] 49: call -38→16 54: add rax,rbx
+        // 57: pop rbx 58: pop rsi 59: ret；槽 @+64（代码 60B，槽恰在尾部后）
+        // ⚠️ 2026-10-15 修四处手编 bug（gdb 单步取证）：
+        //   1) 第二次自调前**缺 `lea rcx,[rsi-2]`**——rcx 残留旧值，
+        //      fib(n-2) 全被算成 fib(1)，fib(25) 返回 25。原注释
+        //      （"42: lea rcx,[rsi-2]"）本有此指令，hex 改长度时丢失。
+        //   2) lea 顺序：必须先 `lea rcx,[rsi-2]` 再 `lea rsi,[rsi-2]`
+        //      （后者更新 rsi，前者若在后 = n-4 → 负数传播，实测
+        //      fib(25) = 6717328849725）。
+        //   3) jge +4→+3（旧落 push rbx 跳过 push rsi → rsp 每层上漂
+        //      8B → 未映射页 SEGV）。
+        //   4) 两条自调 disp 差 1（旧靠 nop 滑进）。
+        val fibEntry = be.emitFunction("bench_fib", "488B0D39000000EB079090909090909083F9027D038BC1C356534889CE488D4EFFE8EAFFFFFF4889C3488D4EFE488D76FEE8DAFFFFFF4801D85B5EC3")
+        if (fibEntry == 0) {
+            println("[BENCH-FIB-ERROR]")
+        } else {
+            Memory.write64((fibEntry + 64) as Long, 25 as Long)
+            val f0: Long = clockNowMs()
+            val fibR: Long = be.executeNative0(fibEntry)
+            val f1: Long = clockNowMs()
+            println("[BENCH-FIB-RESULT]")
+            println(toStr(fibR as Int))            // 期望 75025
+            println("[BENCH-FIB-WALL]")
+            println(JitStackMapUtils.intToStr((f1 - f0) as Int))
         }
-        // n 写入数据槽（JIT 区 +64，8 字节 LE；机器码 [rip+disp] 读取）
-        Memory.write64((entry + 64) as Long, n as Long)
-        println("[BENCH-ENTRY] " + toStr(entry) + " ok")
-        // 内存转储（AURA_BENCH_DUMP=1）：验证 writeCode 真实写入
-        if (Env.get("AURA_BENCH_DUMP", "") == "1") {
-            var di: Int = 0
-            while (di < 40) {
-                val b: Int = Memory.read64((entry + di) as Long) as Int
-                println("[DUMP] " + toStr(di) + " -> " + toStr(b))
-                di = di + 1
-            }
-        }
-        // 正确性哨兵（小 n）。
-        // ⚠️ 2026-10-15：改走 executeNative0（call0 单参形态）——机器码本就
-        // 从数据槽 [rip+disp] 读 n（见上方 hex 注释），arg0 形同虚设；
-        // 而 2 参 extern（executeNative→callI64）在当前发射器布局下稳定
-        // 走进 P5-① 实参/栈腐坏轮盘（gdb 实测 ret→0，rdx=arg0 正确、
-        // rax=入口槽被写 2）。单参窗无轮盘面。
-        val chk: Long = be.executeNative0(entry)
-        val chkI: Int = chk as Int
-        println("[BENCH-CHK]")
-        println(toStr(chkI))
-        ClockImpl.init()
-        val t0: Long = clockNowMs()
-        val r: Long = be.executeNative0(entry)
-        val t1: Long = clockNowMs()
-        println("[BENCH-TDONE]")
-        // ⚠️ P5-②：Long 拼接打印在原生 Photon 代码下不可靠（实测静默
-        // 丢失/错位），全部「先 toStr 成独立局部，再单次拼接」。
-        val dt: Long = t1 - t0
-        val wallMs: Int = dt as Int
-        val rLow: Int = r as Int
-        val rLowS: String = toStr(rLow)
-        // ⚠️ wall 用 Aura 层 intToStr（toStr 是 extern 窗，第二 extern
-        // 调用后的首个 toStr 结果槽在本布局下恒 null——P5-①）。
-        val wallS: String = JitStackMapUtils.intToStr(wallMs)
-        val nOut: String = toStr(n)
-        val kindOut: String = toStr(kind)
-        println("[BENCH] kind=" + kindOut)
-        println("[BENCH-N] " + nOut)
-        println("[BENCH-RESULT-LOW32] " + rLowS)
-        println("[BENCH-WALL-MS]")
-        println(wallS)
         println("[BENCH-DONE]")
         return 0
     }

@@ -1114,6 +1114,31 @@ object PhotonRuntime {
     /// 没有实参窗。ms = QPC() × 1000 / QPF()；两导入都在 kernel32，
     /// emitCallImport 走 __imp_ IAT（与 GetEnvironmentVariableA 同机制，链接已证）。
     /// 整数 ms 精度（QPC 典型 10MHz，基准 ms 级别足用）。
+    /// 编码 `Env_probe1(rcx = name) rax = 1/0`（**1 参**）。
+    ///
+    /// 2026-10-15 P5-②（基准去输入化）：双参 env_get(name, default) 在部分发
+    /// 射器布局下 name 指针被轮盘腐坏 → 查找失败恒返 default（gdb 实证：
+    /// AURA_BENCH_N 读成 default 1e9 → fib(1e9) 递归打穿栈）。基准门控
+    /// 改走 1 参探针（同 call0，实流 rcx 稳定）：只回答「变量是否存在」。
+    /// 值的读取不再起 env（基准去输入化，参数硬编码）。
+    fun emitEnvProbe1(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x40)
+        enc.emitStoreMemDisp32("rbp", -8, "rcx")      // name
+        enc.emitStackLoad("rcx", -8)
+        enc.emitLeaRIP("rdx", "envBuffer")
+        enc.emitMovRI32("r8d", 4096)
+        enc.emitXorRR("r9", "r9")
+        enc.emitStoreImm32Stack(-0x28, 0)
+        enc.emitCallImport("GetEnvironmentVariableA")
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("z", "ep1_absent")
+        enc.emitMovRI32("eax", 1)
+        enc.emitEpilogue()
+        enc.emitLabel("ep1_absent")
+        enc.emitXorRR("eax", "eax")
+        enc.emitEpilogue()
+    }
+
     fun emitClockNowMs(enc: X86Encoder): Unit {
         enc.emitPrologue(0x40)
         // [rbp-0x10] = QPC 计数；[rbp-0x18] = QPF 频率
@@ -5195,7 +5220,7 @@ object PhotonRuntime {
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
     val BUILD_ID: String = "p303-refnull"
-    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists,Clock_nowMs"
+    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists,Clock_nowMs,Env_probe1"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
     fun buildRuntimeObject(): String {
@@ -5868,6 +5893,10 @@ object PhotonRuntime {
         val encCnm: X86Encoder = X86Encoder()
         PhotonRuntime.emitClockNowMs(encCnm)
         writer.appendFunction(encCnm.toHex(), "Clock_nowMs", PhotonObjectWriterUtils.joinRelocRecords(encCnm.getRelocations()))
+        // Env_probe1（1 参 env 探针，见 emitEnvProbe1 注）
+        val encEp1: X86Encoder = X86Encoder()
+        PhotonRuntime.emitEnvProbe1(encEp1)
+        writer.appendFunction(encEp1.toHex(), "Env_probe1", PhotonObjectWriterUtils.joinRelocRecords(encEp1.getRelocations()))
         // 2026-10-02 自举链接修复：`String.fromCharCode` 与 Process.argv 桩
         //（argCount/args 走 CLI 的 Env 回退通道，见 `emitProcArgCountStub` 说明）
         val encFcc = X86EncoderUtils.emptyEncoder()
@@ -6502,6 +6531,10 @@ object PhotonRuntime {
         val encCnm: X86Encoder = X86Encoder()
         PhotonRuntime.emitClockNowMs(encCnm)
         writer.appendFunction(encCnm.toHex(), "Clock_nowMs", PhotonObjectWriterUtils.joinRelocRecords(encCnm.getRelocations()))
+        // Env_probe1（1 参 env 探针，见 emitEnvProbe1 注）
+        val encEp1: X86Encoder = X86Encoder()
+        PhotonRuntime.emitEnvProbe1(encEp1)
+        writer.appendFunction(encEp1.toHex(), "Env_probe1", PhotonObjectWriterUtils.joinRelocRecords(encEp1.getRelocations()))
         // 2026-10-02 自举链接修复：`String.fromCharCode` 与 Process.argv 桩
         //（argCount/args 走 CLI 的 Env 回退通道，见 `emitProcArgCountStub` 说明）
         val encFcc = X86EncoderUtils.emptyEncoder()
@@ -7055,6 +7088,10 @@ object PhotonRuntimeUtils {
         val encCnm: X86Encoder = X86Encoder()
         PhotonRuntime.emitClockNowMs(encCnm)
         writer.appendFunction(encCnm.toHex(), "Clock_nowMs", PhotonObjectWriterUtils.joinRelocRecords(encCnm.getRelocations()))
+        // Env_probe1（1 参 env 探针，见 emitEnvProbe1 注）
+        val encEp1: X86Encoder = X86Encoder()
+        PhotonRuntime.emitEnvProbe1(encEp1)
+        writer.appendFunction(encEp1.toHex(), "Env_probe1", PhotonObjectWriterUtils.joinRelocRecords(encEp1.getRelocations()))
         // 2026-10-02 自举链接修复：`String.fromCharCode` 与 Process.argv 桩
         //（argCount/args 走 CLI 的 Env 回退通道，见 `emitProcArgCountStub` 说明）
         val encFcc = X86EncoderUtils.emptyEncoder()

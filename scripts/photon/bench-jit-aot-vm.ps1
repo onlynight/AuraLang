@@ -108,15 +108,16 @@ function Write-HexFile([string]$Hex, [string]$Path) {
 Write-Host "[build] Photon 编译 jit_vmhost（布局漂移重试）..." -ForegroundColor DarkCyan
 $vmhostOk = $false
 function Test-VmhostGate([string]$Exe) {
-    $env:AURA_VM_SELFTEST = '1'; $env:AURA_HEAP_MB = '256'
-    $st = & $Exe 2>&1
-    $env:AURA_VM_SELFTEST = ''; $env:AURA_HEAP_MB = ''
-    $stText = ($st -join "`n")
-    if ($stText.Contains('SELFTEST-ALL-PASS')) { return 'selftest' }
+    # 哨兵：宿主去输入化基准（sum(1e9) 固定值）一次跑通即过门。
     $env2s = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-    $env2s['AURA_BENCH_JIT'] = 'sum'; $env2s['AURA_BENCH_KIND'] = '1'; $env2s['AURA_BENCH_N'] = '10'; $env2s['AURA_HEAP_MB'] = '256'
-    $sr = Run-WithPeak $Exe $env2s "" 30000
-    if ($sr.Out.Contains('[BENCH-RESULT-LOW32] 45')) { return 'sentinel' }
+    $env2s['AURA_BENCH'] = '1'; $env2s['AURA_HEAP_MB'] = '256'
+    $sr = Run-WithPeak $Exe $env2s "" 60000
+    if ($sr.Out.Contains("[BENCH-SUM-RESULT]")) {
+        $lines = $sr.Out -split "`r?`n"
+        for ($li = 0; $li -lt $lines.Count - 1; $li++) {
+            if ($lines[$li] -eq '[BENCH-SUM-RESULT]' -and $lines[$li + 1] -eq '499999999500000000') { return 'sentinel' }
+        }
+    }
     return ''
 }
 if (Test-Path $VMHost) {
@@ -240,23 +241,39 @@ $T = 600
 
 Write-Host "`n=== 运行基准（每目标 3 次取中位）===" -ForegroundColor Cyan
 
-# -- Photon JIT（2026-10-15 起 sum+fib 都跑）--
-# 宿主 jit_vmhost.exe 的工作负载选择走 AURA_BENCH_KIND 整数（1=sum 2=fib；
-# streq 比较窗在部分发射器布局下腐坏→恒走 else，故不用字符串分派）。
-# 计时 = runtime Clock_nowMs（QPC 0 参原语；ClockImpl.timeNs 的
-# clockGettime 双参 extern 同样是轮盘受害者，已弃用）。
-# ⚠ fib 仍受 P5-① 上游轮盘影响：JIT 机器码本体已修（jge disp/自调
-#   disp/entry 数据槽），但入口 executeNative0 窗在部分构建/进程下
-#   腐坏（rsp/entry 槽被打翻），同一 exe 跨运行在「错误结果 40」与
-#   SEGV 之间翻转。跑批按 3 次取中位，失格输出会在 Out1 列现形。
-foreach ($w in @('sum','fib')) {
+# -- Photon JIT（去输入化：宿主一轮固定跑 sum(1e9)+fib(25)，解析
+#    「标记行+裸值行」）--
+# 宿主只依赖轮盘免疫形态：executeNative0（call0 单参）、Clock_nowMs
+# （QPC 0 参）、benchGate（Env_probe1 1 参）、Memory.* 内联。
+# 2 参 extern（env_get/clockGettime）在部分布局下 name/实参被腐坏
+# （gdb 实证 AURA_BENCH_N 恒读成 default 1e9），已全部移出基准路径。
+$jitTimes = @{ sum = @(); fib = @() }
+$jitRes = @{ sum = ''; fib = '' }
+$jitPeak = 0.0
+for ($i = 0; $i -lt 3; $i++) {
     $env2 = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-    $env2['AURA_BENCH_JIT']  = $w
-    $env2['AURA_BENCH_KIND'] = $(if ($w -eq 'sum') { '1' } else { '2' })
-    $env2['AURA_BENCH_N']    = $(if ($w -eq 'sum') { '1000000000' } else { "$FIB_N" })
-    $env2['AURA_HEAP_MB']    = '256'
-    $r = Bench-Target "JIT-$w" $VMHost $env2 "" 3 $T
-    $RESULTS += [pscustomobject]@{ Target = "Photon-JIT"; Workload = $w; MedMs = $r.Med; PeakMB = $r.Peak; Out1 = $r.Out1 }
+    $env2['AURA_BENCH'] = '1'; $env2['AURA_HEAP_MB'] = '256'
+    $r = Run-WithPeak $VMHost $env2 "" $T
+    if ($r.PeakMB -gt $jitPeak) { $jitPeak = $r.PeakMB }
+    $lines = $r.Out -split "`r?`n"
+    $okSum = $false; $okFib = $false
+    for ($li = 0; $li -lt $lines.Count - 1; $li++) {
+        if ($lines[$li] -eq '[BENCH-SUM-RESULT]') {
+            $jitRes['sum'] = $lines[$li + 1]
+            if ($jitRes['sum'] -eq '499999999500000000') { $okSum = $true }
+        } elseif ($lines[$li] -eq '[BENCH-FIB-RESULT]') {
+            $jitRes['fib'] = $lines[$li + 1]
+            if ($jitRes['fib'] -eq '75025') { $okFib = $true }
+        }
+    }
+    # MedMs 与其他行同口径：进程墙钟；仅在结果校验通过时计入。
+    if ($okSum) { $jitTimes['sum'] += $r.Ms }
+    if ($okFib) { $jitTimes['fib'] += $r.Ms }
+}
+foreach ($w in @('sum','fib')) {
+    $med = -1
+    if ($jitTimes[$w].Count -gt 0) { $sorted = $jitTimes[$w] | Sort-Object; $med = $sorted[[int][Math]::Floor($sorted.Count / 2)] }
+    $RESULTS += [pscustomobject]@{ Target = "Photon-JIT"; Workload = $w; MedMs = $med; PeakMB = $jitPeak; Out1 = $jitRes[$w] }
 }
 
 # -- Photon AOT --
