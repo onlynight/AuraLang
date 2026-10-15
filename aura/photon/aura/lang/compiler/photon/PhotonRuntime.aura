@@ -1107,6 +1107,28 @@ object PhotonRuntime {
     /// call 落地，但 Photon HAT 后端把 extern 当普通函数符号发射，链接期
     /// `undefined symbol: JitExec_callI64`。本桩按 Windows x64 ABI 装 rcx
     /// 后 `call rax`，返回值 rax 直接透传（`JitExec.callI64` 契约）。
+    /// 编码 `Clock_nowMs() rax = ms`（QPC/QPF，**0 参**）。
+    ///
+    /// 2026-10-15 P5-①：ClockImpl.timeNs 走 clockGettime(0, tsBuf) 双参 extern，
+    /// 实参轮盘下恒失败（t0=t1=0，基准 WALL-MS 恒 0）。救场：0 参调用
+    /// 没有实参窗。ms = QPC() × 1000 / QPF()；两导入都在 kernel32，
+    /// emitCallImport 走 __imp_ IAT（与 GetEnvironmentVariableA 同机制，链接已证）。
+    /// 整数 ms 精度（QPC 典型 10MHz，基准 ms 级别足用）。
+    fun emitClockNowMs(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x40)
+        // [rbp-0x10] = QPC 计数；[rbp-0x18] = QPF 频率
+        enc.emitLeaStack("rcx", -0x10)
+        enc.emitCallImport("QueryPerformanceCounter")
+        enc.emitLeaStack("rcx", -0x18)
+        enc.emitCallImport("QueryPerformanceFrequency")
+        enc.emitStackLoad("rax", -0x10)
+        enc.emitImulRI("rax", 1000)
+        enc.emitCqo()
+        enc.emitStackLoad("rcx", -0x18)
+        enc.emitIdiv("rcx")
+        enc.emitEpilogue()
+    }
+
     fun emitJitExecCallI64(enc: X86Encoder): Unit {
         // 参数序自识别（2026-10-08 P1-3）：
         // 期望 (rcx = entry, rdx = arg0)，但实测 Photon 发射器对双参
@@ -1116,13 +1138,20 @@ object PhotonRuntime {
         // 任意用户整数（落在该区间的实参不受支持——当前所有 JIT 调用点
         // 均满足）。判定后：rax = entry，rcx = arg0，call rax。
         enc.emitPrologue(0)
-        // rcx ∈ [0x08000000, 0x20000000] ？
+        // [P5-01] 轮盘升级（2026-10-15）：旧判定「rcx 出界即交换」在 rdx 也不是 entry 时，
+        // 会把 arg0 错当 entry 调（gdb 实测 call 0xa）。改为：rcx 在 JIT 区间直接用；
+        // 否则 rdx 在区间才交换；都不在保持 rcx（实参腐坏更深，VEH 兜底）。
         enc.emitCmpRI("rcx", 134217728)          // 0x08000000
-        enc.emitJccLabel("jb", "je_swapped")
+        enc.emitJccLabel("jb", "je_tryrdx")
         enc.emitCmpRI("rcx", 2130706432)         // 0x7F000000 [P41x] 上界放宽
-        enc.emitJccLabel("ja", "je_swapped")
+        enc.emitJccLabel("ja", "je_tryrdx")
         enc.emitJmpLabel("je_go")
-        enc.emitLabel("je_swapped")
+        enc.emitLabel("je_tryrdx")
+        enc.emitCmpRI("rdx", 134217728)
+        enc.emitJccLabel("jb", "je_go")
+        enc.emitCmpRI("rdx", 2130706432)
+        enc.emitJccLabel("ja", "je_go")
+        enc.emitLabel("je_swap")
         // 交换 rcx <-> rdx（经 rax 中转）
         enc.emitMovRR("rax", "rcx")
         enc.emitMovRR("rcx", "rdx")
@@ -1137,12 +1166,26 @@ object PhotonRuntime {
 
     /// 编码 `JitExec_call0(rcx = entry, [r8 = 0]) rax = entry()`。
     fun emitJitExecCall0(enc: X86Encoder): Unit {
+        // [P5-01] 自识别升级（2026-10-15）：旧实现「rcx==0 则取 rdx」——1 参调用
+        // call0(entry) 下 rcx=entry 恒非 0，于是拿脏槽 rdx 当入口 call（executeNative0
+        // 路径实测必崩）。entry 可靠特征 = 落在 JIT 区间 [0x08000000, 0x7F000000)
+        // （allocRWX 分配窗）：rcx 在区间用 rcx，否则 rdx 在区间用 rdx，都不在退回 rcx。
         enc.emitPrologue(0)
-        enc.emitTestRR("rcx", "rcx")
-        enc.emitJccLabel("jnz", "j0_direct")
-        enc.emitMovRR("rcx", "rdx")
-        enc.emitLabel("j0_direct")
+        enc.emitCmpRI("rcx", 134217728)
+        enc.emitJccLabel("jb", "j0_tryrdx")
+        enc.emitCmpRI("rcx", 2130706432)
+        enc.emitJccLabel("ja", "j0_tryrdx")
+        enc.emitJmpLabel("j0_rcx")
+        enc.emitLabel("j0_tryrdx")
+        enc.emitCmpRI("rdx", 134217728)
+        enc.emitJccLabel("jb", "j0_rcx")
+        enc.emitCmpRI("rdx", 2130706432)
+        enc.emitJccLabel("ja", "j0_rcx")
+        enc.emitMovRR("rax", "rdx")
+        enc.emitJmpLabel("j0_go")
+        enc.emitLabel("j0_rcx")
         enc.emitMovRR("rax", "rcx")
+        enc.emitLabel("j0_go")
         enc.emitXorRR("rcx", "rcx")
         enc.emitCallRR("rax")
         enc.emitEpilogue()
@@ -3489,17 +3532,49 @@ object PhotonRuntime {
     /// 存在**单实参**调用点，那时 rdx 是脏值；代码库里 `Env.get(name, default)` 的
     /// default 一律是 `""`，故「缺失 = 空串」语义等价。
     fun emitEnvGetWin32(enc: X86Encoder): Unit {
-        // R44i：VM 空环境语义对齐（13 §13.6 参考输出 OS=unknown/has=false——
-        // VM 的 env 恒空，get 返 default、has 恒 false）。有 default(rdx) 直返；
-        // 无则空串 @str.0。旧实现读真实环境（GetEnvironmentVariableA）⇒
-        // OS=Windows_NT 与 VM 参考必 diff。
-        enc.emitPrologue(0x30)
-        enc.emitTestRR("rdx", "rdx")
-        enc.emitJccLabel("eq", "egw_default_empty")
-        enc.emitMovRR("rax", "rdx")
-        enc.emitEpilogue()
-        enc.emitLabel("egw_default_empty")
+        // R44i2：真实现——走 kernel32.GetEnvironmentVariableA 读真实环境。
+        // 旧实现（R44i）恒返回 default（忽略环境），导致 jit_vmhost.exe 的
+        // AURA_BENCH_JIT / AURA_BENCH_N / AURA_HEAP_MB 全部读不到，
+        // JIT 基准分支被跳过、进程静默退化到 .auc VM 路径。
+        //
+        // 签名 env_get(rcx=name, rdx=default) rax=char*：
+        //   1) 把 name/default 保存到栈（call 会 clobber rcx/rdx）；
+        //   2) call GetEnvironmentVariableA(name, envBuffer, 4096)：
+        //        返回写入长度（含 NUL），0 表示 env 不存在或缓冲不足；
+        //      envBuffer 是 4096 字节的 .data 静态区，超长值被截断——
+        //      当前 jit_vmhost 只读几个短 key，够用；
+        //   3) 非 0 → 返回 envBuffer；
+        //   4) 0 → 若 default 非 null 返回 default，否则 @str.0。
+        //
+        // 栈帧布局（0x40 保留，含影子空间 [rbp-0x28] 供第 5 参）：
+        //   [rbp-0x08]  name 保存
+        //   [rbp-0x10]  default 保存
+        //   [rbp-0x28]  影子空间（GetEnvironmentVariableA 只有 4 参，
+        //                 影子空间可写任意值，用 store-null 保持 16 字节对齐）
+        //   [rbp-0x30]  额外对齐填充
+        enc.emitPrologue(0x40)
+        // 保存入参
+        enc.emitStoreMemDisp32("rbp", -8, "rcx")      // name
+        enc.emitStoreMemDisp32("rbp", -16, "rdx")     // default
+        // GetEnvironmentVariableA(name, envBuffer, 4096)
+        enc.emitStackLoad("rcx", -8)
+        enc.emitLeaRIP("rdx", "envBuffer")
+        enc.emitMovRI32("r8d", 4096)
+        enc.emitXorRR("r9", "r9")
+        enc.emitStoreImm32Stack(-0x28, 0)             // shadow space = 0
+        enc.emitCallImport("GetEnvironmentVariableA")
+        // rax = 写入长度（含 NUL），或 0 未找到/缓冲不足
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("nz", "egw_found")
+        // 未找到：返回 default（若非 null），否则 @str.0
+        enc.emitStackLoad("rax", -16)
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("nz", "egw_done")
         enc.emitLeaRIP("rax", "@str.0")
+        enc.emitLabel("egw_done")
+        enc.emitEpilogue()
+        enc.emitLabel("egw_found")
+        enc.emitLeaRIP("rax", "envBuffer")
         enc.emitEpilogue()
     }
 
@@ -5120,7 +5195,7 @@ object PhotonRuntime {
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
     val BUILD_ID: String = "p303-refnull"
-    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists"
+    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists,Clock_nowMs"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
     fun buildRuntimeObject(): String {
@@ -5789,6 +5864,10 @@ object PhotonRuntime {
         val encEg = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitEnvGetWin32(encEg)
         writer.appendFunction(encEg.toHex(), "env_get", PhotonObjectWriterUtils.joinRelocRecords(encEg.getRelocations()))
+        // Clock_nowMs（QPC 基准时，见 emitClockNowMs 注）
+        val encCnm: X86Encoder = X86Encoder()
+        PhotonRuntime.emitClockNowMs(encCnm)
+        writer.appendFunction(encCnm.toHex(), "Clock_nowMs", PhotonObjectWriterUtils.joinRelocRecords(encCnm.getRelocations()))
         // 2026-10-02 自举链接修复：`String.fromCharCode` 与 Process.argv 桩
         //（argCount/args 走 CLI 的 Env 回退通道，见 `emitProcArgCountStub` 说明）
         val encFcc = X86EncoderUtils.emptyEncoder()
@@ -6419,6 +6498,10 @@ object PhotonRuntime {
         val encEg = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitEnvGetWin32(encEg)
         writer.appendFunction(encEg.toHex(), "env_get", PhotonObjectWriterUtils.joinRelocRecords(encEg.getRelocations()))
+        // Clock_nowMs（QPC 基准时，见 emitClockNowMs 注）
+        val encCnm: X86Encoder = X86Encoder()
+        PhotonRuntime.emitClockNowMs(encCnm)
+        writer.appendFunction(encCnm.toHex(), "Clock_nowMs", PhotonObjectWriterUtils.joinRelocRecords(encCnm.getRelocations()))
         // 2026-10-02 自举链接修复：`String.fromCharCode` 与 Process.argv 桩
         //（argCount/args 走 CLI 的 Env 回退通道，见 `emitProcArgCountStub` 说明）
         val encFcc = X86EncoderUtils.emptyEncoder()
@@ -6968,6 +7051,10 @@ object PhotonRuntimeUtils {
         val encEg = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitEnvGetWin32(encEg)
         writer.appendFunction(encEg.toHex(), "env_get", PhotonObjectWriterUtils.joinRelocRecords(encEg.getRelocations()))
+        // Clock_nowMs（QPC 基准时，见 emitClockNowMs 注）
+        val encCnm: X86Encoder = X86Encoder()
+        PhotonRuntime.emitClockNowMs(encCnm)
+        writer.appendFunction(encCnm.toHex(), "Clock_nowMs", PhotonObjectWriterUtils.joinRelocRecords(encCnm.getRelocations()))
         // 2026-10-02 自举链接修复：`String.fromCharCode` 与 Process.argv 桩
         //（argCount/args 走 CLI 的 Env 回退通道，见 `emitProcArgCountStub` 说明）
         val encFcc = X86EncoderUtils.emptyEncoder()

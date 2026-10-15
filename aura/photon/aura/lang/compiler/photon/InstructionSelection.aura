@@ -79,7 +79,7 @@ class InstructionSelector {
     /// 桩（getAt 恒返回空串 —— `Env.get` 历史落点），要么布局分叉。保留名单
     /// 会把 guest 真实现抑制掉（`!isRuntimeSymbol` 跳过发射），实测
     /// `tl.get(0)` 返回空串。仅保留 guest 没有的 clear/hashMapPut。
-    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,RegionEnter,RegionReset,io_open,io_close,io_read,io_write,io_access,Collections.clear,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,aura_heapbump,Heap_init,Heap_mmap,boolToStr,charToStr,aura_isOfType,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists"
+    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,RegionEnter,RegionReset,io_open,io_close,io_read,io_write,io_access,Collections.clear,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,aura_heapbump,Heap_init,Heap_mmap,boolToStr,charToStr,aura_isOfType,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists,Clock_nowMs"
 
     /// `computeReachable` 的列表形式结果（供 `select()` 免分配查表）。
     private var reachableNames: List<String> = arrayListOf<String>()
@@ -2897,6 +2897,28 @@ class InstructionSelector {
         // 宿主显式安装 VEH 崩溃转储（jit_vmhost 自检用）。无体 fun 的
         // 裸名映射到 runtime 的 veh_install。
         if (name == "jitVehInstall") { return "veh_install" }
+        // QPC 基准时（无参，见 emitClockNowMs）——ClockImpl.timeNs 的
+        // clockGettime(0, tsBuf) 双参 extern 在轮盘布局下恒失败。
+        if (name == "clockNowMs") { return "Clock_nowMs" }
+        // ── JitExec 原语：裸名 → `JitExec_*` 运行库符号（2026-10-15）──
+        //
+        // 前端把 `JitExec.allocRWX(...)` 等 extern interface 方法降级为**裸名**
+        // 调用（`@call @allocRWX(...)`），同时又给无体方法合成了**同名 return-0
+        // 空桩定义**（jit_vmhost.obj 符号表实测：`allocRWX` 定义 + 同名调用点）。
+        // 结果：调用永远落在自己的空桩上 → `allocRWX` 恒返回 0 →
+        // `emitFunction` 返回 0 → JIT 自检/基准全灭；而 runtime obj 里真正的
+        // `JitExec_allocRWX`（NtAllocateVirtualMemory 提示梯）成了死代码。
+        // 此前从未暴露：env_get 桩（R44i）让 AURA_VM_SELFTEST / AURA_BENCH_JIT
+        // 分支在原生 exe 里从未被执行过。
+        // 映射后调用直连 runtime 符号（RUNTIME_SYMBOLS 已列全部五个名字，
+        // isRuntimeSymbol 同步命中 → 空桩定义不再被当成被调目标编码）。
+        // 实测全闭包裸名唯一（JitBackend.aura / Vm.aura / jit_vmhost.aura
+        // 之外无同名定义或调用），逐名映射无歧义风险。
+        if (name == "callI64") { return "JitExec_callI64" }
+        if (name == "call0") { return "JitExec_call0" }
+        if (name == "allocRW") { return "JitExec_allocRW" }
+        if (name == "allocRWX") { return "JitExec_allocRWX" }
+        if (name == "protect") { return "JitExec_protect" }
         if (name == "substringBefore" || name == "String.substringBefore") { return "String_substringBefore" }
         if (name == "split" || name == "String.split") { return "String_split" }
         // ── `length()` / `size()` 无接收者显式类型的裸名兜底 ──

@@ -114,7 +114,7 @@ function Test-VmhostGate([string]$Exe) {
     $stText = ($st -join "`n")
     if ($stText.Contains('SELFTEST-ALL-PASS')) { return 'selftest' }
     $env2s = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-    $env2s['AURA_BENCH_JIT'] = 'sum'; $env2s['AURA_BENCH_N'] = '10'; $env2s['AURA_HEAP_MB'] = '256'
+    $env2s['AURA_BENCH_JIT'] = 'sum'; $env2s['AURA_BENCH_KIND'] = '1'; $env2s['AURA_BENCH_N'] = '10'; $env2s['AURA_HEAP_MB'] = '256'
     $sr = Run-WithPeak $Exe $env2s "" 30000
     if ($sr.Out.Contains('[BENCH-RESULT-LOW32] 45')) { return 'sentinel' }
     return ''
@@ -240,13 +240,21 @@ $T = 600
 
 Write-Host "`n=== 运行基准（每目标 3 次取中位）===" -ForegroundColor Cyan
 
-# -- Photon JIT（sum：数据槽传参+executeNative 已验证 5e17 精确；
-#    fib 递归手编反复触 P5-① 轮盘（write64 二参/rdx 易失/基例），不跑）--
-foreach ($w in @('sum')) {
+# -- Photon JIT（2026-10-15 起 sum+fib 都跑）--
+# 宿主 jit_vmhost.exe 的工作负载选择走 AURA_BENCH_KIND 整数（1=sum 2=fib；
+# streq 比较窗在部分发射器布局下腐坏→恒走 else，故不用字符串分派）。
+# 计时 = runtime Clock_nowMs（QPC 0 参原语；ClockImpl.timeNs 的
+# clockGettime 双参 extern 同样是轮盘受害者，已弃用）。
+# ⚠ fib 仍受 P5-① 上游轮盘影响：JIT 机器码本体已修（jge disp/自调
+#   disp/entry 数据槽），但入口 executeNative0 窗在部分构建/进程下
+#   腐坏（rsp/entry 槽被打翻），同一 exe 跨运行在「错误结果 40」与
+#   SEGV 之间翻转。跑批按 3 次取中位，失格输出会在 Out1 列现形。
+foreach ($w in @('sum','fib')) {
     $env2 = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-    $env2['AURA_BENCH_JIT'] = $w
-    $env2['AURA_BENCH_N']   = '1000000000'
-    $env2['AURA_HEAP_MB']   = '256'
+    $env2['AURA_BENCH_JIT']  = $w
+    $env2['AURA_BENCH_KIND'] = $(if ($w -eq 'sum') { '1' } else { '2' })
+    $env2['AURA_BENCH_N']    = $(if ($w -eq 'sum') { '1000000000' } else { "$FIB_N" })
+    $env2['AURA_HEAP_MB']    = '256'
     $r = Bench-Target "JIT-$w" $VMHost $env2 "" 3 $T
     $RESULTS += [pscustomobject]@{ Target = "Photon-JIT"; Workload = $w; MedMs = $r.Med; PeakMB = $r.Peak; Out1 = $r.Out1 }
 }

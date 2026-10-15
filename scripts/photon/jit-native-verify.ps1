@@ -165,8 +165,22 @@ $drvPsi.WorkingDirectory = $Root
 $drvProc = [System.Diagnostics.Process]::Start($drvPsi)
 $drvSoT = $drvProc.StandardOutput.ReadToEndAsync()
 $drvSeT = $drvProc.StandardError.ReadToEndAsync()
+# [OOM-GUARD] 驱动内存看门狗：物理内存 32GB 机器上，工作集超过 10GB 视为
+# 失控（前端 concat 风暴回归等），立即杀进程保系统 —— 2026-10-15 R67
+# bufferToString O(N²) 回归曾把系统打到假死（无限制跑满 24GB+ 物理内存）。
+$drvWatchdogMB = 10240
+$drvKilled = $false
 while (-not $drvProc.HasExited) {
-    try { $ws = $drvProc.PeakWorkingSet64; if ($ws -gt $drvPeakMB) { $drvPeakMB = $ws } } catch {}
+    try {
+        $ws = $drvProc.PeakWorkingSet64
+        if ($ws -gt $drvPeakMB) { $drvPeakMB = $ws }
+        if ($ws -gt ($drvWatchdogMB * 1MB)) {
+            Write-Host ("        [OOM-GUARD] driver WS {0:N0} MB > {1} MB — kill" -f [math]::Round($ws / 1MB), $drvWatchdogMB) -ForegroundColor Red
+            $drvProc.Kill()
+            $drvKilled = $true
+            break
+        }
+    } catch {}
     Start-Sleep -Milliseconds 5
 }
 try { $ws2 = $drvProc.PeakWorkingSet64; if ($ws2 -gt $drvPeakMB) { $drvPeakMB = $ws2 } } catch {}

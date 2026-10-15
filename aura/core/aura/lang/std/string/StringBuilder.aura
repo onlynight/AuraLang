@@ -207,12 +207,8 @@ class StringBuilder {
         val sb: Long = hd()
         val buf: Long = sbBuf(sb)
         val len: Long = sbLen(sb)
-        println("[B1] hd/buf/len ok")
         if (buf == 0 || len <= 0) { return "" }
-        println("[B2] calling ReadCStr")
-        val r: String = ReadCStr(buf)
-        println("[B3] ReadCStr returned rlen=" + toStr(r.length))
-        return r
+        return ReadCStr(buf)
     }
 
     /// 清空（保留容量，返回 self）。

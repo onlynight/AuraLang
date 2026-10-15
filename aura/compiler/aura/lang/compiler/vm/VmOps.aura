@@ -850,7 +850,11 @@ object VmOps {
             return toStr(intOf(v))
         }
         // 种子 VM：typeof 区分 Int/Boolean/String。
-        val kind: String = VmOps.typeof(v)
+        // ⚠️ 必须用裸 `typeof`（内建），不能用 `VmOps.typeof`：
+        // Photon AOT 只把裸 `typeof` 映射到 runtime 符号 `aura_typeof`
+        // （见 InstructionSelection.isRuntimeSymbol），`VmOps.typeof` 会
+        // 解析成外部符号 `VmOps_typeof`（未定义）导致链接失败。
+        val kind: String = typeof(v)
         if (kind == "Int" || kind == "Long" || kind == "Boolean") {
             return toStr(v as Long)
         }

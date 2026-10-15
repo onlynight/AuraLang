@@ -70,6 +70,13 @@ fun stOk(name: String, got: Int, want: Int): Unit {
 /// 漂移崩点（P5 缺口①）的定位通道。
 fun jitVehInstall(): Int
 
+/// QPC 毫秒时钟（runtime `Clock_nowMs`，**0 参**）。
+///
+/// 2026-10-15 P5-①：基准计时弃用 `ClockImpl.timeNs()`——其
+/// `Clock.clockGettime(0, tsBuf)` 是双参 extern，实参轮盘布局下恒失败
+/// （实测 t0=t1=0、WALL-MS 恒 0）。0 参调用没有实参窗。
+fun clockNowMs(): Long
+
 fun jitSelfTest(): Unit {
     println("=== P1-3 NATIVE JIT SELFTEST (in native VM host) ===")
     // VEH 转储默认关闭：handler 不过滤异常码，first-chance 风暴会干扰
@@ -290,7 +297,16 @@ fun main(): Int {
     // ⚠️ Env.get 返回共享 envBuffer 指针（P292 同族）——下一次 Env.get
     // 会覆盖内容。读取后立即经 strcat 拷贝到 arena（"" + s）。
     val bench: String = "" + Env.get("AURA_BENCH_JIT", "")
-    if (bench == "sum" || bench == "fib") {
+    println("[BENCH-KIND]<" + bench + ">")
+    // ⚠️ 2026-10-15：工作负载选择改走**整数**比较（AURA_BENCH_KIND：
+    // 1=sum 2=fib）。实测当前发射器布局下 bench=="sum" 的 streq 窗口
+    // 腐坏（恒 false → 恒走 else → sum 请求跑到 fib 代码上，fib(1000)
+    // 指数递归把栈打成筛子）。整数 icmp 无调用窗，轮盘免疫。
+    // AURA_BENCH_JIT 仍读取（bench 脚本兼容 + [BENCH] kind= 标签），
+    // 但不再参与分支。
+    val kindStr: String = "" + Env.get("AURA_BENCH_KIND", "")
+    val kind: Int = JitStackMapUtils.parseInt(kindStr)
+    if (kind == 1 || kind == 2) {
         Heap.init()
         val nStr: String = "" + Env.get("AURA_BENCH_N", "1000000000")
         val n: Int = JitStackMapUtils.parseInt(nStr)
@@ -300,23 +316,37 @@ fun main(): Int {
         // 机器码 `mov r8/rcx, [rip+disp]` 读取——executeNative(entry, 0)
         // 单参形态，绕开 2 参 extern 的实参丢失轮盘。
         var hex: String = ""
-        if (bench == "sum") {
+        if (kind == 1) {
             // 0: mov r8,[rip+57](7B) 7:xor eax,eax 9:xor ecx,ecx 11:cmp rcx,r8(3)
             // 14: jge +8→24 16: add rax,rcx 19: inc rcx 22: jmp 11 24: ret
             // 数据槽 @+64
             hex = "4C8B053900000031C031C94C39C17D084801C848FFC1EBF3C3"
         } else {
-            // 0: mov rcx,[rip+9](7B) 7: jmp +7→16 | fib@16: cmp rcx,2(3)
-            // 19: jge +4→25 21: lea eax,[rcx-1](3) 24: ret 25: push rsi
-            // 26: push rbx 27: mov rsi,rcx 30: lea rcx,[rsi-1] 34: call -23
-            // 39: mov rbx,rax 42: lea rcx,[rsi-2] 46: call -35 51: add rax,rbx
-            // 54: pop rbx 55: pop rsi 56: ret
-            // 入口 mov rcx,[rip+57] → 数据槽 @+64（fib 体 @16 起）
-            hex = "488B0D39000000EB079090909090909083F9027D048BC1C356534889CE488D4EFFE8E9FFFFFF4889C3488D76FEE8DDFFFFFF4801D85B5EC3"
+            // 0: mov rcx,[rip+0x39](7B) 7: jmp +7→16 | fib@16: cmp rcx,2(3)
+            // 19: jge +3→24 21: mov eax,ecx(2) 23: ret 24: push rsi
+            // 25: push rbx 26: mov rsi,rcx 29: lea rcx,[rsi-1] 33: call -22→16
+            // 38: mov rbx,rax 41: lea rsi,[rsi-2] 45: call -34→16 50: add rax,rbx
+            // 53: pop rbx 54: pop rsi 55: ret
+            // 入口 mov rcx,[rip+0x39] → 数据槽 @+64（fib 体 @16 起）。
+            // ⚠️ 2026-10-15 修两处手编 bug（gdb 栈取证）：
+            //   1) 自调 disp 差 1（目标 15——靠 nop 滑进 16 碰巧能用），
+            //      现精确指向 fib@16（E8EAFFFFFF / E8DEFFFFFF）。
+            //   2) jge +4 实际落在 push rbx（跳过 push rsi）→ 每层递归
+            //      少 push 一个、返回时 pop 两个 → rsp 每层上漂 8 字节，
+            //      fib(40) 递归数百层后 push 打到 JIT 块外的未映射页
+            //      （gdb 实测 rsp=0x404000、rip 落在 mov rsi,rcx 中段）。
+            //      根因：早期把 3 字节 lea eax,[rcx-1] 缩成 2 字节
+            //      mov eax,ecx 时 jge 位移没跟着减。现 +3 精确指向 push rsi。
+            hex = "488B0D39000000EB079090909090909083F9027D038BC1C356534889CE488D4EFFE8EAFFFFFF4889C3488D76FEE8DEFFFFFF4801D85B5EC3"
         }
         val entry = be.emitFunction("bench_fn", hex)
+        if (entry == 0) {
+            println("[BENCH-ERROR] emitFunction returned 0")
+            return 1
+        }
         // n 写入数据槽（JIT 区 +64，8 字节 LE；机器码 [rip+disp] 读取）
         Memory.write64((entry + 64) as Long, n as Long)
+        println("[BENCH-ENTRY] " + toStr(entry) + " ok")
         // 内存转储（AURA_BENCH_DUMP=1）：验证 writeCode 真实写入
         if (Env.get("AURA_BENCH_DUMP", "") == "1") {
             var di: Int = 0
@@ -326,26 +356,37 @@ fun main(): Int {
                 di = di + 1
             }
         }
-        if (entry == 0) {
-            println("[BENCH-ERROR] emitFunction returned 0")
-            return 1
-        }
-        // 正确性哨兵（小 n）
-        val chk: Long = be.executeNative(entry, 10)
+        // 正确性哨兵（小 n）。
+        // ⚠️ 2026-10-15：改走 executeNative0（call0 单参形态）——机器码本就
+        // 从数据槽 [rip+disp] 读 n（见上方 hex 注释），arg0 形同虚设；
+        // 而 2 参 extern（executeNative→callI64）在当前发射器布局下稳定
+        // 走进 P5-① 实参/栈腐坏轮盘（gdb 实测 ret→0，rdx=arg0 正确、
+        // rax=入口槽被写 2）。单参窗无轮盘面。
+        val chk: Long = be.executeNative0(entry)
         val chkI: Int = chk as Int
-        println("[BENCH-CHK] " + toStr(chkI))
+        println("[BENCH-CHK]")
+        println(toStr(chkI))
         ClockImpl.init()
-        val t0: Long = ClockImpl.timeNs()
-        val r: Long = be.executeNative(entry, n)
-        val t1: Long = ClockImpl.timeNs()
+        val t0: Long = clockNowMs()
+        val r: Long = be.executeNative0(entry)
+        val t1: Long = clockNowMs()
+        println("[BENCH-TDONE]")
         // ⚠️ P5-②：Long 拼接打印在原生 Photon 代码下不可靠（实测静默
-        // 丢失），全部拆为独立行 + Int 化。
-        val wallMs: Int = ((t1 - t0) / 1000000) as Int
+        // 丢失/错位），全部「先 toStr 成独立局部，再单次拼接」。
+        val dt: Long = t1 - t0
+        val wallMs: Int = dt as Int
         val rLow: Int = r as Int
-        println("[BENCH] kind=" + bench)
-        println("[BENCH-N] " + nStr)
-        println("[BENCH-RESULT-LOW32] " + toStr(rLow))
-        println("[BENCH-WALL-MS] " + toStr(wallMs))
+        val rLowS: String = toStr(rLow)
+        // ⚠️ wall 用 Aura 层 intToStr（toStr 是 extern 窗，第二 extern
+        // 调用后的首个 toStr 结果槽在本布局下恒 null——P5-①）。
+        val wallS: String = JitStackMapUtils.intToStr(wallMs)
+        val nOut: String = toStr(n)
+        val kindOut: String = toStr(kind)
+        println("[BENCH] kind=" + kindOut)
+        println("[BENCH-N] " + nOut)
+        println("[BENCH-RESULT-LOW32] " + rLowS)
+        println("[BENCH-WALL-MS]")
+        println(wallS)
         println("[BENCH-DONE]")
         return 0
     }

@@ -24,6 +24,7 @@ import aura.lang.native.memory.Allocator
 import aura.lang.native.console.Console
 import aura.lang.native.file.FileOps
 import aura.lang.native.Syscalls
+import aura.lang.std.string.StringBuilder
 
 /// 高级标准 I/O（纯 Aura 实现，委托到 native 包）
 object Stdio {
@@ -77,33 +78,36 @@ object Stdio {
 
     /// 将内存缓冲区转换为 Aura String（不包含 NUL 终止符）。
     ///
-    /// **零拷贝**：Aura(AOT) 的 `String` 与 C 字符串同为「NUL 结尾的 `i8*`」，
-    /// 因此只需在 `maxLen` 处补一个 NUL，即可把缓冲区**本身**当作字符串返回。
+    /// 缓冲区 → Aura String（遇 NUL 截断）。
     ///
-    /// 旧实现逐字符 `result = result + String.fromCharCode(c)`：每次拼接都要
-    /// 复制已累积的整段前缀 → 读取 n 字节文件要分配约 n²/2 字节。
-    /// 实测：自举编译器读取自身 300 KB 源码时因此吃掉数十 GB 内存、单文件
-    /// 耗时 >20 秒（种子编译器由 Rust 后端生成、该模式被优化掉，故只有
-    /// 自举产物会暴露）。
+    /// 实现：`StringBuilder.appendByte`（摊销 O(1)，容量倍增）逐字节追加，
+    /// 末尾一次 `build()`（`ReadCStr` 独立拷贝，AOT/VM 双后端一致）。
     ///
-    /// **注意**：返回的字符串与 `buf` 是同一块内存 —— 调用方此后**不得**
-    /// `Allocator.free(buf)`。
+    /// ⚠ 历史两个坑（都实测过）：
+    ///   1. 零拷贝「在 `maxLen` 处补 NUL，返回 `buf` 本身」——AOT 下成立
+    ///      （String 就是 `i8*`），但种子 VM 的 String 是 Rust String，
+    ///      返回 Long 实测得到「指针值的十进制文本」（R67 前的状态）。
+    ///   2. R67 改成「`out = out + String.fromCharCode(c)` 逐字符拼接」——
+    ///      语义对了，但每次 `+` 复制整段已累积前缀 → 读 n 字节分配
+    ///      ≈ n²/2 字节。自举驱动全量构建读 370KB 的 PhotonRuntime.aura
+    ///      需要 ≈68GB，2026-10-15 实测 AURA_MEM_LIMIT_MB=24576 直接 OOM
+    ///      （见 build/jit-verify/diag2.txt：单拼接点 23 万次调用 1990MB）。
+    ///      本版恢复线性。
+    ///
+    /// **注意**：返回的 String 是独立内存，与 `buf` 解耦 —— 调用方此后
+    /// 可以 `Allocator.free(buf)`（逐字节循环里 `Memory.read` 只读不写）。
     fun bufferToString(buf: Long, maxLen: Long): String {
         if (buf == 0) { return "" }
         if (maxLen <= 0) { return "" }
-        // 从 buf 读 maxLen 字节 → 转字符。
-        // 旧实现是「零拷贝」返回 buf 本身当 String——这在种子 VM 下
-        // 不成立（VM 的 String 是 Rust String，不是裸指针），实测返回
-        // 结果是一个 i64 指针值十进制。改为按字节读入。
-        var out: String = ""
+        val sb: StringBuilder = StringBuilder()
         var i: Long = 0
         while (i < maxLen) {
             val c: Int = Memory.read(buf + i)
             if (c == 0) { break }
-            out = out + String.fromCharCode(c)
+            sb.appendByte(c)
             i = i + 1
         }
-        return out
+        return sb.build()
     }
 
     /// 计算缓冲区中字符串的长度（不含 NUL 终止符）。
@@ -179,8 +183,10 @@ object Stdio {
             }
             i = i + 1
         }
-        // 零拷贝：缓冲区即返回字符串，不能再 free
-        return bufferToString(buf, end)
+        // bufferToString 返回独立字符串，缓冲区可归还
+        val line: String = bufferToString(buf, end)
+        Allocator.free(buf)
+        return line
     }
 
     /// 从标准输入读取全部（直到 EOF）。
@@ -200,8 +206,10 @@ object Stdio {
             Allocator.free(buf)
             return ""
         }
-        // 零拷贝：缓冲区即返回字符串，不能再 free
-        return bufferToString(buf, total)
+        // bufferToString 返回独立字符串，缓冲区可归还
+        val out: String = bufferToString(buf, total)
+        Allocator.free(buf)
+        return out
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -258,8 +266,11 @@ object Stdio {
             FileOps.close(fd)
             return ""
         }
-        // 零拷贝：缓冲区即返回字符串（bufferToString 会补 NUL），不能再 free
+        // bufferToString 返回独立字符串（见其注释），缓冲区这里归还
+        // （旧零拷贝契约「不能再 free」已失效；不 free 会让每个源文件的
+        // 缓冲区驻留到进程退出——闭包 6.2MB 全量 ≈ 双倍占用）。
         val content: String = bufferToString(buf, total)
+        Allocator.free(buf)
         FileOps.close(fd)
         return content
     }
