@@ -10,7 +10,6 @@
 import aura.lang.std.String
 import aura.lang.compiler.jit.JitState
 import aura.lang.compiler.jit.JitDispatch
-import aura.lang.compiler.jit.JitDecide
 import aura.lang.compiler.photon.JitBackend
 
 var passCount: Int = 0
@@ -49,7 +48,7 @@ fun main() {
         k = k + 1
     }
     ok("A2 计数 4 未达阈值", st.reachThreshold(3) as Int, 0)
-    okStr("A2 决策=DEFER", JitDispatch.jitDecide(st, 3), JitDecide.DEFER)
+    okStr("A2 决策=DEFER", JitDispatchUtils.jitDecide(st, 3), JitDecide.DEFER)
     st.incCallCount(3)
     ok("A3 计数 5 达阈值", st.reachThreshold(3) as Int, 1)
     ok("A3 shouldCompile=true", st.shouldCompile(3) as Int, 1)
@@ -64,21 +63,28 @@ fun main() {
     ok("B1 emitFunction 非零（守卫下为模拟地址）", b1, 1)
     st.insert(3)
     ok("B2 insert 后 isCompiled", st.isCompiled(3) as Int, 1)
-    okStr("B3 决策=NATIVE", JitDispatch.jitDecide(st, 3), JitDecide.NATIVE)
-    ok("B3 兜底原因=空", JitDispatch.jitFallbackReason(st, 3), "")
+    okStr("B3 决策=NATIVE", JitDispatchUtils.jitDecide(st, 3), JitDecide.NATIVE)
+    ok("B3 兜底原因=空", JitDispatchUtils.jitFallbackReason(st, 3), "")
 
     // ── C. SKIP 白名单路径 ──
     st.skip(9, "opcode-not-whitelisted")
-    okStr("C1 决策=SKIP", JitDispatch.jitDecide(st, 9), JitDecide.SKIP)
-    okStr("C1 兜底原因", JitDispatch.jitFallbackReason(st, 9), "opcode-not-whitelisted")
+    okStr("C1 决策=SKIP", JitDispatchUtils.jitDecide(st, 9), JitDecide.SKIP)
+    okStr("C1 兜底原因", JitDispatchUtils.jitFallbackReason(st, 9), "opcode-not-whitelisted")
     ok("C1 skippedCount=1", st.skippedCount(), 1)
 
     // ── D. 编译顺序（调用图后序）──
-    // funcs 格式与 JitState.plan 一致：idx|name;idx|name...
-    val order: String = JitState.jitCompileOrder("0|callee;1|caller", 1)
+    // funcs 表格式（JitUtil.aura:103）：每行一个函数记录，`\n` 分隔；
+    // 字段 `idx|name|size|native|arity|callees`。callees 是被调函数
+    // 序号的逗号分隔列表。此处构造「idx=1 的 caller 调用 idx=0 的 callee」：
+    //   行 0：idx=0, name="callee", size=1, native=0, arity=0, callees=""
+    //   行 1：idx=1, name="caller", size=1, native=0, arity=0, callees="0"
+    // 从 idx=1 出发做后序遍历，应先登 callee(0) 再登 caller(1)。
+    val funcs: String = "0|callee|1|0|0|" + "\n" + "1|caller|1|0|0|0" + "\n"
+    val order: String = JitStateUtils.jitCompileOrder(funcs, 1)
+    // order 是 idx 行表（"0\n1\n"），检查后序：callee(idx=0) 在 caller(idx=1) 之前
     var d1: Int = 0
-    if (order.indexOf("callee") >= 0) { d1 = 1 }
-    ok("D1 编译顺序含 callee", d1, 1)
+    if (order.indexOf("0") >= 0 && order.indexOf("0") < order.indexOf("1")) { d1 = 1 }
+    ok("D1 编译顺序 callee(0) 先于 caller(1)", d1, 1)
 
     // ── E. 守卫模式下 executeNative 仍为 0（模拟对称性）──
     val r: Long = be.executeNative(entry, 20)

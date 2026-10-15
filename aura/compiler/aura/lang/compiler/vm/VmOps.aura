@@ -840,13 +840,24 @@ object VmOps {
         // 标签分派：装箱整数（奇数）→ 拆箱 toStr；真实指针（字符串等）→
         // 原样；null → "null"。种子 VM 下 isTaggedInt 恒 false，typeof 准确，
         // 走指针分支 = 字符串原样，行为不变。
+        // R65：种子 VM 下 Boolean/Int 也不是 tagged（isTaggedInt 恒 false），
+        // 但 `v as String` 对 int64 载荷会抛 "as cast failed"。走 typeof
+        // 分支：Int/Boolean → 打十进制；String → 原样；其它 → "null"。
         if (v == null) {
             return "null"
         }
         if (isTaggedInt(v)) {
             return toStr(intOf(v))
         }
-        return v as String
+        // 种子 VM：typeof 区分 Int/Boolean/String。
+        val kind: String = VmOps.typeof(v)
+        if (kind == "Int" || kind == "Long" || kind == "Boolean") {
+            return toStr(v as Long)
+        }
+        if (kind == "String") {
+            return v as String
+        }
+        return toStr(v)
     }
 
     /// Int → String（不依赖 toStr，避免 AOT 转换问题）。

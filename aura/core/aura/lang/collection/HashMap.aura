@@ -393,7 +393,11 @@ class HashMap<K, V> : Map<K, V> {
         // ⚠️ P237：key 类型收紧为 String 局部——`key.hashCode()`（key: Any）
         // 会派发到裸名 hashCode（无 this 的旧展平形态）；String 局部的
         // `.hashCode()` 才会限定到 String_hashCode（带 this 的新定义）。
-        val ks: String = key as String
+        // R65：key 未必是 String（JitState.aura 用 HashMap<Int, ...>），
+        // `as String` 对 Int/Boolean key 抛 "as cast failed"。改用 toStr()
+        // 统一转字符串再 hash——toStr 对所有内置类型安全，String 局部的
+        // .hashCode() 保证派发到 String_hashCode 而非裸名。
+        val ks: String = toStr(key)
         return ks.hashCode() * 31 + 0
     }
 
