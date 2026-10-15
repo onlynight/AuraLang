@@ -91,8 +91,19 @@ object Stdio {
     fun bufferToString(buf: Long, maxLen: Long): String {
         if (buf == 0) { return "" }
         if (maxLen <= 0) { return "" }
-        Memory.write(buf + maxLen, 0 as Byte)
-        return buf
+        // 从 buf 读 maxLen 字节 → 转字符。
+        // 旧实现是「零拷贝」返回 buf 本身当 String——这在种子 VM 下
+        // 不成立（VM 的 String 是 Rust String，不是裸指针），实测返回
+        // 结果是一个 i64 指针值十进制。改为按字节读入。
+        var out: String = ""
+        var i: Long = 0
+        while (i < maxLen) {
+            val c: Int = Memory.read(buf + i)
+            if (c == 0) { break }
+            out = out + String.fromCharCode(c)
+            i = i + 1
+        }
+        return out
     }
 
     /// 计算缓冲区中字符串的长度（不含 NUL 终止符）。

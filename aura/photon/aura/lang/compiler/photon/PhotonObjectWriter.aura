@@ -2322,22 +2322,22 @@ class PhotonObjectWriter {
 object PhotonObjectWriterUtils {
 
     /// COFF 常量。
-    val COFF_MACHINE_AMD64: Int = 0x8664
-    val COFF_CHAR_EXECUTABLE: Int = 0x0102
-    val SECTION_CODE: Int = 0x20
-    val SECTION_MEM_READ: Int = 0x40000000
-    val SECTION_MEM_EXECUTE: Int = 0x20000000
-    val SECTION_MEM_WRITE: Int = 0x80000000
-    val SECTION_ALIGN_16: Int = 0x0010
-    val REL32: Int = 0x04
+    const val COFF_MACHINE_AMD64: Int = 0x8664
+    const val COFF_CHAR_EXECUTABLE: Int = 0x0102
+    const val SECTION_CODE: Int = 0x20
+    const val SECTION_MEM_READ: Int = 0x40000000
+    const val SECTION_MEM_EXECUTE: Int = 0x20000000
+    const val SECTION_MEM_WRITE: Int = 0x80000000
+    const val SECTION_ALIGN_16: Int = 0x0010
+    const val REL32: Int = 0x04
 
     /// ELF 常量。
-    val ELF_MAGIC: Int = 0x7F454C46
-    val ELF_CLASS64: Int = 2
-    val ELF_DATA_LE: Int = 1
-    val ELF_TYPE_REL: Int = 1
-    val ELF_MACHINE_X86_64: Int = 62
-    val ELF_VERSION: Int = 1
+    const val ELF_MAGIC: Int = 0x7F454C46
+    const val ELF_CLASS64: Int = 2
+    const val ELF_DATA_LE: Int = 1
+    const val ELF_TYPE_REL: Int = 1
+    const val ELF_MACHINE_X86_64: Int = 62
+    const val ELF_VERSION: Int = 1
 
     /// 创建空的 AOT 后端。
     fun emptyBackend(): PhotonObjectWriter {

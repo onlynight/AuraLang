@@ -2027,14 +2027,53 @@ fn native_fileops_open(args: &[Value]) -> Value {
     }
     #[cfg(windows)]
     {
-        flags |= 0x8000; // _O_BINARY：按字节读，忽略 0x1A
+        // Aura 的 FileOps 常量用 POSIX 值，MSVC CRT 期望不同值。位翻译：
+        //   POSIX O_CREAT(0x40)  →  MSVC O_CREAT(0x100)
+        //   POSIX O_TRUNC(0x200) →  MSVC O_TRUNC(0x200)  (相同，不动)
+        // 其余 O_WRONLY(1)/O_RDWR(2) 两边一致。
+        // 关键：MSVC 上 0x40 是 _O_TEMPORARY（文件 close 时自动删除），
+        // 若不做翻译，File.writeText 每次调用后文件都会消失——实测
+        // `aura_runtime.obj.syms` 写入后立刻不存在。
+        if flags & 0x40 != 0 {
+            flags = (flags & !0x40) | 0x100;
+        }
+        // MSVC 的 _O_BINARY = 0x8000（_O_TEXT = 0x4000 是相反含义）。
+        // 不加 _O_BINARY 时 CRT 默认 O_TEXT：read 遇 0x1A 截断，写自动
+        // LF→CRLF 换行。二进制 .obj/.auc 会被污染。
+        // 若误传 _O_TEXT(0x4000)，_open 拒绝（实测 fd=-1）。
+        flags |= 0x8000;
     }
     // Read the path string from memory
     let c_str = unsafe { std::ffi::CStr::from_ptr(path as *const libc::c_char) };
     match c_str.to_str() {
         Ok(s) => {
-            let fd = unsafe { libc::open(s.as_ptr() as *const i8, flags) };
-            Value::Int(fd as i64)
+            #[cfg(windows)]
+            {
+                // MSVC `_open` 不带 mode 参数，创建的文件默认 A+R
+                // （archive+readonly），导致第二次打开（O_TRUNC）因
+                // readonly 属性拒绝写入 → fd=-1。改用 `_wsopen`
+                // （带 shflag=0x30=_SH_DENYNO, uimode=0x06=_S_IREAD|_S_IWRITE）
+                // 创建可写文件。
+                unsafe extern "C" {
+                    #[link(name = "ucrt")]
+                    fn _wsopen(
+                        filename: *const u16, oflag: i32,
+                        shflag: i32, uimode: i32,
+                    ) -> i32;
+                }
+                use std::os::windows::ffi::OsStrExt;
+                let wide: Vec<u16> = std::ffi::OsStr::new(s)
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let fd = unsafe { _wsopen(wide.as_ptr(), flags, 0x30, 0x180) };
+                Value::Int(fd as i64)
+            }
+            #[cfg(not(windows))]
+            {
+                let fd = unsafe { libc::open(s.as_ptr() as *const i8, flags) };
+                Value::Int(fd as i64)
+            }
         }
         Err(_) => Value::Int(-1),
     }

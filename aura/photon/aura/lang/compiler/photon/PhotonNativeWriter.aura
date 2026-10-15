@@ -9,7 +9,7 @@ import aura.lang.std.Env
 
 object PhotonNativeWriter {
 
-    val O_WRONLY_CREAT_TRUNC: Int = 1 | 0x40 | 0x200
+    const val O_WRONLY_CREAT_TRUNC: Int = 1 | 0x40 | 0x200
 
     /// 把 COFF hex 文本解码为字节并写入 path。
     /// 单次大缓冲区写入，避免循环中的 FileOps.write 崩溃。
@@ -73,7 +73,11 @@ object PhotonNativeWriter {
         FileOps.close(fd)
         Memory.free(dataBuf)
         Memory.free(pathBuf)
-        return n == total as Long
+        // ⚠️ VM bug workaround：`return a == b` 中 `a/b` 均为 Long 时
+        // 返回值为 Int64(1) 而非 Boolean(true=-1)；`!1 = -2`（truthy），
+        // 导致调用方 `if (!ok)` 永远走失败分支。显式转 Boolean。
+        if (n == total as Long) { return true }
+        return false
     }
 
     /// 分片写二进制 COFF：逐片段解码 → 追加写，**不物化整串 hex**。

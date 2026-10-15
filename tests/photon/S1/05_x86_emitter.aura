@@ -12,14 +12,16 @@ fun main() {
     var pass: Int = 0
     var fail: Int = 0
 
-    // ── [1] 穀DAG ──
-    println("[1] 穀DAG")
+    // ── [1] 空DAG ──
+    // 空 DAG 应产出空 hex（无指令 → 无字节）。此断言验证 emitter 对
+    // 空输入的稳健处理：不抛异常、输出为空串。
+    println("[1] 空DAG")
     val d1 = MachineDagUtils.emptyDag()
     val e1 = X86EmitterUtils.emptyEmitter()
     e1.emitFunction(d1, "test")
     val hex1 = e1.getOutputHex()
-    if (hex1 != "") { pass = pass + 1; println("  hex len=" + hex1.length) }
-    else { fail = fail + 1 }
+    if (hex1 == "") { pass = pass + 1; println("  hex empty (expected)") }
+    else { fail = fail + 1; println("  hex len=" + hex1.length) }
 
     // ── [2] 常量指令 ──
     println("[2] 常量指令 (mov eax, 42)")
