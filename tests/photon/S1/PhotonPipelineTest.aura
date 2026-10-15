@@ -207,7 +207,7 @@ fun main() {
     if (passCount == totalTests) {
         println("RESULT: PASS  S1 管线集成测试全部通过")
     } else {
-        println("RESULT: FAIL  " + (totalTests - passCount) + " 项失贀)
+        println("RESULT: FAIL  " + (totalTests - passCount) + " 项失败")
     }
     println("══════════════════════════════════════════════")
 }
