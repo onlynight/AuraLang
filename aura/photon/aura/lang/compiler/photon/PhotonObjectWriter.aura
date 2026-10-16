@@ -495,24 +495,18 @@ class PhotonObjectWriter {
             if (this.stringConsts != "") {
                 dataSecNum = 3
             }
-            val dparts: List<String> = this.splitComma(this.dataSymbolName)
-            var dataOff: Int = 0
-            var di: Int = 0
-            while (di < dparts.size) {
-                val spec: String = dparts[di]
-                if (spec != "") {
-                    var nm: String = spec
-                    var sz: Int = 8
-                    val colon: Int = spec.indexOf(":")
-                    if (colon > 0) {
-                        nm = spec.substring(0, colon)
-                        sz = this.strToInt(spec.substring(colon + 1))
-                    }
-                    recs.add(nm + "|" + this.toStr(dataOff) + "|" + this.toStr(dataSecNum) + "|0|2")
-                    dataOff = dataOff + sz
-                }
-                di = di + 1
-            }
+            // ⚠️ P5-① 根修第二刀（2026-10-16）：.data 符号发射改**标量直扫**。
+            // 旧实现 splitComma 物化 66 项 List 再迭代——本函数同时持有
+            // funcParts/offsetParts/parsed/recs/dparts/bparts 六个 List 实例，
+            // 66 项长 CSV 下累加器间歇不前进（runtime obj nm 实证：
+            // objSlots/vehFlag 同偏移 0x10f8、allocRing/crashBuf 同偏移
+            // 0x1100、47 个 vtable 仅 18 个独立偏移 ⇒ 单例槽表只有 8 字节，
+            // 槽号 66 越界直踩 strRing——stOk 的 SelfTestCounters 字段写
+            // 拿到 strRing 残留的 .rdata 字面量指针 = 自检确定性段错误）。
+            // 隔离复刻（单 List）同逻辑同输入完全正确 ⇒ 多 List 实例互扰
+            // （R-v3 缺陷族）。本函数与 bss 循环改为单遍 charCodeAt 扫描 +
+            // 扁平串（";;" 预连接，joinRecords 对合并条目透明）。
+            this.appendDataSpecRecords(this.dataSymbolName, dataSecNum, recs)
         }
 
         // 2c) .bss 节符号（[MEM-FIX] 未初始化数据，如静态堆 heapArena）：
@@ -523,24 +517,7 @@ class PhotonObjectWriter {
             var bssSecNum: Int = 2
             if (this.stringConsts != "") { bssSecNum = bssSecNum + 1 }
             if (this.dataSymbolName != "") { bssSecNum = bssSecNum + 1 }  // 声明式数据也会合成 .data
-            val bparts: List<String> = this.splitComma(this.bssSymbolName)
-            var bOff: Int = 0
-            var bi: Int = 0
-            while (bi < bparts.size) {
-                val spec: String = bparts[bi]
-                if (spec != "") {
-                    var nm: String = spec
-                    var sz: Int = 8
-                    val colon: Int = spec.indexOf(":")
-                    if (colon > 0) {
-                        nm = spec.substring(0, colon)
-                        sz = this.strToInt(spec.substring(colon + 1))
-                    }
-                    recs.add(nm + "|" + this.toStr(bOff) + "|" + this.toStr(bssSecNum) + "|0|2")
-                    bOff = bOff + sz
-                }
-                bi = bi + 1
-            }
+            this.appendDataSpecRecords(this.bssSymbolName, bssSecNum, recs)
         }
 
         // 3) 重定位引用的外部符号（section = 0 表示未定义，由链接器解析）
@@ -557,6 +534,49 @@ class PhotonObjectWriter {
         this.objwProbe("sym4 joining recs=" + this.toStr(recs.size))
         this.symbols = this.joinRecords(recs)
         this.objwProbe("sym4 done symChars=" + this.toStr(this.symbols.length))
+    }
+
+    /// `name:size` CSV → 符号记录，标量直扫版（P5-① 根修第二刀，2026-10-16）。
+    ///
+    /// 语义与旧 splitComma+List 迭代逐条等价：无冒号条目按 8 字节、
+    /// 空段跳过（不计偏移）。所有状态都是 Int/String 标量局部——本函数
+    /// 不物化任何 List（同函数多 List 实例互扰 = R-v3 缺陷族，66 项长
+    /// CSV 在 buildSymbols 的六 List 语境下累加器间歇不前进，实测把
+    /// runtime objSlots 表坍缩成 8 字节）。记录以 ";;" 预连接成**单个**
+    /// recs 条目：joinRecords 在条目间插 ";;"，合并条目与多条目最终
+    /// symbols 串逐字节一致（splitDoubleSemi 消费端无感）。
+    private fun appendDataSpecRecords(specCsv: String, secNum: Int, recs: List<String>): Unit {
+        var dataOff: Int = 0
+        var dataRecs: String = ""
+        var segStart: Int = 0
+        var pos: Int = 0
+        val dLen: Int = specCsv.length
+        while (pos <= dLen) {
+            if (pos == dLen || this.chEq(specCsv, pos, ",")) {
+                if (pos > segStart) {
+                    var colon: Int = -1
+                    var p: Int = segStart
+                    while (p < pos) {
+                        if (this.chEq(specCsv, p, ":")) { colon = p; p = pos }
+                        p = p + 1
+                    }
+                    var sz: Int = 8
+                    var nm: String = ""
+                    if (colon > segStart) {
+                        nm = specCsv.substring(segStart, colon)
+                        sz = this.strToInt(specCsv.substring(colon + 1, pos))
+                    } else {
+                        nm = specCsv.substring(segStart, pos)
+                    }
+                    val rec: String = nm + "|" + this.toStr(dataOff) + "|" + this.toStr(secNum) + "|0|2"
+                    if (dataRecs == "") { dataRecs = rec } else { dataRecs = dataRecs + ";;" + rec }
+                    dataOff = dataOff + sz
+                }
+                segStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        if (dataRecs != "") { recs.add(dataRecs) }
     }
 
     // ── 重定位表构建 ──
@@ -1557,20 +1577,31 @@ class PhotonObjectWriter {
     /// `name:size` 逗号表的总字节数（无名者 8）。
     private fun computeDeclaredSize(specCsv: String): Int {
         if (specCsv == "") { return 0 }
-        val specs: List<String> = this.splitComma(specCsv)
+        // ⚠️ P5-① 根修第二刀（2026-10-16）：标量直扫（同 appendDataSpecRecords
+        // 的理由——多 List 语境下 splitComma 路径累加器间歇不前进；本函数
+        // 算错会让 [P40x-h] 的 .data 补零欠账，尾部符号重新落进 bss 互踩）。
         var declared: Int = 0
-        var i: Int = 0
-        while (i < specs.size) {
-            val spec: String = specs[i]
-            if (spec != "") {
-                val colon: Int = spec.indexOf(":")
-                if (colon > 0) {
-                    declared = declared + this.strToInt(spec.substring(colon + 1))
-                } else {
-                    declared = declared + 8
+        var segStart: Int = 0
+        var pos: Int = 0
+        val len: Int = specCsv.length
+        while (pos <= len) {
+            if (pos == len || this.chEq(specCsv, pos, ",")) {
+                if (pos > segStart) {
+                    var colon: Int = -1
+                    var p: Int = segStart
+                    while (p < pos) {
+                        if (this.chEq(specCsv, p, ":")) { colon = p; p = pos }
+                        p = p + 1
+                    }
+                    if (colon > segStart) {
+                        declared = declared + this.strToInt(specCsv.substring(colon + 1, pos))
+                    } else {
+                        declared = declared + 8
+                    }
                 }
+                segStart = pos + 1
             }
-            i = i + 1
+            pos = pos + 1
         }
         return declared
     }
