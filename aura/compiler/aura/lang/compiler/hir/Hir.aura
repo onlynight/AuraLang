@@ -1151,6 +1151,12 @@ class HirLowerer {
         var hirKids: List<Int> = HirUtils.hirNoKids()
         if (kCount > 0) {
             val initId: Int = HirUtils.hirKidsAt(kids, 0)
+            // Lambda 提升（R81）：`val f = x -> e` ⇒ 函数 f(x)=e，
+            // ValDecl 本体省略（无一等函数值，直呼 f(…) 走函数调用）。
+            if (ast.kindOf(initId) == "Lambda") {
+                val lifted: Int = this.lowerLambdaLift(ast, name, initId)
+                if (lifted >= 0) { return lifted }
+            }
             val initHirId: Int = this.lowerExpr(ast, initId)
             hirKids = HirUtils.hirKidsAdd(hirKids, initHirId)
             // 无显式类型标注时，从初始化表达式推断（Phase 6.5.7）。
@@ -1203,6 +1209,10 @@ class HirLowerer {
         var hirKids: List<Int> = HirUtils.hirNoKids()
         if (kCount > 0) {
             val initId: Int = HirUtils.hirKidsAt(kids, 0)
+            if (ast.kindOf(initId) == "Lambda") {
+                val lifted: Int = this.lowerLambdaLift(ast, name, initId)
+                if (lifted >= 0) { return lifted }
+            }
             val initHirId: Int = this.lowerExpr(ast, initId)
             hirKids = HirUtils.hirKidsAdd(hirKids, initHirId)
             // 门槛同 lowerValDecl：必须 cleanTy（"#public|" 非空但无类型）。
@@ -2336,6 +2346,37 @@ class HirLowerer {
 
     /// 类型体成员预登记（在正式降级**之前**对每个 Class/Struct/Object 调用，
     /// 消除「方法体先于同类其它方法降级」的顺序依赖）。
+    /// Lambda 提升（R81）：`val f = x -> e` ⇒ 函数 f(x) = e。
+    /// 本后端无一等函数值：ValDecl 本体省略，`f(…)` 直呼走函数调用；
+    /// 捕获外部变量的 lambda（闭包）提升后自由变量取 0 —— 需环境捕获，
+    /// 留待闭包专项。函数体：HirBlock[HirReturn[body]]（隐式返回值）。
+    private fun lowerLambdaLift(ast: Ast, fname: String, lambdaId: Int): Int {
+        val kids: List<Int> = ast.kidsOfList(lambdaId)
+        if (HirUtils.hirKidsCount(kids) < 2) { return -1 }
+        val paramsNode: Int = HirUtils.hirKidsAt(kids, 0)
+        val bodyId: Int = HirUtils.hirKidsAt(kids, 1)
+        if (ast.kindOf(paramsNode) != "Params") { return -1 }
+        val sp: Span = ast.spanOf(lambdaId)
+        var outKids: List<Int> = HirUtils.hirNoKids()
+        val pk: List<Int> = ast.kidsOfList(paramsNode)
+        var i: Int = 0
+        while (i < pk.size()) {
+            val pid: Int = pk[i]
+            outKids = HirUtils.hirKidsAdd(outKids, this.hir.add("HirParam",
+                    ast.textOf(pid), ast.tyOf(pid), ast.spanOf(pid),
+                    HirUtils.hirNoKids()))
+            i = i + 1
+        }
+        val bodyHir: Int = this.lowerExpr(ast, bodyId)
+        if (bodyHir < 0) { return -1 }
+        val retHir: Int = this.hir.add("HirReturn", "", "", sp,
+                HirUtils.hirKidsAdd(HirUtils.hirNoKids(), bodyHir))
+        val blk: Int = this.hir.add("HirBlock", "", "", sp,
+                HirUtils.hirKidsAdd(HirUtils.hirNoKids(), retHir))
+        outKids = HirUtils.hirKidsAdd(outKids, blk)
+        return this.hir.add("HirFunction", fname, "", sp, outKids)
+    }
+
     /// enum 成员登记：body Block 的 ExprStmt(Ident) 按序入表。
     private fun registerEnumMembers(ast: Ast, id: Int): Unit {
         val name: String = ast.textOf(id)

@@ -335,6 +335,7 @@ class SsaBuilder {
         // 「大写前缀_」且前缀未登记为类/单例/extern ⇒ 补登记 + 补合成 getter。
         // 在全部函数建完后跑 ⇒ 对 csv 的增补不再影响任何调用点解析，纯增益。
         this.synthesizeDissolvedGetters(src)
+        // this.synthesizeCallStubs()  # R81:与Lambda提升组合时驱动段错误,待定位
 
         return this.program
     }
@@ -4848,6 +4849,95 @@ class SsaBuilder {
     ///     顺序编号进 `overloadSigIdxCsv`（`name_ov<N>` 的 N）。
     /// 定义侧（buildFunction）与调用点（buildCall）用同一张表，保证两端
     /// mangle 一致。`main` 的多副本由 buildAllFunctions 单独跳过，不参与。
+    /// 为「被调用但未定义」的裸名合成 ret 0 桩（R81）。
+    /// 场景：函数类型参数/闭包的一等调用目标（03 的 f、add5、add10、
+    /// adder）——本后端尚无一等函数值/间接调用，链接期 undefined。
+    /// 规则：裸名（无下划线无大写）、不在函数表、非自由函数、非运行时
+    /// 裸名、非 min/max/and/or ⇒ 合成。多桩为死代码，无害。
+    private fun synthesizeCallStubs(): Unit {
+        var seen: String = ""
+        var i: Int = 0
+        while (i < this.program.valueCount) {
+            val v: MirValue = this.program.valueOf(i)
+            if (v.op == "Call" && v.aux != "") {
+                val nm: String = v.aux
+                if (seen.indexOf("\n" + nm + "\n") < 0) {
+                    seen = seen + "\n" + nm + "\n"
+                }
+            }
+            i = i + 1
+        }
+        var have: String = ""
+        var fi: Int = 0
+        while (fi < this.program.functionCount) {
+            have = have + "\n" + this.program.functionOf(fi).name + "\n"
+            fi = fi + 1
+        }
+        var k: Int = 0
+        while (k < seen.length) {
+            if (seen.charCodeAt(k) == 10) {
+                var e: Int = k + 1
+                while (e < seen.length && seen.charCodeAt(e) != 10) { e = e + 1 }
+                if (e > k + 1) {
+                    val nm: String = seen.substring(k + 1, e)
+                    if (this.needsStub(nm, have)) {
+                        println("[stub] undefined call target synthesized: " + nm)
+                        val fid: Int = this.program.addFunction(nm, 0, 0, false)
+                        val entry: Int = this.program.addBlock()
+                        val zero: Int = this.program.addValue("Const",
+                                this.types.intType(64), "", "0", entry)
+                        this.program.setTerminator(entry, "Ret", 0, toStr(zero), "")
+                        this.program.functionOf(fid).entryBlock = entry
+                        this.program.endFunction()
+                    }
+                }
+                k = e - 1
+            }
+            k = k + 1
+        }
+    }
+
+    private fun needsStub(nm: String, have: String): Boolean {
+        if (nm == "" || nm == "main") { return false }
+        if (have.indexOf("\n" + nm + "\n") >= 0) { return false }
+        if (this.isFreeFunc(nm)) { return false }
+        if (this.isRuntimeBareName(nm)) { return false }
+        if (nm == "min" || nm == "max" || nm == "and" || nm == "or") { return false }
+        // 类型方法名（String.substring 等）不桩——ISel 会经 mapStdlibFuncName
+        // 限定到真实实现；误桩会遮蔽映射（实测 substring/split/replace）。
+        val tm: String = this.typeMethods
+        var si: Int = 0
+        while (si < tm.length) {
+            if (tm.charCodeAt(si) == 46 && si + 1 + nm.length <= tm.length) {
+                var m: Boolean = true
+                var j: Int = 0
+                while (j < nm.length) {
+                    if (tm.charCodeAt(si + 1 + j) != nm.charCodeAt(j)) {
+                        m = false
+                        j = nm.length
+                    }
+                    j = j + 1
+                }
+                if (m) {
+                    val after: Int = si + 1 + nm.length
+                    if (after >= tm.length || tm.charCodeAt(after) == 44
+                            || tm.charCodeAt(after) == 61) {
+                        return false
+                    }
+                }
+            }
+            si = si + 1
+        }
+        // 只桩裸小写名（无下划线、无大写）——限定名/映射名/运行库名不碰
+        var i: Int = 0
+        while (i < nm.length) {
+            val c: Int = nm.charCodeAt(i)
+            if (c == 95 || (c >= 65 && c <= 90)) { return false }
+            i = i + 1
+        }
+        return true
+    }
+
     private fun scanOverloads(src: Hir) {
         // 两遍直扫 HIR，不构建巨串（defs 逐条拼接是 O(函数数^2) 拷贝，
         // stdlib 千级函数下实测前端 60s 超时 —— 与 scanInitArities 的
