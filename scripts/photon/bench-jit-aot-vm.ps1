@@ -15,8 +15,17 @@
 #
 # 指标：墙钟时间（Runs 取中位） + 峰值工作集（5ms 轮询）
 #
-# 已知边界：JIT 目标依赖宿主构建布局（P5-① 发射器实参序漂移）——
-# 脚本对 jit_vmhost 做多次构建重试，取自检通过的那次。
+# 已知边界：
+#   1. JIT 目标依赖宿主构建布局（P5-① 发射器实参序漂移）——
+#      脚本对 jit_vmhost 做多次构建重试，取自检通过的那次。
+#   2. ⚠️ 2026-10-16 R70：JIT 行是**进程墙钟**（含宿主初始化、
+#      JIT 区分配、两次 Memory.write64、四次 println I/O），不是
+#      负载墙钟——其他行（AOT/VM）是单负载独立进程的墙钟。两者
+#      口径不同，**不能直接横向比较**「JIT 是否比 Rust-VM 快」。
+#      实测 JIT 内部 `clockNowMs` 在单进程内恒返回同一值（36212949），
+#      无法拆分 sum/fib 分项；`benchGateRaw` 多令牌探针恒返回 1
+#      （rcx 实参被 P5-① 腐坏 + envBuffer .data 残留），无法做
+#      运行时负载选择。根因修复需 P5-① 主线回合。
 #
 # 用法: powershell -File scripts\photon\bench-jit-aot-vm.ps1 [-Quick]
 # -------------------------------------------------------------
@@ -247,6 +256,14 @@ Write-Host "`n=== 运行基准（每目标 3 次取中位）===" -ForegroundColo
 # （QPC 0 参）、benchGate（Env_probe1 1 参）、Memory.* 内联。
 # 2 参 extern（env_get/clockGettime）在部分布局下 name/实参被腐坏
 # （gdb 实证 AURA_BENCH_N 恒读成 default 1e9），已全部移出基准路径。
+#
+# ⚠️ R70（2026-10-16）：JIT MedMs 是**进程墙钟**——Run-WithPeak 的
+# Stopwatch 包住整个进程（含宿主启动、JIT 区 allocRW、writeCode、
+# executeNative0、println I/O），不是负载墙钟。其他行（AOT/VM）是
+# 单负载独立进程的墙钟，**口径不同，不能直接比较**。
+# JIT 内部 clockNowMs 在单进程内恒返回同一值（实测 36212949），
+# 无法拆分 sum/fib 分项；benchGateRaw 多令牌探针恒返回 1，无法做
+# 运行时负载选择。这两处根因都属 P5-① 上游，待主线回合修复。
 $jitTimes = @{ sum = @(); fib = @() }
 $jitRes = @{ sum = ''; fib = '' }
 $jitPeak = 0.0
@@ -266,7 +283,9 @@ for ($i = 0; $i -lt 3; $i++) {
             if ($jitRes['fib'] -eq '75025') { $okFib = $true }
         }
     }
-    # MedMs 与其他行同口径：进程墙钟；仅在结果校验通过时计入。
+    # ⚠️ R70：JIT MedMs 是**进程墙钟**（含宿主启动 + 双负载），不是
+    # 负载墙钟；与其他行（单负载独立进程）口径不同。保留两行同值
+    # 是为了不丢结果校验信号，**不代表 sum 和 fib 各自耗时相等**。
     if ($okSum) { $jitTimes['sum'] += $r.Ms }
     if ($okFib) { $jitTimes['fib'] += $r.Ms }
 }
