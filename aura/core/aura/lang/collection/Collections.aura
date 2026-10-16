@@ -64,6 +64,87 @@ object Collections {
         return l
     }
 
+    /// listOf 0 参重载（photon AOT 链：调用点按元数对齐定义）。
+    fun listOf(): Long {
+        val l: Long = newList(1)
+        return l
+    }
+
+    /// listOf 1 参重载（photon AOT 链：调用点按元数对齐定义）。
+    fun listOf(a: Long): Long {
+        val l: Long = newList(2)
+        push(l, a)
+        return l
+    }
+
+    /// listOf 2 参重载（photon AOT 链：调用点按元数对齐定义）。
+    fun listOf(a: Long, b: Long): Long {
+        val l: Long = newList(3)
+        push(l, a)
+        push(l, b)
+        return l
+    }
+
+    /// listOf 4 参重载（photon AOT 链：调用点按元数对齐定义）。
+    fun listOf(a: Long, b: Long, c: Long, d: Long): Long {
+        val l: Long = newList(5)
+        push(l, a)
+        push(l, b)
+        push(l, c)
+        push(l, d)
+        return l
+    }
+
+    /// listOf 5 参重载（photon AOT 链：调用点按元数对齐定义）。
+    fun listOf(a: Long, b: Long, c: Long, d: Long, e: Long): Long {
+        val l: Long = newList(6)
+        push(l, a)
+        push(l, b)
+        push(l, c)
+        push(l, d)
+        push(l, e)
+        return l
+    }
+
+    /// listOf 6 参重载（photon AOT 链：调用点按元数对齐定义）。
+    fun listOf(a: Long, b: Long, c: Long, d: Long, e: Long, f: Long): Long {
+        val l: Long = newList(7)
+        push(l, a)
+        push(l, b)
+        push(l, c)
+        push(l, d)
+        push(l, e)
+        push(l, f)
+        return l
+    }
+
+    /// listOf 7 参重载（photon AOT 链：调用点按元数对齐定义）。
+    fun listOf(a: Long, b: Long, c: Long, d: Long, e: Long, f: Long, g: Long): Long {
+        val l: Long = newList(8)
+        push(l, a)
+        push(l, b)
+        push(l, c)
+        push(l, d)
+        push(l, e)
+        push(l, f)
+        push(l, g)
+        return l
+    }
+
+    /// listOf 8 参重载（photon AOT 链：调用点按元数对齐定义）。
+    fun listOf(a: Long, b: Long, c: Long, d: Long, e: Long, f: Long, g: Long, h: Long): Long {
+        val l: Long = newList(9)
+        push(l, a)
+        push(l, b)
+        push(l, c)
+        push(l, d)
+        push(l, e)
+        push(l, f)
+        push(l, g)
+        push(l, h)
+        return l
+    }
+
     /// 创建 Pair（2 元素列表），用于 `to` 运算符解构。
     fun pairOf(a: Long, b: Long): Long {
         val l: Long = newList(4)

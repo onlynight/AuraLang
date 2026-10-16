@@ -194,6 +194,19 @@ class SsaBuilder {
     /// 回退，会把 `add(3,4)` 误接到 `ArrayList_add`（实测 05_functions 崩溃）。
     private var freeFuncs: String = ""
 
+    /// 普通函数重载表（2026-10-16）：每行 `\nqualName|arity|ty,ty,...\n`。
+    /// 由 `scanOverloads` 预扫描全部 `HirFunction` 填充；同名出现**不同签名**
+    /// ⇒ 进 `overloadedNamesCsv`，定义与调用点都按签名序号 mangle 成
+    /// `<name>_ov<N>`（COFF 同名强符号只保留一份，`add(Int,Int)` 与
+    /// `add(Int,Int,Int)` 并存时 3 参调用被吞 ⇒ `add(1,2,3)=3` 而非 6，
+    /// 实测 17-function-overload / listOf 多参全挂）。纯 CSV（List 不可用，
+    /// 见 scanInitArities 的教训注释）。
+    private var overloadDefsCsv: String = ""
+    /// 重载名集合（`\nname\n`；同名不同签名 >1 时登记）。
+    private var overloadedNamesCsv: String = ""
+    /// 重载名的去重签名序表：每行 `\nname|sig\n`，行号即 `_ov<N>` 的 N。
+    private var overloadSigIdxCsv: String = ""
+
     /// 当前函数所属类（空 = 自由函数）。
     private var curClass: String = ""
 
@@ -305,6 +318,8 @@ class SsaBuilder {
         // symbol——实测 VM runner 的 MirUtils：10 处调用 0 定义，2026-10-06）。
         // `init` 重载元数（决定 `<Class>_init<N>` 后缀与要生成哪些 `__new<N>`）。
         this.scanInitArities(src)
+        // 普通函数重载表（同名不同签名 → `_ov<N>` mangle；定义/调用共用）。
+        this.scanOverloads(src)
         // 构造器 `<Class>__new<N>`：每个类每个元数一份，必须早于用户函数。
         this.synthesizeCtors(src)
         // 单例字段实例访问器（<Name>_getInstance）必须在用户函数之前建好：
@@ -431,6 +446,16 @@ class SsaBuilder {
             // `ArenaAllocator_init`（P4 `probe_arena` / `test_memory_alloc`
             // 的 undefined symbol）。
             name = name + toStr(this.hirExplicitParamCount(src, id))
+        }
+        // 普通函数重载（2026-10-16）：同名不同签名 ⇒ 按签名序号 mangle 成
+        // `<name>_ov<N>`（COFF 同名强符号只保留一份，`add(Int,Int)` 与
+        // `add(Int,Int,Int)` 并存时后定义被吞、调用点全接首个 ⇒
+        // `add(1,2,3)=3` 而非 6，实测 17-function-overload）。
+        // 调用点在 buildCall 尾部按实参签名对齐解析。
+        if (this.isOverloadedName(name)) {
+            name = this.overloadDefName(name,
+                    this.hirExplicitParamCount(src, id),
+                    this.hirParamTysCsv(src, id))
         }
 
         val retTy: String = src.tyOf(id)
@@ -2615,6 +2640,36 @@ class SsaBuilder {
             }
         }
 
+        // ── 重载调用点解析（2026-10-16）──
+        // 实参已求值（args = 值 id CSV，此刻无 mem 尾参），按实参 MIR 类型
+        // 构造签名、在序表里对齐到 `_ov<N>`。定义侧 mangle 见 buildFunction。
+        if (this.isOverloadedName(funcName)) {
+            var argArity: Int = 0
+            var argTys: String = ""
+            if (args != "") {
+                var ap: Int = 0
+                while (true) {
+                    var ae: Int = ap
+                    while (ae < args.length && args.charCodeAt(ae) != 44) {
+                        ae = ae + 1
+                    }
+                    val vid: Int = LirUtils.strToInt(args.substring(ap, ae))
+                    var aty: String = ""
+                    if (vid >= 0 && vid < this.program.valueCount) {
+                        aty = this.normAuraType(this.types.typeNameOf(
+                                this.program.valueOf(vid).type))
+                    }
+                    if (aty == "") { aty = "-" }
+                    argArity = argArity + 1
+                    if (argTys != "") { argTys = argTys + "," }
+                    argTys = argTys + aty
+                    if (ae >= args.length) { break }
+                    ap = ae + 1
+                }
+            }
+            funcName = this.resolveOverloadCall(funcName, toStr(argArity), argTys)
+        }
+
         // `toStr(<Boolean>)` / `toString(<Boolean>)` → `"true"` / `"false"`。
         //
         // 运行库的 `toStr` 只做**整数 → 十进制**（`PhotonRuntime.emitToStr`），
@@ -4785,6 +4840,284 @@ class SsaBuilder {
             }
             i = i + 1
         }
+    }
+
+    /// 预扫描普通函数重载（2026-10-16）。两遍：
+    ///   ① 收集每个 HirFunction 的（限定名, 元数, 形参类型 CSV）签名；
+    ///   ② 同名出现不同签名 ⇒ 进 `overloadedNamesCsv`，去重签名按首次出现
+    ///     顺序编号进 `overloadSigIdxCsv`（`name_ov<N>` 的 N）。
+    /// 定义侧（buildFunction）与调用点（buildCall）用同一张表，保证两端
+    /// mangle 一致。`main` 的多副本由 buildAllFunctions 单独跳过，不参与。
+    private fun scanOverloads(src: Hir) {
+        // 两遍直扫 HIR，不构建巨串（defs 逐条拼接是 O(函数数^2) 拷贝，
+        // stdlib 千级函数下实测前端 60s 超时 —— 与 scanInitArities 的
+        // [MEM-FIX] 注释同款教训）。
+        //
+        // 第一遍：每函数的（限定名, 签名）查小表 stats（行 name|count|firstSig）；
+        // 出现不同签名 ⇒ count 累加、名字进重载集合。表长 ~ 名字数×30B，
+        // indexOf 为 memchr 级，总开销 O(函数数 × 表长)，实测亚秒。
+        val n: Int = src.count
+        var stats: String = ""
+        var names: String = ""
+        var i: Int = 0
+        while (i < n) {
+            if (src.kindOf(i) == "HirFunction" && !this.isExternObjMethod(src, i)) {
+                val rawName: String = src.textOf(i)
+                if (rawName != "" && rawName != "main" && rawName != "init") {
+                    val owner: String = this.ownerClassNameOf(i)
+                    var qn: String = rawName
+                    if (owner != "") {
+                        qn = owner + "_" + rawName
+                    }
+                    val sig: String = toStr(this.hirExplicitParamCount(src, i))
+                            + "|" + this.hirParamTysCsv(src, i)
+                    val key: String = "\n" + qn + "|"
+                    var pos: Int = stats.indexOf(key)
+                    if (pos < 0) {
+                        stats = stats + key + "1|" + sig + "\n"
+                    } else {
+                        var ce: Int = pos + key.length
+                        while (ce < stats.length && stats.charCodeAt(ce) != 124
+                                && stats.charCodeAt(ce) != 10) {
+                            ce = ce + 1
+                        }
+                        var cnt: Int = SsaMirUtils.strToInt(stats.substring(pos + key.length, ce))
+                        if (cnt < 1) { cnt = 1 }
+                        var fs: Int = ce + 1
+                        while (fs < stats.length && stats.charCodeAt(fs) != 10) {
+                            fs = fs + 1
+                        }
+                        val firstSig: String = stats.substring(ce + 1, fs)
+                        if (sig != firstSig) {
+                            stats = stats.substring(0, pos) + key
+                                    + toStr(cnt + 1) + "|" + firstSig
+                                    + stats.substring(fs, stats.length)
+                            if (names.indexOf("\n" + qn + "\n") < 0) {
+                                names = names + "\n" + qn + "\n"
+                            }
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+        // 第二遍：仅当存在重载名，再扫一次收集去重签名序表（行号即 _ov<N>）。
+        var sigIdx: String = ""
+        if (names != "") {
+            var k2: Int = 0
+            while (k2 < n) {
+                if (src.kindOf(k2) == "HirFunction" && !this.isExternObjMethod(src, k2)) {
+                    val rawName2: String = src.textOf(k2)
+                    if (rawName2 != "" && rawName2 != "main" && rawName2 != "init") {
+                        val owner2: String = this.ownerClassNameOf(k2)
+                        var qn2: String = rawName2
+                        if (owner2 != "") {
+                            qn2 = owner2 + "_" + rawName2
+                        }
+                        if (names.indexOf("\n" + qn2 + "\n") >= 0) {
+                            val sig2: String = toStr(this.hirExplicitParamCount(src, k2))
+                                    + "|" + this.hirParamTysCsv(src, k2)
+                            if (!this.sigIdxHas(sigIdx, qn2, sig2)) {
+                                sigIdx = sigIdx + "\n" + qn2 + "|" + sig2
+                            }
+                        }
+                    }
+                }
+                k2 = k2 + 1
+            }
+        }
+        this.overloadDefsCsv = ""
+        this.overloadedNamesCsv = names
+        this.overloadSigIdxCsv = sigIdx
+    }
+
+    /// 序表是否已含该行（行尾边界严格：下一字符是 \n 或串尾）。
+    private fun sigIdxHas(sigIdx: String, nm: String, sig: String): Boolean {
+        val key: String = "\n" + nm + "|" + sig
+        val klen: Int = key.length
+        var i: Int = 0
+        while (i + klen <= sigIdx.length) {
+            var m: Boolean = true
+            var j: Int = 0
+            while (j < klen) {
+                if (sigIdx.charCodeAt(i + j) != key.charCodeAt(j)) {
+                    m = false
+                    j = klen
+                }
+                j = j + 1
+            }
+            if (m) {
+                val after: Int = i + klen
+                if (after >= sigIdx.length || sigIdx.charCodeAt(after) == 10) {
+                    return true
+                }
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 形参类型 CSV（HirParam ty 归一化；空类型记 -）。定义/调用两侧共用，
+    /// 保证签名串逐字节一致。
+    private fun hirParamTysCsv(src: Hir, id: Int): String {
+        var tys: String = ""
+        val kids: List<Int> = src.kidsOfList(id)
+        val kn: Int = HirUtils.hirKidsCount(kids)
+        var j: Int = 0
+        while (j < kn) {
+            if (src.kindOf(HirUtils.hirKidsAt(kids, j)) == "HirParam") {
+                var pt: String = this.normAuraType(src.tyOf(HirUtils.hirKidsAt(kids, j)))
+                if (pt == "") { pt = "-" }
+                if (tys != "") { tys = tys + "," }
+                tys = tys + pt
+            }
+            j = j + 1
+        }
+        return tys
+    }
+
+    /// 类型归并族：Float/Double→F、Int/Long/Short/Byte→I（数值字面量与形参
+    /// 声明的宽窄差异），其余按原名（String/Boolean/类名）。
+    private fun tyFamily(ty: String): String {
+        if (ty == "Float" || ty == "Double") { return "F" }
+        if (ty == "Int" || ty == "Long" || ty == "Short" || ty == "Byte") { return "I" }
+        return ty
+    }
+
+    /// 调用点重载解析：按（实参元数, 实参类型 CSV）在序表里找 `_ov<N>`。
+    /// 匹配顺序：精确签名 → 同元数族匹配（数值宽窄）唯一 → 同元数首个。
+    /// 非重载名 / 无法匹配 → 原名（链接期可见 undefined，优于静默错接）。
+    private fun resolveOverloadCall(name: String, arityStr: String, argTys: String): String {
+        if (!this.isOverloadedName(name)) {
+            return name
+        }
+        // 与定义侧签名同构：arity|tys（0 参 = "0|"）
+        val argSig: String = arityStr + "|" + argTys
+        // 手扫行（双参 indexOf 在本运行时忽略起点恒从头找 —— 用它做游标
+        // 步进会死循环；实测 17 前端 25s 只建 8 个函数，卡在 buildCall）。
+        var exact: Int = -1
+        var familyHit: Int = -1
+        var rowIdx: Int = -1
+        var pos: Int = 0
+        val slen: Int = this.overloadSigIdxCsv.length
+        while (pos < slen) {
+            var e: Int = pos
+            while (e < slen && this.overloadSigIdxCsv.charCodeAt(e) != 10) {
+                e = e + 1
+            }
+            if (e > pos) {
+                val row: String = this.overloadSigIdxCsv.substring(pos, e)
+                rowIdx = rowIdx + 1
+                val bar: Int = row.indexOf("|")
+                if (bar > 0 && row.substring(0, bar) == name) {
+                    val sig: String = row.substring(bar + 1, row.length)
+                    if (sig == argSig) {
+                        exact = rowIdx
+                    } else {
+                        // 族匹配只比类型段（去 arity 前缀）
+                        val sbar: Int = sig.indexOf("|")
+                        if (sbar > 0 && familyHit < 0
+                                && this.sameArityFamily(sig.substring(sbar + 1, sig.length), argTys)) {
+                            familyHit = rowIdx
+                        }
+                    }
+                }
+            }
+            pos = e + 1
+        }
+        if (exact >= 0) {
+            return name + "_ov" + toStr(exact)
+        }
+        if (familyHit >= 0) {
+            return name + "_ov" + toStr(familyHit)
+        }
+        return name
+    }
+
+    /// 两个类型 CSV 是否同元数且逐参同族（数值宽窄合并）。
+    private fun sameArityFamily(sigA: String, sigB: String): Boolean {
+        // 逐段比较；段数必须相等
+        var ia: Int = 0
+        var ib: Int = 0
+        var na: Int = 0
+        var nb: Int = 0
+        while (true) {
+            var ea: Int = ia
+            while (ea < sigA.length && sigA.charCodeAt(ea) != 44) { ea = ea + 1 }
+            var eb: Int = ib
+            while (eb < sigB.length && sigB.charCodeAt(eb) != 44) { eb = eb + 1 }
+            val a: String = sigA.substring(ia, ea)
+            val b: String = sigB.substring(ib, eb)
+            if (this.tyFamily(a) != this.tyFamily(b)) {
+                return false
+            }
+            na = na + 1
+            nb = nb + 1
+            val doneA: Boolean = ea >= sigA.length
+            val doneB: Boolean = eb >= sigB.length
+            if (doneA != doneB) {
+                return false
+            }
+            if (doneA) {
+                return true
+            }
+            ia = ea + 1
+            ib = eb + 1
+        }
+        return false
+    }
+
+    /// 名字是否为重载名（同名不同签名）。
+    private fun isOverloadedName(name: String): Boolean {
+        if (name == "" || this.overloadedNamesCsv == "") {
+            return false
+        }
+        return this.overloadedNamesCsv.indexOf("\n" + name + "\n") >= 0
+    }
+
+    /// 定义侧 mangle：签名在序表中的行号（0 基）⇒ `name_ov<N>`。
+    /// 非重载名原样返回。找不到签名（不应发生）也原样返回（保守）。
+    private fun overloadDefName(name: String, arity: Int, paramTys: String): String {
+        if (!this.isOverloadedName(name)) {
+            return name
+        }
+        return this.overloadCallName(name, toStr(arity), paramTys)
+    }
+
+    /// 按（元数, 形参类型 CSV）在序表找 `_ov<N>`。匹配失败返回 `name` 本身
+    ///（链接期可见 undefined，优于静默错接）。
+    private fun overloadCallName(name: String, arityStr: String, paramTys: String): String {
+        val key: String = "\n" + name + "|" + arityStr + "|" + paramTys
+        val klen: Int = key.length
+        var i: Int = 0
+        while (i + klen <= this.overloadSigIdxCsv.length) {
+            var m: Boolean = true
+            var j: Int = 0
+            while (j < klen) {
+                if (this.overloadSigIdxCsv.charCodeAt(i + j) != key.charCodeAt(j)) {
+                    m = false
+                    j = klen
+                }
+                j = j + 1
+            }
+            if (m) {
+                val after: Int = i + klen
+                if (after >= this.overloadSigIdxCsv.length
+                        || this.overloadSigIdxCsv.charCodeAt(after) == 10) {
+                    var idx: Int = 0
+                    var q: Int = 0
+                    while (q < i) {
+                        if (this.overloadSigIdxCsv.charCodeAt(q) == 10) {
+                            idx = idx + 1
+                        }
+                        q = q + 1
+                    }
+                    return name + "_ov" + toStr(idx)
+                }
+            }
+            i = i + 1
+        }
+        return name
     }
 
     /// 把「类名 | 元数」登记进 `initArityCsv`（幂等；CSV 格式 `\nOwner|arity\n`）。

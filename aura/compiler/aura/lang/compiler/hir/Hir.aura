@@ -2538,6 +2538,32 @@ class HirLowerer {
                         }
                     }
                 }
+                // ── take(n)：List 切片 → stdlib `Collections.take`（2026-10-16）──
+                // 此前发**裸名** take → 撞运行库机器码同名符号（ABI 与 stdlib
+                // Aura 实现的列表布局不同）⇒ 结果垃圾 + 堆 OOM（实测
+                // 15-advanced §15.2）。限定到 stdlib 定义（Collections.aura:201）。
+                if (memberName == "take" && kCount >= 2) {
+                    val calleeKids: List<Int> = ast.kidsOfList(calleeId)
+                    if (HirUtils.hirKidsCount(calleeKids) >= 1) {
+                        val recvId: Int = HirUtils.hirKidsAt(calleeKids, 0)
+                        if (!this.receiverNotForCollections(recvId)) {
+                            var hirKids: List<Int> = HirUtils.hirNoKids()
+                            val recvHirId: Int = this.lowerExpr(ast, recvId)
+                            if (recvHirId >= 0) {
+                                hirKids = HirUtils.hirKidsAdd(hirKids, recvHirId)
+                            }
+                            var ti: Int = 1
+                            while (ti < kCount) {
+                                val childHirId: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(kids, ti))
+                                if (childHirId >= 0) {
+                                    hirKids = HirUtils.hirKidsAdd(hirKids, childHirId)
+                                }
+                                ti = ti + 1
+                            }
+                            return this.hir.add("HirCall", "Collections.take", "", sp, hirKids)
+                        }
+                    }
+                }
                 // ── Map 成员：containsKey / containsValue / keys / values / put ──
                 //
                 // 与上面的 `count/getSize/isEmpty` 同源：成员名缺映射 → 退化为裸名
