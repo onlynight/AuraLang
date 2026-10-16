@@ -735,6 +735,10 @@ class SsaBuilder {
 
         // ── else 分支 ──
         this.curBlock = elseBlock
+        // ⚠️ P5-① 根修（2026-10-16）：与 buildIf 同理——else 表达式里的变量
+        // 读必须回滚到 if 之前的状态（then 路径不经过 else，else 里读到
+        // then 的定义 vid = SSA 支配关系违规 ⇒ 后端读到非支配定义的槽残留）。
+        this.varMap = varMapBefore
         var elseVal: Int = -1
         if (kCount > 2) {
             elseVal = this.buildExpr(src, HirUtils.hirKidsAt(kids, 2))
@@ -927,9 +931,18 @@ class SsaBuilder {
             // else if …` 中第二臂的 count 读到第一臂的 count+1 值）——运行期
             // 该值是上一轮迭代的残渣。实测 decodeNumeric 的 count/offset 每轮
             // 回滚（decoded 恒 3/1）、AucLoader 全函数解码量塌缩。
-            if (thenSelfTerm) {
-                this.varMap = varMapBefore
-            }
+            // ⚠️⚠️ P5-① 根修（2026-10-16）：回滚**无条件**——else 路径同样
+            // 永不经过 then，无论 then 是否自终结。旧版只在 thenSelfTerm 时
+            // 回滚 ⇒ 非 self-terminating then（如 `ch = "1"` 赋值）的定义泄漏进
+            // else，嵌套 else-if 链的**下层 if 的 varMapBefore["ch"] 指向上一层
+            // then 的字面量**，最内层「无 else 取 before 值」的 phi else 边因此
+            // 取到前一层字面量而非链条前值——.hat 实证
+            // `phi(bb12742="9", bb12743="8")`（应为 "0"，JitStackMapUtils_intToStr
+            // 的数字选链）。该错误入边在后端物化为**从未写入的幽灵栈槽**
+            // （strcat 扫到未初始化栈残留 ⇒ 小整数即 SEGV）——jit_vmhost
+            // 基准 sum 墙钟打印 ~10-20% 随机段错误的 SSA 根因，也是
+            // 「merge-phi 陈旧读」家族（P271/P386 记载）的构造源头。
+            this.varMap = varMapBefore
             this.buildBlock(src, HirUtils.hirKidsAt(kids, 2))
             if (traceOn) println("      [if9] after buildBlock else")
             val elseBlockObj: MirBlock = this.program.blockOf(this.curBlock)
