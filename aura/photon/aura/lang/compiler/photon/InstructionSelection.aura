@@ -2477,6 +2477,30 @@ class InstructionSelector {
             val auxName: String = argVal.aux
             // 成员调用的 aux 是裸名（X.m() → aux="m"），先解析
             val resolvedCallee: String = this.resolveCalleeSymbol(auxName, "")
+            // 被调 LIR 返回类型是 Float/Double ⇒ 实参是 f64 位型 ⇒
+            // toStringFloat(rcx=位型)。整数 toStr 会把位型打十进制
+            //（实测 11 §11.1 sqrt(16) 打 4616189618054758400）。
+            val mappedCallee: String = this.mapStdlibFuncName(auxName, "", 1, false)
+            var fi0: Int = 0
+            while (fi0 < this.lirFuncNames.size) {
+                if (this.lirFuncNames[fi0] == auxName
+                        || this.lirFuncNames[fi0] == mappedCallee
+                        || this.lirFuncNames[fi0] == resolvedCallee) {
+                    val rn: String = this.types.nameOf(this.lirFuncRetTys[fi0])
+                    if (rn == "Float" || rn == "Double"
+                            || rn.endsWith("|Float") || rn.endsWith("|Double")) {
+                        val fstrTy2: Int = this.types.fromTypeName("String")
+                        val fConvId2: Int = this.dag.addNode("Value", "Call", fstrTy2,
+                                                             "", "", "", this.curChain, "toStringFloat")
+                        val fConvNode2: DagNode = this.dag.nodeOf(fConvId2)
+                        fConvNode2.args = MachineDagUtils.toStr(argNode)
+                        this.dag.selectPattern(50, MachineDagUtils.toStr(fConvId2), -1)
+                        return fConvId2
+                    }
+                    break
+                }
+                fi0 = fi0 + 1
+            }
             // R44e：被调是 Box 臂或构造器（<Class>_init/__new*）⇒ 返回堆指针，
             // LIR 类型却常被标成 Int（前端对 runtime 臂无签名）→ 类型分派会走
             // toStr 把指针打整数（实测 10-memory Box: 140700…）。直接 refToStr。
