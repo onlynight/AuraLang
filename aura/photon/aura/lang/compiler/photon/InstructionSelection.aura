@@ -79,7 +79,7 @@ class InstructionSelector {
     /// 桩（getAt 恒返回空串 —— `Env.get` 历史落点），要么布局分叉。保留名单
     /// 会把 guest 真实现抑制掉（`!isRuntimeSymbol` 跳过发射），实测
     /// `tl.get(0)` 返回空串。仅保留 guest 没有的 clear/hashMapPut。
-    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,RegionEnter,RegionReset,io_open,io_close,io_read,io_write,io_access,Collections.clear,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,aura_heapbump,Heap_init,Heap_mmap,boolToStr,charToStr,aura_isOfType,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists,Clock_nowMs,Env_probe1"
+    private var runtimeSymbolNames: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,streq,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,RegionEnter,RegionReset,io_open,io_close,io_read,io_write,io_access,Collections.clear,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,aura_heapbump,Heap_init,Heap_mmap,boolToStr,charToStr,aura_isOfType,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists,Clock_nowMs,Env_probe1,toStringFloat"
 
     /// `computeReachable` 的列表形式结果（供 `select()` 免分配查表）。
     private var reachableNames: List<String> = arrayListOf<String>()
@@ -2454,12 +2454,25 @@ class InstructionSelector {
         // 类型名可能带 #public| 限定前缀（函数签名家族），裸名/限定名都认
         var argTyName: String = this.types.nameOf(argVal.type)
         if (this.types.isString(argVal.type) || argTyName == "String"
-                || endsWithStr(argTyName, "|String")
-                || argTyName == "Float" || argTyName == "Double"
-                || endsWithStr(argTyName, "|Float") || endsWithStr(argTyName, "|Double")) {
-            // String 恒等；Float/Double 恒等（P40x-k：浮点常量已物化为文本串，
-            // 值即 C 串指针——再 toStr 会把指针打成十进制）
+                || endsWithStr(argTyName, "|String")) {
             return argNode
+        }
+        if (argTyName == "Float" || argTyName == "Double"
+                || endsWithStr(argTyName, "|Float") || endsWithStr(argTyName, "|Double")) {
+            // P40x-k：**常量**浮点已物化为文本串（值即 C 串指针）→ 恒等。
+            // 计算浮点是原始 f64 位型，恒等会把位型当串指针 strlen
+            //（实测 14.2 `pi*2` 打 3.14、pf2 `s.toString()` 段错误）→
+            // toStringFloat(rcx = 位型) 十进制格式化。
+            if (argVal.op == "Const" || argVal.op == "ConstImm") {
+                return argNode
+            }
+            val fstrTy: Int = this.types.fromTypeName("String")
+            val fConvId: Int = this.dag.addNode("Value", "Call", fstrTy,
+                                                "", "", "", this.curChain, "toStringFloat")
+            val fConvNode: DagNode = this.dag.nodeOf(fConvId)
+            fConvNode.args = MachineDagUtils.toStr(argNode)
+            this.dag.selectPattern(50, MachineDagUtils.toStr(fConvId), -1)
+            return fConvId
         }
         // 调用实参：优先查被调在 LIR 的返回类型（自举前端调用 LIR 类型不可靠
         // ——返回 String 的方法标成 Basic/Int，按类型判定会二次转换，实测 p5）。

@@ -376,7 +376,12 @@ class X86Encoder {
     private fun emitSseFloatBinary(dst: String, src: String, sseOpcode: Int): Unit {
         val dstNum: Int = this.xmmNum(dst)
         val srcNum: Int = this.xmmNum(src)
-        // 0F 前缀 + opcode
+        // 66 0F + opcode（双精度 SSE2）。2026-10-16：此前漏 66 前缀 ——
+        // emitAddpd 等四个"pd"函数实际编码**单精度** addps/subps/mulps/
+        // divps：f64 位型低 32 位被当两个 f32 运算（1.5 的低位=0 ⇒
+        // 1.5+2.0 = 0），AddF/MulF 全链垃圾（实测 add(3,1.5)=3、
+        // sqrt(16) 指针值、11-imports 挂起）。
+        this.writeByte(0x66)
         this.writeByte(0x0F)
         this.writeByte(sseOpcode)
         // ModRM: mod=11 (reg,reg), reg=dst[3:0], r/m=src[3:0]
@@ -504,6 +509,28 @@ class X86Encoder {
         this.writeByte(this.rexByte(false, d, s))
         this.writeByte(0x0F)
         this.writeByte(0x59)
+        this.writeByte(0xC0 | ((d & 7) << 3) | (s & 7))
+    }
+
+    /// 编码 addsd dst, src（F2 REX 0F 58 /r，标量双精度）。
+    fun emitAddsd(dst: String, src: String): Unit {
+        val d: Int = this.xmmNum(dst)
+        val s: Int = this.xmmNum(src)
+        this.writeByte(0xF2)
+        this.writeByte(this.rexByte(false, d, s))
+        this.writeByte(0x0F)
+        this.writeByte(0x58)
+        this.writeByte(0xC0 | ((d & 7) << 3) | (s & 7))
+    }
+
+    /// 编码 divsd dst, src（F2 REX 0F 5E /r，标量双精度）。
+    fun emitDivsd(dst: String, src: String): Unit {
+        val d: Int = this.xmmNum(dst)
+        val s: Int = this.xmmNum(src)
+        this.writeByte(0xF2)
+        this.writeByte(this.rexByte(false, d, s))
+        this.writeByte(0x0F)
+        this.writeByte(0x5E)
         this.writeByte(0xC0 | ((d & 7) << 3) | (s & 7))
     }
 

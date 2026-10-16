@@ -726,20 +726,51 @@ class X86Emitter {
     /// （"rbx" → "xmm3"，因为 REX.R 位与 REG 位一一对应）。
     private fun emitFloatRR(nodes: List<String>, dag: MachineDag, op: Int): Unit {
         if (nodes.size < 2) { return }
-        val dstRaw: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
-        val srcRaw: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
-        val dst: String = this.resolveToReg(dstRaw, "xmm0")
-        val src: String = this.resolveToReg(srcRaw, "xmm1")
-        val dstXmm: String = this.regToXmm(dst)
-        val srcXmm: String = this.regToXmm(src)
-        if (op == 0) {
-            this.enc.emitAddpd(dstXmm, srcXmm)
-        } else if (op == 1) {
-            this.enc.emitSubpd(dstXmm, srcXmm)
-        } else if (op == 2) {
-            this.enc.emitMulpd(dstXmm, srcXmm)
+        val dstNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(nodes[0]))
+        val srcNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(nodes[1]))
+        // 2026-10-16 重写：浮点值在本后端以 **f64 位型存于 GPR/栈槽**（与
+        // 整数同槽模型）。旧实现直接 addpd xmm0,xmm0——操作数从未装入
+        // XMM（RA 槽是 GPR/栈引用，regOfNode 兜底全落 xmm0）⇒ AddF/MulF
+        // 全链垃圾（实测 add(3,1.5)=3、pi*2=3.14、sqrt(16) 指针值）。
+        // 现在：GPR/栈槽 → movq → xmm，标量双精度运算，movq 回写。
+        val dstRaw: String = this.regOfNode(dstNode)
+        val srcRaw: String = this.regOfNode(srcNode)
+        // src 位型 → xmm1
+        if (this.isStackRef(srcRaw)) {
+            this.enc.emitStackLoad("r11", this.stackOffsetOf(srcRaw))
+            this.enc.emitMovqXmmFromGpr("xmm1", "r11")
+        } else if (srcRaw != "" && srcRaw != "rax") {
+            this.enc.emitMovqXmmFromGpr("xmm1", srcRaw)
         } else {
-            this.enc.emitDivpd(dstXmm, srcXmm)
+            this.enc.emitMovqXmmFromGpr("xmm1", "rax")
+        }
+        // dst 位型 → xmm0
+        if (this.isStackRef(dstRaw)) {
+            this.enc.emitStackLoad("r10", this.stackOffsetOf(dstRaw))
+            this.enc.emitMovqXmmFromGpr("xmm0", "r10")
+        } else if (dstRaw != "" && dstRaw != "rax") {
+            this.enc.emitMovqXmmFromGpr("xmm0", dstRaw)
+        } else {
+            this.enc.emitMovqXmmFromGpr("xmm0", "rax")
+        }
+        // 标量双精度运算（低 64 位有效）
+        if (op == 0) {
+            this.enc.emitAddsd("xmm0", "xmm1")
+        } else if (op == 1) {
+            this.enc.emitSubsd("xmm0", "xmm1")
+        } else if (op == 2) {
+            this.enc.emitMulsd("xmm0", "xmm1")
+        } else {
+            this.enc.emitDivsd("xmm0", "xmm1")
+        }
+        // 结果位型回写 dst
+        this.enc.emitMovqGprFromXmm("r11", "xmm0")
+        if (this.isStackRef(dstRaw)) {
+            this.enc.emitStackStore(this.stackOffsetOf(dstRaw), "r11")
+        } else if (dstRaw != "" && dstRaw != "rax") {
+            this.enc.emitMovRR(dstRaw, "r11")
+        } else {
+            this.enc.emitMovRR("rax", "r11")
         }
     }
 

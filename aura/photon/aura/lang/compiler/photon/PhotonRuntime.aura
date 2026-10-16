@@ -1965,6 +1965,149 @@ object PhotonRuntime {
 
     // ── boolToStr / charToStr / isOfType / ptr 反射（P40x AOT 语言测试轮）──
 
+    /// 编码 toStringFloat(rcx = IEEE754 位型) rax = char*（2026-10-17 重落地）。
+    ///
+    /// Photon 扁平调用模型：实参（含 double 位型）经 GPR 槽，位型在 rcx。
+    /// 输出 = C %g 的普通十进制子集：整数部分 + 至多 6 位小数（去尾零、
+    /// 全零省小数点）；无科学计数法。缓冲 = 专用 BSS tsfBuffer(64B)，
+    /// 尾部整块拷贝到 heap（P254 同款防别名）。前置条件：Heap_init 已跑
+    ///（真实 exe 的 main 前置；单测 harness 需自填 heapArenaBase/heapCap）。
+    fun emitToStringFloat(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x60)
+        enc.emitStackStore(-0x30, "rbx")
+        enc.emitStackStore(-0x38, "rsi")
+        enc.emitStackStore(-0x40, "rdi")
+
+        // r9 = 符号位；rcx = |x| 位型（清 bit63）
+        enc.emitMovRR("r9", "rcx")
+        enc.emitShrRI("r9", 63)
+        enc.emitMovRR("r10", "rcx")
+        enc.emitShrRI("r10", 63)
+        enc.emitShlRI("r10", 63)
+        enc.emitXorRR("rcx", "r10")
+
+        // xmm0 = |x|；r8 = trunc(|x|)；xmm1 = double(r8)；xmm0 = 小数
+        enc.emitMovqXmmFromGpr("xmm0", "rcx")
+        enc.emitCvttsd2si("r8", "xmm0")
+        enc.emitCvtsi2sd("xmm1", "r8")
+        enc.emitSubsd("xmm0", "xmm1")
+
+        enc.emitLeaRIP("rbx", "tsfBuffer")
+        enc.emitMovRR("rsi", "rbx")
+        enc.emitAddRI("rsi", 47)
+        enc.emitXorRR("rax", "rax")
+        enc.emitMovByteMemReg("rsi", "rax")   // NUL 恒在 [47]
+
+        // ── 小数位收集：scratch[i] = 第 i 位小数字符（至多 6 位）──
+        enc.emitMovRI32("rdi", 0)
+        enc.emitLabel("tsf_frac_loop")
+        enc.emitMovqGprFromXmm("rax", "xmm0")
+        enc.emitTestRR("rax", "rax")
+        enc.emitJccLabel("e", "tsf_frac_done")
+        // xmm2 = 10.0（位型 0x4024000000000000 运行时构造）
+        enc.emitMovRI32("r10", 1076101120)
+        enc.emitShlRI("r10", 32)
+        enc.emitMovqXmmFromGpr("xmm2", "r10")
+        enc.emitMulsd("xmm0", "xmm2")
+        enc.emitCvttsd2si("r11", "xmm0")
+        enc.emitCvtsi2sd("xmm1", "r11")
+        enc.emitSubsd("xmm0", "xmm1")
+        enc.emitMovRR("rax", "r11")
+        enc.emitAddRI("rax", 48)
+        enc.emitStoreIndexed8("rbp", "rdi", -80, "rax")
+        enc.emitAddRI("rdi", 1)
+        enc.emitCmpRI("rdi", 6)
+        enc.emitJccLabel("l", "tsf_frac_loop")
+        enc.emitLabel("tsf_frac_done")
+
+        // 去尾零：slot 步长 8 —— slot(rdi-1) 字节地址 = rbp + rdi*8 - 88
+        enc.emitLabel("tsf_trim")
+        enc.emitCmpRI("rdi", 0)
+        enc.emitJccLabel("e", "tsf_nodot")
+        enc.emitLoadIndexed8("rax", "rbp", "rdi", -88)
+        enc.emitCmpRI("rax", 48)
+        enc.emitJccLabel("ne", "tsf_nodot")
+        enc.emitSubRI("rdi", 1)
+        enc.emitJmpLabel("tsf_trim")
+        enc.emitLabel("tsf_nodot")
+
+        // ── 落笔顺序 = 读序的**逆序**（写指针向下走）：
+        //    [47]=NUL ← 末位小数…首位小数 ← '.' ← 整数(低位先) ← 符号
+        // 有小数：scratch[rdi-1] → scratch[0] 逆序落笔（rdi 保留计数，
+        // 循环索引用 r14 —— 复用 rdi 会在循环后归零、小数点被跳过）。
+        enc.emitCmpRI("rdi", 0)
+        enc.emitJccLabel("e", "tsf_nofrac")
+        enc.emitMovRR("r14", "rdi")
+        enc.emitLabel("tsf_wloop")
+        enc.emitSubRI("r14", 1)
+        enc.emitLoadIndexed8("rax", "rbp", "r14", -80)
+        enc.emitSubRI("rsi", 1)
+        enc.emitMovByteMemReg("rsi", "rax")
+        enc.emitCmpRI("r14", 0)
+        enc.emitJccLabel("g", "tsf_wloop")
+        enc.emitSubRI("rsi", 1)
+        enc.emitMovRI32("eax", 46)
+        enc.emitMovByteMemReg("rsi", "rax")   // '.'
+        enc.emitLabel("tsf_nofrac")
+
+        // 整数部分（idiv 自然产出低位在前 = 向下写正确）
+        enc.emitMovRR("rax", "r8")
+        enc.emitCmpRI("rax", 0)
+        enc.emitJccLabel("ne", "tsf_intloop")
+        enc.emitSubRI("rsi", 1)
+        enc.emitMovRI32("eax", 48)
+        enc.emitMovByteMemReg("rsi", "rax")
+        enc.emitJmpLabel("tsf_intdone")
+        enc.emitLabel("tsf_intloop")
+        enc.emitCmpRI("rax", 0)
+        enc.emitJccLabel("e", "tsf_intdone")
+        enc.emitMovRI32("r10", 10)
+        enc.emitXorRR("rdx", "rdx")
+        enc.emitIdiv("r10")
+        enc.emitSubRI("rsi", 1)
+        enc.emitAddRI("rdx", 48)
+        enc.emitMovByteMemReg("rsi", "rdx")
+        enc.emitJmpLabel("tsf_intloop")
+        enc.emitLabel("tsf_intdone")
+        enc.emitCmpRI("r9", 0)
+        enc.emitJccLabel("e", "tsf_sign_done")
+        enc.emitSubRI("rsi", 1)
+        enc.emitMovRI32("eax", 45)
+        enc.emitMovByteMemReg("rsi", "rax")
+        enc.emitLabel("tsf_sign_done")
+
+        // ── 整块堆拷贝（P254 防别名；入口 NUL 恒在最高 written 位之后，
+        // 不再补写——dec 会把首字符前面一格清零 ⇒ 空串）──
+        enc.emitLabel("tsf_heapcopy")
+        enc.emitMovRR("rbx", "rsi")
+        enc.emitMovRIP("rax", "heapBump")
+        enc.emitMovRIP("rdx", "heapArenaBase")
+        enc.emitAddRR("rdx", "rax")
+        enc.emitAddRI("rax", 64)
+        enc.emitAddRI("rax", 7)
+        enc.emitAndRI("rax", -8)
+        enc.emitMovRIP("r10", "heapCap")
+        enc.emitCmpRR("rax", "r10")
+        enc.emitJccLabel("le", "tsf_ok")
+        enc.emitCallRel("__heap_oom")
+        enc.emitLabel("tsf_ok")
+        enc.emitStoreRIP("heapBump", "rax")
+        enc.emitXorRR("r10", "r10")
+        enc.emitLabel("tsf_ccopy2")
+        enc.emitCmpRI("r10", 64)
+        enc.emitJccLabel("ge", "tsf_ccopy2_done")
+        enc.emitLoadIndexed8("r8", "rbx", "r10", 0)
+        enc.emitStoreIndexed8("rdx", "r10", 0, "r8")
+        enc.emitAddRI("r10", 1)
+        enc.emitJmpLabel("tsf_ccopy2")
+        enc.emitLabel("tsf_ccopy2_done")
+        enc.emitMovRR("rax", "rdx")
+        enc.emitStackLoad("rdi", -0x40)
+        enc.emitStackLoad("rsi", -0x38)
+        enc.emitStackLoad("rbx", -0x30)
+        enc.emitEpilogue()
+    }
+
     /// 编码 aura_isOfType(obj, typeName, memTok) rax = 1。
     /// is 类型检查的链接解阻塞桩：真判需要对象类型头/vtable——当前 AOT
     /// 对象模型是扁平槽（无类型信息）。恒返回 1：让 x is T 用例走 then
@@ -5219,8 +5362,8 @@ object PhotonRuntime {
     /// Pipeline 以 `RUNTIME_SYMBOLS + BUILD_ID` 作为 aura_runtime.obj 的缓存
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
-    val BUILD_ID: String = "p303-refnull"
-    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists,Clock_nowMs,Env_probe1"
+    val BUILD_ID: String = "p313-tostrfloat6"
+    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists,Clock_nowMs,Env_probe1,toStringFloat"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
     fun buildRuntimeObject(): String {
@@ -5356,6 +5499,14 @@ object PhotonRuntime {
             enc4.toHex(),
             "toStr",
             PhotonObjectWriterUtils.joinRelocRecords(enc4.getRelocations())
+        )
+
+        val enc4f = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitToStringFloat(enc4f)
+        writer.appendFunction(
+            enc4f.toHex(),
+            "toStringFloat",
+            PhotonObjectWriterUtils.joinRelocRecords(enc4f.getRelocations())
         )
 
         val enc4b = X86EncoderUtils.emptyEncoder()
@@ -6081,7 +6232,7 @@ object PhotonRuntime {
         // @str.0 = 空串）。@str.1/2/3 = "Null"/"Int"/"String" 供
         // `aura_typeof`（Plan A 折叠）使用，2026-10-06。
         writer.stringConsts = "0|4|Null3|Int6|String"
-        writer.bssSymbolName = "heapArena:67108864,refIdxArr:262144,refIdxCount:8"  // [MEM-FIX] 静态堆 → .bss（文件零字节,加载器零填充）
+        writer.bssSymbolName = "heapArena:67108864,refIdxArr:262144,refIdxCount:8,tsfBuffer:64"  // [MEM-FIX] 静态堆 → .bss（文件零字节,加载器零填充）
         writer.buildSymbols(writer.functions, writer.stringConsts)
         // 分片模式：跳过 writer 终归并（134M 字符级驻留，见 emitPieces 说明）
         if (this.rtPiecesMode) {
@@ -6138,6 +6289,9 @@ object PhotonRuntime {
         val enc4 = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitToStr(enc4)
         writer.appendFunction(enc4.toHex(), "toStr", PhotonObjectWriterUtils.joinRelocRecords(enc4.getRelocations()))
+        val enc4f = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitToStringFloat(enc4f)
+        writer.appendFunction(enc4f.toHex(), "toStringFloat", PhotonObjectWriterUtils.joinRelocRecords(enc4f.getRelocations()))
 
         val enc4b = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitStrcat(enc4b)
@@ -6650,7 +6804,7 @@ object PhotonRuntime {
         //
         // 常量池编码是「`<十进制长度>|<载荷>` 首尾相接」，空载荷即 `0|`。
         writer.stringConsts = "0|"
-        writer.bssSymbolName = "heapArena:67108864,refIdxArr:262144,refIdxCount:8"  // [MEM-FIX] 静态堆 → .bss（文件零字节,加载器零填充）
+        writer.bssSymbolName = "heapArena:67108864,refIdxArr:262144,refIdxCount:8,tsfBuffer:64"  // [MEM-FIX] 静态堆 → .bss（文件零字节,加载器零填充）
         writer.buildSymbols(writer.functions, writer.stringConsts)
         writer.emit()
         return writer.writeObjectHexFile(path)
@@ -6695,6 +6849,9 @@ object PhotonRuntimeUtils {
         val enc4 = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitToStr(enc4)
         writer.appendFunction(enc4.toHex(), "toStr", PhotonObjectWriterUtils.joinRelocRecords(enc4.getRelocations()))
+        val enc4f = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitToStringFloat(enc4f)
+        writer.appendFunction(enc4f.toHex(), "toStringFloat", PhotonObjectWriterUtils.joinRelocRecords(enc4f.getRelocations()))
 
         val enc4b = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitStrcat(enc4b)
@@ -7207,7 +7364,7 @@ object PhotonRuntimeUtils {
         //
         // 常量池编码是「`<十进制长度>|<载荷>` 首尾相接」，空载荷即 `0|`。
         writer.stringConsts = "0|"
-        writer.bssSymbolName = "heapArena:67108864,refIdxArr:262144,refIdxCount:8"  // [MEM-FIX] 静态堆 → .bss（文件零字节,加载器零填充）
+        writer.bssSymbolName = "heapArena:67108864,refIdxArr:262144,refIdxCount:8,tsfBuffer:64"  // [MEM-FIX] 静态堆 → .bss（文件零字节,加载器零填充）
         writer.buildSymbols(writer.functions, writer.stringConsts)
         writer.emit()
         return writer.writeObjectHexFile(path)
