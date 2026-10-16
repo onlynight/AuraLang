@@ -3367,8 +3367,13 @@ class InstructionSelector {
         // ── P40x-l：toString(<单实参>)（Parser 为 str + 非String / 插值合成）
         // → emitToStrConvNode 按类型分派。runtime 裸 toString = 恒等占位
         //（标量/null 被当串指针，实测 06 nullInt= 空串）。
+        // 2026-10-16：放宽到「2 参且末参是 MemToken」——SSA 侧 buildCall 对
+        // 非自由函数追加内存链尾参（`toString(v, mem)`），旧条件 size==1
+        // 漏掉该形态 ⇒ 落到裸 call @toString（runtime int-only）⇒ Float/
+        // Double 位型按整数解析垃圾/空串（实测 17-function-overload）。
         if ((resolvedName == "toString" || funcName == "toString")
-                && args.size == 1) {
+                && (args.size == 1
+                    || (args.size == 2 && this.lastArgIsMemToken(args)))) {
             val a0Node: Int = this.resolveNode(args[0])
             if (a0Node >= 0) {
                 val convId: Int = this.emitToStrConvNode(args[0], a0Node)

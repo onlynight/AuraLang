@@ -525,6 +525,11 @@ class HirLowerer {
     private var typeMethods: String = ""
     /// 是否正处在类型体的直接成员层（方法体内部为 false）
     private var inTypeBody: Boolean = false
+    // 函数/方法名 → 返回类型（`k=v` 条目，预登记期填充；lowerCall 回填
+    // HirCall ty —— String 隐式拼接包裹需要它识别非 String 调用结果）。
+    // ⚠️ 必须追加在字段块**末尾**：AOT 对象槽位按声明序编号，插中段会把
+    // 后续字段槽位整体推歪（实测 llc 报 i32/ptr 混用，见类头注释）。
+    private var funcRetTys: List<String> = arrayListOf<String>()
 
     init() {
         this.ast = Ast()
@@ -571,6 +576,18 @@ class HirLowerer {
                 val tKids: List<Int> = program.kidsOfList(declId)
                 if (HirUtils.hirKidsCount(tKids) >= 1) {
                     this.preRegisterTypeMembers(tName, HirUtils.hirKidsAt(tKids, 0))
+                }
+            } else if (dk == "Function") {
+                // 顶层函数返回类型预登记（lowerCall 回填 HirCall ty 用）。
+                // 同时按 `名/元数` 登记：重载同名不同参各自有类型。
+                val fName: String = program.textOf(declId)
+                val frty: String = this.cleanTy(program.tyOf(declId))
+                if (fName != "" && frty != "") {
+                    if (this.kvGet(this.funcRetTys, fName) == "") {
+                        this.funcRetTys = this.kvAdd(this.funcRetTys, fName, frty)
+                    }
+                    val arK: String = fName + "/" + toStr(this.paramCountOf(program, declId))
+                    this.funcRetTys = this.kvAdd(this.funcRetTys, arK, frty)
                 }
             }
             ri = ri + 1
@@ -768,6 +785,18 @@ class HirLowerer {
                 val tKids: List<Int> = program.kidsOfList(declId)
                 if (HirUtils.hirKidsCount(tKids) >= 1) {
                     this.preRegisterTypeMembers(tName, HirUtils.hirKidsAt(tKids, 0))
+                }
+            } else if (dk == "Function") {
+                // 顶层函数返回类型预登记（lowerCall 回填 HirCall ty 用）。
+                // 同时按 `名/元数` 登记：重载同名不同参各自有类型。
+                val fName: String = program.textOf(declId)
+                val frty: String = this.cleanTy(program.tyOf(declId))
+                if (fName != "" && frty != "") {
+                    if (this.kvGet(this.funcRetTys, fName) == "") {
+                        this.funcRetTys = this.kvAdd(this.funcRetTys, fName, frty)
+                    }
+                    val arK: String = fName + "/" + toStr(this.paramCountOf(program, declId))
+                    this.funcRetTys = this.kvAdd(this.funcRetTys, arK, frty)
                 }
             }
             ppi = ppi + 1
@@ -1074,8 +1103,12 @@ class HirLowerer {
             val initId: Int = HirUtils.hirKidsAt(kids, 0)
             val initHirId: Int = this.lowerExpr(ast, initId)
             hirKids = HirUtils.hirKidsAdd(hirKids, initHirId)
-            // 无显式类型标注时，从初始化表达式推断（Phase 6.5.7）
-            if (ty == "" && initHirId >= 0) {
+            // 无显式类型标注时，从初始化表达式推断（Phase 6.5.7）。
+            // ⚠️ 门槛必须用 cleanTy（剥可见性前缀后判空）：parseDecl 无标注时
+            // ty 列是 prsVisTy("") = "#public|"（**非空**），按 ty=="" 判会
+            // 整体跳过推断 ⇒ 变量类型丢失 ⇒ String 拼接不包裹 ⇒ 段错误
+            //（实测 `val x = 5` 崩、`val x: Int = 5` 正常）。
+            if (this.cleanTy(ty) == "" && initHirId >= 0) {
                 ty = this.hir.tyOf(initHirId)
             }
             // 2026-10-02：注解在解析器侧丢失（实测 `val vm: VmRunner = VmRunner()`
@@ -1122,7 +1155,8 @@ class HirLowerer {
             val initId: Int = HirUtils.hirKidsAt(kids, 0)
             val initHirId: Int = this.lowerExpr(ast, initId)
             hirKids = HirUtils.hirKidsAdd(hirKids, initHirId)
-            if (ty == "" && initHirId >= 0) {
+            // 门槛同 lowerValDecl：必须 cleanTy（"#public|" 非空但无类型）。
+            if (this.cleanTy(ty) == "" && initHirId >= 0) {
                 ty = this.hir.tyOf(initHirId)
             }
             // 2026-10-02：同 lowerValDecl —— 注解丢失时从构造器调用推断类型。
@@ -1735,7 +1769,17 @@ class HirLowerer {
 
         // 标识符
         if (kind == "Ident") {
-            return this.hir.leaf("HirVar", text, sp)
+            // 回填声明类型（局部量表 → 类字段表 → AST ty 列）。旧实现恒空 ⇒
+            // lowerBinary 的 String 隐式拼接无法识别变量操作数的非 String
+            // 身份 ⇒ `println("x=" + intVar)` 发 `@add(String, i32)` 段错误。
+            var vty: String = this.localVarTy(text)
+            if (vty == "" && this.curTypeDecl != "") {
+                vty = this.kvGet(this.typeMemberTys, this.curTypeDecl + "." + text)
+            }
+            if (vty == "") {
+                vty = ast.tyOf(id)
+            }
+            return this.hir.add("HirVar", text, vty, sp, HirUtils.hirNoKids())
         } else if (kind == "This") {
             return this.hir.leaf("HirVar", "this", sp)
         } else if (kind == "Super") {
@@ -1885,6 +1929,7 @@ class HirLowerer {
         var hirKids: List<Int> = HirUtils.hirNoKids()
         var opTy: String = ""
         var firstTy: String = ""
+        var wideTy: String = ""
         var i: Int = 0
         while (i < kCount) {
             val childId: Int = HirUtils.hirKidsAt(kids, i)
@@ -1898,20 +1943,77 @@ class HirLowerer {
                 if (i == 0 && firstTy == "") {
                     firstTy = cty
                 }
+                if (this.tyRank(cty) > this.tyRank(wideTy)) {
+                    wideTy = cty
+                }
             }
             i = i + 1
         }
         val normOp: String = HirUtils.hirNormBinOp(op)
+        // 字符串隐式拼接（对齐 Kotlin `String + T`）：`+` 且任一操作数为
+        // String 时，其余非 String 操作数显式包一层 `toString` 调用。
+        // 旧实现直接发混型 kids 的 `HirBinary +` ⇒ SSA `@add(String, i32)`
+        // ⇒ 后端按整数指针加法出垃圾指针 ⇒ println 段错误
+        //（toString_implicit_test §1 首行 `"  Int: " + 42` 即崩）。
+        // 与手写 `x.toString()` 完全同路（buildCall → `@call @toString`）。
+        if (normOp == "+" && opTy == "String") {
+            var wrapped: List<Int> = HirUtils.hirNoKids()
+            var wi: Int = 0
+            while (wi < HirUtils.hirKidsCount(hirKids)) {
+                val kid: Int = HirUtils.hirKidsAt(hirKids, wi)
+                var kty: String = this.hir.tyOf(kid)
+                // HirCall ty 空时按调用名（含 `Class_method` 限定名）兜底查
+                // 预登记返回类型表 —— 成员调用走限定名路径，ty 未回填。
+                // ⚠️ kid 是 HIR 节点 **id**（Int）：取其子节点必须经
+                // `hir.kidsOfList(id)`，直接把 id 传给 hirKidsCount（收
+                // List）无类型检查器拦截，会编出 `Collections_count(i32)`
+                // 非法 IR、llc 拒收（2026-10-16 实踩）。
+                if (kty == "" && this.hir.kindOf(kid) == "HirCall") {
+                    val cnm: String = this.hir.textOf(kid)
+                    val cKids: List<Int> = this.hir.kidsOfList(kid)
+                    kty = this.kvGet(this.funcRetTys,
+                            cnm + "/" + toStr(HirUtils.hirKidsCount(cKids)))
+                    if (kty == "") {
+                        kty = this.kvGet(this.funcRetTys, cnm)
+                    }
+                }
+                // `String`/`String?` 都不包（String? 的 toString 即原值）。
+                if (kty != "String" && kty != "" && !kty.startsWith("String")) {
+                    // 用户类/结构体若声明了 toString 方法 → 发**限定方法调用**
+                    //（`Vec2_toString`）；运行库 `@toString` 只认标量，对象
+                    // 指针进去会打出垃圾数字（实测 §10 `v1+v2`）。
+                    var callName: String = "toString"
+                    if (this.csvContains(this.typeMethods, kty + ".toString")) {
+                        callName = kty + "_toString"
+                    }
+                    wrapped = HirUtils.hirKidsAdd(wrapped, this.hir.add(
+                            "HirCall", callName, "String", sp,
+                            HirUtils.hirKidsAdd(HirUtils.hirNoKids(), kid)))
+                } else {
+                    wrapped = HirUtils.hirKidsAdd(wrapped, kid)
+                }
+                wi = wi + 1
+            }
+            hirKids = wrapped
+        }
         if (normOp != "+" && normOp != "&&" && normOp != "||" &&
             normOp != "==" && normOp != "!=" && normOp != "<" &&
             normOp != ">" && normOp != "<=" && normOp != ">=") {
-            // R53:算术运算(-,*,/,%)结果类型 = 左操作数类型(取宽)。
+            // R53:算术运算(-,*,/,%)结果类型 = 操作数取宽。
             // 旧实现 opTy 一律置空 ⇒ val r = pi * 2 的 HIR 类型为 ""
             // ⇒ lowerValDecl 推断 r 的类型为空 ⇒ Emit.inferType("r")
             // 回落 "i32" ⇒ r.toString() 走装箱整数路径(把 double 的
             // 8 字节按奇偶判指针/整数)⇒ 实测 14-string-interp §14.2
             // 输出 281392529211456 而非 6.28。
-            opTy = firstTy
+            // 2026-10-16：改为**取宽**（原实现取 firstTy，Int+Double 会
+            // 静态标成 Int ⇒ double 位型按整数装箱打印出垃圾）。
+            opTy = if (this.tyRank(wideTy) > this.tyRank(firstTy)) wideTy else firstTy
+        } else if (normOp == "+" && opTy == "" && firstTy != "") {
+            // 数值 `+`（无 String 操作数）结果类型 = 操作数取宽（理由同上）。
+            // 旧实现把 `+` 排除在推断外 ⇒ `val total = add(3,4) + square(2)`
+            // 的 total ty="" ⇒ String 拼接包裹跳过 ⇒ @add(String, i32) 段错误
+            //（toString_implicit_test §12）。
+            opTy = if (this.tyRank(wideTy) > this.tyRank(firstTy)) wideTy else firstTy
         }
         return this.hir.add("HirBinary", normOp, opTy, sp, hirKids)
     }
@@ -1924,16 +2026,23 @@ class HirLowerer {
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
+        var kidTy: String = ""
         var i: Int = 0
         while (i < kCount) {
             val childId: Int = HirUtils.hirKidsAt(kids, i)
             val childHirId: Int = this.lowerExpr(ast, childId)
             if (childHirId >= 0) {
                 hirKids = HirUtils.hirKidsAdd(hirKids, childHirId)
+                if (kidTy == "") {
+                    kidTy = this.hir.tyOf(childHirId)
+                }
             }
             i = i + 1
         }
-        return this.hir.add("HirUnary", HirUtils.hirNormUnOp(op), "", sp, hirKids)
+        // 结果类型 = 首操作数类型（R53 算术同语义）。旧实现恒空 ⇒
+        // `(-7)` 这类节点进 lowerBinary 的 String 隐式拼接包裹时因
+        // ty=="" 被跳过 ⇒ `@add(String, i32)` 段错误。
+        return this.hir.add("HirUnary", HirUtils.hirNormUnOp(op), kidTy, sp, hirKids)
     }
 
     /// 接收者是否为**不该降级为 `Collections.*`** 的对象。
@@ -2012,6 +2121,39 @@ class HirLowerer {
             return ty.substring(bar + 1, ty.length)
         }
         return ty
+    }
+
+    /// 数值类型宽度序（取宽用）：Double > Float > Long > Int > 其它(0)。
+    private fun tyRank(ty: String): Int {
+        if (ty == "Int") { return 1 }
+        if (ty == "Long") { return 2 }
+        if (ty == "Float") { return 3 }
+        if (ty == "Double") { return 4 }
+        return 0
+    }
+
+    /// 函数声明节点的形参个数（`Params`→`Param` 两层）。
+    private fun paramCountOf(ast: Ast, fnId: Int): Int {
+        val kids: List<Int> = ast.kidsOfList(fnId)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        var n: Int = 0
+        var i: Int = 0
+        while (i < kCount) {
+            val kidId: Int = HirUtils.hirKidsAt(kids, i)
+            if (ast.kindOf(kidId) == "Params") {
+                val pk: List<Int> = ast.kidsOfList(kidId)
+                val pn: Int = HirUtils.hirKidsCount(pk)
+                var j: Int = 0
+                while (j < pn) {
+                    if (ast.kindOf(HirUtils.hirKidsAt(pk, j)) == "Param") {
+                        n = n + 1
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+        return n
     }
 
     /// 是否标量类型（接收者类型限定只对类/对象类型生效）。
@@ -2142,6 +2284,20 @@ class HirLowerer {
                 val key: String = name + "." + mn
                 if (!this.csvContains(this.typeMethods, key)) {
                     this.typeMethods = this.typeMethods + "," + key
+                }
+                // 方法返回类型也登记（裸名 + 限定名 + 名/元数三份 —— String
+                // 隐式拼接包裹需要 HirCall ty；同名方法按元数区分）。
+                val rty: String = this.cleanTy(this.ast.tyOf(mKids[mi]))
+                if (mn != "" && rty != "") {
+                    if (this.kvGet(this.funcRetTys, mn) == "") {
+                        this.funcRetTys = this.kvAdd(this.funcRetTys, mn, rty)
+                    }
+                    val qmn: String = name + "_" + mn
+                    if (this.kvGet(this.funcRetTys, qmn) == "") {
+                        this.funcRetTys = this.kvAdd(this.funcRetTys, qmn, rty)
+                    }
+                    val arK: String = mn + "/" + toStr(this.paramCountOf(this.ast, mKids[mi]))
+                    this.funcRetTys = this.kvAdd(this.funcRetTys, arK, rty)
                 }
             } else if (mk == "ValDecl" || mk == "VarDecl") {
                 val fty: String = this.cleanTy(this.ast.tyOf(mKids[mi]))
@@ -2494,10 +2650,13 @@ class HirLowerer {
                                     // 接口类型 List/Map 的 size → Collections.count（runtime 导出）
                                     qualified = "Collections.count"
                                 } else if (rty != "" && this.isScalarTy(rty) && ast.textOf(calleeId) == "toString") {
-                                    // P40x-g：标量接收者的 .toString() 直接定 toStr——
-                                    // 裸 toString 在 isel 会退化成 runtime 恒等占位
-                                    //（标量值被当串指针，实测 01-lexer §1.3 段错误）
-                                    qualified = "toStr"
+                                    // 标量接收者的 .toString() 定 `toString` 分派器
+                                    //（后端按 SSA 值类型分派 Int/Long/Double/…）。
+                                    // 旧实现定 `toStr` —— 运行库 toStr 只做**整数→
+                                    // 十进制**，Double 位型按整数解析出垃圾
+                                    //（实测 toString_implicit_test §9
+                                    // `Manual Float: 140698358490360`）。
+                                    qualified = "toString"
                                 }
                             }
                         }
@@ -2620,7 +2779,28 @@ class HirLowerer {
             }
             i = i + 1
         }
-        return this.hir.add("HirCall", calleeName, "", sp, hirKids)
+        // 回填返回类型（预登记表；String 隐式拼接包裹依赖它识别调用结果）。
+        // 先按 `名/实参个数` 查（重载各自类型），退回裸名。
+        val arK: String = calleeName + "/" + toStr(kCount - argStart)
+        var callTy: String = this.kvGet(this.funcRetTys, arK)
+        if (callTy == "") {
+            callTy = this.kvGet(this.funcRetTys, calleeName)
+        }
+        // 重载按元数撞键时（`add/2` 既有 (Int,Int) 又有 (Int,Double)），首见
+        // 登记可能偏窄 ⇒ 结果静态标 Int、运行时 double 位型 ⇒ toString 装箱
+        // 打印垃圾（实测 17-function-overload `add(3, 1.5)`）。按实参宽度
+        // 提升数值返回类型。
+        if (callTy != "" && this.tyRank(callTy) > 0) {
+            var ai: Int = argStart
+            while (ai < HirUtils.hirKidsCount(hirKids)) {
+                val aty: String = this.hir.tyOf(HirUtils.hirKidsAt(hirKids, ai))
+                if (this.tyRank(aty) > this.tyRank(callTy)) {
+                    callTy = aty
+                }
+                ai = ai + 1
+            }
+        }
+        return this.hir.add("HirCall", calleeName, callTy, sp, hirKids)
     }
 
     /// 降级成员访问表达式。
@@ -2643,6 +2823,18 @@ class HirLowerer {
         var mty: String = ""
         if (memberName == "length" || memberName == "size") {
             mty = "Int"
+        }
+        if (mty == "" && HirUtils.hirKidsCount(hirKids) > 0) {
+            // 字段类型回填：接收者 ty（类名）→ 预登记字段表
+            //（typeMemberTys 条目 `Class.field=Ty`，kvGet 按 `Class.field=`
+            // 前缀命中、返回 Ty）。String 隐式拼接包裹依赖 HirMember ty。
+            val recvTy: String = this.hir.tyOf(HirUtils.hirKidsAt(hirKids, 0))
+            if (recvTy != "") {
+                val fty: String = this.kvGet(this.typeMemberTys, recvTy + "." + memberName)
+                if (fty != "") {
+                    mty = fty
+                }
+            }
         }
         return this.hir.add("HirMember", memberName, mty, sp, hirKids)
     }
@@ -2714,6 +2906,13 @@ class HirLowerer {
             var childHirId: Int = -1
             if (i == 0) {
                 childHirId = this.lowerExpr(ast, childId)
+            } else if (ast.kindOf(childId) == "If") {
+                // else-if 链（表达式上下文）：必须按**嵌套 HirIfExpr 表达式**
+                // 降级进 phi 链。走 lowerBranch 会包成 HirBlock 语句，
+                // SsaBuilder.buildStmt 静默跳过 HirIfExpr ⇒ else 臂 = @null
+                //（实测 toString_implicit_test §8 `grade` 外层 phi 合并出 null
+                // → println 段错误）。
+                childHirId = this.lowerIfExpr(ast, childId)
             } else {
                 childHirId = this.lowerBranch(ast, childId)
             }

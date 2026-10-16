@@ -5000,6 +5000,33 @@ class SsaBuilder {
             this.program.addValue("Call", lty, initArgs, initFunc, this.curBlock)
             // 父类 init 由 `<Sub>_init<ar>` 体内的 `super(...)` 降级处理
             //（见 `buildCall` 的 `super` 分支），这里不再重复调用。
+        } else if (total > 0) {
+            // 主构造参数直落字段（2026-10-16）：`struct Point(val x: Int, val
+            // y: Int)` 无显式 `init` 时，旧实现把全部字段写完默认值后**丢弃
+            // 实参** ⇒ `Point(3,4)` 的 x/y 恒为 0（05-classes /
+            // toString_implicit_test 的共同根因）。
+            // 字段序 = 声明序：parseTypeDecl 把 ctor 参数并成 body Block 的
+            // **前缀** kids，registerClassBodyEx 按序登记，自有字段从
+            // classBaseIndex 起 —— 参数 pi 对应字段 base+pi；构造参数之外
+            // 的自有字段保留上面的默认值。
+            val base: Int = this.classBaseIndex(cname)
+            var pi2: Int = 0
+            var pos: Int = 0
+            val csvLen: Int = this.curParams.length
+            // String.indexOf 无 start 参数（见 PhotonHatCompile 缓存注释），
+            // 手扫逗号分隔的 param vid 表。
+            while (pi2 < total && pos <= csvLen) {
+                var end: Int = pos
+                while (end < csvLen && this.curParams.charCodeAt(end) != 44) {
+                    end = end + 1
+                }
+                val vid: Int = SsaMirUtils.strToInt(this.curParams.substring(pos, end))
+                if (vid >= 0) {
+                    this.emitFieldSet(objVal, base + pi2, vid)
+                }
+                pi2 = pi2 + 1
+                pos = end + 1
+            }
         }
 
         this.program.setTerminator(this.curBlock, "Ret", 0, toStr(objVal), "")

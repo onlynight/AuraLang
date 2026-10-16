@@ -426,6 +426,98 @@ class X86Encoder {
         this.emitSseFloatBinary(dst, src, 0x5E)
     }
 
+    // ── SSE2 数据搬运 / 整数↔浮点转换（toStringFloat 支持，2026-10-16）──
+
+    /// movq xmm, r/m64（66 REX 0F 6E /r）：64 位 GPR 位型搬入 xmm。
+    fun emitMovqXmmFromGpr(xmm: String, gpr: String): Unit {
+        val x: Int = this.xmmNum(xmm)
+        val r: Int = this.regNum(gpr)
+        this.writeByte(0x66)
+        this.writeByte(this.rexByte(true, x, r))
+        this.writeByte(0x0F)
+        this.writeByte(0x6E)
+        this.writeByte(0xC0 | ((x & 7) << 3) | (r & 7))
+    }
+
+    /// movq r/m64, xmm（66 REX 0F 7E /r）：xmm 位型搬入 64 位 GPR。
+    fun emitMovqGprFromXmm(gpr: String, xmm: String): Unit {
+        val r: Int = this.regNum(gpr)
+        val x: Int = this.xmmNum(xmm)
+        this.writeByte(0x66)
+        this.writeByte(this.rexByte(true, x, r))
+        this.writeByte(0x0F)
+        this.writeByte(0x7E)
+        this.writeByte(0xC0 | ((x & 7) << 3) | (r & 7))
+    }
+
+    /// cvttsd2si r64, xmm（F2 REX 0F 2C /r）：double → 有符号整数（向零截断）。
+    fun emitCvttsd2si(gpr: String, xmm: String): Unit {
+        val r: Int = this.regNum(gpr)
+        val x: Int = this.xmmNum(xmm)
+        this.writeByte(0xF2)
+        this.writeByte(this.rexByte(true, r, x))
+        this.writeByte(0x0F)
+        this.writeByte(0x2C)
+        this.writeByte(0xC0 | ((r & 7) << 3) | (x & 7))
+    }
+
+    /// cvtsi2sd xmm, r/m64（F2 REX 0F 2A /r）：有符号整数 → double。
+    fun emitCvtsi2sd(xmm: String, gpr: String): Unit {
+        val x: Int = this.xmmNum(xmm)
+        val r: Int = this.regNum(gpr)
+        this.writeByte(0xF2)
+        this.writeByte(this.rexByte(true, x, r))
+        this.writeByte(0x0F)
+        this.writeByte(0x2A)
+        this.writeByte(0xC0 | ((x & 7) << 3) | (r & 7))
+    }
+
+    /// 编码**双精度** xmm 二元运算（66 0F xx /r）。
+    /// ⚠️ emitSseFloatBinary 无 66 前缀（实为单精度 subps/mulps），
+    /// R57 既有调用按单精度工作不能动；toStringFloat 需要真 double。
+    private fun emitSseDoubleBinary(dst: String, src: String, sseOpcode: Int): Unit {
+        val d: Int = this.xmmNum(dst)
+        val s: Int = this.xmmNum(src)
+        this.writeByte(0x66)
+        this.writeByte(this.rexByte(false, d, s))
+        this.writeByte(0x0F)
+        this.writeByte(sseOpcode)
+        this.writeByte(0xC0 | ((d & 7) << 3) | (s & 7))
+    }
+
+    /// 编码 subsd dst, src（F2 REX 0F 5C /r，标量双精度）。
+    fun emitSubsd(dst: String, src: String): Unit {
+        val d: Int = this.xmmNum(dst)
+        val s: Int = this.xmmNum(src)
+        this.writeByte(0xF2)
+        this.writeByte(this.rexByte(false, d, s))
+        this.writeByte(0x0F)
+        this.writeByte(0x5C)
+        this.writeByte(0xC0 | ((d & 7) << 3) | (s & 7))
+    }
+
+    /// 编码 mulsd dst, src（F2 REX 0F 59 /r，标量双精度）。
+    fun emitMulsd(dst: String, src: String): Unit {
+        val d: Int = this.xmmNum(dst)
+        val s: Int = this.xmmNum(src)
+        this.writeByte(0xF2)
+        this.writeByte(this.rexByte(false, d, s))
+        this.writeByte(0x0F)
+        this.writeByte(0x59)
+        this.writeByte(0xC0 | ((d & 7) << 3) | (s & 7))
+    }
+
+    /// ucomisd xmm, xmm（66 REX 0F 2E /r）：比较置 EFLAGS（ZF/PF/CF）。
+    fun emitUcomisd(xmm1: String, xmm2: String): Unit {
+        val a: Int = this.xmmNum(xmm1)
+        val b: Int = this.xmmNum(xmm2)
+        this.writeByte(0x66)
+        this.writeByte(this.rexByte(false, a, b))
+        this.writeByte(0x0F)
+        this.writeByte(0x2E)
+        this.writeByte(0xC0 | ((a & 7) << 3) | (b & 7))
+    }
+
     /// 编码 NOT r/m64（REX.W F7 /2）。
     ///
     /// ⚠️ 与 emitMovRI 组合产生字节流歧义时（如 `mov rcx, -1` 紧跟
