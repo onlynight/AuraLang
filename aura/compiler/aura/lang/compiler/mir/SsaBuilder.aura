@@ -335,7 +335,8 @@ class SsaBuilder {
         // 「大写前缀_」且前缀未登记为类/单例/extern ⇒ 补登记 + 补合成 getter。
         // 在全部函数建完后跑 ⇒ 对 csv 的增补不再影响任何调用点解析，纯增益。
         this.synthesizeDissolvedGetters(src)
-        // this.synthesizeCallStubs()  # R81:与Lambda提升组合时驱动段错误,待定位
+        // R81:桩通道与Lambda提升组合时驱动段错误,待定位——暂禁用
+        this.synthesizeCallStubs()
 
         return this.program
     }
@@ -4867,12 +4868,14 @@ class SsaBuilder {
             }
             i = i + 1
         }
+        FileUtils.writeText("build/pt/s1_seen.txt", seen)
         var have: String = ""
         var fi: Int = 0
         while (fi < this.program.functionCount) {
             have = have + "\n" + this.program.functionOf(fi).name + "\n"
             fi = fi + 1
         }
+        FileUtils.writeText("build/pt/s2_have.txt", have)
         var k: Int = 0
         while (k < seen.length) {
             if (seen.charCodeAt(k) == 10) {
@@ -4880,7 +4883,9 @@ class SsaBuilder {
                 while (e < seen.length && seen.charCodeAt(e) != 10) { e = e + 1 }
                 if (e > k + 1) {
                     val nm: String = seen.substring(k + 1, e)
+                    FileUtils.writeText("build/pt/s3_cand.txt", nm)
                     if (this.needsStub(nm, have)) {
+                        FileUtils.writeText("build/pt/s4_made.txt", nm)
                         println("[stub] undefined call target synthesized: " + nm)
                         val fid: Int = this.program.addFunction(nm, 0, 0, false)
                         val entry: Int = this.program.addBlock()
@@ -4903,38 +4908,18 @@ class SsaBuilder {
         if (this.isFreeFunc(nm)) { return false }
         if (this.isRuntimeBareName(nm)) { return false }
         if (nm == "min" || nm == "max" || nm == "and" || nm == "or") { return false }
-        // 类型方法名（String.substring 等）不桩——ISel 会经 mapStdlibFuncName
-        // 限定到真实实现；误桩会遮蔽映射（实测 substring/split/replace）。
-        val tm: String = this.typeMethods
-        var si: Int = 0
-        while (si < tm.length) {
-            if (tm.charCodeAt(si) == 46 && si + 1 + nm.length <= tm.length) {
-                var m: Boolean = true
-                var j: Int = 0
-                while (j < nm.length) {
-                    if (tm.charCodeAt(si + 1 + j) != nm.charCodeAt(j)) {
-                        m = false
-                        j = nm.length
-                    }
-                    j = j + 1
-                }
-                if (m) {
-                    val after: Int = si + 1 + nm.length
-                    if (after >= tm.length || tm.charCodeAt(after) == 44
-                            || tm.charCodeAt(after) == 61) {
-                        return false
-                    }
-                }
-            }
-            si = si + 1
-        }
-        // 只桩裸小写名（无下划线、无大写）——限定名/映射名/运行库名不碰
+        // ⚠️ 只桩**裸小写名**（无下划线、无大写）：带限定形式的名字
+        // （FileOps_open / ObjectHeader_init0 …）是 ISel mapStdlibFuncName
+        // /唯一属主解析的真实目标，误桩 ⇒ duplicate/遮蔽（实测 13
+        // duplicate symbol: FileOps_lseek）。
         var i: Int = 0
         while (i < nm.length) {
             val c: Int = nm.charCodeAt(i)
             if (c == 95 || (c >= 65 && c <= 90)) { return false }
             i = i + 1
         }
+        // 已存在 `<Owner>_nm` 限定形式（含运行库前缀）⇒ ISel 会限定，不桩
+        if (have.indexOf("_" + nm + "\n") >= 0) { return false }
         return true
     }
 
