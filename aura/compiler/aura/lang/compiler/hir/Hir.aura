@@ -531,6 +531,16 @@ class HirLowerer {
     // 后续字段槽位整体推歪（实测 llc 报 i32/ptr 混用，见类头注释）。
     private var funcRetTys: List<String> = arrayListOf<String>()
 
+    /// enum 成员序号表（2026-10-16）：行。
+    /// ColorKind.RED 折叠为 HirLit(序号)——此前发 __field_get(0,0)
+    /// （基址 0 段错误，实测 05-classes §5.11）。
+    private var enumMembersCsv: String = ""
+    /// 伴生对象常量表（2026-10-16）：行 \nType.name=litText|litTy\n。
+    /// `companion object { val BASE: Int = 100 }` 的**字面量**初始化成员
+    /// 折叠为编译期常量——此前 MathUtil.BASE 走 __field_get(0,0)（基址 0
+    /// 段错误；R62 注释预言的缺口）。非字面量初始化不登记。
+    private var companionValsCsv: String = ""
+
     init() {
         this.ast = Ast()
         this.hir = Hir()
@@ -577,6 +587,10 @@ class HirLowerer {
                 if (HirUtils.hirKidsCount(tKids) >= 1) {
                     this.preRegisterTypeMembers(tName, HirUtils.hirKidsAt(tKids, 0))
                 }
+            } else if (dk == "Enum") {
+                // enum 成员按声明序编号（parseTypeDecl 枚举分支产
+                // ExprStmt(Ident) 挂 body Block）。
+                this.registerEnumMembers(program, declId)
             } else if (dk == "Function") {
                 // 顶层函数返回类型预登记（lowerCall 回填 HirCall ty 用）。
                 // 同时按 `名/元数` 登记：重载同名不同参各自有类型。
@@ -786,6 +800,10 @@ class HirLowerer {
                 if (HirUtils.hirKidsCount(tKids) >= 1) {
                     this.preRegisterTypeMembers(tName, HirUtils.hirKidsAt(tKids, 0))
                 }
+            } else if (dk == "Enum") {
+                // enum 成员按声明序编号（parseTypeDecl 枚举分支产
+                // ExprStmt(Ident) 挂 body Block）。
+                this.registerEnumMembers(program, declId)
             } else if (dk == "Function") {
                 // 顶层函数返回类型预登记（lowerCall 回填 HirCall ty 用）。
                 // 同时按 `名/元数` 登记：重载同名不同参各自有类型。
@@ -1996,6 +2014,18 @@ class HirLowerer {
             }
             hirKids = wrapped
         }
+        // ── 运算符重载（2026-10-16）：左操作数类型声明了 operator fun plus ──
+        // `v1 + v2` → `Vec2_plus(v1, v2)`（接收者 kids[0]，走既有方法调用/
+        // 重载解析链）。此前发裸 @add 把对象指针当整数加 → 垃圾/段错误
+        //（实测 05 §5.17、toString_implicit §10）。
+        if (normOp == "+" && opTy != "String"
+                && HirUtils.hirKidsCount(hirKids) >= 2) {
+            val olTy: String = this.hir.tyOf(HirUtils.hirKidsAt(hirKids, 0))
+            if (olTy != "" && !this.isScalarTy(olTy)
+                    && this.csvContains(this.typeMethods, olTy + ".plus")) {
+                return this.hir.add("HirCall", olTy + "_plus", "", sp, hirKids)
+            }
+        }
         if (normOp != "+" && normOp != "&&" && normOp != "||" &&
             normOp != "==" && normOp != "!=" && normOp != "<" &&
             normOp != ">" && normOp != "<=" && normOp != ">=") {
@@ -2274,6 +2304,38 @@ class HirLowerer {
 
     /// 类型体成员预登记（在正式降级**之前**对每个 Class/Struct/Object 调用，
     /// 消除「方法体先于同类其它方法降级」的顺序依赖）。
+    /// enum 成员登记：body Block 的 ExprStmt(Ident) 按序入表。
+    private fun registerEnumMembers(ast: Ast, id: Int): Unit {
+        val name: String = ast.textOf(id)
+        if (name == "") {
+            return
+        }
+        this.knownTypes = this.knownTypes + "," + name
+        val kids: List<Int> = ast.kidsOfList(id)
+        if (HirUtils.hirKidsCount(kids) < 1) {
+            return
+        }
+        val bodyId: Int = HirUtils.hirKidsAt(kids, 0)
+        val bk: List<Int> = ast.kidsOfList(bodyId)
+        var idx: Int = 0
+        var i: Int = 0
+        while (i < bk.size()) {
+            val stmtId: Int = bk[i]
+            if (ast.kindOf(stmtId) == "ExprStmt") {
+                val sk: List<Int> = ast.kidsOfList(stmtId)
+                if (sk.size() > 0 && ast.kindOf(sk[0]) == "Ident") {
+                    val mname: String = ast.textOf(sk[0])
+                    if (mname != "") {
+                        this.enumMembersCsv = this.enumMembersCsv + "\n"
+                                + name + "." + mname + "=" + toStr(idx) + "\n"
+                        idx = idx + 1
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
     private fun preRegisterTypeMembers(name: String, bodyAst: Int): Unit {
         val mKids: List<Int> = this.ast.kidsOfList(bodyAst)
         var mi: Int = 0
@@ -2306,6 +2368,34 @@ class HirLowerer {
                     if (this.kvGet(this.typeMemberTys, name + "." + mn) == "") {
                         this.typeMemberTys = this.kvAdd(this.typeMemberTys, key, "")
                     }
+                }
+            } else if (mk == "CompanionBody") {
+                // 伴生 val/var 的**字面量**初始化 → 编译期常量表
+                //（MathUtil.BASE 读取此前走 __field_get(0,0) 段错误）。
+                val ck: List<Int> = this.ast.kidsOfList(mKids[mi])
+                var cj: Int = 0
+                while (cj < ck.size()) {
+                    val cid: Int = ck[cj]
+                    val ckind: String = this.ast.kindOf(cid)
+                    if (ckind == "ValDecl" || ckind == "VarDecl") {
+                        val vname: String = this.ast.textOf(cid)
+                        val vKids: List<Int> = this.ast.kidsOfList(cid)
+                        if (vname != "" && vKids.size() > 0) {
+                            val initId: Int = vKids[0]
+                            val ik: String = this.ast.kindOf(initId)
+                            var litTy: String = ""
+                            if (ik == "IntLiteral") { litTy = "Int" }
+                            else if (ik == "StringLiteral") { litTy = "String" }
+                            else if (ik == "BoolLiteral") { litTy = "Boolean" }
+                            else if (ik == "FloatLiteral" || ik == "DoubleLiteral") { litTy = "Double" }
+                            if (litTy != "") {
+                                this.companionValsCsv = this.companionValsCsv + "\n"
+                                        + name + "." + vname + "="
+                                        + this.ast.textOf(initId) + "|" + litTy + "\n"
+                            }
+                        }
+                    }
+                    cj = cj + 1
                 }
             }
             mi = mi + 1
@@ -2849,6 +2939,59 @@ class HirLowerer {
         var mty: String = ""
         if (memberName == "length" || memberName == "size") {
             mty = "Int"
+        }
+        // enum 成员折叠：接收者是已知类型名且成员在 enum 表 → HirLit(序号)。
+        // 此前 ColorKind.RED 发 __field_get(0,0)（基址 0 段错误）。
+        if (kCount >= 1) {
+            val evRecv: Int = HirUtils.hirKidsAt(kids, 0)
+            if (this.ast.kindOf(evRecv) == "Ident") {
+                val evCls: String = this.ast.textOf(evRecv)
+                if (evCls != "" && this.isKnownTypeName(evCls)) {
+                    val evKey: String = "\n" + evCls + "." + memberName + "="
+                    val evPos: Int = this.enumMembersCsv.indexOf(evKey)
+                    if (evPos >= 0) {
+                        var evE: Int = evPos + evKey.length
+                        while (evE < this.enumMembersCsv.length
+                                && this.enumMembersCsv.charCodeAt(evE) != 10) {
+                            evE = evE + 1
+                        }
+                        val evIdx: String = this.enumMembersCsv.substring(evPos + evKey.length, evE)
+                        if (evIdx != "") {
+                            return this.hir.add("HirLit", evIdx, "Int", sp,
+                                    HirUtils.hirNoKids())
+                        }
+                    }
+                }
+            }
+        }
+        // 伴生常量折叠：接收者是已知类型名且成员在伴生常量表 → HirLit。
+        // 此前 MathUtil.BASE 发 __field_get(0,0)（基址 0 段错误）。
+        if (kCount >= 1) {
+            val cvRecv: Int = HirUtils.hirKidsAt(kids, 0)
+            if (this.ast.kindOf(cvRecv) == "Ident") {
+                val cvCls: String = this.ast.textOf(cvRecv)
+                if (cvCls != "" && this.isKnownTypeName(cvCls)) {
+                    val cvKey: String = "\n" + cvCls + "." + memberName + "="
+                    // 键唯一（Type.name），单次查找即可；双参 indexOf 在
+                    // 本运行时忽略起点，不能用。
+                    val cvPos: Int = this.companionValsCsv.indexOf(cvKey)
+                    if (cvPos >= 0) {
+                        var cvE: Int = cvPos + cvKey.length
+                        while (cvE < this.companionValsCsv.length
+                                && this.companionValsCsv.charCodeAt(cvE) != 10) {
+                            cvE = cvE + 1
+                        }
+                        val cvRow: String = this.companionValsCsv.substring(cvPos + cvKey.length, cvE)
+                        val cvBar: Int = cvRow.indexOf("|")
+                        if (cvBar > 0) {
+                            return this.hir.add("HirLit",
+                                    cvRow.substring(0, cvBar),
+                                    cvRow.substring(cvBar + 1, cvRow.length),
+                                    sp, HirUtils.hirNoKids())
+                        }
+                    }
+                }
+            }
         }
         if (mty == "" && HirUtils.hirKidsCount(hirKids) > 0) {
             // 字段类型回填：接收者 ty（类名）→ 预登记字段表
