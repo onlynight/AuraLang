@@ -531,6 +531,12 @@ class HirLowerer {
     // 后续字段槽位整体推歪（实测 llc 报 i32/ptr 混用，见类头注释）。
     private var funcRetTys: List<String> = arrayListOf<String>()
 
+    /// import 别名表（2026-10-17）：行 \nalias|modulePath\n。
+    /// `import aura.concurrent as cc` ⇒ `cc.newChannel(0)` 的接收者 cc 是
+    /// 模块路径别名而非实例——旧实现降级成 __field_get(0,0) 且泄漏为
+    /// arg0 ⇒ rcx=垃圾（实测 11 §11.2/§11.4 段错误）。
+    private var importAliasCsv: String = ""
+
     /// enum 成员序号表（2026-10-16）：行。
     /// ColorKind.RED 折叠为 HirLit(序号)——此前发 __field_get(0,0)
     /// （基址 0 段错误，实测 05-classes §5.11）。
@@ -591,6 +597,19 @@ class HirLowerer {
                 // enum 成员按声明序编号（parseTypeDecl 枚举分支产
                 // ExprStmt(Ident) 挂 body Block）。
                 this.registerEnumMembers(program, declId)
+            } else if (dk == "Import") {
+                // import aura.<path> as <alias> ⇒ 别名表（std 静态调用识别）。
+                val itxt: String = program.textOf(declId)
+                if (itxt.startsWith("aura.")) {
+                    val asIdx: Int = itxt.indexOf(" as ")
+                    if (asIdx > 0) {
+                        val alias: String = itxt.substring(asIdx + 4, itxt.length)
+                        if (alias != "") {
+                            this.importAliasCsv = this.importAliasCsv + "\n"
+                                    + alias + "|" + itxt.substring(0, asIdx) + "\n"
+                        }
+                    }
+                }
             } else if (dk == "Function") {
                 // 顶层函数返回类型预登记（lowerCall 回填 HirCall ty 用）。
                 // 同时按 `名/元数` 登记：重载同名不同参各自有类型。
@@ -804,6 +823,19 @@ class HirLowerer {
                 // enum 成员按声明序编号（parseTypeDecl 枚举分支产
                 // ExprStmt(Ident) 挂 body Block）。
                 this.registerEnumMembers(program, declId)
+            } else if (dk == "Import") {
+                // import aura.<path> as <alias> ⇒ 别名表（std 静态调用识别）。
+                val itxt: String = program.textOf(declId)
+                if (itxt.startsWith("aura.")) {
+                    val asIdx: Int = itxt.indexOf(" as ")
+                    if (asIdx > 0) {
+                        val alias: String = itxt.substring(asIdx + 4, itxt.length)
+                        if (alias != "") {
+                            this.importAliasCsv = this.importAliasCsv + "\n"
+                                    + alias + "|" + itxt.substring(0, asIdx) + "\n"
+                        }
+                    }
+                }
             } else if (dk == "Function") {
                 // 顶层函数返回类型预登记（lowerCall 回填 HirCall ty 用）。
                 // 同时按 `名/元数` 登记：重载同名不同参各自有类型。
@@ -2472,6 +2504,53 @@ class HirLowerer {
             val calleeId: Int = HirUtils.hirKidsAt(kids, 0)
             if (ast.kindOf(calleeId) == "Member" || ast.kindOf(calleeId) == "SafeAccess") {
                 val memberName: String = ast.textOf(calleeId)
+
+                // ── std 模块静态调用（R80）：`aura.<mod>.<m>(…)` 与
+                // `<alias>.<m>(…)`（alias = import aura.<path> as X）。
+                // 接收者链是模块路径/导入别名，不是实例。旧实现把接收者
+                // 降级成 __field_get(0,0) 并泄漏为 arg0 ⇒ rcx=垃圾
+                //（实测 11 §11.2 aura.io.fileExists 段错误）。处理：丢弃
+                // 接收者链，只发实参的裸名调用——由唯一属主（如
+                // Stdio_fileExists）/自由函数（prelu max）/运行库映射解析。
+                if (ast.kindOf(calleeId) == "Member") {
+                    val cq: String = this.collectQualifiedName(ast, calleeId)
+                    var stdCall: Int = 0
+                    var methodName: String = ""
+                    if (cq.startsWith("aura.")) {
+                        var dots: Int = 0
+                        var di: Int = 0
+                        while (di < cq.length) {
+                            if (cq.charCodeAt(di) == 46) { dots = dots + 1 }
+                            di = di + 1
+                        }
+                        if (dots >= 2) {
+                            stdCall = 1
+                            var ld: Int = cq.length - 1
+                            while (ld >= 0 && cq.charCodeAt(ld) != 46) { ld = ld - 1 }
+                            methodName = cq.substring(ld + 1, cq.length)
+                        }
+                    } else {
+                        val cKids: List<Int> = ast.kidsOfList(calleeId)
+                        if (HirUtils.hirKidsCount(cKids) >= 1
+                                && ast.kindOf(HirUtils.hirKidsAt(cKids, 0)) == "Ident") {
+                            val alias: String = ast.textOf(HirUtils.hirKidsAt(cKids, 0))
+                            if (alias != "" && this.importAliasCsv.indexOf("\n" + alias + "|") >= 0) {
+                                stdCall = 1
+                                methodName = memberName
+                            }
+                        }
+                    }
+                    if (stdCall == 1) {
+                        var stdKids: List<Int> = HirUtils.hirNoKids()
+                        var ai: Int = 1
+                        while (ai < kCount) {
+                            val ah: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(kids, ai))
+                            if (ah >= 0) { stdKids = HirUtils.hirKidsAdd(stdKids, ah) }
+                            ai = ai + 1
+                        }
+                        return this.hir.add("HirCall", methodName, "", sp, stdKids)
+                    }
+                }
 
                 // ── `Env.get(name[, default])`：**不是**集合取值，必须先拦下 ──
                 //
