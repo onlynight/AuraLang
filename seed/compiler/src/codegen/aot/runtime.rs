@@ -957,6 +957,15 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
         // [MEM-FIX] 阶段区域原语:符号与 Photon 侧 Memory.aura 的 @native 声明一致
         "Memory_regionEnter" => ("i64", &[]),
         "Memory_regionReset" => ("i64", &[]),
+        // [R87] scratch 并行 arena
+        "Memory_regionScratchTarget" => ("i64", &[]),
+        "Memory_regionRetainTarget" => ("i64", &[]),
+        "Memory_scratchReset" => ("i64", &[]),
+        // [R87] æ å¼ mark/rewind
+        "Memory_scratchMark" => ("i64", &[]),
+        "Memory_scratchRewind" => ("i64", &["i64"]),
+        // [R89] 字符串幸存者 dup
+        "Memory_strdupRetain" => ("i8*", &["i8*"]),
         // [MEM-FIX] 阶段区域原语(编译内存:前端 bump 区域 + 边界整块回收)
         "RegionEnter" => ("i64", &[]),
         "RegionReset" => ("i64", &[]),

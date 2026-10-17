@@ -801,6 +801,12 @@ class HirLowerer {
     /// 小端 8 字节，被 `strlen` 读成 1~2，再被逗号拼接成垃圾串，最终在
     /// `synthesizeMainInKids` 里被 `hirKidsAt` 解成野 id（Photon 前端链接阶段
     /// 0xC0000005 的根因）。
+    /// [R89] ModuleLink scratchRewind 前调用：置空本模块 AST 引用，
+    /// 防止字段悬挂指向已被 scratch 回收的内存（后续读=碎尸）。
+    fun releaseAst() {
+        this.ast = Ast()
+}
+
     fun lowerTopLevel(program: Ast): List<Int> {
         this.ast = program
         // 2026-10-02 接收者类型传播：本模块类型体的方法/字段**预登记**。

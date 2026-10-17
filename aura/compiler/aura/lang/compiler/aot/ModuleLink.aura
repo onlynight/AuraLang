@@ -27,6 +27,7 @@ import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.parser.Parser
 import aura.lang.compiler.hir.Hir
 import aura.lang.compiler.aot.AotUtil
+import aura.lang.native.Memory
 
 /// 模块链接器：把入口文件及其递归 `import` 合并为单一 HIR。
 class AotModuleLinker {
@@ -62,7 +63,7 @@ class AotModuleLinker {
     }
 
     /// 入口文件 → 合并 HIR（含递归 import）。
-    fun link(entryPath: String): Hir {
+        fun link(entryPath: String): Hir {
         this.hir = Hir()
         this.seen = ""
         this.missing = ""
@@ -110,7 +111,7 @@ class AotModuleLinker {
     /// 顺序读取只依赖 `AotModuleLinker` 自身的实例字段（Class 实例字段在 AOT 下
     /// 语义正确），因此对两个后端都成立。实测并行版与顺序版自举耗时相同
     /// （均约 13.2s：40+ 模块的读取并非瓶颈），故本改动无性能回退。
-    fun preloadCache(paths: String): Unit {
+        fun preloadCache(paths: String): Unit {
         var i: Int = 0
         val pathCount: Int = aotLineCount(paths)
         while (i < pathCount) {
@@ -128,7 +129,7 @@ class AotModuleLinker {
     ///
     /// 记录布局：`路径\n内容长度\n内容`；按记录顺序线性扫描（缓存条目数为
     /// std 模块数量级，扫描开销可忽略）。
-    fun cacheGet(path: String): String {
+        fun cacheGet(path: String): String {
         var pos: Int = 0
         while (pos < this.cacheBlob.length) {
             val nl1: Int = this.cacheLineEnd(pos)
@@ -152,25 +153,31 @@ class AotModuleLinker {
     }
 
     /// 自 `from` 起第一个换行的下标（无则返回 -1，供缓存解码用）。
-    fun cacheLineEnd(from: Int): Int {
+    // [R87] 旧实现 aotSlice(blob, from, 剩余全长) 找一个换行——每查一条
+    // 记录拷贝一次 blob 余量（MB 级），cacheGet 线性扫全部记录 ⇒ 每模块
+    // loadPath 数十次全量拷贝、全部留在 retain era（[rgn] 探针实测的
+    // 16GB 峰值主因）。改为 charCodeAt 原地扫描，零分配。
+        fun cacheLineEnd(from: Int): Int {
         if (from >= this.cacheBlob.length) {
             return -1
         }
-        val rest: String = aotSlice(this.cacheBlob, from, this.cacheBlob.length - from)
-        val rel: Int = aotIndexOfSub(rest, "\n")
-        if (rel < 0) {
-            return -1
+        var i: Int = from
+        while (i < this.cacheBlob.length) {
+            if (this.cacheBlob.charCodeAt(i) == 10) {
+                return i
+            }
+            i = i + 1
         }
-        return from + rel
+        return -1
     }
 
     /// 已加载的模块数。
-    fun loadedCount(): Int {
+        fun loadedCount(): Int {
         return aotLineCount(this.seen)
     }
 
     /// 加载单个文件（去重）→ 其递归依赖 + 本文件顶层声明的 HIR kids 列表。
-    fun loadPath(path: String): List<Int> {
+        fun loadPath(path: String): List<Int> {
         val norm: String = ModuleLinkUtils.normalizePath(path)
         if (norm == "") {
             return HirUtils.hirNoKids()
@@ -182,18 +189,29 @@ class AotModuleLinker {
             this.missing = this.missing + norm + "\n"
             return HirUtils.hirNoKids()
         }
+        // [R89] mark 必须在 seen 拼接之前：seen 本身进 scratch，若在 mark 之后
+        // 分配，rewind 会回收它 ⇒ 去重表腐坏 ⇒ 模块误判已见跳过/乱码名
+        // （Allocator 蒸发 + 'lse' 碎片 stub 的根因）。seen/missing 在 rewind
+        // 前 strdupRetain 落 retain。
+        // val smark: Long = Memory.scratchMark()
         this.seen = this.seen + norm + "\n"
 
         // B1: 优先从缓存读取（预加载阶段已填充），避免重复 I/O
         val source: String
+        // [R87] source/cacheGet 拷贝同样进 scratch（只喂 Parser，此后无用）。
+        Memory.regionScratchTarget()
+        println("[mod-start] " + norm)  // [R87]
         val cached: String = this.cacheGet(norm)
         if (cached != "") {
             source = cached
         } else {
             source = FileUtils.readText(norm)
         }
+        // [R87] parse 中间物(含上面的 source 拷贝)全在 scratch；
+        // lowerTopLevel(allocate HIR 产物)前切回 retain。
         val p: Parser = Parser(source)
         p.parseProgram()
+        Memory.regionRetainTarget()
         // 注意：不能直接 `p.ast.kindOf(...)` —— VM 对「字段访问得到的对象再调方法」
         // 会错乱 this 绑定（既有缺陷）。必须先取局部变量。
         val ast: Ast = p.ast
@@ -202,19 +220,23 @@ class AotModuleLinker {
         // 分段收集、最后一次归并：`out = appendKids(out, …)` 在整棵导入树上是
         // O(n²) 复制，且 AOT 运行时没有 GC —— 链接阶段就能吃掉数 GB 内存。
         var parts: List<List<Int>> = arrayListOf<List<Int>>()
-        // 0) 同包名自动导入：若当前文件有 package 声明，自动加载同包下所有 .aura 文件
         val pkgName: String = this.extractPackage(ast)
-        if (pkgName != "") {
-            val siblings: String = this.findSiblingAuraFiles(pkgName, norm)
-            var si: Int = 0
-            while (si < aotLineCount(siblings)) {
-                val sib: String = aotLineAt(siblings, si)
-                val dep: List<Int> = this.loadPath(sib)
-                if (dep.size > 0) {
-                    parts.add(dep)
-                }
-                si = si + 1
+        // [R87] scratch 栈式回收：mark 在 parse 后取——ast 跨递归存活，
+        // 本模块全部处理完（含递归）后 rewind 一次性回收。
+        // 顺序恢复原序（兄弟→import→own）：own 先降级会破坏 lowerer 的
+        // 跨模块预登记顺序（deps 类型未登记 ⇒ 解析走慢速失败路径，
+        // 失败中间物留在 retain——前端 11GB retained 的主因）。
+        // val smark: Long = Memory.scratchMark()
+        // 0) 同包名自动导入：若当前文件有 package 声明，自动加载同包下所有 .aura 文件
+        val siblings: String = if (pkgName != "") { this.findSiblingAuraFiles(pkgName, norm) } else { "" }
+        var si: Int = 0
+        while (si < aotLineCount(siblings)) {
+            val sib: String = aotLineAt(siblings, si)
+            val dep: List<Int> = this.loadPath(sib)
+            if (dep.size > 0) {
+                parts.add(dep)
             }
+            si = si + 1
         }
         // 1) 先展开 import（被依赖模块的声明在前）
         var i: Int = 0
@@ -233,11 +255,18 @@ class AotModuleLinker {
             }
             i = i + 1
         }
-        // 2) 再降级本文件顶层声明
+        // 2) 再降级本文件顶层声明（原序：deps 先、own 后）
         val own: List<Int> = this.loader.lowerTopLevel(ast)
         if (own.size > 0) {
             parts.add(own)
         }
+        // [R87] ast/token/parse 垃圾整体回收（ast 此后不再被读）
+        // [R89] seen/missing 幸存者落 retain（本体在 scratch，将被本 rewind 回收）
+        this.seen = Memory.strdupRetain(this.seen)
+        this.missing = Memory.strdupRetain(this.missing)
+        // Memory.scratchRewind(smark)  // [BISECT] rewind off
+        this.loader.releaseAst()
+        println("[mod] nodes=" + toStr(this.hir.count) + " " + norm)  // [R87] 逐模块探针
         // 归并各分段为单一 kids 列表（树形归并见 `joinPieces` 的说明）。
         var out: List<Int> = HirUtils.hirNoKids()
         var pi: Int = 0
@@ -249,7 +278,7 @@ class AotModuleLinker {
     }
 
     /// 把一条 import 文本解析为若干「完整文件路径」（换行分隔）。
-    fun resolveImports(imp: String, baseDir: String): String {
+        fun resolveImports(imp: String, baseDir: String): String {
         val raw: String = trimSpaces(imp)
         if (raw == "") {
             return ""
@@ -293,7 +322,7 @@ class AotModuleLinker {
     }
 
     /// 解析单条导入为完整路径（未命中返回 ""）。
-    fun resolveOne(imp: String, baseDir: String): String {
+        fun resolveOne(imp: String, baseDir: String): String {
         if (imp == "") {
             return ""
         }
@@ -333,7 +362,7 @@ class AotModuleLinker {
     }
 
     /// 从 AST 中提取 package 声明（未声明返回 ""）。
-    fun extractPackage(ast: Ast): String {
+        fun extractPackage(ast: Ast): String {
         var i: Int = 0
         while (i < ast.count) {
             if (ast.kindOf(i) == "Package") {
@@ -347,7 +376,7 @@ class AotModuleLinker {
     /// 查找同包下的所有 .aura 文件（排除自身）。
     /// 使用预生成的索引文件 `aura/.aura_index.txt`（格式：`package|relativePath`），
     /// 避免运行时目录遍历（Aura FileUtils 在 AOT 模式下不支持 listDir）。
-    fun findSiblingAuraFiles(pkgName: String, selfPath: String): String {
+        fun findSiblingAuraFiles(pkgName: String, selfPath: String): String {
         if (pkgName == "") {
             return ""
         }
@@ -416,7 +445,7 @@ class AotModuleLinker {
     /// 从文件路径中提取 aura/ 根目录。
     /// 例如：`aura/compiler/...` → `aura`
     ///       `D:\Code\AuraLang\aura\compiler\...` → `D:\Code\AuraLang\aura`
-    fun findAuraRoot(path: String): String {
+        fun findAuraRoot(path: String): String {
         // 查找 "aura/" 段（路径中第一个 "aura/" 之前的部分）
         var pos: Int = 0
         var len: Int = path.length
@@ -441,7 +470,7 @@ class AotModuleLinker {
 object ModuleLinkUtils {
 
     /// 顶层便捷入口：入口文件 → 合并 HIR。
-    fun linkModules(entryPath: String): Hir {
+        fun linkModules(entryPath: String): Hir {
         val l: AotModuleLinker = AotModuleLinker()
         return l.link(entryPath)
     }
@@ -458,7 +487,7 @@ object ModuleLinkUtils {
     ///   * Memory.aura          — 内存分配（@native alloc/free → @malloc/@free）
     ///   * Cpu.aura             — CPU 指令（@native(asm) → LLVM inline asm/fence/atomicrmw）
     ///   * Runtime.aura         — 运行时入口（@native → syscall/asm）
-    fun essentialStdModules(): String {
+        fun essentialStdModules(): String {
         // Phase B.3: 自动包含的 std 模块。
         //
         // String.aura / Math.aura / MathOps.aura / Memory.aura / Cpu.aura / Runtime.aura
@@ -497,7 +526,7 @@ object ModuleLinkUtils {
     // ── 路径工具 ──
 
     /// 把点分包名转为路径（`aura.lang.std.String` → `aura/lang/std/String`）。
-    fun replaceAllDots(s: String): String {
+        fun replaceAllDots(s: String): String {
         var out: String = ""
         var i: Int = 0
         val len: Int = s.length
@@ -513,7 +542,7 @@ object ModuleLinkUtils {
     }
 
     /// 取目录部分（无分隔符返回 "."）。
-    fun dirOf(p: String): String {
+        fun dirOf(p: String): String {
         var i: Int = p.length - 1
         while (i >= 0) {
             if (p.charCodeAt(i) == 47 || p.charCodeAt(i) == 92) {  // '/' or '\\'
@@ -525,7 +554,7 @@ object ModuleLinkUtils {
     }
 
     /// 目录 + 相对路径拼接（绝对路径原样返回）。
-    fun joinPath(dir: String, rel: String): String {
+        fun joinPath(dir: String, rel: String): String {
         if (rel.startsWith("/") || rel.contains(":")) {
             return rel
         } else if (dir == "" || dir == ".") {
@@ -540,12 +569,12 @@ object ModuleLinkUtils {
     /// 必须按列表拼接而非字符串拼接：`Hir.add(..., children: List<Int>)` 与
     /// `synthesizeMainInKids(kids: List<Int>, …)` 都要求堆列表，把 `ArrayList`
     /// 句柄当字符串传下去会在 AOT 下被 `strlen` / `list.size` 误读为野值。
-    fun appendKids(a: List<Int>, b: List<Int>): List<Int> {
+        fun appendKids(a: List<Int>, b: List<Int>): List<Int> {
         return HirUtils.hirKidsConcat(a, b)
     }
 
     /// 反斜杠 → 正斜杠（手写，避免依赖 String.replace 的类调用链接）。
-    fun slashify(p: String): String {
+        fun slashify(p: String): String {
         var out: String = ""
         var i: Int = 0
         val len: Int = p.length
@@ -561,7 +590,7 @@ object ModuleLinkUtils {
     }
 
     /// 规范化路径：折叠 `.` / `..` / 重复分隔符（保持 POSIX 风格）。
-    fun normalizePath(p: String): String {
+        fun normalizePath(p: String): String {
         val parts: String = slashify(p)
         var out: String = ""
         var i: Int = 0
@@ -591,7 +620,7 @@ object ModuleLinkUtils {
     }
 
     /// 弹出路径的最后一段（用于 `..`）。
-    fun popSegment(path: String): String {
+        fun popSegment(path: String): String {
         var i: Int = path.length - 1
         while (i >= 0) {
             if (path.charCodeAt(i) == 47) {

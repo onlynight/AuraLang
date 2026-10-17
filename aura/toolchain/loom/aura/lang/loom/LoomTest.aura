@@ -44,7 +44,8 @@ import aura.lang.std.Encoding
     }
 }
 
-/// 测试用任务类型常�?object TestTaskType {
+/// 测试用任务类型常�?
+object TestTaskType {
     const val CLEAN: Int = 0
     const val COMPILE: Int = 2
     const val TEST: Int = 3
@@ -194,7 +195,8 @@ object LoomTests {
         TestRunner.assertEqual(map.getOrDefault("key1", ""), "value1", "Get key1")
     }
 
-    /// 执行全部测试�?    fun runAll(): Int {
+    /// 执行全部测试�?
+        fun runAll(): Int {
         IO.println("Aura Loom Unit Tests")
         TestRunner.reset()
         LoomTests.testTaskBasic()
