@@ -420,6 +420,9 @@ class X86Emitter {
                 //（PhotonRuntime 侧已加幂等守卫，与宿主自身 init 共存安全）。
                 if (instrFunc == "main") {
                     this.enc.emitCallRel("Heap_init")
+                    // [R83-DEBUG] VEH 崩溃转储：崩溃时向 stdout 打 32 字节
+                    // 诊断（crashBuf 含 Context.Rip），供定位段错误。
+                    this.enc.emitCallRel("veh_install")
                 }
                 this.canaryFrameSize = frame
                 this.canaryFuncIdx = this.canaryFuncIdx + 1
