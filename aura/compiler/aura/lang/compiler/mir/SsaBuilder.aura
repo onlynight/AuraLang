@@ -4595,6 +4595,11 @@ class SsaBuilder {
         if (name.startsWith("io_")) { return true }
         if (name.startsWith("String")) { return true }
         // P4: 原子操作 / ARC / 线程桥 runtime 符号
+        // [R85] @native(asm="...") 桥裸名（Cpu extern interface）：runtime obj
+        // 提供真身（Cpu_rdtsc 等 + 裸 rdtsc 别名）——R82 桩通道误桩使 guest
+        // obj 自带 rdtsc 定义，与 runtime 别名 duplicate symbol（jit_vmhost
+        // 重链接实测，2026-10-17）。
+        if (name == "rdtsc" || name == "memFence" || name == "cpuid") { return true }
         if (name == "atomicAdd" || name == "atomicDec" || name == "cas") { return true }
         if (name == "arcIncrement" || name == "arcDecrement") { return true }
         if (name.startsWith("ThreadOps_")) { return true }

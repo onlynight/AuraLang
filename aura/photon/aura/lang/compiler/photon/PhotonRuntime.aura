@@ -5362,8 +5362,8 @@ object PhotonRuntime {
     /// Pipeline 以 `RUNTIME_SYMBOLS + BUILD_ID` 作为 aura_runtime.obj 的缓存
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
-    val BUILD_ID: String = "p314-chrecv-ringread"
-    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists,Clock_nowMs,Env_probe1,toStringFloat"
+    val BUILD_ID: String = "p315-string-startswith"
+    val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists,Clock_nowMs,Env_probe1,toStringFloat,String_String_startsWith"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
     fun buildRuntimeObject(): String {
@@ -5620,6 +5620,10 @@ object PhotonRuntime {
             "String_contains",
             PhotonObjectWriterUtils.joinRelocRecords(enc8h.getRelocations())
         )
+
+        val enc8h2 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStringStartsWith(enc8h2)
+        writer.appendFunction(enc8h2.toHex(), "String_String_startsWith", PhotonObjectWriterUtils.joinRelocRecords(enc8h2.getRelocations()))
 
         val enc8i = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitStringToUpper(enc8i)
@@ -6347,6 +6351,10 @@ object PhotonRuntime {
         PhotonRuntime.emitStringContains(enc8h)
         writer.appendFunction(enc8h.toHex(), "String_contains", PhotonObjectWriterUtils.joinRelocRecords(enc8h.getRelocations()))
 
+        val enc8h2 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStringStartsWith(enc8h2)
+        writer.appendFunction(enc8h2.toHex(), "String_String_startsWith", PhotonObjectWriterUtils.joinRelocRecords(enc8h2.getRelocations()))
+
         val enc8i = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitStringToUpper(enc8i)
         writer.appendFunction(enc8i.toHex(), "String_toUpperCase", PhotonObjectWriterUtils.joinRelocRecords(enc8i.getRelocations()))
@@ -6906,6 +6914,10 @@ object PhotonRuntimeUtils {
         val enc8h = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitStringContains(enc8h)
         writer.appendFunction(enc8h.toHex(), "String_contains", PhotonObjectWriterUtils.joinRelocRecords(enc8h.getRelocations()))
+
+        val enc8h2 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStringStartsWith(enc8h2)
+        writer.appendFunction(enc8h2.toHex(), "String_String_startsWith", PhotonObjectWriterUtils.joinRelocRecords(enc8h2.getRelocations()))
 
         val enc8i = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitStringToUpper(enc8i)

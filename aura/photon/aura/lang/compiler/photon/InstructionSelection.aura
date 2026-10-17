@@ -798,6 +798,10 @@ class InstructionSelector {
         if (name == "ptrToInt" || name == "intToPtr" || name == "ptrIsNull") {
             return true
         }
+        // [R85] String 类方法 mangling 名：runtime obj 提供真身（
+        // emitStringStartsWith）。内联判定不追加 runtimeSymbolNames 字面量——
+        // P40x-b：长字面量有发射阈值（追加 ~730 字符曾致驱动启动段错误）。
+        if (name == "String_String_startsWith") { return true }
         if (name == "IO_fileExists" || name == "Box" || name == "take"
                 || name == "newChannel" || name == "channelSend" || name == "channelRecv") {
             return true

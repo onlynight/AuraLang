@@ -348,9 +348,15 @@ fun main(): Int {
             println("[BENCH-SUM-CHK]")
             println(toStr(sumChk as Int))          // 期望 499999500000
             Memory.write64((sumEntry + 64) as Long, 1000000000 as Long)
+            // [R85] 负载墙钟（clockNowMs 0参外调，2026-10-17 实证递进正常，
+            // R70 「恒同值」系误诊）——单进程内拆分 sum/fib 分项。
+            val sumT0: Long = clockNowMs()
             val sumR: Long = be.executeNative0(sumEntry)
+            val sumT1: Long = clockNowMs()
             println("[BENCH-SUM-RESULT]")
             println(toStr(sumR as Int))            // 期望 499999999500000000
+            println("[BENCH-SUM-MS]")
+            println(toStr((sumT1 - sumT0) as Int))
             println("[BENCH-SUM-DONE]")
         }
         // -- fib(25)：递归手编（基例 eax=ecx）--
@@ -374,9 +380,13 @@ fun main(): Int {
             println("[BENCH-FIB-ERROR]")
         } else {
             Memory.write64((fibEntry + 64) as Long, 25 as Long)
+            val fibT0: Long = clockNowMs()
             val fibR: Long = be.executeNative0(fibEntry)
+            val fibT1: Long = clockNowMs()
             println("[BENCH-FIB-RESULT]")
             println(toStr(fibR as Int))            // 期望 75025
+            println("[BENCH-FIB-MS]")
+            println(toStr((fibT1 - fibT0) as Int))
             println("[BENCH-FIB-DONE]")
         }
         println("[BENCH-DONE]")

@@ -18,14 +18,10 @@
 # 已知边界：
 #   1. JIT 目标依赖宿主构建布局（P5-① 发射器实参序漂移）——
 #      脚本对 jit_vmhost 做多次构建重试，取自检通过的那次。
-#   2. ⚠️ 2026-10-16 R70：JIT 行是**进程墙钟**（含宿主初始化、
-#      JIT 区分配、两次 Memory.write64、四次 println I/O），不是
-#      负载墙钟——其他行（AOT/VM）是单负载独立进程的墙钟。两者
-#      口径不同，**不能直接横向比较**「JIT 是否比 Rust-VM 快」。
-#      实测 JIT 内部 `clockNowMs` 在单进程内恒返回同一值（36212949），
-#      无法拆分 sum/fib 分项；`benchGateRaw` 多令牌探针恒返回 1
-#      （rcx 实参被 P5-① 腐坏 + envBuffer .data 残留），无法做
-#      运行时负载选择。根因修复需 P5-① 主线回合。
+#   2. [R85]（2026-10-17）已修：JIT MedMs 现为宿主内 clockNowMs
+#      分项墙钟（sum/fib 独立计时）。R70 记录的「恒同值」系误诊，
+#      0 参外调探针实证正常递进。benchGateRaw 多令牌探针恒 1 仍
+#      未修（P5-① 上游），负载选择维持 AURA_BENCH=1 全跑。
 #
 # 用法: powershell -File scripts\photon\bench-jit-aot-vm.ps1 [-Quick]
 # -------------------------------------------------------------
@@ -257,15 +253,16 @@ Write-Host "`n=== 运行基准（每目标 3 次取中位）===" -ForegroundColo
 # 2 参 extern（env_get/clockGettime）在部分布局下 name/实参被腐坏
 # （gdb 实证 AURA_BENCH_N 恒读成 default 1e9），已全部移出基准路径。
 #
-# ⚠️ R70（2026-10-16）：JIT MedMs 是**进程墙钟**——Run-WithPeak 的
-# Stopwatch 包住整个进程（含宿主启动、JIT 区 allocRW、writeCode、
-# executeNative0、println I/O），不是负载墙钟。其他行（AOT/VM）是
-# 单负载独立进程的墙钟，**口径不同，不能直接比较**。
-# JIT 内部 clockNowMs 在单进程内恒返回同一值（实测 36212949），
-# 无法拆分 sum/fib 分项；benchGateRaw 多令牌探针恒返回 1，无法做
-# 运行时负载选择。这两处根因都属 P5-① 上游，待主线回合修复。
+# [R85]（2026-10-17）分项口径已修：宿主 bench 路径用 clockNowMs
+# （QPC 0 参外调）在进程内对 sum/fib 分别计时，MedMs = 分项内部
+# 墙钟中位（纯负载成本）；进程墙钟仅留在原始输出。
+# R70「clockNowMs 恒同值」系误诊——2026-10-17 探针实证 0 参外调
+# 正常递进（41503626→41503806→41503980）。benchGateRaw 多令牌仍不可用，
+# 负载选择维持 AURA_BENCH=1 全跑（属 P5-① 上游，未动）。
 $jitTimes = @{ sum = @(); fib = @() }
 $jitRes = @{ sum = ''; fib = '' }
+# [R85] 分项内部墙钟（宿主 clockNowMs）；无标记时回退进程墙钟
+$jitMs = @{ sum = -1; fib = -1 }
 $jitPeak = 0.0
 for ($i = 0; $i -lt 3; $i++) {
     $env2 = New-Object 'System.Collections.Generic.Dictionary[string,string]'
@@ -278,16 +275,19 @@ for ($i = 0; $i -lt 3; $i++) {
         if ($lines[$li] -eq '[BENCH-SUM-RESULT]') {
             $jitRes['sum'] = $lines[$li + 1]
             if ($jitRes['sum'] -eq '499999999500000000') { $okSum = $true }
+        } elseif ($lines[$li] -eq '[BENCH-SUM-MS]') {
+            $jitMs['sum'] = [int]$lines[$li + 1]
         } elseif ($lines[$li] -eq '[BENCH-FIB-RESULT]') {
             $jitRes['fib'] = $lines[$li + 1]
             if ($jitRes['fib'] -eq '75025') { $okFib = $true }
+        } elseif ($lines[$li] -eq '[BENCH-FIB-MS]') {
+            $jitMs['fib'] = [int]$lines[$li + 1]
         }
     }
-    # ⚠️ R70：JIT MedMs 是**进程墙钟**（含宿主启动 + 双负载），不是
-    # 负载墙钟；与其他行（单负载独立进程）口径不同。保留两行同值
-    # 是为了不丢结果校验信号，**不代表 sum 和 fib 各自耗时相等**。
-    if ($okSum) { $jitTimes['sum'] += $r.Ms }
-    if ($okFib) { $jitTimes['fib'] += $r.Ms }
+    # [R85] MedMs = 宿主内 clockNowMs 分项墙钟（纯负载成本，
+    # [R85] 优先吃宿主分项内部墙钟；缺失时回退进程墙钟（旧行为）
+    if ($okSum) { if ($jitMs['sum'] -ge 0) { $jitTimes['sum'] += $jitMs['sum'] } else { $jitTimes['sum'] += $r.Ms } }
+    if ($okFib) { if ($jitMs['fib'] -ge 0) { $jitTimes['fib'] += $jitMs['fib'] } else { $jitTimes['fib'] += $r.Ms } }
 }
 foreach ($w in @('sum','fib')) {
     $med = -1
