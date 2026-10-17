@@ -453,9 +453,9 @@ object PhotonRuntime {
         enc.emitJccLabel("ne", "rdxwin_loop")
         enc.emitLabel("rdxwin_skip")
         enc.emitMovMemDisp32("rcx", "rsp", 40)       // handle
-        enc.emitMovRI32("r8d", 2344)
+        enc.emitMovRI32("r8d", 2400)
         enc.emitMovRR("r9", "rdx")
-        enc.emitAddRI("r9", 56)                      // scratch（crashBuf+56）
+        // crashBuf+0 起写 2400B = 56B 头（RIP/访问地址/Rcx/Rdx/Rsp）+ 2344B 现场
         enc.emitXorRR("r10", "r10")
         enc.emitStoreMemDisp32("rsp", 32, "r10")     // lpOverlapped = 0
         enc.emitCallImport("WriteFile")
@@ -2829,7 +2829,7 @@ object PhotonRuntime {
         enc.emitAndRI("rdx", 63)
         enc.emitShlRI("rdx", 3)
         enc.emitAddRR("rax", "rdx")
-        enc.emitMovMemDisp32("rax", 0, "rax")
+        enc.emitMovMemDisp32("rax", "rax", 0)
         enc.emitIncRR("rcx")
         enc.emitStoreMemDisp32("rbx", 8, "rcx")
         enc.emitJmpLabel("cr_done")
@@ -5362,7 +5362,7 @@ object PhotonRuntime {
     /// Pipeline 以 `RUNTIME_SYMBOLS + BUILD_ID` 作为 aura_runtime.obj 的缓存
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
-    val BUILD_ID: String = "p313-tostrfloat6"
+    val BUILD_ID: String = "p314-chrecv-ringread"
     val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists,Clock_nowMs,Env_probe1,toStringFloat"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex

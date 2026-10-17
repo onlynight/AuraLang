@@ -1411,6 +1411,9 @@ class X86Encoder {
         }
     }
 
+    /// [R84] 未知寄存器名警告首次即止标记
+    private var unknownRegReported: Int = 0
+
     /// 获取寄存器编号。
     private fun regNum(reg: String): Int {
         // 同一寄存器的 64/32/16/8 位别名都要映射到同一个 REX 字段值。
@@ -1433,6 +1436,17 @@ class X86Encoder {
         if (reg == "r13" || reg == "r13d" || reg == "r13w" || reg == "r13b") return 13
         if (reg == "r14" || reg == "r14d" || reg == "r14w" || reg == "r14b") return 14
         if (reg == "r15" || reg == "r15d" || reg == "r15w" || reg == "r15b") return 15
+        // [R84] 未知寄存器名不再静默落 RAX。本函数旧兜底 `return 0`
+        // 曾把「写 rdx」编成「写 rax」（见上注）；R84 又实测 emitChannelRecv
+        // 把 emitMovMemDisp32(dst,base,disp) 按 store 风格(base,disp,src) 调用，
+        // 字符串 "rax" 落进 disp32 、整数 0 落进 base，编出
+        // mov rax,[rax+0xF204EF00] 野读，11-imports §11.4 因此崩。
+        // 参数错位这类错误必须在编译器构建期可见。首次即止，避免
+        // trace 刷屏家族的 OOM 路数（见 X86Emitter P1-3 注）。
+        if (this.unknownRegReported != 1) {
+            this.unknownRegReported = 1
+            println("[X86ENCODE] 未知寄存器名: " + reg + " （检查调用点参数顺序）")
+        }
         return 0
     }
 
