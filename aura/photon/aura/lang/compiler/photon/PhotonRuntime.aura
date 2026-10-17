@@ -2168,7 +2168,7 @@ object PhotonRuntime {
         enc.emitMovRR("rax", "rcx")
         enc.emitCmpRI("rax", 0)
         enc.emitJccLabel("ne", "b2s_true")
-        // "false "
+        // "false(NUL)"
         enc.emitMovRI("rax", 102)
         enc.emitMovByteMemReg("rdx", "rax")
         enc.emitIncRR("rdx")
@@ -2188,7 +2188,7 @@ object PhotonRuntime {
         enc.emitMovByteMemReg("rdx", "rax")
         enc.emitJmpLabel("b2s_done")
         enc.emitLabel("b2s_true")
-        // "true "
+        // "true(NUL)"
         enc.emitMovRI("rax", 116)
         enc.emitMovByteMemReg("rdx", "rax")
         enc.emitIncRR("rdx")
@@ -2688,7 +2688,7 @@ object PhotonRuntime {
         enc.emitStackStore(-0x8, "rbx")
         enc.emitCmpRI("rcx", 0)
         enc.emitJccLabel("ne", "tsn_nonnull")
-        // "null "：bump 分配 8 字节，rbx = 起始
+        // "null(NUL)"：bump 分配 8 字节，rbx = 起始
         enc.emitMovRIP("rax", "heapBump")
         enc.emitMovRIP("rdx", "heapArenaBase")
         enc.emitAddRR("rdx", "rax")
@@ -3672,7 +3672,7 @@ object PhotonRuntime {
     ///     rax = gs:[0x60]        ; TEB.Peb
     ///     rax = [rax + 0x20]     ; PEB.ProcessParameters（RTL_USER_PROCESS_PARAMETERS*）
     ///     rax = [rax + 0x80]     ; ProcessParameters.Environment（**UTF-16** 块）
-    /// 块内每条为 `NAME=VALUE\0`（UTF-16），整块以**空条目**（双 NUL）结尾。
+    /// 块内每条为 `NAME=VALUE(NUL)`（UTF-16），整块以**空条目**（双 NUL）结尾。
     ///
     /// 环境变量名恒为 ASCII，所以：
     ///   * 「条目/值的低字节是否为 0」可当作 NUL 判据（低字节在前）；
@@ -4067,7 +4067,7 @@ object PhotonRuntime {
     ///     首字节是可打印 ASCII（0x20..0x7E），记**大写**字母（第 `idx` 个）；
     ///   * 否则记小写字母。
     ///
-    /// 为什么这样判定：环境块内容形如 `NAME=VALUE\0`（UTF-16，低字节在前），
+    /// 为什么这样判定：环境块内容形如 `NAME=VALUE(NUL)`（UTF-16，低字节在前），
     /// 其首字节必然是 `=`(0x3D) 或字母 ⇒ 可打印 ✓；而句柄（如 `0xC`）或长度值
     /// 不会通过 `> 0x10000` 这一关，从而**避免解引用非指针字段导致的访问违例**。
     private fun emitFieldPrintableFlag(enc: X86Encoder, disp: Int, idx: Int): Unit {

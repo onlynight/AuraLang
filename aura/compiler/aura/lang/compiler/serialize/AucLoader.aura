@@ -615,11 +615,10 @@ class AucModule {
             return v
         }
         // P389：单字符 "
-" / "\" 快速路径——直接返回预转义常量，
+        // "" / "\" 快速路径——直接返回预转义常量，
         // 不进 concat 循环（.auc 常量池里含特殊字符的值几乎全是这三种）。
         if (v.length == 1) {
-            if (v.charCodeAt(0) == 10) { return "
-" }
+            if (v.charCodeAt(0) == 10) { return "\n" }
             if (v.charCodeAt(0) == 92) { return "\\" }
         }
         // P388：改用**字面量反斜杠**——String.fromCharCode(92) 的调用窗在

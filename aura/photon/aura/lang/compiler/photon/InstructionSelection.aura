@@ -3022,6 +3022,21 @@ class InstructionSelector {
         // MathOps.aura）。此前无映射 ⇒ 链接期 `undefined symbol: sqrt / cos /
         // sq`（11-imports §11.1/§11.3 全挂）。`sq` 是 `import aura.math.sqrt
         // as sq` 的别名导入（§11.3），同样落到裸名 `@call @sq(...)`。
+        // [R86] Collections.listOf 裸名调用点 → _ov 重载：前端重载解析在部分
+        // call-shape 上漏 mangling（自举 Main.aura 实测 5 处 2/5/7/8 参裸名）。
+        // ov 编号来自 core Collections.aura 重载合成序：0 参=ov24、1=ov25、
+        // 2=ov26、3=ov23、4=ov27、5=ov28、6=ov29、7=ov30、8=ov31。
+        if (name == "Collections_listOf") {
+            if (argCount == 0) { return "Collections_listOf_ov24" }
+            if (argCount == 1) { return "Collections_listOf_ov25" }
+            if (argCount == 2) { return "Collections_listOf_ov26" }
+            if (argCount == 3) { return "Collections_listOf_ov23" }
+            if (argCount == 4) { return "Collections_listOf_ov27" }
+            if (argCount == 5) { return "Collections_listOf_ov28" }
+            if (argCount == 6) { return "Collections_listOf_ov29" }
+            if (argCount == 7) { return "Collections_listOf_ov30" }
+            if (argCount == 8) { return "Collections_listOf_ov31" }
+        }
         if (name == "sqrt") { return "MathOps_sqrtD" }
         if (name == "cos") { return "MathOps_cosD" }
         if (name == "sin") { return "MathOps_sinD" }
