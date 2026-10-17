@@ -956,30 +956,42 @@ static void aura_mem_dump_stats(void) {
 // 安全:区域块无 AuraMemHdr——aura_mem_free/aura_mem_realloc 对区域
 // 指针做**地址范围守卫**,直接走跳过/新分配路径,绝不读头、绝不 free
 // 区域内部指针(防 free 中间指针破坏堆)。
-static void **g_rgn_chunks = NULL;
-static int64_t *g_rgn_sizes = NULL;
-static int64_t g_rgn_n = 0;
-static int64_t g_rgn_cap = 0;
-static char *g_rgn_cur = NULL;
-static int64_t g_rgn_off = 0;
-static int64_t g_rgn_cur_cap = 0;
 static int64_t g_rgn_active = 0;
-static int64_t g_rgn_used = 0;
+/* [R87] 旧区域全局已由 g_rgn_ret(AuraRgn) 取代;g_rgn_active 仍为区域模式
+ * 开关。scratch 并行 arena 见 g_scr(分配目标 RegionScratchTarget 切换)。 */
 
-static int g_rgn_has(int64_t need) {
-    if (g_rgn_cap >= g_rgn_n + 1) return 1;
-    int64_t nc = g_rgn_cap ? g_rgn_cap * 2 : 64;
-    void **nc1 = (void **)realloc(g_rgn_chunks, (size_t)(nc * (int64_t)sizeof(void *)));
+/* [R87] scratch 并行 arena:分配目标开关(RegionScratchTarget/
+ * RegionRetainTarget/ScratchReset)。用途:前端逐模块把 parse 中间物
+ * (token/AST/源串)打进 scratch、HIR 产物切回 retain,模块边界
+ * ScratchReset 批量回收——region 峰值从「全模块垃圾累加」降到
+ * 「retained 总量 + 单模块垃圾」。自举 Main.aura 实测前端 >21.5GB
+ * (287 模块全在单一 retain era 里堆到进程死),本机制为正解。 */
+typedef struct {
+    void **chunks;
+    int64_t *sizes;
+    int64_t n, cap;
+    char *cur;
+    int64_t off, cur_cap, used;
+} AuraRgn;
+static AuraRgn g_rgn_ret = {0};
+static AuraRgn g_scr = {0};
+static int64_t g_rgn_target = 0; /* 0=retain(默认), 1=scratch */
+
+static int aura_rgn_has(AuraRgn *r, int64_t need) {
+    (void)need;
+    if (r->cap >= r->n + 1) return 1;
+    int64_t nc = r->cap ? r->cap * 2 : 64;
+    void **nc1 = (void **)realloc(r->chunks, (size_t)(nc * (int64_t)sizeof(void *)));
     if (!nc1) return 0;
-    int64_t *nc2 = (int64_t *)realloc(g_rgn_sizes, (size_t)(nc * (int64_t)sizeof(int64_t)));
-    if (!nc2) { g_rgn_chunks = nc1; return 0; }
-    g_rgn_chunks = (void **)nc1;
-    g_rgn_sizes = nc2;
-    g_rgn_cap = nc;
+    int64_t *nc2 = (int64_t *)realloc(r->sizes, (size_t)(nc * (int64_t)sizeof(int64_t)));
+    if (!nc2) { r->chunks = nc1; return 0; }
+    r->chunks = (void **)nc1;
+    r->sizes = nc2;
+    r->cap = nc;
     return 1;
 }
 
-static void *rgn_chunk(int64_t need) {
+static void *aura_rgn_chunk(AuraRgn *r, int64_t need) {
     /* 区块走 VirtualAlloc:Reset 时 VirtualFree(MEM_RELEASE) 把整个区块
      * 直接归还 OS(避免 CRT 堆空闲链长期占用物理页——本轮实测 WS 峰值
      * 比 used 峰值高 ~5GB 的主因);64KB 对齐满足 Plan A。 */
@@ -987,34 +999,141 @@ static void *rgn_chunk(int64_t need) {
     if (cap < need) cap = ((need + 0xFFFF) / 0x10000) * 0x10000;
     void *c = VirtualAlloc(NULL, (unsigned long long)cap, 0x3000 /*RESERVE|COMMIT*/, 4 /*READWRITE*/);
     if (!c) return NULL;
-    if (!g_rgn_has(0)) return NULL;
-    g_rgn_chunks[g_rgn_n] = c;
-    g_rgn_sizes[g_rgn_n] = cap;
-    g_rgn_n += 1;
-    g_rgn_cur = (char *)c;
-    g_rgn_off = 0;
-    g_rgn_cur_cap = cap;
+    if (!aura_rgn_has(r, 0)) return NULL;
+    r->chunks[r->n] = c;
+    r->sizes[r->n] = cap;
+    r->n += 1;
+    r->cur = (char *)c;
+    r->off = 0;
+    r->cur_cap = cap;
     return c;
 }
 
+static int64_t g_rgn_probe_mark = 0;
+static void *aura_rgn_bump(AuraRgn *r, int64_t need) {
+    if (!r->cur || r->off + need > r->cur_cap) {
+        if (!aura_rgn_chunk(r, need)) return NULL;
+    }
+    void *p = r->cur + r->off;
+    r->off += need;
+    r->used += need;
+    g_aura_mem_used += need; /* 区域占用计入闸门;Reset 时统一扣回 */
+    /* [R87] 探针：每 1GB 打一行 retain/scratch 分布 */
+    if (g_aura_mem_used - g_rgn_probe_mark > ((int64_t)1 << 20 << 7)) {
+        g_rgn_probe_mark = g_aura_mem_used;
+        fprintf(stderr, "[rgn] used=%lldMB retain=%lldMB scratch=%lldMB\n",
+            (long long)(g_aura_mem_used >> 20), (long long)(g_rgn_ret.used >> 20),
+            (long long)(g_scr.used >> 20));
+        fflush(stderr);
+    }
+    return p;
+}
+
+static void aura_rgn_free_all(AuraRgn *r) {
+    int64_t i;
+    for (i = 0; i < r->n; i++) {
+        if (r->chunks[i]) {
+            VirtualFree(r->chunks[i], 0, 0x8000 /*MEM_RELEASE*/);
+        }
+    }
+    r->n = 0;
+    r->cur = NULL;
+    r->off = 0;
+    r->cur_cap = 0;
+    g_aura_mem_used -= r->used;
+    r->used = 0;
+}
+
 static void *rgn_alloc(int64_t n) {
-    int64_t need = ((n + 15) / 16) * 16; /* 16 对齐(Plan A:指针低位为 0) */
+    int64_t need = ((n + 15) / 16) * 16; /* 16 
+    }
+对齐(Plan A:指针低位为 0) */
     if (g_aura_mem_limit > 0 && g_aura_mem_used + need > g_aura_mem_limit) {
         aura_mem_oom(need);
     }
-    if (!g_rgn_cur || g_rgn_off + need > g_rgn_cur_cap) {
-        if (!rgn_chunk(need)) return NULL;
+    if (g_rgn_target) {
+        return aura_rgn_bump(&g_scr, need);
     }
-    void *p = g_rgn_cur + g_rgn_off;
-    g_rgn_off += need;
-    g_rgn_used += need;
-    g_aura_mem_used += need; /* 区域占用计入闸门;Reset 时统一扣回 */
-    return p;
+    return aura_rgn_bump(&g_rgn_ret, need);
 }
 
 /// 进入区域:此后 aura_mem_alloc 的块走区域 bump 分配。
 int64_t RegionEnter(void) {
     g_rgn_active = 1;
+    return 0;
+}
+
+/// [R87] 分配目标 → scratch arena(配合 RegionRetainTarget/ScratchReset
+/// 做逐模块 parse 中间物回收)。
+int64_t RegionScratchTarget(void) {
+    g_rgn_target = 1;
+    return 0;
+}
+
+/// [R87] 分配目标切回 retain arena。
+int64_t RegionRetainTarget(void) {
+    g_rgn_target = 0;
+    return 0;
+}
+
+/// [R87] 整体释放 scratch arena(记账同步扣回)。
+/// 区块**保留复用**不 VirtualFree:悬空指针仍落在已映射页(free/realloc
+/// 的区域守卫可识别),也省掉逐模块 VirtualAlloc/VirtualFree 循环;
+/// 真正释放跟随 RegionReset。记账按逻辑用量扣回。
+int64_t ScratchReset(void) {
+    g_aura_mem_used -= g_scr.used;
+    g_scr.used = 0;
+    if (g_scr.n > 0) {
+        g_scr.cur = (char *)g_scr.chunks[0];
+        g_scr.off = 0;
+        g_scr.cur_cap = g_scr.sizes[0];
+    }
+    return 0;
+}
+/// [R87] scratch 栈式标记（配合 ScratchRewind 做嵌套模块回收：
+/// 内层 rewind 永不越过外层 mark——栈纪律下外层 ast 跨递归存活）。
+/// mark 编码 = (chunk 序号+1) << 40 | 块内偏移。0 = 空。
+int64_t ScratchMark(void) {
+    if (g_scr.n <= 0 || !g_scr.cur) {
+        return 0;
+    }
+    int64_t idx = 0;
+    int64_t k;
+    for (k = 0; k < g_scr.n; k++) {
+        if (g_scr.chunks[k] == (void *)g_scr.cur) { idx = k + 1; break; }
+    }
+    if (idx == 0) { return 0; }
+    return (idx << 40) | (g_scr.off & ((1LL << 40) - 1));
+}
+
+/// [R87] 回退 scratch 到 mark：bump 指针回拨（块保留复用），mark 之后
+/// 分配的记账同步扣回。栈纪律：内层先 rewind，外层后 rewind。
+int64_t ScratchRewind(int64_t mark) {
+    int64_t idx = (int64_t)(mark >> 40);
+    int64_t off = mark & ((1LL << 40) - 1);
+    if (idx <= 0 || idx > g_scr.n) {
+        g_aura_mem_used -= g_scr.used;
+        g_scr.used = 0;
+        g_scr.cur = NULL;
+        g_scr.off = 0;
+        g_scr.cur_cap = 0;
+        g_scr.n = 0;
+        return 0;
+    }
+    int64_t drop = 0;
+    int64_t k;
+    for (k = idx; k < g_scr.n; k++) {
+        drop += g_scr.sizes[k];
+    }
+    drop += (int64_t)((char *)g_scr.cur - (char *)g_scr.chunks[idx - 1]) - off;
+    if (drop < 0) { drop = 0; }
+    if (drop > g_scr.used) { drop = g_scr.used; }
+    g_aura_mem_used -= drop;
+    g_scr.used -= drop;
+    g_scr.cur = (char *)g_scr.chunks[idx - 1];
+    g_scr.off = off;
+    g_scr.cur_cap = g_scr.sizes[idx - 1];
+    g_scr.n = idx;
     return 0;
 }
 
@@ -1029,17 +1148,20 @@ int64_t RegionReset(void) {
         fflush(stderr);
     }
     int64_t i;
-    for (i = 0; i < g_rgn_n; i++) {
-        if (g_rgn_chunks[i]) {
-            VirtualFree(g_rgn_chunks[i], 0, 0x8000 /*MEM_RELEASE*/);
+    /* [R87] scratch 一并清(防残留记账);目标复位为 retain。 */
+    aura_rgn_free_all(&g_scr);
+    g_rgn_target = 0;
+    for (i = 0; i < g_rgn_ret.n; i++) {
+        if (g_rgn_ret.chunks[i]) {
+            VirtualFree(g_rgn_ret.chunks[i], 0, 0x8000 /*MEM_RELEASE*/);
         }
     }
-    g_aura_mem_used -= g_rgn_used;
-    g_rgn_n = 0;
-    g_rgn_cur = NULL;
-    g_rgn_off = 0;
-    g_rgn_cur_cap = 0;
-    g_rgn_used = 0;
+    g_aura_mem_used -= g_rgn_ret.used;
+    g_rgn_ret.n = 0;
+    g_rgn_ret.cur = NULL;
+    g_rgn_ret.off = 0;
+    g_rgn_ret.cur_cap = 0;
+    g_rgn_ret.used = 0;
     g_rgn_active = 0;
     return 0;
 }
@@ -1051,6 +1173,8 @@ void *aura_mem_alloc(int64_t n) {
         n = 0;
     }
     if (g_rgn_active) {
+        /* [R87] region åéä¹è¿å½å ï¼ra0 = å­ç¬¦ä¸²/åè¡¨è¾å©å½æ°ï¼ä¸ malloc è·¯åè´¨éï¼ */
+        AURA_ATTR_RECORD(__builtin_return_address(0), n);
         return rgn_alloc(n);
     }
     aura_mem_init();
@@ -1127,20 +1251,30 @@ void *aura_mem_realloc(void *p, int64_t n) {
         n = 0;
     }
     /* [MEM-FIX] 区域指针守卫(同 aura_mem_free):区域块走「新分配+拷贝」
-     * 路径(拷贝长度按新尺寸,区域块内越界读是安全的有意行为)。 */
-    if (g_rgn_active && g_rgn_n > 0) {
+     * 路径(拷贝长度按新尺寸,区域块内越界读是安全的有意行为)。
+     * [R87] retain 与 scratch 两个 arena 都要查。 */
+    if (g_rgn_active) {
+        int64_t rem = -1;
         int64_t k;
-        for (k = 0; k < g_rgn_n; k++) {
-            char *cs = (char *)g_rgn_chunks[k];
-            if ((char *)p >= cs && (char *)p < cs + g_rgn_sizes[k]) {
-                /* 拷贝长度按区块剩余截断,避免越界读(区块尾部之后未映射) */
-                int64_t rem = (cs + g_rgn_sizes[k]) - (char *)p;
-                int64_t cp = (n < rem) ? n : rem;
-                char *np = (char *)aura_mem_alloc(n);
-                if (!np) return NULL;
-                if (cp > 0) memcpy(np, p, (size_t)cp);
-                return np;
+        for (k = 0; k < g_rgn_ret.n && rem < 0; k++) {
+            char *cs = (char *)g_rgn_ret.chunks[k];
+            if ((char *)p >= cs && (char *)p < cs + g_rgn_ret.sizes[k]) {
+                rem = (cs + g_rgn_ret.sizes[k]) - (char *)p;
             }
+        }
+        for (k = 0; k < g_scr.n && rem < 0; k++) {
+            char *cs = (char *)g_scr.chunks[k];
+            if ((char *)p >= cs && (char *)p < cs + g_scr.sizes[k]) {
+                rem = (cs + g_scr.sizes[k]) - (char *)p;
+            }
+        }
+        if (rem >= 0) {
+            /* 拷贝长度按区块剩余截断,避免越界读(区块尾部之后未映射) */
+            int64_t cp = (n < rem) ? n : rem;
+            char *np = (char *)aura_mem_alloc(n);
+            if (!np) return NULL;
+            if (cp > 0) memcpy(np, p, (size_t)cp);
+            return np;
         }
     }
     /* [PLAN3-FIX] 悬空区域指针(Reset 后):页已 unmap,拷贝必 AV。
@@ -1194,12 +1328,20 @@ void aura_mem_free(void *p) {
     }
     /* [MEM-FIX] 区域指针守卫:区域 bump 块无 AuraMemHdr,读头 = 读垃圾
      * (垃圾若通过 hdr_sane 会被 free 到区域块中间 → 堆破坏)。区域内存
-     * 由 RegionReset 整体管理,这里直接跳过。 */
-    if (g_rgn_active && g_rgn_n > 0) {
+     * 由 RegionReset 整体管理,这里直接跳过。
+     * [R87] retain 与 scratch 两个 arena 都要查。 */
+    if (g_rgn_active) {
         int64_t k;
-        for (k = 0; k < g_rgn_n; k++) {
-            char *cs = (char *)g_rgn_chunks[k];
-            if ((char *)p >= cs && (char *)p < cs + g_rgn_sizes[k]) {
+        for (k = 0; k < g_rgn_ret.n; k++) {
+            char *cs = (char *)g_rgn_ret.chunks[k];
+            if ((char *)p >= cs && (char *)p < cs + g_rgn_ret.sizes[k]) {
+                g_aura_mem_bad_hdr += 1;
+                return;
+            }
+        }
+        for (k = 0; k < g_scr.n; k++) {
+            char *cs = (char *)g_scr.chunks[k];
+            if ((char *)p >= cs && (char *)p < cs + g_scr.sizes[k]) {
                 g_aura_mem_bad_hdr += 1;
                 return;
             }

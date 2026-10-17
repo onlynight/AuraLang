@@ -66,6 +66,19 @@ extern interface Memory {
     // Memory_regionReset(seed 后端 runtime.rs 已注册)。
     @native fun regionEnter(): Long
     @native fun regionReset(): Long
+    // [R87] scratch 并行 arena:分配目标开关 + 批量回收。前端逐模块把
+    // parse 中间物(token/AST/源串)打进 scratch、HIR 产物切回 retain,
+    // 模块边界 scratchReset 批量回收——region 峰值从「全模块垃圾累加」
+    // 降到「retained 总量 + 单模块垃圾」。C 导出 RegionScratchTarget/
+    // RegionRetainTarget/ScratchReset(aura_std_cffi.c)。
+    @native fun regionScratchTarget(): Long
+    @native fun regionRetainTarget(): Long
+    // [R87] 栈式 mark/rewind：ModuleLink.loadPath 进入时 scratchMark()，
+    // own 降级完成后 scratchRewind(mark)——ast 跨递归存活、整模块垃圾
+    // 一次性回收。内层先 rewind（栈纪律）。
+    @native fun scratchMark(): Long
+    @native fun scratchRewind(mark: Long): Long
+
     @native(asm = "lock inc") fun arcIncrement(addr: Long): Long
     @native(asm = "lock dec") fun arcDecrement(addr: Long): Long
 }
@@ -115,7 +128,7 @@ object ArenaAllocator {
     var usedSize: Long = 0          // 已使用大小
 
     /// 初始化分配器
-    fun init(size: Long): Boolean {
+        fun init(size: Long): Boolean {
         // PROT_READ=1, PROT_WRITE=2, PROT_READ|PROT_WRITE=3
         // MAP_PRIVATE=2, MAP_ANONYMOUS=0x20=32, MAP_PRIVATE|MAP_ANONYMOUS=34
         this.baseAddr = Memory.mmap(0, size, 3, 34, -1, 0)
@@ -129,7 +142,7 @@ object ArenaAllocator {
     }
 
     /// 分配内存 (对齐到 8 字节)
-    fun alloc(size: Long): Long {
+        fun alloc(size: Long): Long {
         val alignedSize: Long = (size + 7) / 8 * 8
         if (this.currentPtr + alignedSize > this.baseAddr + this.capacity) {
             return 0  // 内存不足
@@ -141,13 +154,13 @@ object ArenaAllocator {
     }
 
     /// 重置分配器 (释放所有内存)
-    fun reset(): Unit {
+        fun reset(): Unit {
         this.currentPtr = this.baseAddr
         this.usedSize = 0
     }
 
     /// 释放全部内存 (返回给 OS)
-    fun free(): Unit {
+        fun free(): Unit {
         if (this.baseAddr != 0) {
             Memory.munmap(this.baseAddr, this.capacity)
             this.baseAddr = 0
@@ -157,12 +170,12 @@ object ArenaAllocator {
     }
 
     /// 获取已使用内存大小
-    fun getUsedSize(): Long {
+        fun getUsedSize(): Long {
         return this.usedSize
     }
 
     /// 获取剩余内存大小
-    fun getFreeSize(): Long {
+        fun getFreeSize(): Long {
         return this.capacity - this.usedSize
     }
 }
@@ -179,7 +192,7 @@ object MemoryManager {
     var initialized: Boolean = false
 
     /// 初始化全局内存管理器
-    fun init(size: Long): Boolean {
+        fun init(size: Long): Boolean {
         if (this.initialized) { return true }
         val result: Boolean = ArenaAllocator.init(size)
         if (result) {
@@ -189,28 +202,28 @@ object MemoryManager {
     }
 
     /// 分配内存
-    fun alloc(size: Long): Long {
+        fun alloc(size: Long): Long {
         return ArenaAllocator.alloc(size)
     }
 
     /// 释放全部内存
-    fun free(): Unit {
+        fun free(): Unit {
         ArenaAllocator.free()
         this.initialized = false
     }
 
     /// 重置分配器
-    fun reset(): Unit {
+        fun reset(): Unit {
         ArenaAllocator.reset()
     }
 
     /// 获取已使用内存大小
-    fun getUsedSize(): Long {
+        fun getUsedSize(): Long {
         return ArenaAllocator.getUsedSize()
     }
 
     /// 获取剩余内存大小
-    fun getFreeSize(): Long {
+        fun getFreeSize(): Long {
         return ArenaAllocator.getFreeSize()
     }
 }
@@ -218,8 +231,7 @@ object MemoryManager {
 // ═══════════════════════════════════════════════════════════════
 // MemoryUtils — 顶层辅助函数
 // ═══════════════════════════════════════════════════════════════
-
-object MemoryUtils {
+        object MemoryUtils {
     // ArenaAllocator 是全局单例，无法创建新实例。
     // 请使用 MemoryManager.alloc() 分配内存。
 }

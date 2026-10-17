@@ -629,6 +629,13 @@ impl EmitCtx {
         // 与定义并存为 LLVM 允许的冗余声明。
         s.push_str("declare i64 @RegionEnter()\n");
         s.push_str("declare i64 @RegionReset()\n");
+        // [R87] scratch 并行 arena(逐模块 parse 中间物回收)
+        s.push_str("declare i64 @RegionScratchTarget()\n");
+        s.push_str("declare i64 @RegionRetainTarget()\n");
+        s.push_str("declare i64 @ScratchReset()\n");
+        // [R87] æ å¼ mark/rewind
+        s.push_str("declare i64 @ScratchMark()\n");
+        s.push_str("declare i64 @ScratchRewind(i64)\n");
         // Phase D: 异常值全局变量（setjmp/longjmp 桥用）— 在 aura_syscalls.c 中定义
         s.push_str("@aura_exception_value = external global i8*\n");
         // LLVM 内建函数声明（Memory.copy / Memory.set / Memory.compare 用）
@@ -1075,6 +1082,17 @@ fn emit_native_wrapper(
             } else if func.name.contains("Memory") && method_lower == "set" {
                 // Memory.set(addr, v, n) → @llvm.memset
                 "%ptr.addr = inttoptr i64 %arg.0 to i8*\ncall void @llvm.memset(i8* %ptr.addr, i8 %arg.1, i64 %arg.2, i1 false)".to_string()
+            } else if method_lower == "regionscratchtarget" {
+                // [R87] scratch 并行 arena(见 aura_std_cffi.c)
+                "call i64 @RegionScratchTarget()".to_string()
+            } else if method_lower == "regionretaintarget" {
+                "call i64 @RegionRetainTarget()".to_string()
+            } else if method_lower == "scratchreset" {
+                "call i64 @ScratchReset()".to_string()
+            } else if method_lower == "scratchmark" {
+                "call i64 @ScratchMark()".to_string()
+            } else if method_lower == "scratchrewind" {
+                "call i64 @ScratchRewind(%arg.0)".to_string()
             } else if method_lower == "regionenter" || method_lower == "regionreset" {
                 // [MEM-FIX] 阶段区域原语 → C runtime 同名符号（Aura 方法名
                 // regionEnter/regionReset → C 导出 RegionEnter/RegionReset）。
