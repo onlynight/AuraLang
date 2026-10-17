@@ -35,7 +35,7 @@ import aura.lang.compiler.vm.VmStack
 import aura.lang.compiler.serialize.AucLoader
 
 /// 完整虚拟机实现（P0 替代占位桩）。
-        class Vm {
+class Vm {
 
     // ── 常量 ──
 
@@ -181,7 +181,7 @@ import aura.lang.compiler.serialize.AucLoader
     private var cbDiag: Int = 0
 
     // [R24] 布局扰动桩（真尺寸变化掷骰用；无调用者）
-        private fun layoutDiceStub(): Int {
+    private fun layoutDiceStub(): Int {
         val d: Int = 7
         return d * 3
     }
@@ -323,7 +323,7 @@ import aura.lang.compiler.serialize.AucLoader
     // ═══════════════════════════════════════════════════════════
 
     /// 加载字节码（文本模式：每行一条指令）。
-        fun loadBytecode(code: String, consts: String, funcs: String): Unit {
+    fun loadBytecode(code: String, consts: String, funcs: String): Unit {
         this.bytecode = code
 
         this.ip = 0
@@ -358,7 +358,7 @@ import aura.lang.compiler.serialize.AucLoader
     ///
     /// P2.2：加载器产出**数值化指令数组**（无文本中间层）时走 `loadPredecoded`
     /// 直读路径；类定义表自动注册进类继承注册表（继承/虚方法分派生效）。
-        fun loadAucAndRun(path: String): Any {
+    fun loadAucAndRun(path: String): Any {
         AucLoaderUtils.loadModule(path)
         // ⚠️ P266：从全局槽读取（绕开返回值传递链的句柄漂移）
         val mod: AucModule = AucLoaderUtils.lastLoaded
@@ -507,7 +507,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 注册 .auc 类定义表（P2.2c）：类名 + 父类下标 → 类继承注册表。
-        fun registerAucClasses(names: List<String>, parentIds: List<Int>): Unit {
+    fun registerAucClasses(names: List<String>, parentIds: List<Int>): Unit {
         var i: Int = 0
         while (i < names.size()) {
             var parent: String = ""
@@ -536,7 +536,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 从二进制数据加载（P1 预留接口）。
-        fun loadAucBinary(data: Array<Byte>): Unit {
+    fun loadAucBinary(data: Array<Byte>): Unit {
         this.error = "loadAucBinary: use loadAucAndRun(path) instead"
         this.running = false
     }
@@ -550,7 +550,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// 性能/内存要点：指令行、opcode、参数都在**加载期**一次性解析并缓存
     /// （`lines` / `ops` / 参数扁平槽）。AOT 运行时**没有 GC**，若在执行循环里
     /// 逐条 `substring`/`parseArgs`，长循环会把临时字符串累积成 GB 级内存。
-        fun run(): Any {
+    fun run(): Any {
         // 从 main 函数入口开始
         this.ip = this.funcOffset("main")
         this.currentFunc = "main"
@@ -634,7 +634,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// 表大小 2^20 槽 × 8 B = 8 MB（落在 bump arena 上）。MAX_INSTRUCTIONS =
     /// 2×10⁹ ⇒ 最多 ~1908 个采样点，表充裕。⚠ 8 MB 是探针固有开销，会使
     /// 绝对水位比纯净运行高 8 MB+；但「是否收敛」的斜率判定不受影响。
-        private fun probeArena(): Unit {
+    private fun probeArena(): Unit {
         if (this.arenaProbe == 0) {
             this.arenaProbe = Memory.alloc(2097152 + 16)
         }
@@ -667,7 +667,7 @@ import aura.lang.compiler.serialize.AucLoader
     ///   slope >> 8           ⇒  线性泄漏（bump 单调，无回收）；
     ///   capGrow 恒定 / capLast=64  ⇒  值栈无倍增（栈账目平衡）；
     ///   capGrow 持续上涨 / capLast 巨大  ⇒  栈顶单调上升。
-        private fun probeReport(): Unit {
+    private fun probeReport(): Unit {
         if (this.probeCount <= 0) {
             return
         }
@@ -703,7 +703,7 @@ import aura.lang.compiler.serialize.AucLoader
 
     /// 加载期预处理：把字节码切成行并缓存 `opcode` 助记符 / **数值编号** / 参数表
     ///（只分配一次；助记符→编号转换在此一次完成，ADR-002）。
-        private fun buildLineCache() {
+    private fun buildLineCache() {
         this.lines = this.bytecode.split("\n")
         this.ops = arrayListOf<String>()
         this.opCodes = arrayListOf<Int>()
@@ -746,7 +746,7 @@ import aura.lang.compiler.serialize.AucLoader
     ///
     /// P0.4（ADR-002）：分派只做**整数**比较（`Opcodes` 常量），无指令名
     /// 字符串比较；`opName` 仅用于未知指令的诊断信息。
-        private fun dispatch(op: Int): Unit {
+    private fun dispatch(op: Int): Unit {
         // ── 常量指令 ──
         // ── 热指令快速分派（方案 D）：按动态频次把高频臂前置，
         // 未命中落入下方原链（臂语义与原链逐字一致）。 ──
@@ -1458,7 +1458,7 @@ import aura.lang.compiler.serialize.AucLoader
     // ═══════════════════════════════════════════════════════════
 
     /// 调用内置函数或用户函数。
-        private fun callOrBuiltin(funcName0: String, argc: Int): Unit {
+    private fun callOrBuiltin(funcName0: String, argc: Int): Unit {
         // [R24] 全名前置路由（剥离**前**）：streq 直比 = runtime 汇编
         //（emitStreq，R3 审计过）——绕开剥离块的 charCodeAt NUL 扫描
         //（长堆串接收者漂移后无零区自旋，本轮 [CB0-4] 二分判决）。
@@ -2925,7 +2925,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 从函数返回。
-        private fun returnFromFunc(): Unit {
+    private fun returnFromFunc(): Unit {
         // [R20] 返回点轨迹：谁在返回、栈上有什么、返回什么
         if (this.rtTraceCap > 0) {
             this.rtTraceCap = this.rtTraceCap - 1
@@ -2972,7 +2972,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// （返回地址、保存的局部变量）原样保留，因此被调函数 RETURN 时直接
     /// 返回到**原调用者**——深层递归的调用深度恒为 O(1)。
     /// 实参绑定与 `callOrBuiltin` 的用户函数路径一致（含 aucArgBase 基址）。
-        private fun callTail(funcName: String, argc: Int): Unit {
+    private fun callTail(funcName: String, argc: Int): Unit {
         var target: Int = this.funcOffset(funcName)
         if (this.accelEnabled) {
             val accel: Int = this.accelTable.getOrDefault(funcName, -1)
@@ -2996,12 +2996,12 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// [R20] 压入调用者帧（List 直操，见 savedLocals 字段注释）。
-        private fun savedFramesAdd(v: VmLocals): Unit {
+    private fun savedFramesAdd(v: VmLocals): Unit {
         this.savedLocals.add(v)
     }
 
     /// [R20] 弹出最后一个保存的局部变量块（size 驱动 + 尾下标，同池模式）。
-        private fun savedFramesPop(): VmLocals {
+    private fun savedFramesPop(): VmLocals {
         val n: Int = this.savedLocals.size()
         if (n <= 0) {
             return VmLocals()
@@ -3012,7 +3012,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 从池中取一个（已重置的）locals；池空则新建。
-        private fun popLocalsPool(): VmLocals {
+    private fun popLocalsPool(): VmLocals {
         val n: Int = this.localsPool.size()
         if (n > 0) {
             val v: VmLocals = this.localsPool[n - 1]
@@ -3023,7 +3023,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 退役帧 locals：代际重置后归还池（容量保留，热身后零分配）。
-        private fun retireLocals(m: VmLocals): Unit {
+    private fun retireLocals(m: VmLocals): Unit {
         m.reset()
         this.localsPool.add(m)
     }
@@ -3032,7 +3032,7 @@ import aura.lang.compiler.serialize.AucLoader
     ///
     /// 转换统一走 `VmOps.toStrAny`（见其注释：直接在本类方法里对「刚从容器
     /// 取回的值」调用 `toStr` 在自举 AOT 下会得到错误结果）。
-        private fun collectArgs(argc: Int): String {
+    private fun collectArgs(argc: Int): String {
         if (argc <= 0) {
             return ""
         }
@@ -3063,7 +3063,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// 类名登记进 `objectClass`，供 `CALL_METHOD` 虚方法解析与类型查询使用；
     /// 字段值存 `objectFields`（按实例隔离），不写裸内存（装箱 Any 无法安全
     /// round-trip，见 ADR-003 偏差记录）。
-        private fun newObject(className: String): Unit {
+    private fun newObject(className: String): Unit {
         val objSize: Long = 16
         val ptr: Long = Memory.alloc(objSize)
         Memory.write64(ptr, 0)          // 类型标签（0 = 通用对象；类表接入 P1.2 后写类 id）
@@ -3085,7 +3085,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// 内建成员对应 Rust VM 的 `builtin_member`：`s.length` / `xs.size` /
     /// `xs.isEmpty` / `xs.first` / `xs.last`。加载器已把 `GET_FIELD` 的哈希操作数
     /// 翻译成这些名字（见 `AucLoaderUtils.fieldNameOf`）。
-        private fun getField(fieldName: String): Unit {
+    private fun getField(fieldName: String): Unit {
         val obj: Any = this.stack.pop()
         if (fieldName == "length" || fieldName == "size" || fieldName == "count") {
             // [R19] 路由至 strLenRaw(toStrAny(obj))——两个已证可靠原语的组合。
@@ -3184,7 +3184,7 @@ import aura.lang.compiler.serialize.AucLoader
     ///
     /// P0.5（ADR-003）：字段按**实例**存储（键 "<objPtr>|<name>"）。
     /// 栈序：value 在顶、objPtr 在其下。
-        private fun setField(fieldName: String): Unit {
+    private fun setField(fieldName: String): Unit {
         val val: Any = this.stack.pop()
         val obj: Any = this.stack.pop()
         // 指针装箱类型名随宿主可能是 "Int"/"Long"（见 getField 注释），接受整型
@@ -3226,7 +3226,7 @@ import aura.lang.compiler.serialize.AucLoader
     ///
     /// 缓冲区惰性分配后复用（每次取时间都 malloc 会在长循环里持续泄漏）；
     /// 读取失败（返回值非 0）时返回 0，与 VM 其余原语的容错风格一致。
-        private fun clockNowMs(): Long {
+    private fun clockNowMs(): Long {
         if (this.clockBuf == 0L) {
             this.clockBuf = Memory.alloc(16L)
         }
@@ -3257,14 +3257,14 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 数组/列表元素读取（`Collections` 布局：元素在 `read64(ptr+16)` 指向的数组中）。
-        private fun getIndex(): Unit {
+    private fun getIndex(): Unit {
         val idx: Any = this.stack.pop()
         val objAny: Any = this.stack.pop()
         this.stack.push(VmCollections.vmListAt(objAny, idx))
     }
 
     /// 数组元素写入。
-        private fun setIndex(): Unit {
+    private fun setIndex(): Unit {
         // 栈序（见 Rust `OpCode::SetIndex` 注释）：栈顶为索引、其下为引用、再下为值
         val idx: Any = this.stack.pop()
         val objAny: Any = this.stack.pop()
@@ -3276,7 +3276,7 @@ import aura.lang.compiler.serialize.AucLoader
     ///
     /// `DEF_CLASS cls parent` 指令与 `registerClass` API 共用；
     /// parent 为 "" 或 "-" 表示无父类。
-        private fun defClass(cls: String, parent: String): Unit {
+    private fun defClass(cls: String, parent: String): Unit {
         var p: String = parent
         if (p == "-") { p = "" }
         // [R33] 线性登记（覆盖式）
@@ -3298,7 +3298,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 沿父类链解析方法（P1.2）：返回 "类名.方法名"，链上无命中返回 ""。
-        private fun resolveMethodInChain(cls: String, methodName: String): String {
+    private fun resolveMethodInChain(cls: String, methodName: String): String {
         var cur: String = cls
         var depth: Int = 0
         while (cur != "" && depth < 64) {
@@ -3322,7 +3322,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 类名 cls 是否为 target 自身或其祖先链上的类型（P1.2，instanceOf/checkCast 用）。
-        private fun classIsA(cls: String, target: String): Boolean {
+    private fun classIsA(cls: String, target: String): Boolean {
         if (cls == "") { return false }
         var cur: String = cls
         var depth: Int = 0
@@ -3335,7 +3335,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 对象值是否为注册的堆对象（P1.2/P1.5 共用），是则返回其类名。
-        private fun heapObjectClass(v: Any): String {
+    private fun heapObjectClass(v: Any): String {
         if (v == null) { return "" }
         val key: String = VmOps.toStrAny(v)
         if (this.heapKinds.getOrDefault(key, "") != "object") { return "" }
@@ -3352,7 +3352,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
     ///
     /// depth = 接收者之下压着的实参个数（0 = 接收者在栈顶）。
-        private fun receiverClassAt(depth: Int): String {
+    private fun receiverClassAt(depth: Int): String {
         if (depth < 0) { return "" }
         val idx: Int = this.stack.stackDepth() - 1 - depth
         if (idx < 0) { return "" }
@@ -3380,7 +3380,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// `CALL_METHOD name [argc]`：argc 可选（除 self 外的实参个数；
     /// 省略时按无参方法处理，接收者 = 栈顶）。解析失败退让旧路径
     /// `callOrBuiltin(name, 0)`，兼容遗留字节码。
-        private fun callMethod(methodName: String): Unit {
+    private fun callMethod(methodName: String): Unit {
         if (this.aucMode) {
             // `.auc` 布局（Rust emit.rs CallMethod）：[self, args..., receiverCopy]，
             // 栈顶是接收者**副本**，仅用于虚分派（Rust VM 同样丢弃该副本）。
@@ -3433,7 +3433,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// `CALL_CTOR name [argc]`：对象已由 `NEW_OBJECT` 分配（接收者在栈上、
     /// 实参之下），构造器函数以 `"类名.ctor"`（或 `"类名." + name`）注册，
     /// self 为首参。解析失败退让旧路径。
-        private fun callCtor(ctorName: String): Unit {
+    private fun callCtor(ctorName: String): Unit {
         var argc: Int = 0
         if (this.argCountOf() >= 2) {
             argc = VmOps.toI32(this.argStrOf(1))
@@ -3461,7 +3461,7 @@ import aura.lang.compiler.serialize.AucLoader
     ///
     /// varNames 在文本模式下无 name→slot 映射可解析，按 0 捕获处理；
     /// 捕获语义由 `MAKE_CLOSURE name nCaptures`（弹栈捕获）承担。
-        private fun loadClosure(closureData: String): Unit {
+    private fun loadClosure(closureData: String): Unit {
         val parts: List<String> = VmOps.split(closureData, "|")
         if (parts.size >= 1) {
             this.makeClosure(parts[0], parts)
@@ -3474,7 +3474,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// nCaptures 个值作为捕获（按压入顺序存为 upvalue 0..n-1）；
     /// 无第二个操作数时为 0 捕获（遗留 .auc 路径兼容）。
     /// 压入 closureId（Int），`CALL_CLOSURE` 按其调用。
-        private fun makeClosure(funcName: String): Unit {
+    private fun makeClosure(funcName: String): Unit {
         var n: Int = 0
         if (this.argCountOf() >= 2) {
             n = VmOps.toI32(this.argStrOf(1))
@@ -3508,7 +3508,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// （与 CALL 一致）。argc 省略时按目标函数参数个数推导（兼容旧路径
     /// 的无参调用）。调用期间 currentClosure 指向该闭包，函数体内的
     /// LOAD_UPVALUE/STORE_UPVALUE 按此寻址。
-        private fun callClosureAt(): Unit {
+    private fun callClosureAt(): Unit {
         var argc: Int = 0
         if (this.argCountOf() >= 1) {
             argc = VmOps.toI32(this.argStrOf(0))
@@ -3545,7 +3545,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 读取当前闭包的第 idx 个 upvalue（P1.3）。
-        private fun loadUpvalue(idx: Int): Unit {
+    private fun loadUpvalue(idx: Int): Unit {
         if (this.currentClosure < 0) {
             this.error = "LOAD_UPVALUE: no closure context"
             this.running = false
@@ -3561,7 +3561,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 原位改写当前闭包的第 idx 个 upvalue（P1.3，闭包间共享可变状态）。
-        private fun storeUpvalue(idx: Int): Unit {
+    private fun storeUpvalue(idx: Int): Unit {
         if (this.currentClosure < 0) {
             this.error = "STORE_UPVALUE: no closure context"
             this.running = false
@@ -3584,7 +3584,8 @@ import aura.lang.compiler.serialize.AucLoader
     // ═══════════════════════════════════════════════════════════
     //  类型检查（P1.2：对象值沿类继承链判定）
     // ═══════════════════════════════════════════════════════════
-        private fun instanceOf(typeName: String): Unit {
+
+    private fun instanceOf(typeName: String): Unit {
         val v: Any = this.stack.pop()
         // 对象值：沿类继承链匹配（is-a 语义）
         val objCls: String = this.heapObjectClass(v)
@@ -3647,7 +3648,7 @@ import aura.lang.compiler.serialize.AucLoader
     // ═══════════════════════════════════════════════════════════
 
     /// 登记一个堆分配（栈顶值即句柄；键取 toStrAny 形态）。
-        private fun registerHeapTop(kind: String): Unit {
+    private fun registerHeapTop(kind: String): Unit {
         this.heapKinds.put(VmOps.toStrAny(this.stack.peek()), kind)
     }
 
@@ -3656,7 +3657,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// 容器（list/map/array）布局与 `aura.lang.collection.Collections` 兼容、
     /// 头部无引用计数字段，采用「丢弃即释放」语义；别名容器重复 DEC_REF
     /// 会双重释放 —— 已知限制，等价 Rust VM 的即时回收行为（heap.rs）。
-        private fun freeRegistered(ptrKey: String, kind: String): Unit {
+    private fun freeRegistered(ptrKey: String, kind: String): Unit {
         val ptr: Long = VmOps.toI64(ptrKey)
         if (ptr == 0L) { return }
         if (kind == "list") {
@@ -3687,12 +3688,12 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 活跃堆对象计数（P1.5 泄漏检测：长循环创建/销毁后应归零）。
-        fun getActiveHeapObjects(): Int {
+    fun getActiveHeapObjects(): Int {
         return this.heapKinds.getSize()
     }
 
     /// 当前调用深度（主帧为 1）。
-        fun getCallDepth(): Int {
+    fun getCallDepth(): Int {
         return this.callStack.callDepth() + 1
     }
 
@@ -3700,7 +3701,7 @@ import aura.lang.compiler.serialize.AucLoader
     ///
     /// 仅对带引用计数头的堆块生效（object/box，rc 位于 offset 8）；
     /// 其余注册类型（容器/资源）无 rc 字段，为 no-op。
-        private fun incRef(): Unit {
+    private fun incRef(): Unit {
         val v: Any = this.stack.pop()
         if (v == null || !VmOps.isNumeric(v)) {
             this.stack.push(v)
@@ -3726,7 +3727,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 递减引用计数，归零时按类型释放堆内存（P1.5）。
-        private fun decRef(): Unit {
+    private fun decRef(): Unit {
         val v: Any = this.stack.pop()
         if (v == null || !VmOps.isNumeric(v)) {
             this.stack.push(null)
@@ -3772,7 +3773,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// 2869+2887 双 push）每次 RETAIN 泄 2 槽。唯一正确语义 = 消费。
     /// [X] 轨迹实证：GET_FIELD 的操作数来自其**前一条** LOAD_LOCAL（ip29→30），
     /// 与 RETAIN 无关——「RETAIN 喂 GET_FIELD」的前提不成立。
-        private fun retain(): Unit {
+    private fun retain(): Unit {
         val v: Any = this.stack.pop()
         if (v == null || !VmOps.isNumeric(v)) {
             return
@@ -3794,7 +3795,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 释放（RELEASE，op 113）——**消费**栈顶，不回压（同 retain 的栈约定）。
-        private fun release(): Unit {
+    private fun release(): Unit {
         val v: Any = this.stack.pop()
         if (v == null || !VmOps.isNumeric(v)) {
             return
@@ -3820,7 +3821,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 丢弃引用：弹出并按注册类型回收（P1.5）。
-        private fun dropRef(): Unit {
+    private fun dropRef(): Unit {
         val v: Any = this.stack.pop()
         if (v == null || !VmOps.isNumeric(v)) {
             return
@@ -3851,7 +3852,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 创建弱引用（不增加引用计数，返回原指针值）。
-        private fun weakRef(): Unit {
+    private fun weakRef(): Unit {
         val v: Any = this.stack.pop()
         this.stack.push(v)
     }
@@ -3859,7 +3860,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// 弱引用升级（P1.5 真弱引用）：仅当对象仍在堆注册表中存活时升级成功
     /// （object/box 引用计数 +1 并返回原值）；已释放的块已被摘除登记，
     /// 一律返回 null——不再有「读已释放内存的 rc」的未定义行为。
-        private fun weakGet(): Unit {
+    private fun weakGet(): Unit {
         val v: Any = this.stack.pop()
         if (v == null || !VmOps.isNumeric(v)) {
             this.stack.push(v)
@@ -3883,7 +3884,7 @@ import aura.lang.compiler.serialize.AucLoader
     ///
     /// 数值装箱值直接写 value 槽；非数值（字符串等句柄值）写裸内存会截断，
     /// 存入 `boxValues` 侧表（键 = objPtr 的 toStrAny 形态）。
-        private fun boxAlloc(): Unit {
+    private fun boxAlloc(): Unit {
         val v: Any = this.stack.pop()
         val ptr: Long = Memory.alloc(24)
         Memory.write32(ptr + 8, 1)  // 初始引用计数 = 1
@@ -3912,7 +3913,8 @@ import aura.lang.compiler.serialize.AucLoader
     // ═══════════════════════════════════════════════════════════
     //  FFI
     // ═══════════════════════════════════════════════════════════
-        private fun callC(idx: Int): Unit {
+
+    private fun callC(idx: Int): Unit {
         // C ABI 函数调用。
         //
         // `.auc` 路径中，AucLoader 已将 CALL_C 转为 CALL_NATIVE_ARGS（按名分派），
@@ -3974,7 +3976,7 @@ import aura.lang.compiler.serialize.AucLoader
     ///
     /// `PUSH_HANDLER target slot catchType`；记录条目
     /// `target|ip|slot|catchType|frame`（slot = catch 后异常值的落槽，-1 = 不落槽）。
-        private fun pushHandlerAt(): Unit {
+    private fun pushHandlerAt(): Unit {
         val target: String = this.argStrOf(0)
         var slot: String = "-1"
         if (this.argCountOf() >= 2) { slot = this.argStrOf(1) }
@@ -3997,7 +3999,7 @@ import aura.lang.compiler.serialize.AucLoader
     ///   * 异常值为注册对象：沿其类继承链匹配（子类实例可被父类 catch）；
     ///   * 异常值为字符串：视为自动包装的 Exception（匹配 "Exception"/"String"）；
     ///   * 其他内置类型：按 `typeName` 精确匹配。
-        private fun exceptionMatches(ex: Any, catchType: String): Boolean {
+    private fun exceptionMatches(ex: Any, catchType: String): Boolean {
         if (catchType == "" || catchType == "Any") { return true }
         if (ex == null) { return catchType == "Null" }
         val objCls: String = this.heapObjectClass(ex)
@@ -4065,7 +4067,7 @@ import aura.lang.compiler.serialize.AucLoader
     // ═══════════════════════════════════════════════════════════
 
     /// 自旋获取：`fetch_add(1)` 返回 0 则获得锁。
-        private fun vmSpinAcquire(word: Long): Unit {
+    private fun vmSpinAcquire(word: Long): Unit {
         while (true) {
             if (Cpu.atomicAdd(word, 1L) == 0L) { return }
             Cpu.atomicAdd(word, 0L - 1L)
@@ -4073,12 +4075,13 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 自旋释放：`fetch_add(-1)`。
-        private fun vmSpinRelease(word: Long): Unit {
+    private fun vmSpinRelease(word: Long): Unit {
         Cpu.atomicAdd(word, 0L - 1L)
     }
 
     // ── 线程 ──
-        private fun threadSpawn(): Unit {
+
+    private fun threadSpawn(): Unit {
         val arg: Any = this.stack.pop()
         val fnId: Any = this.stack.pop()
         val handle: Int = ThreadOps.create(
@@ -4106,7 +4109,8 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     // ── 互斥锁（自旋锁，8 字节锁字） ──
-        private fun mutexNew(): Unit {
+
+    private fun mutexNew(): Unit {
         val addr: Long = Memory.alloc(8L)
         Memory.write64(addr, 0L)
         this.stack.push(addr)
@@ -4136,7 +4140,8 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     // ── 原子整数（16 字节：值 + CAS 守卫） ──
-        private fun atomicNew(): Unit {
+
+    private fun atomicNew(): Unit {
         val initial: Any = this.stack.pop()
         val addr: Long = Memory.alloc(16L)
         Memory.write64(addr, VmOps.addrOf(initial))
@@ -4176,7 +4181,8 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     // ── 通道（32B 头 + cap×8B 环形缓冲区） ──
-        private fun channelNew(): Unit {
+
+    private fun channelNew(): Unit {
         val cap: Any = this.stack.pop()
         var capacity: Long = VmOps.intOf(cap) as Long
         if (capacity <= 0L) { capacity = 64L }
@@ -4228,7 +4234,8 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     // ── 读写锁（24 字节：守卫 + 读者计数 + 写者标志） ──
-        private fun rwLockNew(): Unit {
+
+    private fun rwLockNew(): Unit {
         val addr: Long = Memory.alloc(24L)
         Memory.write64(addr, 0L)
         Memory.write64(addr + 8L, 0L)
@@ -4283,7 +4290,8 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     // ── 条件变量（16 字节：守卫 + 代数计数器） ──
-        private fun condvarNew(): Unit {
+
+    private fun condvarNew(): Unit {
         val addr: Long = Memory.alloc(16L)
         Memory.write64(addr, 0L)
         Memory.write64(addr + 8L, 0L)
@@ -4321,7 +4329,8 @@ import aura.lang.compiler.serialize.AucLoader
     // ═══════════════════════════════════════════════════════════
     //  枚举
     // ═══════════════════════════════════════════════════════════
-        private fun enumConstruct(tagName: String): Unit {
+
+    private fun enumConstruct(tagName: String): Unit {
         val tag: Any = this.stack.pop()
         // 枚举构造：压入标签值
         this.stack.push(tag)
@@ -4344,7 +4353,8 @@ import aura.lang.compiler.serialize.AucLoader
     // ═══════════════════════════════════════════════════════════
     //  跨模块
     // ═══════════════════════════════════════════════════════════
-        private fun callExport(symName: String): Unit {
+
+    private fun callExport(symName: String): Unit {
         this.callOrBuiltin(symName, 0)
     }
 
@@ -4429,7 +4439,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 在导出表文本（每行 `name|funcIdx`）中查找符号（P2.3 注册表辅助）。
-        private fun lookupExportIn(exportsText: String, symName: String): String {
+    private fun lookupExportIn(exportsText: String, symName: String): String {
         if (exportsText == "" || symName == "") { return "" }
         var pos: Int = 0
         var len: Int = exportsText.length
@@ -4447,12 +4457,12 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 登记已加载模块的导出表（P2.3 ModuleRegistry；供跨模块诊断/解析）。
-        fun registerLoadedModule(moduleName: String, exportsText: String): Unit {
+    fun registerLoadedModule(moduleName: String, exportsText: String): Unit {
         this.loadedModuleExports.put(moduleName, exportsText)
     }
 
     /// 在导入表中按索引查找条目（格式 `name|module|symbol|funcIdx`）。
-        private fun lookupImport(idx: Int): String {
+    private fun lookupImport(idx: Int): String {
         if (this.importsTable == "" || idx < 0) { return "" }
         var lineIdx: Int = 0
         var pos: Int = 0
@@ -4471,7 +4481,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 在导出表中按符号名查找条目（格式 `name|funcIdx`）。
-        private fun lookupExportByName(symName: String): String {
+    private fun lookupExportByName(symName: String): String {
         if (this.exportsTable == "" || symName == "") { return "" }
         var pos: Int = 0
         var len: Int = this.exportsTable.length
@@ -4489,7 +4499,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 按全局函数索引查找函数名（函数表行序 = 全局索引）。
-        private fun findFuncNameByIndex(idx: Int): String {
+    private fun findFuncNameByIndex(idx: Int): String {
         if (this.funcTable == "" || idx < 0) { return "" }
         var lineIdx: Int = 0
         var pos: Int = 0
@@ -4512,7 +4522,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 在字符串中查找指定字符的下标（从 start 开始搜索），未找到返回 -1。
-        private fun indexOfChar(s: String, start: Int, ch: Int): Int {
+    private fun indexOfChar(s: String, start: Int, ch: Int): Int {
         var i: Int = start
         val len: Int = s.length
         while (i < len) {
@@ -4523,7 +4533,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 按管道符分割字符串。
-        private fun splitPipe(s: String): List<String> {
+    private fun splitPipe(s: String): List<String> {
         val result: List<String> = arrayListOf<String>()
         var pos: Int = 0
         var len: Int = s.length
@@ -4547,7 +4557,7 @@ import aura.lang.compiler.serialize.AucLoader
     // ═══════════════════════════════════════════════════════════
 
     /// 获取字节码行数。
-        private fun bytecodeLineCount(): Int {
+    private fun bytecodeLineCount(): Int {
         var count: Int = 0
         var i: Int = 0
         var len: Int = this.bytecode.length
@@ -4564,7 +4574,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 获取指定行的字节码。
-        private fun getBytecodeLine(lineIdx: Int): String {
+    private fun getBytecodeLine(lineIdx: Int): String {
         var pos: Int = 0
         var len: Int = this.bytecode.length
         var lineStart: Int = 0
@@ -4588,7 +4598,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 查找函数入口偏移（未找到返回 0）。
-        private fun funcOffset(funcName: String): Int {
+    private fun funcOffset(funcName: String): Int {
         var i: Int = 0
         val n: Int = this.funcNamesL.size()
         while (i < n) {
@@ -4601,7 +4611,7 @@ import aura.lang.compiler.serialize.AucLoader
     }
 
     /// 查找函数参数个数（未找到返回 -1）。
-        private fun funcParamCount(funcName: String): Int {
+    private fun funcParamCount(funcName: String): Int {
         var i: Int = 0
         val n: Int = this.funcNamesL.size()
         while (i < n) {
@@ -4615,13 +4625,13 @@ import aura.lang.compiler.serialize.AucLoader
 
     /// 获取常量池中的值。
     /// 算术融合白名单：与快速分派块的臂一一对应。
-        private fun isArithOp(op: Int): Boolean {
+    private fun isArithOp(op: Int): Boolean {
         return op == 20 || op == 21 || op == 22
     }
 
     /// 装载期索引构建（方案 A2+E）：函数表 → 两张 HashMap；常量池 → 行缓存；
     /// 指令参数 → 预解析 Int。装载完成后调用一次；执行路径零解析零分配。
-        private fun buildLoadCaches(): Unit {
+    private fun buildLoadCaches(): Unit {
         this.funcNamesL = arrayListOf<String>()
         this.funcOffL = arrayListOf<Int>()
         this.funcPcL = arrayListOf<Int>()
@@ -4692,7 +4702,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// 纯写执行改写。旧实现单循环边读边写增量改写，在 photon 下触发槽
     /// 影子读家族（P277：r 不推进 14 万次；P366 同族）需要护栏截断，融合
     /// 长期失效。读写分离后计划行间无重叠，遍 2 的写入不影响遍 1 结论。
-        private fun fuseHotPairs(): Unit {
+    private fun fuseHotPairs(): Unit {
         val n: Int = this.opCodes.size()
         if (n < 2) { return }
         // 跳转目标位图：融合窗口 [r+1, r+span) 内不得含任何跳转目标行，
@@ -4771,7 +4781,7 @@ import aura.lang.compiler.serialize.AucLoader
     /// 融合对识别：返回融合 opcode（0 = 无）。语义与原增量版一致，唯
     /// 6 连守卫（204）保留 store/load 同槽检查（tmpW==tmpR）——不同槽
     /// 时原第二分支会错误假设同槽，此处不融合（放弃该对，语义安全）。
-        private fun matchFuseAt(r: Int, n: Int): Int {
+    private fun matchFuseAt(r: Int, n: Int): Int {
         val op: Int = this.opCodes[r]
         if (r < n - 5
             && op == 10
@@ -4780,8 +4790,8 @@ import aura.lang.compiler.serialize.AucLoader
             && this.opCodes[r + 3] == 11
             && this.opCodes[r + 4] == 10
             && this.opCodes[r + 5] == 51) {
-            val a3s: String = this.argStrs[(r + 3) * 3]
-            val a4s: String = this.argStrs[(r + 4) * 3]
+            val a3s: String = this.argStrs[(r + 3) * 3)
+            val a4s: String = this.argStrs[(r + 4) * 3)
             if (a3s == a4s) {
                 return 204
             }
@@ -4807,7 +4817,7 @@ if (false && (r < n - 5
             && this.opCodes[r + 2] == 32
             && this.opCodes[r + 3] == 11
             && this.opCodes[r + 4] == 10
-            && this.opCodes[r + 5] == 51)) {
+            && this.opCodes[r + 5] == 51) {
             return 205
         }
         if (op == 10 && this.opCodes[r + 1] == 11) {
@@ -4823,19 +4833,19 @@ if (false && (r < n - 5
     }
 
     /// 融合对的窗口跨度。
-        private fun fuseSpanOf(f: Int): Int {
+    private fun fuseSpanOf(f: Int): Int {
         if (f == 204 || f == 205) { return 6 }
         if (f == 202 || f == 203) { return 4 }
         return 2
     }
 
     /// 融合对的参数构造（从 argStrs 读取原行参数）。
-        private fun buildFusePair(r: Int, f: Int): List<String> {
+    private fun buildFusePair(r: Int, f: Int): List<String> {
         val pair: List<String> = arrayListOf<String>()
         val a0s: String = this.argStrs[r * 3]
-        val a1s: String = this.argStrs[(r + 1) * 3]
+        val a1s: String = this.argStrs[(r + 1) * 3)
         if (f == 202 || f == 203 || f == 205) {
-            val a3s: String = this.argStrs[(r + 3) * 3]
+            val a3s: String = this.argStrs[(r + 3) * 3)
             if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
             if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
             if (f == 205) {
@@ -4844,15 +4854,15 @@ if (false && (r < n - 5
                 // arg3 落 argNoneMark → 0 → 跳回第 0 行（banner 重启 /
                 // loop1M 吞输出的实相）。
                 if (a3s != "") { pair.add(a3s) } else { pair.add("-1") }
-                val a5s: String = this.argStrs[(r + 5) * 3]
+                val a5s: String = this.argStrs[(r + 5) * 3)
                 if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
             } else {
                 pair.add(toStr(this.opCodes[r + 2]))
                 if (a3s != "") { pair.add(a3s) } else { pair.add("0") }
             }
         } else if (f == 204) {
-            val a3s: String = this.argStrs[(r + 3) * 3]
-            val a5s: String = this.argStrs[(r + 5) * 3]
+            val a3s: String = this.argStrs[(r + 3) * 3)
+            val a5s: String = this.argStrs[(r + 5) * 3)
             if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
             if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
             pair.add(toStr(32))
@@ -4860,7 +4870,7 @@ if (false && (r < n - 5
             if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
         } else if (f == 206 || f == 201) {
             // 两参融合对：arg1 在 r+1 行（STORE 槽 / JIF 跳转目标）。
-            val a1b: String = this.argStrs[(r + 1) * 3]
+            val a1b: String = this.argStrs[(r + 1) * 3)
             if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
             if (a1b != "") { pair.add(a1b) } else { pair.add("0") }
         } else if (f == 200) {
@@ -4871,7 +4881,7 @@ if (false && (r < n - 5
     }
 
     /// 融合指令的助记符名。
-        private fun fuseNameOf(f: Int): String {
+    private fun fuseNameOf(f: Int): String {
         if (f == 204) { return "LDLC_LTL_JIFS" }
         if (f == 202) { return "LDLC_OP_STL" }
         if (f == 203) { return "LDLB_OP_STL" }
@@ -4884,7 +4894,7 @@ if (false && (r < n - 5
     /// 第 i 条指令的 arg0 整数值（预解析未命中时回退现场解析）。
 
     /// 取第 k 个参数的字符串值（扁平槽：0/1/2 直取；≥3 当前指令集无此形态）。
-        private fun argStrOf(k: Int): String {
+    private fun argStrOf(k: Int): String {
         if (k <= 2) {
             // P341：下标形式（.get 调用窗口实参槽覆写，布局敏感）
             return this.argStrs[(this.ip - 1) * 3 + k]
@@ -4894,12 +4904,12 @@ if (false && (r < n - 5
 
     /// 取第 k 个参数的字符串值（k ≥ 3 恒空：当前指令集参数最多 5 个且
     /// 槽 3/4 仅融合指令使用、必为数值——走 arg3/4IntOf）。
-        private fun argCountOf(): Int {
+    private fun argCountOf(): Int {
         return this.argCounts[this.ip - 1]
     }
 
     /// 数值快路径：槽 2/3/4 的预解析值（sentinel 时回退按字符串解析）。
-        private fun arg2IntOf(): Int {
+    private fun arg2IntOf(): Int {
         val v: Int = this.arg2Ints[this.ip - 1]
         if (v != this.argNoneMark) {
             return v
@@ -4924,7 +4934,7 @@ if (false && (r < n - 5
     }
 
     /// 常量池按下标直取（arg0/1IntOf 预解析下标的免解析快路径）。
-        private fun getConstByIdx(idx: Int): Any {
+    private fun getConstByIdx(idx: Int): Any {
         // P364：**单返回路径**——旧双返回（String 路径 + Any fallback 路径）
         // 的合并值在 photon 下按调用点布局被 Int 装箱（字符串指针
         // (v<<1)|1），println 打印指针十进制（[CA] tagged=true 实证）。
@@ -4941,7 +4951,7 @@ if (false && (r < n - 5
 
     /// 装载扁平参数串（loadPredecoded）：每条 "a0,a1[,a2]"，空段保序。
     /// ⚠️ 槽 3/4 装载期不存在（融合指令由 fuseHotPairs 生成并回填）。
-        private fun loadArgsFlat(flat: List<String>): Unit {
+    private fun loadArgsFlat(flat: List<String>): Unit {
         this.argStrs = arrayListOf<String>()
         this.arg2Ints = arrayListOf<Int>()
         this.arg3Ints = arrayListOf<Int>()
@@ -5021,7 +5031,7 @@ if (false && (r < n - 5
 
     /// 文本路径（buildLineCache）写一行参数槽（与 loadArgsFlat 同构）。
     /// ⚠️ 不写 arg0/1Ints——buildLoadCaches 在融合**之后**统一重建。
-        private fun writeArgsRow(temp: List<String>): Unit {
+    private fun writeArgsRow(temp: List<String>): Unit {
         var k: Int = 0
         while (k < 3) {
             val v: String = if (k < temp.size()) { temp[k] } else { "" }
@@ -5060,7 +5070,7 @@ if (false && (r < n - 5
     /// 融合写回：把 pair 的槽写回第 r 行（字符串槽 0-2 + 数值槽 2-4 + 计数）。
     /// ⚠️ 不写 arg0/1Ints——fuseHotPairs 在 buildLoadCaches **之前**运行，
     /// 后者会从 argStrs 统一重建。
-        private fun setArgsRow(r: Int, pair: List<String>): Unit {
+    private fun setArgsRow(r: Int, pair: List<String>): Unit {
         var k: Int = 0
         while (k < 3) {
             val v: String = if (k < pair.size()) { pair[k] } else { "" }
@@ -5124,7 +5134,7 @@ if (false && (r < n - 5
     }
 
     /// 第 i 条指令的 arg1 整数值（同上）。
-        private fun arg1IntOf(): Int {
+    private fun arg1IntOf(): Int {
         if (this.mcValid == 1) {
             val v: Int = Memory.read64(this.mcA1 + (this.ip - 1) * 8) as Int
             if (v != this.argNoneMark) {
@@ -5152,7 +5162,7 @@ if (false && (r < n - 5
     }
 
     /// 反转义 AucLoader 的常量值转义（\\ → \、\n → 换行）。
-        private fun unescapeConst(s: String): String {
+    private fun unescapeConst(s: String): String {
         var hasEscape: Boolean = false
         var i0: Int = 0
         val n0: Int = s.length
@@ -5192,7 +5202,7 @@ if (false && (r < n - 5
     }
 
     /// 检查字符串是否以指定前缀开头。
-        private fun startsWith(s: String, prefix: String): Boolean {
+    private fun startsWith(s: String, prefix: String): Boolean {
         if (s.length < prefix.length) {
             return false
         }
@@ -5211,37 +5221,37 @@ if (false && (r < n - 5
     // ═══════════════════════════════════════════════════════════
 
     /// 获取错误信息。
-        fun getError(): String {
+    fun getError(): String {
         return this.error
     }
 
     /// 获取指令计数。
-        fun getInstructionCount(): Int {
+    fun getInstructionCount(): Int {
         return this.instructionCount
     }
 
     /// 检查是否运行中。
-        fun isRunning(): Boolean {
+    fun isRunning(): Boolean {
         return this.running
     }
 
     /// 获取栈深度。
-        fun getStackDepth(): Int {
+    fun getStackDepth(): Int {
         return this.stack.stackDepth()
     }
 
     /// 获取退出码。
-        fun getExitCode(): Int {
+    fun getExitCode(): Int {
         return this.exitCode
     }
 
     /// 获取返回值。
-        fun getReturnValue(): Any {
+    fun getReturnValue(): Any {
         return this.returnValue
     }
 
     /// 获取全局变量。
-        fun getGlobal(name: String): Any {
+    fun getGlobal(name: String): Any {
         // [R33] 线性读
         val gn: Int = this.gKeys.size()
         var gi: Int = 0
@@ -5255,7 +5265,7 @@ if (false && (r < n - 5
     }
 
     /// 设置全局变量。
-        fun setGlobal(name: String, value: Any): Unit {
+    fun setGlobal(name: String, value: Any): Unit {
         // [R33] 线性写
         val gn2: Int = this.gKeys.size()
         var gi2: Int = 0
@@ -5275,17 +5285,17 @@ if (false && (r < n - 5
     }
 
     /// 获取闭包总数。
-        fun getClosureCount(): Int {
+    fun getClosureCount(): Int {
         return this.closureTable.getSize()
     }
 
     /// 获取捕获值（upvalue）总数（P1.3）。
-        fun getUpvalueCount(): Int {
+    fun getUpvalueCount(): Int {
         return this.upvalueTotal
     }
 
     /// 注册类继承关系（P1.2；与 DEF_CLASS 指令等效，parent 空/"-" = 无父类）。
-        fun registerClass(cls: String, parent: String): Unit {
+    fun registerClass(cls: String, parent: String): Unit {
         this.defClass(cls, parent)
     }
 
@@ -5294,49 +5304,49 @@ if (false && (r < n - 5
     // ═══════════════════════════════════════════════════════════
 
     /// 启用/禁用加速派发钩子（默认关闭，行为与未接入时完全一致）。
-        fun enableAccelDispatch(enabled: Boolean): Unit {
+    fun enableAccelDispatch(enabled: Boolean): Unit {
         this.accelEnabled = enabled
     }
 
     /// 注册热函数直呼入口（funcName -> 入口行号）。
-        fun setAccelEntry(funcName: String, entryIp: Int): Unit {
+    fun setAccelEntry(funcName: String, entryIp: Int): Unit {
         this.accelTable.put(funcName, entryIp)
     }
 
     /// 清空直呼表。
-        fun clearAccelEntries(): Unit {
+    fun clearAccelEntries(): Unit {
         this.accelTable = HashMap<String, Int>()
     }
 
     /// 查询钩子是否启用。
-        fun isAccelDispatchEnabled(): Boolean {
+    fun isAccelDispatchEnabled(): Boolean {
         return this.accelEnabled
     }
 
     /// VM 版本。
-        fun version(): String {
+    fun version(): String {
         return "1.1.0-p0-numeric-dispatch"
     }
 
     /// 检查 VM 是否就绪。
-        fun isReady(): Boolean {
+    fun isReady(): Boolean {
         return true
     }
 
     /// 挂起执行（P0：仅置挂起标志；原协程语义已按 D5 废弃）。
-        fun suspend(): Unit {
+    fun suspend(): Unit {
         this.suspended = true
         this.running = false
     }
 
     /// 恢复执行。
-        fun resume(): Unit {
+    fun resume(): Unit {
         this.suspended = false
         this.running = true
     }
 
     /// 保存 VM 状态（用于协程切换）。
-        fun saveState(): HashMap<String, Any> {
+    fun saveState(): HashMap<String, Any> {
         val state: HashMap<String, Any> = HashMap<String, Any>()
         state.put("ip", this.ip)
         state.put("running", this.running)
@@ -5351,7 +5361,7 @@ if (false && (r < n - 5
     }
 
     /// 恢复 VM 状态。
-        fun restoreState(state: HashMap<String, Any>): Unit {
+    fun restoreState(state: HashMap<String, Any>): Unit {
         val ipVal = state.get("ip")
         if (ipVal != null) this.ip = ipVal as Int
         val runningVal = state.get("running")
@@ -5379,41 +5389,41 @@ if (false && (r < n - 5
     // ═══════════════════════════════════════════════════════════
 
     /// 压栈（测试用）。
-        fun push(value: String): Unit {
+    fun push(value: String): Unit {
         this.stack.push(value)
     }
 
     /// 栈顶（测试用）。
-        fun peek(): String {
+    fun peek(): String {
         val v = this.stack.peek()
         if (v == null) return ""
         return toStr(v)
     }
 
     /// 弹栈（测试用）。
-        fun pop(): String {
+    fun pop(): String {
         val v = this.stack.pop()
         if (v == null) return ""
         return toStr(v)
     }
 
     /// 设置局部变量（测试用）。
-        fun setLocal(idx: Int, value: String): Unit {
+    fun setLocal(idx: Int, value: String): Unit {
         this.locals.putSlot(idx, value)
     }
 
     /// 诊断：读融合后指令流的操作码名（dump 用，不进热路径）。
-        fun debugOpName(i: Int): String {
+    fun debugOpName(i: Int): String {
         return this.ops[i]
     }
 
     /// 诊断：读融合后指令流的参数个数。
-        fun debugArgCount(i: Int): Int {
+    fun debugArgCount(i: Int): Int {
         return this.argCounts[i]
     }
 
     /// 诊断：读融合后指令流的第 j 个参数。
-        fun debugArg(i: Int, j: Int): String {
+    fun debugArg(i: Int, j: Int): String {
         if (j <= 2) {
             return this.argStrs[i * 3 + j]
         }
@@ -5429,29 +5439,29 @@ if (false && (r < n - 5
     }
 
     /// 获取局部变量（测试用）。
-        fun getLocal(idx: Int): String {
+    fun getLocal(idx: Int): String {
         val v = this.locals.getSlot(idx)
         if (v == null) return ""
         return toStr(v)
     }
 
     /// 加法（测试用）。
-        fun arithAdd(a: String, b: String): String {
+    fun arithAdd(a: String, b: String): String {
         return VmOps.intToStr(VmOps.vrToInt(a) + VmOps.vrToInt(b))
     }
 
     /// 减法（测试用）。
-        fun arithSub(a: String, b: String): String {
+    fun arithSub(a: String, b: String): String {
         return VmOps.intToStr(VmOps.vrToInt(a) - VmOps.vrToInt(b))
     }
 
     /// 乘法（测试用）。
-        fun arithMul(a: String, b: String): String {
+    fun arithMul(a: String, b: String): String {
         return VmOps.intToStr(VmOps.vrToInt(a) * VmOps.vrToInt(b))
     }
 
     /// 除法（测试用）。
-        fun arithDiv(a: String, b: String): String {
+    fun arithDiv(a: String, b: String): String {
         val div: Int = VmOps.vrToInt(b)
         if (div == 0) return "0"
         return VmOps.intToStr(VmOps.vrToInt(a) / div)

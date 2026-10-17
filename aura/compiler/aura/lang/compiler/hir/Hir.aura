@@ -37,7 +37,6 @@ package aura.lang.compiler.hir
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.std.string.StringBuilder
 // 本文件必须**自包含**：以下两个类是 HirLowerer 签名/实现直接依赖的
 // 跨包类型，缺 import 时只有在「整个编译器一次性编译」的入口下才会
 // 因为同编译单元而侥幸解析；单独/经 Parser 之外的入口编译时，接收者
@@ -52,7 +51,7 @@ object HirUtils {
     ///
     /// 说明：Parser 的 Binary.text 存的是 TokenKind 名，而 MIR/Codegen 按符号匹配，
     /// 若不归一化则所有二元运算都会退化为默认的 ADD。
-        fun hirNormBinOp(op: String): String {
+    fun hirNormBinOp(op: String): String {
         if (op == "Plus" || op == "+") { return "+" }
         if (op == "Minus" || op == "-") { return "-" }
         if (op == "Star" || op == "*") { return "*" }
@@ -79,7 +78,7 @@ object HirUtils {
     }
 
     /// 归一化一元运算符：Minus→-、Bang→!、Plus→+。
-        fun hirNormUnOp(op: String): String {
+    fun hirNormUnOp(op: String): String {
         if (op == "Minus" || op == "-") { return "-" }
         if (op == "Bang" || op == "!") { return "!" }
         if (op == "Plus" || op == "+") { return "+" }
@@ -87,13 +86,13 @@ object HirUtils {
     }
 
     /// 空的子节点列表。
-        fun hirNoKids(): List<Int> {
+    fun hirNoKids(): List<Int> {
         return arrayListOf<Int>()
     }
 
     /// 列表安全取项（越界返回空串）；arena 各流（kinds/texts/tys）
     /// 的下标访问统一走此处，O(1)。
-        fun hirItemAt(items: List<String>, index: Int): String {
+    fun hirItemAt(items: List<String>, index: Int): String {
         if (index < 0 || index >= items.size) {
             return ""
         }
@@ -101,7 +100,7 @@ object HirUtils {
     }
 
     /// List<Int> 堆列表安全取项（越界返回空列表）；kids 流的下标访问。
-        fun hirKidsItemAt(items: List<List<Int>>, index: Int): List<Int> {
+    fun hirKidsItemAt(items: List<List<Int>>, index: Int): List<Int> {
         if (index < 0 || index >= items.size) {
             return arrayListOf<Int>()
         }
@@ -109,7 +108,7 @@ object HirUtils {
     }
 
     /// Int 堆列表安全取项（越界返回 0）；span 的 6 条并列流下标访问统一走此处，O(1)。
-        fun hirIntAt(items: List<Int>, index: Int): Int {
+    fun hirIntAt(items: List<Int>, index: Int): Int {
         if (index < 0 || index >= items.size) {
             return 0
         }
@@ -118,7 +117,7 @@ object HirUtils {
 
     /// 向子节点列表追加一个 id。
     /// ⚠️ 2026-09-29 P2.1：改用 List[Int>，均摊 O(1) 追加，取代旧版 O(n) 字符串拼接。
-        fun hirKidsAdd(list: List<Int>, child: Int): List<Int> {
+    fun hirKidsAdd(list: List<Int>, child: Int): List<Int> {
         val result: List<Int> = arrayListOf<Int>()
         var i: Int = 0
         while (i < list.size) {
@@ -130,7 +129,7 @@ object HirUtils {
     }
 
     /// 拼接两个子节点 id 列表（空列表安全）。
-        fun hirKidsConcat(a: List<Int>, b: List<Int>): List<Int> {
+    fun hirKidsConcat(a: List<Int>, b: List<Int>): List<Int> {
         val result: List<Int> = arrayListOf<Int>()
         var i: Int = 0
         while (i < a.size) {
@@ -146,7 +145,7 @@ object HirUtils {
     }
 
     /// 把 child 插到列表最前。
-        fun hirKidsPrepend(list: List<Int>, child: Int): List<Int> {
+    fun hirKidsPrepend(list: List<Int>, child: Int): List<Int> {
         val result: List<Int> = arrayListOf<Int>()
         result.add(child)
         var i: Int = 0
@@ -158,12 +157,12 @@ object HirUtils {
     }
 
     /// 子节点列表的长度。
-        fun hirKidsCount(list: List<Int>): Int {
+    fun hirKidsCount(list: List<Int>): Int {
         return list.size
     }
 
     /// 取子节点列表的第 index 个 id。
-        fun hirKidsAt(list: List<Int>, index: Int): Int {
+    fun hirKidsAt(list: List<Int>, index: Int): Int {
         if (index < 0 || index >= list.size) {
             return -1
         }
@@ -174,7 +173,7 @@ object HirUtils {
     ///
     /// 单次扫描 + 一次切片：旧实现用 substringAfter 链，索引 i 的调用要
     /// 分配 i 个「剩余串」，配合无 GC 的 AOT 运行时是平方级内存黑洞。
-        fun hirFieldAt(text: String, index: Int, sep: String): String {
+    fun hirFieldAt(text: String, index: Int, sep: String): String {
         if (index < 0) {
             return ""
         }
@@ -200,7 +199,7 @@ object HirUtils {
     }
 
     /// 十进制字符串 → Int。
-        fun hirToIntOf(text: String): Int {
+    fun hirToIntOf(text: String): Int {
         if (text == "") {
             return 0
         }
@@ -277,7 +276,7 @@ class Hir {
     /// 这样即使 `Hir` 实例被**浅拷贝**（Rust AOT 后端对结构体参数/字段按值传递），
     /// 拷贝与原值仍共享同一组堆列表（`List` = `i8*`），`count` 也能自愈一致；
     /// 否则标量 `count` 会在拷贝间失步（曾导致原生编译器的 HIR 静默为空）。
-        fun add(kind: String, text: String, ty: String, sp: Span, children: List<Int>): Int {
+    fun add(kind: String, text: String, ty: String, sp: Span, children: List<Int>): Int {
         // ⚠️ Initialize lists if null (defensive: constructor may not have been called)
         if (this.kinds == null) { this.kinds = arrayListOf<String>() }
         if (this.texts == null) { this.texts = arrayListOf<String>() }
@@ -297,20 +296,17 @@ class Hir {
         var escaped: String = text
         if (text.contains("\n")) {
             val tlen: Int = text.length
-            // [R87] 单遍 StringBuilder：旧 buf = buf + 1字符 是 O(n²) 拼接，
-            // 多行长文本单节点即百万级 concat（2.08 亿次/6GB 归因实测），
-            // 且全部落在 retain era 的 bump 区——峰值直接堆高。
-            val sb: StringBuilder = StringBuilder()
+            var buf: String = ""
             var i: Int = 0
             while (i < tlen) {
                 if (text.charCodeAt(i) == 10) {
-                    sb.append("\\n")
+                    buf = buf + "\\n"
                 } else {
-                    sb.append(text.substring(i, i + 1))
+                    buf = buf + text.substring(i, i + 1)
                 }
                 i = i + 1
             }
-            escaped = sb.build()
+            escaped = buf
         }
         this.texts.add(escaped)
         this.tys.add(ty)
@@ -326,14 +322,14 @@ class Hir {
     }
 
     /// 追加一个无类型、无子节点的叶子节点。
-        fun leaf(kind: String, text: String, sp: Span): Int {
+    fun leaf(kind: String, text: String, sp: Span): Int {
         return this.add(kind, text, "", sp, HirUtils.hirNoKids())
     }
 
     // ── 访问 ──
 
     /// 第 id 个节点的种类。
-        fun kindOf(id: Int): String {
+    fun kindOf(id: Int): String {
         if (this.kinds == null) {
             return ""
         }
@@ -341,7 +337,7 @@ class Hir {
     }
 
     /// 第 id 个节点的主文本。
-        fun textOf(id: Int): String {
+    fun textOf(id: Int): String {
         if (this.texts == null) {
             return ""
         }
@@ -352,23 +348,23 @@ class Hir {
             return raw
         }
         // 手动反转义换行符（避免 replace 在 VM 内类调用时未链接）
-        // [R87] 单遍 StringBuilder（同 add 的转义循环，textOf 是发射期热点）。
-        val sb2: StringBuilder = StringBuilder()
+        var result: String = ""
         var i: Int = 0
         var len: Int = raw.length
         while (i < len) {
             if (i + 1 < len && raw.charCodeAt(i) == 92 && raw.charCodeAt(i + 1) == 110) {
-                sb2.append("\n")
+                result = result + "\n"
                 i = i + 2
             } else {
-                sb2.append(raw.substring(i, i + 1))
+                result = result + raw.substring(i, i + 1)
                 i = i + 1
             }
         }
-        return sb2.build()    }
+        return result
+    }
 
     /// 第 id 个节点的类型名。
-        fun tyOf(id: Int): String {
+    fun tyOf(id: Int): String {
         if (this.tys == null) {
             return ""
         }
@@ -376,7 +372,7 @@ class Hir {
     }
 
     /// 第 id 个节点的位置。
-        fun spanOf(id: Int): Span {
+    fun spanOf(id: Int): Span {
         if (this.spanStart == null) {
             return Span(0, 0, 0, 0, 0, 0)
         }
@@ -388,7 +384,7 @@ class Hir {
     }
 
     /// 第 id 个节点的子节点 id 列表（逗号分隔串，向后兼容旧调用方）。
-        fun kidsOf(id: Int): String {
+    fun kidsOf(id: Int): String {
         val k: List<Int> = this.kidsOfList(id)
         var out: String = ""
         var i: Int = 0
@@ -403,7 +399,7 @@ class Hir {
     }
 
     /// 第 id 个节点的子节点 id 列表（List[Int>，P2.1 新接口）。
-        fun kidsOfList(id: Int): List<Int> {
+    fun kidsOfList(id: Int): List<Int> {
         if (this.kids == null) {
             return HirUtils.hirNoKids()
         }
@@ -411,7 +407,7 @@ class Hir {
     }
 
     /// 第 id 个节点的第 i 个子节点 id（越界返回 -1）。
-        fun childOf(id: Int, i: Int): Int {
+    fun childOf(id: Int, i: Int): Int {
         val k: List<Int> = this.kidsOfList(id)
         if (i >= HirUtils.hirKidsCount(k)) {
             return -1
@@ -422,7 +418,7 @@ class Hir {
     // ── 输出 ──
 
     /// 从根节点开始的缩进文本转储。
-        fun dump(): String {
+    fun dump(): String {
         if (this.count == 0) {
             return "<empty hir>\n"
         }
@@ -430,7 +426,7 @@ class Hir {
     }
 
     /// 递归转储单个节点。
-        fun dumpNode(id: Int, depth: Int): String {
+    fun dumpNode(id: Int, depth: Int): String {
         var line: String = this.indent(depth) + this.kindOf(id)
         val t: String = this.textOf(id)
         if (t != "") {
@@ -453,7 +449,7 @@ class Hir {
     }
 
     /// 生成 depth 级缩进（每级 2 空格）。
-        fun indent(depth: Int): String {
+    fun indent(depth: Int): String {
         var s: String = ""
         var i: Int = 0
         while (i < depth) {
@@ -464,7 +460,7 @@ class Hir {
     }
 
     /// 取第 index 行（内部辅助）。
-        fun lineAt(text: String, index: Int): String {
+    fun lineAt(text: String, index: Int): String {
         return HirUtils.hirFieldAt(text, index, "\n")
     }
 }
@@ -472,7 +468,10 @@ class Hir {
 // ─────────────────────────────────────────────────────────────
 // AST → HIR 降级器
 // ─────────────────────────────────────────────────────────────
-        class HirLowerer {
+
+
+
+class HirLowerer {
 
     private var ast: Ast = Ast()
 
@@ -557,7 +556,7 @@ class Hir {
     ///
     /// 脚本模式（synthesize_main）：顶层可执行语句会被合成进 `main`，
     /// 见 [`synthesizeMainInKids`]。
-        fun lower(program: Ast): Int {
+    fun lower(program: Ast): Int {
         this.ast = program
         this.hir = Hir()
         // 查找 Program 根节点（可能不在 index 0）
@@ -662,7 +661,7 @@ class Hir {
     /// 与 Rust 侧「splice 到已有 main 体首」的差异：Rust 的 HIR 是可变树，
     /// 可原位改 body；Aura 侧受 VM 列表不可按下标赋值（见 Ast.aura 注释）
     /// 与发射器全量扫描的双重约束，暂只支持「无 main」这一分支。
-        fun synthesizeMainInKids(kids: List<Int>, sp: Span): List<Int> {
+    fun synthesizeMainInKids(kids: List<Int>, sp: Span): List<Int> {
         // 第一遍：是否已有 main
         var mainId: Int = -1
         var i: Int = 0
@@ -754,7 +753,7 @@ class Hir {
     ///
     /// `treatTopLevelValAsDeclaration` 为假时，顶层 `HirValDecl` / `HirVarDecl`
     /// 归为语句，进入合成的 main 体成为局部变量——见 [`synthesizeMainInKids`]。
-        fun isHirDeclaration(hirId: Int, treatTopLevelValAsDeclaration: Boolean): Boolean {
+    fun isHirDeclaration(hirId: Int, treatTopLevelValAsDeclaration: Boolean): Boolean {
         val k: String = this.hir.kindOf(hirId)
         if (k == "HirFunction" || k == "HirTypeDecl" || k == "HirTypealias"
             || k == "HirExternObject" || k == "HirNativeFunction" || k == "HirAotDecl") {
@@ -767,7 +766,7 @@ class Hir {
     }
 
     /// 在子节点 id 列表中把 oldId 原位替换为 newId（脚本模式 splice 用）。
-        fun hirKidsReplace(list: List<Int>, oldId: Int, newId: Int): List<Int> {
+    fun hirKidsReplace(list: List<Int>, oldId: Int, newId: Int): List<Int> {
         val result: List<Int> = arrayListOf<Int>()
         var i: Int = 0
         while (i < list.size) {
@@ -785,7 +784,7 @@ class Hir {
     // ── 多模块合并（Phase 6.5.10：把多个 AST 的顶层声明降级进同一 HIR）──
 
     /// 设置目标 HIR（供模块链接器在多个源文件间共享同一产物）。
-        fun useHir(target: Hir) {
+    fun useHir(target: Hir) {
         this.hir = target
     }
 
@@ -802,12 +801,6 @@ class Hir {
     /// 小端 8 字节，被 `strlen` 读成 1~2，再被逗号拼接成垃圾串，最终在
     /// `synthesizeMainInKids` 里被 `hirKidsAt` 解成野 id（Photon 前端链接阶段
     /// 0xC0000005 的根因）。
-    /// [R87] ModuleLink scratchReset 前调用：置空本模块 AST 引用，
-    /// 防止字段悬挂指向已被 scratch 回收的内存（后续读=碎尸）。
-        fun releaseAst() {
-        this.ast = Ast()
-    }
-
     fun lowerTopLevel(program: Ast): List<Int> {
         this.ast = program
         // 2026-10-02 接收者类型传播：本模块类型体的方法/字段**预登记**。
@@ -889,7 +882,7 @@ class Hir {
     // ── 声明降级 ──
 
     /// 降级一个顶层节点。
-        fun lowerDecl(ast: Ast, id: Int): Int {
+    fun lowerDecl(ast: Ast, id: Int): Int {
         val kind: String = ast.kindOf(id)
         val text: String = ast.textOf(id)
         val ty: String = ast.tyOf(id)
@@ -941,7 +934,7 @@ class Hir {
     }
 
     /// 降级函数声明。
-        fun lowerFunction(ast: Ast, id: Int): Int {
+    fun lowerFunction(ast: Ast, id: Int): Int {
         // 2026-10-02 接收者类型传播：局部类型表按函数清空（作用域边界）。
         this.localVarTys = arrayListOf<String>()
         var name: String = ast.textOf(id)
@@ -1038,7 +1031,7 @@ class Hir {
     ///
     /// 容器自身不生成 IR（`HirExternObject` 仅承载分组信息），
     /// 方法各自降级为独立的 arena 节点（供发射器按 kind 扫描）。
-        fun lowerExternObject(ast: Ast, id: Int): Int {
+    fun lowerExternObject(ast: Ast, id: Int): Int {
         val name: String = ast.textOf(id)
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
@@ -1073,7 +1066,7 @@ class Hir {
     ///
     /// AST 形状：`NativeMethod(kids=[NativeInfo(metadata), Function])`；
     /// metadata 取值：`native|SYS_READ`（syscall）/ `asm|<code>` / `native`（内置）。
-        fun lowerNativeMethod(ast: Ast, id: Int): Int {
+    fun lowerNativeMethod(ast: Ast, id: Int): Int {
         val kids: List<Int> = ast.kidsOfList(id)
         if (HirUtils.hirKidsCount(kids) < 2) {
             return -1
@@ -1093,7 +1086,7 @@ class Hir {
 
     /// 降级 `export fun`：按普通函数发射（LLVM `define` 默认外部链接，
     /// 符号即可被 C/其他模块解析）。
-        fun lowerExportMethod(ast: Ast, id: Int): Int {
+    fun lowerExportMethod(ast: Ast, id: Int): Int {
         val kids: List<Int> = ast.kidsOfList(id)
         if (HirUtils.hirKidsCount(kids) < 1) {
             return -1
@@ -1106,7 +1099,7 @@ class Hir {
     }
 
     /// 降级 `@aot fun`：AOT 库函数，发射为外部 `declare`（库在链接期解析）。
-        fun lowerAotMethod(ast: Ast, id: Int): Int {
+    fun lowerAotMethod(ast: Ast, id: Int): Int {
         val kids: List<Int> = ast.kidsOfList(id)
         if (HirUtils.hirKidsCount(kids) < 2) {
             return -1
@@ -1121,7 +1114,7 @@ class Hir {
     }
 
     /// 降级函数形参 → `HirParam` id 列表（逗号分隔；fkids[0] 为 Params）。
-        fun lowerParamIds(ast: Ast, fnId: Int): String {
+    fun lowerParamIds(ast: Ast, fnId: Int): String {
         val kids: List<Int> = ast.kidsOfList(fnId)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         var out: List<Int> = HirUtils.hirNoKids()
@@ -1148,7 +1141,7 @@ class Hir {
     }
 
     /// 降级 val 声明。
-        fun lowerValDecl(ast: Ast, id: Int): Int {
+    fun lowerValDecl(ast: Ast, id: Int): Int {
         val name: String = ast.textOf(id)
         var ty: String = ast.tyOf(id)
         val sp: Span = ast.spanOf(id)
@@ -1206,7 +1199,7 @@ class Hir {
     }
 
     /// 降级 var 声明。
-        fun lowerVarDecl(ast: Ast, id: Int): Int {
+    fun lowerVarDecl(ast: Ast, id: Int): Int {
         val name: String = ast.textOf(id)
         var ty: String = ast.tyOf(id)
         val sp: Span = ast.spanOf(id)
@@ -1250,7 +1243,7 @@ class Hir {
     }
 
     /// 降级类型声明（struct/class/object/enum）。
-        fun lowerTypeDecl(ast: Ast, id: Int): Int {
+    fun lowerTypeDecl(ast: Ast, id: Int): Int {
         val kind: String = ast.kindOf(id)
         val name: String = ast.textOf(id)
         val sp: Span = ast.spanOf(id)
@@ -1294,7 +1287,7 @@ class Hir {
     // ── 块/表达式降级 ──
 
     /// 降级块或表达式（用于函数体等）。
-        fun lowerBlockOrExpr(ast: Ast, id: Int): Int {
+    fun lowerBlockOrExpr(ast: Ast, id: Int): Int {
         val kind: String = ast.kindOf(id)
         if (kind == "Block") {
             return this.lowerBlock(ast, id)
@@ -1309,7 +1302,7 @@ class Hir {
     /// 是 `Assign` / `ExprStmt` / `Return` / `ValDecl` 等**语句节点**；这些必须
     /// 经 `lowerStmt` 降级并包一层 `HirBlock`（发射器按「块或表达式」消费分支，
     /// 单条语句直接放进值位置会丢失副作用）。
-        fun lowerBranch(ast: Ast, id: Int): Int {
+    fun lowerBranch(ast: Ast, id: Int): Int {
         val kind: String = ast.kindOf(id)
         if (kind == "Block") {
             return this.lowerBlock(ast, id)
@@ -1346,7 +1339,7 @@ class Hir {
     }
 
     /// 降级语句块。
-        fun lowerBlock(ast: Ast, id: Int): Int {
+    fun lowerBlock(ast: Ast, id: Int): Int {
         return this.lowerBlockWithKind(ast, id, "HirBlock")
     }
 
@@ -1364,7 +1357,7 @@ class Hir {
     /// 段错误（实测 05-classes §5.8）。这里直接跳过，牺牲运行时输出完整性
     /// 换取不崩溃；调用点 `MathUtil.BASE.toString()` 会走通用路径（可能返回
     /// 0/空串），至少不会崩。
-        private fun lowerBlockWithKind(ast: Ast, id: Int, hirKind: String): Int {
+    private fun lowerBlockWithKind(ast: Ast, id: Int, hirKind: String): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -1399,7 +1392,7 @@ class Hir {
     }
 
     /// 克隆 HirFunction 节点到新名字（arena 只读，不能原地改名）。
-        private fun renameHirNode(nodeId: Int, newName: String): Int {
+    private fun renameHirNode(nodeId: Int, newName: String): Int {
         val oldName: String = this.hir.textOf(nodeId)
         val ty: String = this.hir.tyOf(nodeId)
         val sp: Span = this.hir.spanOf(nodeId)
@@ -1410,7 +1403,7 @@ class Hir {
     // ── 语句降级 ──
 
     /// 降级语句。
-        fun lowerStmt(ast: Ast, id: Int): Int {
+    fun lowerStmt(ast: Ast, id: Int): Int {
         val kind: String = ast.kindOf(id)
         if (kind == "ValDecl") {
             return this.lowerValDecl(ast, id)
@@ -1482,7 +1475,7 @@ class Hir {
     /// 类体 Block 的某个子节点若是 InitBlock，则本方法产出 HirFunction，
     /// 使发射器侧的「方法所属类」扫描能把它识别为 `<Class>.init`；
     /// AOT 的 `X()` 构造在字段初始化后调用它。
-        fun lowerInitBlock(ast: Ast, id: Int): Int {
+    fun lowerInitBlock(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         var bodyId: Int = -1
@@ -1497,7 +1490,7 @@ class Hir {
     }
 
     /// 降级 return 语句。
-        fun lowerReturn(ast: Ast, id: Int): Int {
+    fun lowerReturn(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -1516,7 +1509,7 @@ class Hir {
     /// AST 形状：`If(cond, thenBranch[, elseBranch])`。
     /// 条件可为任意表达式 kind（Binary/Call/Ident…），必须无条件降级（此前按
     /// `Expr/Block/If` 过滤，导致条件被丢弃）。
-        fun lowerIfStmt(ast: Ast, id: Int): Int {
+    fun lowerIfStmt(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -1549,7 +1542,7 @@ class Hir {
     }
 
     /// 降级 while 循环。
-        fun lowerWhile(ast: Ast, id: Int): Int {
+    fun lowerWhile(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -1568,7 +1561,7 @@ class Hir {
     }
 
     /// 降级 for 循环。
-        fun lowerFor(ast: Ast, id: Int): Int {
+    fun lowerFor(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -1599,7 +1592,7 @@ class Hir {
     ///
     /// AST kids 固定为 `[init, cond, incr, body]`（Parser.parseFor 的 C 分支
     /// 用 BoolLiteral/Block 占位补齐可选部分）。
-        fun lowerCFor(ast: Ast, id: Int): Int {
+    fun lowerCFor(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         if (HirUtils.hirKidsCount(kids) < 4) {
@@ -1644,7 +1637,7 @@ class Hir {
     /// 降级赋值语句。
     /// array[i] = v → array = Collections.set(array, i, v)
     /// （Value::List 不可变，set 返回新列表，需回赋到目标变量）
-        fun lowerAssign(ast: Ast, id: Int): Int {
+    fun lowerAssign(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -1723,7 +1716,7 @@ class Hir {
     /// 与 Rust 侧 `desugar_expr(Expr::Throw)` 的 HIR 形状一致（callee `__throw`）。
     /// Aura 侧 AOT 无异常机制，发射器对未解析符号不发调用 —— 语义上等价于
     /// 「不求值」的空操作，但**解析不再中断**（vm/*.aura 里大量 `throw Runtime(…)`）。
-        fun lowerThrow(ast: Ast, id: Int): Int {
+    fun lowerThrow(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         var hkids: List<Int> = HirUtils.hirNoKids()
@@ -1741,7 +1734,7 @@ class Hir {
     /// ⚠️ 必须包裹一层 `HirExprStmt`：`buildStmt` 按 `kind == "HirExprStmt"` 分派，
     /// 直接返回 `lowerExpr` 的结果（`HirBinary` / `HirLit` 等）会落到
     /// `buildStmt` 的 else 分支被静默丢弃 —— 实测 `fun main() { 1+1 }` 生成空函数体。
-        fun lowerExprStmt(ast: Ast, id: Int): Int {
+    fun lowerExprStmt(ast: Ast, id: Int): Int {
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         if (kCount > 0) {
@@ -1758,7 +1751,7 @@ class Hir {
     // ── 表达式降级 ──
 
     /// R51:radix 文本 → 十进制文本(跳过非法字符与下划线)。
-        private fun radixToDec(text: String, radix: Int, from: Int): String {
+    private fun radixToDec(text: String, radix: Int, from: Int): String {
         var v: Int = 0
         var i: Int = from
         while (i < text.length) {
@@ -1776,7 +1769,7 @@ class Hir {
     }
 
     /// R51:Int → 十进制文本。
-        private fun intToDec(v: Int): String {
+    private fun intToDec(v: Int): String {
         if (v == 0) { return "0" }
         var out: String = ""
         var n: Int = v
@@ -1795,7 +1788,7 @@ class Hir {
     }
 
     /// 降级表达式。
-        fun lowerExpr(ast: Ast, id: Int): Int {
+    fun lowerExpr(ast: Ast, id: Int): Int {
         val kind: String = ast.kindOf(id)
         val text: String = ast.textOf(id)
         val sp: Span = ast.spanOf(id)
@@ -1972,7 +1965,7 @@ class Hir {
     }
 
     /// 降级二元运算表达式。
-        fun lowerBinary(ast: Ast, id: Int): Int {
+    fun lowerBinary(ast: Ast, id: Int): Int {
         val op: String = ast.textOf(id)
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
@@ -2098,7 +2091,7 @@ class Hir {
     }
 
     /// 降级一元运算表达式。
-        fun lowerUnary(ast: Ast, id: Int): Int {
+    fun lowerUnary(ast: Ast, id: Int): Int {
         val op: String = ast.textOf(id)
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
@@ -2133,7 +2126,7 @@ class Hir {
     ///   * 自带同名方法的用户集合类实例（`ArrayList`/`HashMap`/`HashSet`/…）；
     /// 就必须保留为普通方法调用。否则会把**类实例指针**当成列表头解引用 ——
     /// 实测 `this.get(i)` 被降级成 `Collections.getAt(this, i)` 后直接访问违规崩溃。
-        private fun receiverNotForCollections(recvId: Int): Boolean {
+    private fun receiverNotForCollections(recvId: Int): Boolean {
         val k: String = this.ast.kindOf(recvId)
         if (k == "This") {
             return true
@@ -2162,7 +2155,7 @@ class Hir {
     /// 实现 —— 该分支的原有注释已写明「对 List 与 Map 都成立，因此不需要区分
     /// 接收者」。自举 `Main.aura` 实测：`getSize` / `clear` 因被这里排除而退化
     /// 成裸名（lld-link: undefined symbol）。
-        private fun isCollectionMapOrSetTy(ty: String): Boolean {
+    private fun isCollectionMapOrSetTy(ty: String): Boolean {
         if (ty == "") {
             return false
         }
@@ -2175,7 +2168,7 @@ class Hir {
     /// `Env.get(...)` 的接收者是否为 std 的 `Env` 对象。
     ///
     /// 见 `lowerCall` 里该分支的说明：不拦下就会被当成集合取值。
-        private fun isEnvReceiver(ast: Ast, calleeId: Int): Boolean {
+    private fun isEnvReceiver(ast: Ast, calleeId: Int): Boolean {
         val ck: List<Int> = ast.kidsOfList(calleeId)
         if (HirUtils.hirKidsCount(ck) < 1) {
             return false
@@ -2193,7 +2186,7 @@ class Hir {
     /// 清理类型名：剥离访问修饰符前缀（解析器把 `#public|` 一并写进 ty 列，
     /// 实测 `val x: Int` 的节点 ty 是 "#public|Int"，类类型只剩 "#public|" ——
     /// 不剥离则一切基于类型名的逻辑失效）。
-        private fun cleanTy(ty: String): String {
+    private fun cleanTy(ty: String): String {
         if (ty == "") { return "" }
         val bar: Int = ty.indexOf("|")
         if (bar >= 0) {
@@ -2203,7 +2196,7 @@ class Hir {
     }
 
     /// 数值类型宽度序（取宽用）：Double > Float > Long > Int > 其它(0)。
-        private fun tyRank(ty: String): Int {
+    private fun tyRank(ty: String): Int {
         if (ty == "Int") { return 1 }
         if (ty == "Long") { return 2 }
         if (ty == "Float") { return 3 }
@@ -2212,7 +2205,7 @@ class Hir {
     }
 
     /// 函数声明节点的形参个数（`Params`→`Param` 两层）。
-        private fun paramCountOf(ast: Ast, fnId: Int): Int {
+    private fun paramCountOf(ast: Ast, fnId: Int): Int {
         val kids: List<Int> = ast.kidsOfList(fnId)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         var n: Int = 0
@@ -2236,7 +2229,7 @@ class Hir {
     }
 
     /// 是否标量类型（接收者类型限定只对类/对象类型生效）。
-        private fun isScalarTy(ty: String): Boolean {
+    private fun isScalarTy(ty: String): Boolean {
         if (ty == "Int" || ty == "Long" || ty == "Bool" || ty == "Float"
             || ty == "Double" || ty == "String" || ty == "Unit" || ty == "Byte"
             || ty == "Short" || ty == "Any" || ty == "Basic" || ty == "") {
@@ -2246,7 +2239,7 @@ class Hir {
     }
 
     /// CSV（逗号分隔）中是否含指定条目。
-        private fun csvContains(csv: String, item: String): Boolean {
+    private fun csvContains(csv: String, item: String): Boolean {
         if (csv == "" || item == "") { return false }
         var start: Int = 0
         var i: Int = 0
@@ -2263,13 +2256,13 @@ class Hir {
 
     /// "k1=v1,k2=v2" 形式的 CSV 中按键取值（未命中返回 ""）。
     /// [MEM-FIX] 键值条目追加（O(1) 摊还,替代 CSV 整段拷贝累积）。
-        private fun kvAdd(list: List<String>, key: String, value: String): List<String> {
+    private fun kvAdd(list: List<String>, key: String, value: String): List<String> {
         list.add(key + "=" + value)
         return list
     }
 
     /// 键值查找（精确 key、首条命中——csvLookup 同语义,零分配）。
-        private fun kvGet(list: List<String>, key: String): String {
+    private fun kvGet(list: List<String>, key: String): String {
         if (key == "") { return "" }
         var i: Int = 0
         while (i < list.size) {
@@ -2304,12 +2297,12 @@ class Hir {
     }
 
     /// 局部量声明类型（localVarTys 查表）。
-        private fun localVarTy(name: String): String {
+    private fun localVarTy(name: String): String {
         return this.kvGet(this.localVarTys, name)
     }
 
     /// P40x-e：name 是否为已声明类型名（knownTypes CSV 精确匹配）。
-        private fun isKnownTypeName(name: String): Boolean {
+    private fun isKnownTypeName(name: String): Boolean {
         if (name == "" || this.knownTypes == "") { return false }
         var i: Int = 0
         val n: Int = this.knownTypes.length
@@ -2330,7 +2323,7 @@ class Hir {
     /// 递归把每层文本用 `.` 拼起来。遇到非 Member/Ident 节点（例如
     /// `This`、`Call`、`Literal`）即停止——那意味着基座是「值」而非「路径」，
     /// 返回已收集的部分供调用方判定。
-        private fun collectQualifiedName(ast: Ast, id: Int): String {
+    private fun collectQualifiedName(ast: Ast, id: Int): String {
         if (id < 0) { return "" }
         val k: String = ast.kindOf(id)
         if (k != "Member" && k != "Ident") { return ast.textOf(id) }
@@ -2346,7 +2339,7 @@ class Hir {
     }
 
     /// 类字段声明类型（typeMemberTys 查表，owner 为类/对象名）。
-        private fun typeMemberTy(owner: String, field: String): String {
+    private fun typeMemberTy(owner: String, field: String): String {
         if (owner == "" || field == "") { return "" }
         return this.kvGet(this.typeMemberTys, owner + "." + field)
     }
@@ -2357,7 +2350,7 @@ class Hir {
     /// 本后端无一等函数值：ValDecl 本体省略，`f(…)` 直呼走函数调用；
     /// 捕获外部变量的 lambda（闭包）提升后自由变量取 0 —— 需环境捕获，
     /// 留待闭包专项。函数体：HirBlock[HirReturn[body]]（隐式返回值）。
-        private fun lowerLambdaLift(ast: Ast, fname: String, lambdaId: Int): Int {
+    private fun lowerLambdaLift(ast: Ast, fname: String, lambdaId: Int): Int {
         val kids: List<Int> = ast.kidsOfList(lambdaId)
         if (HirUtils.hirKidsCount(kids) < 2) { return -1 }
         val paramsNode: Int = HirUtils.hirKidsAt(kids, 0)
@@ -2385,7 +2378,7 @@ class Hir {
     }
 
     /// enum 成员登记：body Block 的 ExprStmt(Ident) 按序入表。
-        private fun registerEnumMembers(ast: Ast, id: Int): Unit {
+    private fun registerEnumMembers(ast: Ast, id: Int): Unit {
         val name: String = ast.textOf(id)
         if (name == "") {
             return
@@ -3047,7 +3040,7 @@ class Hir {
     }
 
     /// 降级成员访问表达式。
-        fun lowerMember(ast: Ast, id: Int): Int {
+    fun lowerMember(ast: Ast, id: Int): Int {
         val memberName: String = ast.textOf(id)
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
@@ -3139,7 +3132,7 @@ class Hir {
     /// SafeAccess 节点与 Member 同形（text=成员名,kids=[接收者]）,
     /// lowerMember 可原样复用。结果类型取 ast.tyOf,缺失按 length/size
     /// → Int?、其余 → Int? 兜底（可空语义,phi/toStrN 据此打 null）。
-        fun lowerSafeAccess(ast: Ast, id: Int): Int {
+    fun lowerSafeAccess(ast: Ast, id: Int): Int {
         val memberName: String = ast.textOf(id)
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
@@ -3170,7 +3163,7 @@ class Hir {
     }
 
     /// 降级下标访问表达式。
-        fun lowerIndex(ast: Ast, id: Int): Int {
+    fun lowerIndex(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -3189,7 +3182,7 @@ class Hir {
     }
 
     /// 降级 if 表达式。
-        fun lowerIfExpr(ast: Ast, id: Int): Int {
+    fun lowerIfExpr(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -3231,7 +3224,7 @@ class Hir {
     /// 降级算法与 Rust 后端 `desugar_when`（`compiler/src/codegen/hir.rs`）
     /// 保持一致：**从后往前**构造 else 链（最后一个 arm 成为最内层 else，
     /// 源码中第一个 arm 在最外层），`else ->` 分支条件恒为 `true`。
-        fun lowerWhen(ast: Ast, id: Int): Int {
+    fun lowerWhen(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -3357,7 +3350,7 @@ class Hir {
     ///
     /// 三段**恒存在**（Parser.parseTry 对缺失的 catch/finally 补空 Block 占位），
     /// 否则 `try {} finally {}` 与 `try {} catch {}` 无法区分。
-        fun lowerTry(ast: Ast, id: Int): Int {
+    fun lowerTry(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val catchVar: String = ast.textOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
@@ -3380,7 +3373,7 @@ class Hir {
     ///
     /// AST 形状：`Lambda/Closure([params], body)`
     /// HIR 形状：`HirLambda([HirParam...], body)`
-        fun lowerLambda(ast: Ast, id: Int): Int {
+    fun lowerLambda(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)

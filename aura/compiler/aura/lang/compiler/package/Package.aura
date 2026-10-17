@@ -32,7 +32,7 @@ class Version {
     var build: List<String> = []
 
     /// 解析版本号字符串。
-        fun parse(s: String): Version {
+    fun parse(s: String): Version {
         val v: Version = Version()
         val parts: Array = s.split(".")
         if (parts.length < 2) {
@@ -66,7 +66,7 @@ class Version {
     }
 
     /// 转换为字符串。
-        fun toStr(): String {
+    fun toStr(): String {
         var result: String = toStr(this.major) + "." + toStr(this.minor) + "." + toStr(this.patch)
         if (this.prerelease.length > 0) {
             result = result + "-"
@@ -90,7 +90,7 @@ class Version {
     }
 
     /// 比较版本号。
-        fun compareTo(other: Version): Int {
+    fun compareTo(other: Version): Int {
         if (this.major != other.major) {
             return PackageUtils.cmpInt(this.major, other.major)
         }
@@ -122,7 +122,7 @@ class Version {
     }
 
     /// 版本号是否满足约束。
-        fun matchesConstraint(constraint: VersionConstraint): Boolean {
+    fun matchesConstraint(constraint: VersionConstraint): Boolean {
         return constraint.matches(this)
     }
 }
@@ -130,13 +130,14 @@ class Version {
 // ═══════════════════════════════════════════════════════════════
 // VersionConstraint — 版本约束
 // ═══════════════════════════════════════════════════════════════
-        class VersionConstraint {
+
+class VersionConstraint {
     var kind: String = "exact" // exact, gte, gt, lt, tilde, compatible, range, any
     var version: Version = Version()
     var upper: Version = Version()
 
     /// 解析约束字符串。
-        fun parse(s: String): VersionConstraint {
+    fun parse(s: String): VersionConstraint {
         val c: VersionConstraint = VersionConstraint()
 
         if (s == "*" || s == "latest") {
@@ -179,7 +180,7 @@ class Version {
     }
 
     /// 判断版本号是否满足约束。
-        fun matches(v: Version): Boolean {
+    fun matches(v: Version): Boolean {
         if (this.kind == "any") {
             return true
         } else if (this.kind == "exact") {
@@ -206,7 +207,7 @@ class Version {
     }
 
     /// 转换为字符串。
-        fun toStr(): String {
+    fun toStr(): String {
         if (this.kind == "any") {
             return "*"
         }
@@ -231,13 +232,14 @@ class Version {
 // ═══════════════════════════════════════════════════════════════
 // Dependency — 依赖声明
 // ═══════════════════════════════════════════════════════════════
-        class Dependency {
+
+class Dependency {
     var name: String = ""
     var version: VersionConstraint = VersionConstraint()
     var source: String = "" // git URL or path
 
     /// 从 @depends 注释行解析依赖。
-        fun parseDepends(line: String): Dependency {
+    fun parseDepends(line: String): Dependency {
         val d: Dependency = Dependency()
         // Format: // @depends name >= 1.0 from git@...
         val afterDepends: String = line.substring(0, 0)
@@ -257,7 +259,7 @@ class Version {
             val spaceIdx: Int = nameVer.indexOf(" ")
             if (spaceIdx >= 0) {
                 d.name = nameVer.substring(0, spaceIdx)
-                d.version = VersionConstraint.parse(nameVer.substring(spaceIdx + 1, nameVer.length()).trim())
+                d.version = VersionConstraint.parse(nameVer.substring(spaceIdx + 1, VersionConstraint.parse(nameVer.length()).trim())
             } else {
                 d.name = nameVer
             }
@@ -266,7 +268,7 @@ class Version {
             val spaceIdx: Int = rest.indexOf(" ")
             if (spaceIdx >= 0) {
                 d.name = rest.substring(0, spaceIdx)
-                d.version = VersionConstraint.parse(rest.substring(spaceIdx + 1, rest.length()).trim())
+                d.version = VersionConstraint.parse(rest.substring(spaceIdx + 1, VersionConstraint.parse(rest.length()).trim())
             } else {
                 d.name = rest
             }
@@ -283,7 +285,8 @@ class Version {
 // ═══════════════════════════════════════════════════════════════
 // PackageManifest — 包清单
 // ═══════════════════════════════════════════════════════════════
-        class PackageManifest {
+
+class PackageManifest {
     var schemaVersion: String = "1.0"
     var name: String = ""
     var version: String = "0.1.0"
@@ -302,12 +305,12 @@ class Version {
     var compilerMaxVersion: String = ""
 
     /// 是否为库。
-        fun isLibrary(): Boolean {
+    fun isLibrary(): Boolean {
         return this.library || this.entry == ""
     }
 
     /// 从 TOML 字符串解析。
-        fun fromToml(toml: String): PackageManifest {
+    fun fromToml(toml: String): PackageManifest {
         val m: PackageManifest = PackageManifest()
         val lines: Array = toml.split("\n")
         for (line in lines) {
@@ -359,7 +362,7 @@ class Version {
     }
 
     /// 序列化为 TOML。
-        fun toToml(): String {
+    fun toToml(): String {
         var result: String = ""
         result = result + "schema_version = \"" + this.schemaVersion + "\"\n"
         result = result + "name = \"" + this.name + "\"\n"
@@ -383,7 +386,8 @@ class Version {
 // ═══════════════════════════════════════════════════════════════
 // LockFile — 锁定文件
 // ═══════════════════════════════════════════════════════════════
-        class LockEntry {
+
+class LockEntry {
     var name: String = ""
     var version: Version = Version()
     var source: String = ""
@@ -396,7 +400,7 @@ class LockFile {
     var dependencies: List<LockEntry> = []
 
     /// 查找依赖。
-        fun find(name: String): LockEntry {
+    fun find(name: String): LockEntry {
         for (d in this.dependencies) {
             if (d.name == name) {
                 return d
@@ -406,7 +410,7 @@ class LockFile {
     }
 
     /// 从 TOML 字符串解析。
-        fun fromToml(toml: String): LockFile {
+    fun fromToml(toml: String): LockFile {
         val lf: LockFile = LockFile()
         // Simple TOML parsing for lock file
         val lines: Array = toml.split("\n")
@@ -447,7 +451,7 @@ class LockFile {
     }
 
     /// 写入锁定文件。
-        fun writeToFile(path: String): Boolean {
+    fun writeToFile(path: String): Boolean {
         var toml: String = "version = " + toStr(this.version) + "\n"
         for (entry in this.dependencies) {
             toml = toml + "\n[[dependencies]]\n"
@@ -474,7 +478,7 @@ class LockFile {
 /// 包管理工具函数集合。
 object PackageUtils {
     /// 从源文件中解析所有 @depends 依赖声明。
-        fun parseDepends(source: String): List<Dependency> {
+    fun parseDepends(source: String): List<Dependency> {
         val deps: List<Dependency> = []
         val lines: Array = source.split("\n")
         for (line in lines) {

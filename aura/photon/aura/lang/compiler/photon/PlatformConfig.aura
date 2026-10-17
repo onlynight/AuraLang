@@ -57,21 +57,19 @@ class SyscallConvention {
         }
     }
 
-    /// 获取参数寄存器数量
-        fun getArgRegCount(): Int {
+    /// 获取参数寄存器数量    fun getArgRegCount(): Int {
         val regs: List<String> = this.splitComma(this.argRegisters)
         return regs.count()
     }
 
     /// 获取第i 个参数寄存器
-        fun getArgReg(i: Int): String {
+    fun getArgReg(i: Int): String {
         val regs: List<String> = this.splitComma(this.argRegisters)
         if (i < 0 || i >= regs.count()) { return "" }
         return regs[i]
     }
 
-    /// 按逗号分隔字符串
-        private fun splitComma(s: String): List<String> {
+    /// 按逗号分隔字符串    private fun splitComma(s: String): List<String> {
         val result: List<String> = arrayListOf<String>()
         if (s == "") { return result }
         var start: Int = 0
@@ -106,8 +104,7 @@ object PlatformConfig {
         this.detectPlatform()
     }
 
-    /// 检测当前平台
-        fun detectPlatform(): Unit {
+    /// 检测当前平台    fun detectPlatform(): Unit {
         // 简化实现：根据环境变量或编译目标检测        // 实际实现需要读台OS 信息
         this.platform = PlatformType.LINUX
         this.arch = ArchType.X86_64
@@ -118,7 +115,7 @@ object PlatformConfig {
     }
 
     /// 设置 Windows 平台
-        fun setWindows(): Unit {
+    fun setWindows(): Unit {
         this.platform = PlatformType.WINDOWS
         this.arch = ArchType.X86_64
         this.os = "windows"
@@ -128,7 +125,7 @@ object PlatformConfig {
     }
 
     /// 设置 Linux 平台
-        fun setLinux(): Unit {
+    fun setLinux(): Unit {
         this.platform = PlatformType.LINUX
         this.arch = ArchType.X86_64
         this.os = "linux"
@@ -138,52 +135,51 @@ object PlatformConfig {
     }
 
     /// 获取当前平台
-        fun getPlatform(): String {
+    fun getPlatform(): String {
         return this.platform
     }
 
     /// 获取当前架构
-        fun getArch(): String {
+    fun getArch(): String {
         return this.arch
     }
 
     /// 获取操作系统
-        fun getOS(): String {
+    fun getOS(): String {
         return this.os
     }
 
-    /// 获取目标三元继
-        fun getTarget(): String {
+    /// 获取目标三元继    fun getTarget(): String {
         return this.target
     }
 
     /// 获取输出格式
-        fun getOutputFormat(): String {
+    fun getOutputFormat(): String {
         return this.outputFormat
     }
 
     /// 获取系统调用约定
-        fun getSyscallConvention(): SyscallConvention {
+    fun getSyscallConvention(): SyscallConvention {
         return this.syscallConvention
     }
 
     /// 检查是否为 Windows 平台
-        fun isWindows(): Boolean {
+    fun isWindows(): Boolean {
         return this.platform == PlatformType.WINDOWS
     }
 
     /// 检查是否为 Linux 平台
-        fun isLinux(): Boolean {
+    fun isLinux(): Boolean {
         return this.platform == PlatformType.LINUX
     }
 
     /// 检查是否为 x86_64 架构
-        fun isX86_64(): Boolean {
+    fun isX86_64(): Boolean {
         return this.arch == ArchType.X86_64
     }
 
     /// 获取平台名称（用于日志）
-        fun getPlatformName(): String {
+    fun getPlatformName(): String {
         return this.arch + "-" + this.os
     }
 }
@@ -191,24 +187,22 @@ object PlatformConfig {
 // ─────────────────────────────────────────────────────────────
 // PlatformConfigUtils —顶层辅助函数
 // ─────────────────────────────────────────────────────────────
-        object PlatformConfigUtils {
 
-    /// 创建 Linux 平台配置。
-        fun linuxConfig(): PlatformConfig {
+object PlatformConfigUtils {
+
+    /// 创建 Linux 平台配置。    fun linuxConfig(): PlatformConfig {
         val config: PlatformConfig = PlatformConfig()
         config.setLinux()
         return config
     }
 
-    /// 创建 Windows 平台配置。
-        fun windowsConfig(): PlatformConfig {
+    /// 创建 Windows 平台配置。    fun windowsConfig(): PlatformConfig {
         val config: PlatformConfig = PlatformConfig()
         config.setWindows()
         return config
     }
 
-    /// 创建默认的Linux x86_64 配置。
-        fun defaultConfig(): PlatformConfig {
+    /// 创建默认的Linux x86_64 配置。    fun defaultConfig(): PlatformConfig {
         val config: PlatformConfig = PlatformConfig()
         config.setLinux()
         return config

@@ -17,7 +17,7 @@ import aura.lang.std.fs.FileUtils
 import aura.lang.compiler.serialize.AucSerializer
 
 /// 加载后的模块信息。
-        class AucModule {
+class AucModule {
     var name: String = ""
     var version: String = ""
     var headerFlags: Long = 0
@@ -110,7 +110,7 @@ import aura.lang.compiler.serialize.AucSerializer
 }
 
     /// .auc 加载器。
-        object AucLoaderUtils {
+    object AucLoaderUtils {
 
         /// .auc 数值 opcode → VM 数值 opcode（P350：fromName 的字符串比较在
         /// photon 下布局敏感误配——PRINT 误配成 STORE_LOCAL 之类，指令流
@@ -226,7 +226,7 @@ import aura.lang.compiler.serialize.AucSerializer
         }
 
     /// 从文件加载 .auc 模块。
-        fun loadModule(path: String): AucModule {
+    fun loadModule(path: String): AucModule {
         val mod: AucModule = AucModule()
         val reader: AucReader = AucReader()
         if (!reader.readFromFile(path)) {
@@ -586,7 +586,7 @@ import aura.lang.compiler.serialize.AucSerializer
     var lastLoaded: AucModule = AucModule()
 
     /// headerFlags 位检测（避免跨包位运算依赖：正整数用除法/取模实现）。
-        private fun hasHeaderFlag(flags: Long, bit: Int): Boolean {
+    private fun hasHeaderFlag(flags: Long, bit: Int): Boolean {
         if (flags < 0 || bit <= 0) { return false }
         val f: Long = flags
         val b: Long = bit as Long
@@ -599,7 +599,7 @@ import aura.lang.compiler.serialize.AucSerializer
     /// 之后**所有**常量下标错位（实测 stdlib 的 `"\n"` 字符串常量让
     /// loop50 的 const[41]（Int 50）读成 `}` → 循环条件恒假 → 循环整段
     /// 被跳过）。反转义在 VM 侧 `Vm.getConst`。
-        private fun escapeConstValue(v: String): String {
+    private fun escapeConstValue(v: String): String {
         var hasSpecial: Boolean = false
         var i0: Int = 0
         val n0: Int = v.length
@@ -645,12 +645,12 @@ import aura.lang.compiler.serialize.AucSerializer
     }
 
     /// 文件读取的安全终点（AucReader 越界读返回 -1/0，这里防御性判断）。
-        private fun endOfModules(reader: AucReader): Long {
+    private fun endOfModules(reader: AucReader): Long {
         return reader.dataLen
     }
 
     /// 从 "Class.method" 形态的函数名提取方法名部分（无点号返回原名）。
-        private fun methodNameOf(funcName: String): String {
+    private fun methodNameOf(funcName: String): String {
         var i: Int = funcName.length - 1
         while (i >= 0) {
             if (funcName.charCodeAt(i) == 46) {  // '.'
@@ -662,7 +662,7 @@ import aura.lang.compiler.serialize.AucSerializer
     }
 
     /// 读取魔数。
-        private fun readMagic(reader: AucReader): String {
+    private fun readMagic(reader: AucReader): String {
         var result: String = ""
         var i: Int = 0
         while (i < 4) {
@@ -679,7 +679,7 @@ import aura.lang.compiler.serialize.AucSerializer
     /// 不用 `magic == AucConstants.MAGIC`：Aura AOT 下字符串字面量比较会走
     /// 指针比较路径，且 `object` 常量取值不稳定；按字符码逐个比较与
     /// 字符串内容比较的实现细节无关，最稳。
-        private fun isAuraMagic(magic: String): Boolean {
+    private fun isAuraMagic(magic: String): Boolean {
         if (magic == null) { return false }
         if (magic.length != 4) { return false }
         if (magic.charCodeAt(0) != 65) { return false }  // 'A'
@@ -690,7 +690,7 @@ import aura.lang.compiler.serialize.AucSerializer
     }
 
     /// 读取常量值。
-        private fun readConstValue(reader: AucReader, tag: Int): String {
+    private fun readConstValue(reader: AucReader, tag: Int): String {
         // 常量标签用字面量（同版本号：object 的 const val 在自举 AOT 下不可靠）
         if (tag == 0) {  // CONST_INT（i64）
             // 逐 32 位读取：写端是 `i64`，但字节码语义是 32 位 Int。
@@ -1106,7 +1106,7 @@ import aura.lang.compiler.serialize.AucSerializer
     /// value = (-1)^sign × (1.fraction) × 2^(exp-1023)；尾数位从高到低以
     /// 0.5 步进累加（f32 精确表示 0.5^i 直至 i=149），指数经 pow 缩放。
     /// 输出格式与 Rust f64 Display 一致的常见形态（"2.5"/"5.0"/"-1.25"）。
-        private fun f64BitsToText(bits: Long): String {
+    private fun f64BitsToText(bits: Long): String {
         // Long 位运算在 Aura 侧不可靠，用除法/取模拆位。
         // P4.1（AOT 基底适配）：不再用 2^51/2^52 级巨型 Long 字面量作除数
         //（自举 AOT 下触发 0xC0000094 整除零，实测 arithmetic 样例必崩）——
@@ -1167,7 +1167,7 @@ import aura.lang.compiler.serialize.AucSerializer
     }
 
     /// 类 ID → 类名（越界回退：0 = "Any"，其余用数字串保持旧行为）。
-        private fun classNameAt(classNames: List<String>, id: Int): String {
+    private fun classNameAt(classNames: List<String>, id: Int): String {
         if (id >= 0 && id < classNames.size()) {
             return classNames.get(id)
         }
@@ -1208,7 +1208,7 @@ import aura.lang.compiler.serialize.AucSerializer
     /// `length → 47589`、`size → 64764`、`isEmpty → 9133`、`first → 8387`、
     /// `last → 15355`。翻译回名字后 VM 才能按内建成员取值
     ///（旧实现把哈希当字段名查全局表 → 恒得 0，实测 `len=0`）。
-        private fun fieldNameOf(hash: Int): String {
+    private fun fieldNameOf(hash: Int): String {
         if (hash == 47589) { return "length" }
         if (hash == 64764) { return "size" }
         if (hash == 9133) { return "isEmpty" }
@@ -1218,7 +1218,7 @@ import aura.lang.compiler.serialize.AucSerializer
     }
 
     /// 按常量标签选择类型化加载助记符（越界按字符串处理）。
-        private fun constMnemonic(tags: List<Int>, idx: Int): String {
+    private fun constMnemonic(tags: List<Int>, idx: Int): String {
         if (idx < 0 || idx >= tags.size()) {
             return "LOAD_CONST_S"
         }
@@ -1231,21 +1231,21 @@ import aura.lang.compiler.serialize.AucSerializer
     }
 
     /// 按下标取原生函数名（越界返回 ""）。
-        private fun nameAt(names: List<String>, idx: Int): String {
+    private fun nameAt(names: List<String>, idx: Int): String {
         if (idx < 0) { return "" }
         if (idx >= names.size) { return "" }
         return names.get(idx)
     }
 
     /// 按下标取原生函数形参个数（越界返回 0）。
-        private fun paramAt(params: List<Int>, idx: Int): Int {
+    private fun paramAt(params: List<Int>, idx: Int): Int {
         if (idx < 0) { return 0 }
         if (idx >= params.size) { return 0 }
         return params.get(idx)
     }
 
     /// 统计文本行数（不含结尾换行；空串计 0 行）。
-        private fun countTextLines(text: String): Int {
+    private fun countTextLines(text: String): Int {
         if (text == "") { return 0 }
         var count: Int = 1
         var i: Int = 0
@@ -1260,7 +1260,7 @@ import aura.lang.compiler.serialize.AucSerializer
     }
 
     /// 操作码名称映射（数字 → 助记符）。
-        private fun opcodeName(op: Int): String {
+    private fun opcodeName(op: Int): String {
         if (op == 0) return "CONST_INT"
         if (op == 1) return "LOAD_LOCAL"
         if (op == 2) return "STORE_LOCAL"
@@ -1381,7 +1381,7 @@ import aura.lang.compiler.serialize.AucSerializer
     }
 
     /// 操作数字节数查找表。
-        private fun operandSizeLookup(op: Int): Int {
+    private fun operandSizeLookup(op: Int): Int {
         if (op == 0 || op == 1 || op == 2) return 2
         if (op == 30 || op == 32 || op == 33) return 2
         if (op == 23 || op == 24 || op == 25) return 4
@@ -1399,7 +1399,7 @@ import aura.lang.compiler.serialize.AucSerializer
     }
 
     /// 验证 .auc 文件是否存在且有效。
-        fun validateAuc(path: String): Boolean {
+    fun validateAuc(path: String): Boolean {
         if (!FileUtils.exists(path)) {
             return false
         }
