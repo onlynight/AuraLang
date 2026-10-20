@@ -2765,9 +2765,6 @@ static AuraDynList *aura_dynlist_new(int64_t cap) {
 static void aura_dynlist_push(AuraDynList *l, const char *s) {
     if (!l) return;
     if (l->len >= l->cap) {
-        /* [R131-DIAG] realloc 归因到 Aura 级调用者（临时）：
-         * ra0=push 内(重分配点)、ra1=listAppend、ra2=Aura 调用点。 */
-        AURA_ATTR_RECORD(__builtin_return_address(1), l->cap * 2 * 8 + 64);
         int64_t ncap = l->cap * 2;
         const char **ni =
             (const char **)aura_mem_realloc((void *)l->items, (int64_t)sizeof(const char *) * ncap);

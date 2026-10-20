@@ -443,7 +443,10 @@ object MirBlockUtils {
         if (list == "") {
             return SsaMirUtils.toStr(vid)
         }
-        return list + "," + SsaMirUtils.toStr(vid)
+        // [R131] tail-first：旧 `list + "," + vid` 两次整串拷贝（自举实测
+        // 31.8 万次 / 113MB 滞留）；先拼 2 字节尾巴再一次大 concat。
+        val tail: String = "," + SsaMirUtils.toStr(vid)
+        return list + tail
     }
 
     /// 向后继列表追加一个 BlockID。
@@ -451,7 +454,9 @@ object MirBlockUtils {
         if (list == "") {
             return SsaMirUtils.toStr(bid)
         }
-        return list + "," + SsaMirUtils.toStr(bid)
+        // [R131] tail-first（同 instrsAdd）。
+        val tail: String = "," + SsaMirUtils.toStr(bid)
+        return list + tail
     }
 
     /// 向前驱列表追加一个 BlockID。

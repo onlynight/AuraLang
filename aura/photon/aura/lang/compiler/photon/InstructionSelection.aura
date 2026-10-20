@@ -646,13 +646,25 @@ class InstructionSelector {
 
         // 出口仍返回逗号串（`nameInList` 语义），同时留下列表供 `select()` 免分配查表
         this.reachableNames = outList
-        var out: String = ""
-        var i: Int = 0
-        while (i < outList.size) {
-            if (out == "") { out = outList[i] } else { out = out + "," + outList[i] }
-            i = i + 1
+        // [R131] 两两归并拼接（O(R·log k)）：旧 `out = out + "," + nm` 是
+        // O(k²) 整串拷贝（自举实测 2101 次 × avg 23KB ≈ 92MB 滞留）。
+        var segs: List<String> = outList
+        while (segs.size > 1) {
+            val merged: List<String> = arrayListOf<String>()
+            var i: Int = 0
+            while (i < segs.size) {
+                if (i + 1 < segs.size) {
+                    merged.add(segs[i] + "," + segs[i + 1])
+                    i = i + 2
+                } else {
+                    merged.add(segs[i])
+                    i = i + 1
+                }
+            }
+            segs = merged
         }
-        return out
+        if (segs.size == 0) { return "" }
+        return segs[0]
     }
 
     /// 列表内是否包含指定名字（无分配的线性扫描）。
