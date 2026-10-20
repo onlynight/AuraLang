@@ -650,18 +650,39 @@ class PhotonObjectWriter {
             arrayListOf<String>()
         }
         val entries: List<String> = this.parseRelocEntries(this.relocs)
+        // [R96] 函数名建哈希索引：本函数对**每个**重定位条目都判定「符号是否
+        // 由本模块定义」，旧实现线性扫 `funcs`（自举 ~6 千函数）⇒ O(重定位数
+        // × 函数数)。建表后为 O(1)（语义不变：命中与否的结果完全相同）。
+        this.buildSymIdx(funcs)
         var i: Int = 0
         while (i < entries.size) {
             val fields: List<String> = this.splitPipe(entries[i])
             if (fields.size >= 2) {
                 val sym: String = fields[1]
-                if (!this.isDefinedSymbolIn(sym, funcs, dnames) && !this.containsString(out, sym)) {
+                if (!this.isDefinedSymbolFast(sym, dnames) && !this.containsString(out, sym)) {
                     out.add(sym)
                 }
             }
             i = i + 1
         }
         return out
+    }
+
+    /// `isDefinedSymbolIn` 的哈希版（`funcs` 已由 `buildSymIdx` 建表）。
+    /// 判定顺序与旧实现一致：`@str.` 前缀 → data 符号名 → 函数名。
+    private fun isDefinedSymbolFast(name: String, dnames: List<String>): Boolean {
+        if (this.hasPrefix(name, "@str.")) {
+            return true
+        }
+        var dn: Int = 0
+        while (dn < dnames.size) {
+            if (dnames[dn] != "" && this.dataSymbolBaseName(dnames[dn]) == name) {
+                return true
+            }
+            dn = dn + 1
+        }
+        if (name == "") { return false }
+        return this.symIdxGet(name) >= 0
     }
 
     /// 判断符号是否由本模块定义（函数名，或 `@str.N` 形式的字符串常量，或 .data 符号）。
@@ -694,6 +715,80 @@ class PhotonObjectWriter {
     ///
     /// 重定位偏移已在 `appendFunction` 中按函数基准换算为节内绝对偏移，
     /// 此处仅需解析符号名到符号表索引。
+    /// [R96] 符号名 → 符号表下标 的哈希索引。
+    ///
+    /// ⚠️ 重定位解析对**每个**重定位条目都调 `indexOfName(symNames, name)`，
+    /// 而 `symNames` 是整张符号表（自举实测 ~6 万条：函数 + 5.7 万字符串常量
+    /// + 外部符号）⇒ O(重定位数 × 符号数) 次字符串比较，是 writer 46.8s 的
+    /// 主体。改为一次建表 + O(1) 查询；同名仍取**最早出现**者（与线性扫描
+    /// 首次命中完全一致，符号下标因此逐位不变）。
+    private var symIdxNames: List<String> = arrayListOf<String>()
+    private var symIdxTable: List<Int> = arrayListOf<Int>()
+
+    /// 构建符号名哈希索引（一次性）。
+    private fun buildSymIdx(names: List<String>): Unit {
+        this.symIdxNames = names
+        var cap: Int = 16
+        val want: Int = names.size * 2
+        while (cap < want) { cap = cap * 2 }
+        this.symIdxTable = arrayListOf<Int>()
+        var k: Int = 0
+        while (k < cap) {
+            this.symIdxTable.add(0)
+            k = k + 1
+        }
+        var j: Int = 0
+        while (j < names.size) {
+            val nm: String = names[j]
+            var h: Int = 0
+            var c: Int = 0
+            val nmLen: Int = nm.length
+            while (c < nmLen) {
+                h = (h * 31 + (nm.charCodeAt(c) as Int)) % cap
+                c = c + 1
+            }
+            var placed: Boolean = false
+            var probes: Int = 0
+            while (!placed && probes < cap) {
+                val slot: Int = this.symIdxTable[h]
+                if (slot == 0) {
+                    this.symIdxTable[h] = j + 1
+                    placed = true
+                } else if (names[slot - 1] == nm) {
+                    placed = true
+                } else {
+                    h = h + 1
+                    if (h >= cap) { h = 0 }
+                }
+                probes = probes + 1
+            }
+            j = j + 1
+        }
+    }
+
+    /// 哈希查符号下标（未找到 -1）。
+    private fun symIdxGet(name: String): Int {
+        val cap: Int = this.symIdxTable.size
+        if (cap == 0) { return -1 }
+        var h: Int = 0
+        var c: Int = 0
+        val nameLen: Int = name.length
+        while (c < nameLen) {
+            h = (h * 31 + (name.charCodeAt(c) as Int)) % cap
+            c = c + 1
+        }
+        var probes: Int = 0
+        while (probes < cap) {
+            val slot: Int = this.symIdxTable[h]
+            if (slot == 0) { return -1 }
+            if (this.symIdxNames[slot - 1] == name) { return slot - 1 }
+            h = h + 1
+            if (h >= cap) { h = 0 }
+            probes = probes + 1
+        }
+        return -1
+    }
+
     private fun composeRelocations(): List<String> {
         this.materializeRelocParts()
         if (this.coffRelocCacheValid) {
@@ -712,6 +807,8 @@ class PhotonObjectWriter {
             symNames.add(this.symbolName(symRecs[sn]))
             sn = sn + 1
         }
+        // [R96] 符号名哈希索引：把逐条 O(符号数) 的线性扫描降为 O(1)。
+        this.buildSymIdx(symNames)
 
         // 按 `;;` 分隔函数组，每个组内的条目属于同一个函数
         val groups: List<String> = this.splitDoubleSemi(this.relocs)
@@ -728,7 +825,7 @@ class PhotonObjectWriter {
                     val fields: List<String> = this.splitPipe(entries[i])
                     if (fields.size >= 3) {
                         val absoluteOffset: Int = this.strToInt(fields[0])
-                        val idx: Int = this.indexOfName(symNames, fields[1])
+                        val idx: Int = this.symIdxGet(fields[1])
                         if (absoluteOffset >= 905000 && absoluteOffset <= 907400) {
                             this.objwProbe("RELCHK off=" + toStr(absoluteOffset) +
                                     " sym=" + fields[1] + " idx=" + toStr(idx))
@@ -1409,7 +1506,8 @@ class PhotonObjectWriter {
             return false
         }
         var i: Int = 0
-        while (i < prefix.length) {
+        val prefixLen: Int = prefix.length
+        while (i < prefixLen) {
             // `charCodeAt` 直取码值：`s[i]` 每次索引都新建单字符字符串（见 `chEq` 说明）。
             if ((s.charCodeAt(i) as Int) != (prefix.charCodeAt(i) as Int)) {
                 return false
@@ -1443,31 +1541,36 @@ class PhotonObjectWriter {
 
         var i: Int = 0
         val seg1: String = "%&'()*+,-./"
-        while (i < seg1.length) {
+        val seg1Len: Int = seg1.length
+        while (i < seg1Len) {
             if (c == seg1[i]) { return 37 + i }
             i = i + 1
         }
         val digits: String = "0123456789"
         i = 0
-        while (i < digits.length) {
+        val digitsLen: Int = digits.length
+        while (i < digitsLen) {
             if (c == digits[i]) { return 48 + i }
             i = i + 1
         }
         val seg2: String = ":;<=>?@"
         i = 0
-        while (i < seg2.length) {
+        val seg2Len: Int = seg2.length
+        while (i < seg2Len) {
             if (c == seg2[i]) { return 58 + i }
             i = i + 1
         }
         val upper: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         i = 0
-        while (i < upper.length) {
+        val upperLen: Int = upper.length
+        while (i < upperLen) {
             if (c == upper[i]) { return 65 + i }
             i = i + 1
         }
         val lower: String = "abcdefghijklmnopqrstuvwxyz"
         i = 0
-        while (i < lower.length) {
+        val lowerLen: Int = lower.length
+        while (i < lowerLen) {
             if (c == lower[i]) { return 97 + i }
             i = i + 1
         }
@@ -1486,7 +1589,8 @@ class PhotonObjectWriter {
     private fun digitOf(c: String): Int {
         var i: Int = 0
         val digits: String = "0123456789"
-        while (i < digits.length) {
+        val digitsLen2: Int = digits.length
+        while (i < digitsLen2) {
             if (c == digits[i]) { return i }
             i = i + 1
         }
@@ -1497,13 +1601,15 @@ class PhotonObjectWriter {
     private fun hexValOf(c: String): Int {
         var i: Int = 0
         val lower: String = "0123456789abcdef"
-        while (i < lower.length) {
+        val lowerLen2: Int = lower.length
+        while (i < lowerLen2) {
             if (c == lower[i]) { return i }
             i = i + 1
         }
         val upper: String = "0123456789ABCDEF"
         i = 0
-        while (i < upper.length) {
+        val upperLen2: Int = upper.length
+        while (i < upperLen2) {
             if (c == upper[i]) { return i }
             i = i + 1
         }

@@ -336,7 +336,8 @@ object JitRelocationUtils {
     fun rangeText(text: String, start: Int, endEx: Int): String {
         var out: String = ""
         var i: Int = start
-        while (i < endEx && i < text.length) {
+        val textLen: Int = text.length
+        while (i < endEx && i < textLen) {
             out = out + fromCharCode(text.charCodeAt(i) as Int)
             i = i + 1
         }
@@ -365,7 +366,8 @@ object JitRelocationUtils {
         val nlen: Int = needle.length
         if (nlen == 0 || text.length < nlen) { return -1 }
         var i: Int = 0
-        while (i + nlen <= text.length) {
+        val textLen2: Int = text.length
+        while (i + nlen <= textLen2) {
             var j: Int = 0
             var ok: Boolean = true
             while (j < nlen) {

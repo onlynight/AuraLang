@@ -1825,7 +1825,8 @@ class LlvmEmitter {
         }
         var v: Int = 0
         var i: Int = start
-        while (i < s.length) {
+        val sLen: Int = s.length
+        while (i < sLen) {
             val c: Int = s.charCodeAt(i) as Int
             var d: Int = -1
             if (c >= 48 && c <= 57) {
@@ -1993,10 +1994,11 @@ class LlvmEmitter {
         // 方法名本身可能含下划线，如 `JitUtil_patternCount`）。
         var up: Int = -1
         var k: Int = 0
-        while (k < fname.length) {
+        val fnameLen: Int = fname.length
+        while (k < fnameLen) {
             if (fname.charCodeAt(k) == 95) {
                 up = k
-                k = fname.length
+                k = fnameLen
             }
             k = k + 1
         }
@@ -3019,7 +3021,8 @@ class LlvmEmitter {
         var depth: Int = 0
         var start: Int = 0
         var i: Int = 0
-        while (i < s.length) {
+        val sLen2: Int = s.length
+        while (i < sLen2) {
             val ch: String = aotSlice(s, i, 1)
             if (ch == "(") {
                 depth = depth + 1
@@ -3179,7 +3182,8 @@ class LlvmEmitter {
         var ret: String = this.auraRetTyOf(sym)
         if (ret == "") {
             var u: Int = 0
-            while (u < sym.length && aotSlice(sym, u, 1) != "_") {
+            val symLen: Int = sym.length
+            while (u < symLen && aotSlice(sym, u, 1) != "_") {
                 u = u + 1
             }
             if (u > 0 && u < sym.length - 1) {
@@ -7402,7 +7406,8 @@ class LlvmEmitter {
                         val restStart: Int = prefixLen
                         var underscorePos: Int = -1
                         var scanI: Int = restStart
-                        while (scanI < m.length) {
+                        val mLen: Int = m.length
+                        while (scanI < mLen) {
                             if (aotSlice(m, scanI, 1) == "_") {
                                 underscorePos = scanI
                                 break
@@ -7501,7 +7506,8 @@ class LlvmEmitter {
                     val restStart: Int = prefixLen
                     var underscorePos: Int = -1
                     var scanI: Int = restStart
-                    while (scanI < methodSym.length) {
+                    val methodSymLen: Int = methodSym.length
+                    while (scanI < methodSymLen) {
                         if (aotSlice(methodSym, scanI, 1) == "_") {
                             underscorePos = scanI
                             break
@@ -8522,7 +8528,8 @@ class LlvmEmitter {
                 val restStart: Int = prefixLen
                 var underscorePos: Int = -1
                 var scanI: Int = restStart
-                while (scanI < methodSym.length) {
+                val methodSymLen2: Int = methodSym.length
+                while (scanI < methodSymLen2) {
                     if (aotSlice(methodSym, scanI, 1) == "_") {
                         underscorePos = scanI
                         break

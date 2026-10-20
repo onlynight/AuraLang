@@ -191,10 +191,11 @@ class Lowering {
                             val seg: String = v.args.substring(cStart, ci).trim()
                             var colon: Int = -1
                             var qi: Int = 0
-                            while (qi < seg.length) {
+                            val segLen: Int = seg.length
+                            while (qi < segLen) {
                                 if ((seg.charCodeAt(qi) as Int) == 58) {
                                     colon = qi
-                                    qi = seg.length
+                                    qi = segLen
                                 }
                                 qi = qi + 1
                             }
@@ -214,11 +215,8 @@ class Lowering {
                 val newVid: Int = dst.addPhi(dstBlockId, v.type, plain, v.aux)
                 if (pairs != "") {
                     val rec: String = LirUtils.toStr(newVid) + "|" + pairs
-                    if (dst.phiPredMap == "") {
-                        dst.phiPredMap = rec
-                    } else {
-                        dst.phiPredMap = dst.phiPredMap + ";" + rec
-                    }
+                    // [R131] 记录进列表（旧 += 整串拷贝 ~1.3GB，见 LirProgram 说明）。
+                    dst.phiPredRecs.add(rec)
                 }
             } else {
                 this.lowerValue(vi, src, dst, dstBlockId)
@@ -269,10 +267,11 @@ class Lowering {
                         val seg: String = srcVal.args.substring(cStart, ci).trim()
                         var colon: Int = -1
                         var qi: Int = 0
-                        while (qi < seg.length) {
+                        val segLen2: Int = seg.length
+                        while (qi < segLen2) {
                             if ((seg.charCodeAt(qi) as Int) == 58) {
                                 colon = qi
-                                qi = seg.length
+                                qi = segLen2
                             }
                             qi = qi + 1
                         }
@@ -292,11 +291,8 @@ class Lowering {
             val newVid: Int = dst.addPhi(dstBlockId, srcVal.type, plain, srcVal.aux)
             if (pairs != "") {
                 val rec: String = LirUtils.toStr(newVid) + "|" + pairs
-                if (dst.phiPredMap == "") {
-                    dst.phiPredMap = rec
-                } else {
-                    dst.phiPredMap = dst.phiPredMap + ";" + rec
-                }
+                // [R131] 记录进列表（旧 += 整串拷贝 ~1.3GB，见 LirProgram 说明）。
+                dst.phiPredRecs.add(rec)
             }
             return newVid
         }

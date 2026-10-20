@@ -42,11 +42,25 @@ class X86Encoder {
     /// 待回填的局部跳转（记录 `dispFieldOffset|labelName`）。
     private var pendingJumps: List<String> = arrayListOf<String>()
 
+    /// [R96] 标签名 → 偏移的哈希索引（`resolveLabels` 回填时用）。
+    ///
+    /// ⚠️ 旧 `labelOffset` 每查一个标签都把整张 `labels` 扫一遍，且每个候选
+    /// 都用 `fieldOf` 现解析 `name|offset` 记录（逐字符扫描 + 建子串）——
+    /// 自举实测 pendingJumps × labels 双线性，`resolveLabels` 单项吃掉
+    /// emit 87s 里的 **80s**（主循环本身只要 6.4s）。
+    /// 改成「名称/偏移各预解析一次 + 开放寻址哈希」后查询 O(1)，
+    /// 同名仍取**最早出现**者（与旧线性扫描的首次命中语义一致）。
+    private var labelNamesIdx: List<String> = arrayListOf<String>()
+    private var labelOffIdx: List<Int> = arrayListOf<Int>()
+    private var labelTable: List<Int> = arrayListOf<Int>()
+    private var labelIdxReady: Boolean = false
+
     init() {
         this.relocations = arrayListOf<String>()
         this.offset = 0
         this.labels = arrayListOf<String>()
         this.pendingJumps = arrayListOf<String>()
+        this.labelIdxReady = false
         this.hex.reset()
     }
 
@@ -56,6 +70,7 @@ class X86Encoder {
         this.offset = 0
         this.labels = arrayListOf<String>()
         this.pendingJumps = arrayListOf<String>()
+        this.labelIdxReady = false
         this.hex.reset()
     }
 
@@ -766,16 +781,83 @@ class X86Encoder {
     /// 定义标签（记录当前字节偏移）。
     fun emitLabel(name: String): Unit {
         this.labels.add(name + "|" + toStr(this.offset))
+        // [R96] 新标签加入 ⇒ 索引失效，下次查询时重建。
+        this.labelIdxReady = false
+    }
+
+    /// 构建标签哈希索引（惰性，一次性）。容量取 ≥2×标签数 的 2 的幂。
+    private fun buildLabelIndex(): Unit {
+        this.labelIdxReady = true
+        this.labelNamesIdx = arrayListOf<String>()
+        this.labelOffIdx = arrayListOf<Int>()
+        var i: Int = 0
+        while (i < this.labels.size) {
+            this.labelNamesIdx.add(this.fieldOf(this.labels[i], 0))
+            this.labelOffIdx.add(this.decToInt(this.fieldOf(this.labels[i], 1)))
+            i = i + 1
+        }
+        var cap: Int = 16
+        val want: Int = this.labelNamesIdx.size * 2
+        while (cap < want) { cap = cap * 2 }
+        this.labelTable = arrayListOf<Int>()
+        var k: Int = 0
+        while (k < cap) {
+            this.labelTable.add(0)
+            k = k + 1
+        }
+        var j: Int = 0
+        while (j < this.labelNamesIdx.size) {
+            val nm: String = this.labelNamesIdx[j]
+            var h: Int = 0
+            var c: Int = 0
+            val nmLen: Int = nm.length
+            while (c < nmLen) {
+                h = (h * 31 + (nm.charCodeAt(c) as Int)) % cap
+                c = c + 1
+            }
+            var placed: Boolean = false
+            var probes: Int = 0
+            while (!placed && probes < cap) {
+                val slot: Int = this.labelTable[h]
+                if (slot == 0) {
+                    this.labelTable[h] = j + 1
+                    placed = true
+                } else if (this.labelNamesIdx[slot - 1] == nm) {
+                    // 同名：保留最早出现的那条（与旧线性扫描语义一致）
+                    placed = true
+                } else {
+                    h = h + 1
+                    if (h >= cap) { h = 0 }
+                }
+                probes = probes + 1
+            }
+            j = j + 1
+        }
     }
 
     /// 查询标签的字节偏移（未定义返回 -1）。
     fun labelOffset(name: String): Int {
-        var i: Int = 0
-        while (i < this.labels.size) {
-            if (this.fieldOf(this.labels[i], 0) == name) {
-                return this.decToInt(this.fieldOf(this.labels[i], 1))
+        // [R96] 哈希查询（见 `labelTable` 字段说明）：O(1)，零分配。
+        if (!this.labelIdxReady) { this.buildLabelIndex() }
+        val cap: Int = this.labelTable.size
+        if (cap == 0) { return -1 }
+        var h: Int = 0
+        var c: Int = 0
+        val nameLen: Int = name.length
+        while (c < nameLen) {
+            h = (h * 31 + (name.charCodeAt(c) as Int)) % cap
+            c = c + 1
+        }
+        var probes: Int = 0
+        while (probes < cap) {
+            val slot: Int = this.labelTable[h]
+            if (slot == 0) { return -1 }
+            if (this.labelNamesIdx[slot - 1] == name) {
+                return this.labelOffIdx[slot - 1]
             }
-            i = i + 1
+            h = h + 1
+            if (h >= cap) { h = 0 }
+            probes = probes + 1
         }
         return -1
     }
@@ -1531,7 +1613,8 @@ object X86EncoderUtils {
         if (hex == "") return "(empty)"
         var result: String = ""
         var i: Int = 0
-        while (i < hex.length) {
+        val hexLen: Int = hex.length
+        while (i < hexLen) {
             if (result != "") result = result + " "
             result = result + hex.substring(i, i + 2)
             i = i + 2

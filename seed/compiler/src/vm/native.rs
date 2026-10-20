@@ -1901,7 +1901,7 @@ fn native_tcp_channel_send(args: &[Value]) -> Value {
         let ch_id = args[0].as_int() as usize;
         let val = args[1].clone();
         let mut registry = crate::vm::channel_tcp::TCP_CHANNELS.lock().unwrap();
-        if let Some(server) = registry.get_mut(&ch_id) {
+        if let Some(_server) = registry.get_mut(&ch_id) {
             // 注：服务端需要连接才能发送，当前简化为直接发送
             // 实际使用需通过客户端连接发送
             eprintln!("[Phase 3] TCP Channel send not yet supported (requires client connection)");
@@ -2345,9 +2345,8 @@ fn native_arena_alloc(args: &[Value]) -> Value {
     
     let aligned_size = (size + 7) / 8 * 8; // 8 字节对齐
     let current = ARENA_STATE.current_ptr.load(Ordering::SeqCst);
-    let capacity = ARENA_STATE.capacity.load(Ordering::SeqCst);
     
-    if current + aligned_size > capacity {
+    if current + aligned_size > ARENA_STATE.capacity.load(Ordering::SeqCst) {
         return Value::Int(0); // 内存不足
     }
     
@@ -2372,7 +2371,7 @@ fn native_arena_free(_args: &[Value]) -> Value {
     if base.is_null() {
         return Value::Null;
     }
-    let capacity = ARENA_STATE.capacity.load(Ordering::SeqCst);
+    let _capacity = ARENA_STATE.capacity.load(Ordering::SeqCst);
     
     #[cfg(windows)]
     {

@@ -58,6 +58,16 @@ class RegisterAllocator {
     /// 并持续分配内存。键是整数节点 ID，直接下标即可。
     private var colors: List<String> = arrayListOf<String>()
 
+    /// [R96] 已着色节点 id 的**升序**索引（`buildIntervalInterference` 的扫描域）。
+    ///
+    /// ⚠️ 旧实现每次为节点构建干扰集都扫 `0..dag.nodeCount` 全部节点——自举实测
+    /// 149,547 节点 × 每个着色节点 ⇒ O(N²)，Phase D 的 step2 单项 92.9s（占总
+    /// RA 时间 94%）。而真正可能冲突的只有**已着色**节点，其余 `colorGet==""`
+    /// 的扫描纯属空转。这里在 `colorPut` 中维护升序表，扫描域从「全部节点」
+    /// 缩到「已着色节点」，且**遍历顺序与原 0..nodeCount 升序完全一致**
+    ///（干扰串内容与早停时机不变，着色结果逐位等价）。
+    private var coloredIds: List<Int> = arrayListOf<Int>()
+
     /// 溢出节点 id 列表（仅登记用；`isSpilled` 走 `colors` 里的 `spill_slot_*` 前缀）。
     ///
     /// ⚠️ 旧实现是**逗号分隔的字符串** `this.spilled = this.spilled + "," + id`：
@@ -137,6 +147,7 @@ class RegisterAllocator {
 
     init() {
         this.colors = arrayListOf<String>()
+        this.coloredIds = arrayListOf<Int>()
         this.spilledNodes = arrayListOf<Int>()
         this.callStack = arrayListOf<Int>()
         this.spillSlots = 0
@@ -287,10 +298,11 @@ class RegisterAllocator {
 
         // 递归处理子节点
         if (node.kind == "Value" || node.kind == "Reg") {
-            val args: List<String> = this.splitComma(node.args)
+            // [R95] 直接用解析好的 argIds（CSV → List），避免每次访问 split 整串。
+            val args: List<Int> = node.argIds
             var j: Int = 0
             while (j < args.size) {
-                val arg: Int = strToInt(args[j])
+                val arg: Int = args[j]
                 if (arg >= 0) {
                     this.dfs(arg)
                 }
@@ -340,10 +352,11 @@ class RegisterAllocator {
     private fun buildInterference(nodeId: Int): String {
         var result: String = ""
         val node: DagNode = this.dag.nodeOf(nodeId)
-        val args: List<String> = this.splitComma(node.args)
+        // [R95] CSV → List：干扰图按节点反复构建，旧的每次 split 是 O(N²) 分配源。
+        val args: List<Int> = node.argIds
         var i: Int = 0
         while (i < args.size) {
-            val arg: Int = strToInt(args[i])
+            val arg: Int = args[i]
             if (arg >= 0) {
                 val argColor: String = this.colorGet(arg)
                 if (argColor != "") {
@@ -607,9 +620,9 @@ class RegisterAllocator {
             // 终止指令：无后继
         } else if (template == "jmp @target" || template == "br %label") {
             // 无条件跳转：仅跳转到目标
-            val nodes: List<String> = this.splitComma(instr.nodes)
-            if (nodes.size >= 1) {
-                val target: String = nodes[0]
+            // [R95] 只需首个 token（标签名）：原地取一次，不再 split 整串。
+            val target: String = this.firstCsvToken(instr.nodes)
+            if (target != "") {
                 val targetIdx: Int = this.labelToIndex(target)
                 if (targetIdx >= 0) {
                     succs.add(targetIdx)
@@ -617,9 +630,8 @@ class RegisterAllocator {
             }
         } else if (template == "jcc @target") {
             // 条件跳转：目标 + fall-through
-            val nodes: List<String> = this.splitComma(instr.nodes)
-            if (nodes.size >= 1) {
-                val target: String = nodes[0]
+            val target: String = this.firstCsvToken(instr.nodes)
+            if (target != "") {
                 val targetIdx: Int = this.labelToIndex(target)
                 if (targetIdx >= 0) {
                     succs.add(targetIdx)
@@ -659,7 +671,8 @@ class RegisterAllocator {
         }
         var v: Int = 0
         var i: Int = 2
-        while (i < label.length) {
+        val labelLen: Int = label.length
+        while (i < labelLen) {
             val c: Int = label.charCodeAt(i) as Int
             if (c < 48 || c > 57) { return -1 }
             v = v * 10 + (c - 48)
@@ -879,15 +892,18 @@ class RegisterAllocator {
         // 非易失寄存器 → 生成代码静默算错。
         val availCount: Int = this.availList.size
         var availSeen: Int = 0
+        // [R96] 只扫**已着色**节点（升序，与旧的全节点升序扫描同序）。
         var m: Int = 0
-        val total: Int = this.dag.nodeCount
+        val total: Int = this.coloredIds.size
         while (m < total) {
             if (availSeen >= availCount) { break }
-            if (m != nodeId) {
-                val c: String = this.colorGet(m)
+            val cand: Int = this.coloredIds[m]
+            m = m + 1
+            if (cand != nodeId) {
+                val c: String = this.colorGet(cand)
                 if (c != "" && !this.containsStringIn(seenParts, c)) {
-                    val firstM: Int = this.nodeFirstIdx(m)
-                    val lastM: Int = this.nodeLastIdx(m)
+                    val firstM: Int = this.nodeFirstIdx(cand)
+                    val lastM: Int = this.nodeLastIdx(cand)
                     if (firstM >= 0 && firstN <= lastM && firstM <= lastN) {
                         seenParts.add(c)
                         if (this.isAvailColor(c)) {
@@ -896,7 +912,6 @@ class RegisterAllocator {
                     }
                 }
             }
-            m = m + 1
         }
         if (seenParts.size == 0) {
             return ""
@@ -1273,6 +1288,20 @@ class RegisterAllocator {
 
     // ── 字符串工具（`String.split` 可用；`arrayListOf + add` 会丢元素）──
 
+    /// [R95] 取逗号串的首个 token（无逗号则整串），只分配一次。
+    private fun firstCsvToken(text: String): String {
+        if (text == "") { return "" }
+        val len: Int = text.length
+        var i: Int = 0
+        while (i < len) {
+            if ((text.charCodeAt(i) as Int) == 44) {
+                return text.substring(0, i)
+            }
+            i = i + 1
+        }
+        return text
+    }
+
     /// 按逗号分割字符串。
     private fun splitComma(text: String): List<String> {
         if (text == "") { return emptyList() }
@@ -1301,7 +1330,28 @@ class RegisterAllocator {
     private fun colorPut(nodeId: Int, color: String): Unit {
         if (nodeId < 0) { return }
         while (this.colors.size <= nodeId) { this.colors.add("") }
+        val had: Boolean = this.colors[nodeId] != ""
         this.colors[nodeId] = color
+        // [R96] 维护已着色节点的升序索引（见 `coloredIds` 字段说明）。
+        // 常见情形是「节点 id 递增地首次着色」⇒ 直接 append，O(1)。
+        if (!had && color != "") {
+            val n: Int = this.coloredIds.size
+            if (n == 0 || this.coloredIds[n - 1] < nodeId) {
+                this.coloredIds.add(nodeId)
+            } else {
+                var pos: Int = n
+                while (pos > 0 && this.coloredIds[pos - 1] > nodeId) {
+                    pos = pos - 1
+                }
+                this.coloredIds.add(nodeId)
+                var k: Int = this.coloredIds.size - 1
+                while (k > pos) {
+                    this.coloredIds[k] = this.coloredIds[k - 1]
+                    k = k - 1
+                }
+                this.coloredIds[pos] = nodeId
+            }
+        }
     }
 
     /// 读取颜色。

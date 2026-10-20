@@ -174,7 +174,8 @@ object TypeUtils {
             val rest: String = base.substring(1, base.length())
             val digits: String = "0123456789"
             var i: Int = 0
-            while (i < rest.length()) {
+            val restLen: Int = rest.length
+            while (i < restLen()) {
                 if (digits.indexOf(toStr(rest[i])) < 0) {
                     return false
                 }

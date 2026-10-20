@@ -86,6 +86,12 @@ class DagNode {
     /// 辅助信息（常量值、栈偏移、地址模式描述等）。
     var aux: String = ""
 
+    /// [R95] `args` 的解析结果（操作数节点 id 列表），与 `args` 同步维护。
+    /// CSV → List：`argAt/argCount` 原来每次访问都要 split 整串（O(k) 次
+    /// substring 分配），活跃区间分析按指令反复调用 ⇒ O(k²) 分配。
+    /// ⚠ 直接写 `args = "..."` 会让本列表过期 —— 必须走 `setArgs()`。
+    var argIds: List<Int> = arrayListOf<Int>()
+
     init() {
         this.id = 0
         this.kind = ""
@@ -96,26 +102,27 @@ class DagNode {
         this.uses = ""
         this.chain = -1
         this.aux = ""
+        this.argIds = arrayListOf<Int>()
+    }
+
+    /// [R95] 设置操作数 CSV 并同步解析结果（唯一的写入入口）。
+    fun setArgs(csv: String): Unit {
+        this.args = csv
+        this.argIds = MachineDagUtils.parseIdCsvLenient(csv, false)
     }
 
     /// 获取第 i 个操作数的节点 ID。
     fun argAt(i: Int): Int {
-        if (this.args == "") {
+        // [R95] CSV → List：O(1) 零分配（见 argIds）。
+        if (i < 0 || i >= this.argIds.size) {
             return -1
         }
-        val parts: List<String> = MachineDagUtils.splitArgs(this.args)
-        if (i < 0 || i >= parts.size) {
-            return -1
-        }
-        return MachineDagUtils.strToInt(parts[i])
+        return this.argIds[i]
     }
 
     /// 获取操作数个数。
     fun argCount(): Int {
-        if (this.args == "") {
-            return 0
-        }
-        return MachineDagUtils.splitArgs(this.args).size
+        return this.argIds.size
     }
 
     /// 是否为常量节点。
@@ -186,6 +193,10 @@ class DagInstruction {
     /// 所属函数名（多函数发射时用于标记指令边界）。
     var funcName: String = ""
 
+    /// [R95] `nodes` 的解析结果（输入节点 id；非数字 token 记 -1），与 `nodes` 同步。
+    /// ⚠ 直接写 `nodes = "..."` 会让本列表过期 —— 必须走 `setNodes()`。
+    var nodeIds: List<Int> = arrayListOf<Int>()
+
     init() {
         this.id = 0
         this.template = ""
@@ -196,6 +207,13 @@ class DagInstruction {
         this.mem = ""
         this.bytes = ""
         this.funcName = ""
+        this.nodeIds = arrayListOf<Int>()
+    }
+
+    /// [R95] 设置输入节点 CSV 并同步解析结果（唯一写入入口）。
+    fun setNodes(csv: String): Unit {
+        this.nodes = csv
+        this.nodeIds = MachineDagUtils.parseIdCsvLenient(csv, true)
     }
 
     /// 获取第 i 个输入节点的 ID。
@@ -206,26 +224,16 @@ class DagInstruction {
     /// 分析会把「标签 bb4」当成「节点 4」，跨函数/跨块的假干扰随之产生，
     /// 分配器把寄存器全判为占用 → 节点无颜色 → 回退 `rax` → 互相覆写。
     fun nodeAt(i: Int): Int {
-        if (this.nodes == "") {
+        // [R95] CSV → List：解析结果在 setNodes 时一次性建好，此处 O(1) 零分配。
+        if (i < 0 || i >= this.nodeIds.size) {
             return -1
         }
-        val parts: List<String> = MachineDagUtils.splitArgs(this.nodes)
-        if (i < 0 || i >= parts.size) {
-            return -1
-        }
-        val token: String = parts[i]
-        if (!MachineDagUtils.isNumericToken(token)) {
-            return -1
-        }
-        return MachineDagUtils.strToInt(token)
+        return this.nodeIds[i]
     }
 
     /// 获取输入节点个数。
     fun nodeCount(): Int {
-        if (this.nodes == "") {
-            return 0
-        }
-        return MachineDagUtils.splitArgs(this.nodes).size
+        return this.nodeIds.size
     }
 
     /// 是否读取标志寄存器。
@@ -342,7 +350,7 @@ class MachineDag {
         n.op = op
         n.type = type
         n.reg = reg
-        n.args = args
+        n.setArgs(args)
         n.uses = uses
         n.chain = chain
         n.aux = aux
@@ -367,7 +375,7 @@ class MachineDag {
         val i: DagInstruction = DagInstruction()
         i.id = this.instrCount
         i.template = template
-        i.nodes = nodes
+        i.setNodes(nodes)
         i.output = output
         i.flags = flags
         i.cond = cond
@@ -516,6 +524,53 @@ class MachineDag {
 
 object MachineDagUtils {
 
+    /// [R95] 逗号 CSV → List<Int>，一次性解析、零字符串分配。
+    /// `strict=true`：token 必须是「可选 '-' + 全数字」，否则记 -1
+    ///（对应 `isNumericToken` 语义——`nodes` 里的标签 token 必须被识别为 -1）；
+    /// `strict=false`：按 `strToInt` 语义提取数字（非数字字符忽略），用于 `args`。
+    fun parseIdCsvLenient(csv: String, strict: Boolean): List<Int> {
+        val out: List<Int> = arrayListOf<Int>()
+        if (csv == "") { return out }
+        val len: Int = csv.length
+        var pos: Int = 0
+        while (pos <= len) {
+            var end: Int = pos
+            while (end < len && (csv.charCodeAt(end) as Int) != 44) { end = end + 1 }
+            if (strict) {
+                var ok: Boolean = end > pos
+                var k: Int = pos
+                var neg: Boolean = false
+                if (k < end && (csv.charCodeAt(k) as Int) == 45) { neg = true; k = k + 1 }
+                if (k >= end) { ok = false }
+                var total: Int = 0
+                while (k < end) {
+                    val c: Int = csv.charCodeAt(k) as Int
+                    if (c < 48 || c > 57) { ok = false } else { total = total * 10 + (c - 48) }
+                    k = k + 1
+                }
+                if (ok) {
+                    if (neg) { out.add(0 - total) } else { out.add(total) }
+                } else {
+                    out.add(-1)
+                }
+            } else {
+                var k: Int = pos
+                var neg: Boolean = false
+                if (k < end && (csv.charCodeAt(k) as Int) == 45) { neg = true; k = k + 1 }
+                var total: Int = 0
+                while (k < end) {
+                    val c: Int = csv.charCodeAt(k) as Int
+                    if (c >= 48 && c <= 57) { total = total * 10 + (c - 48) }
+                    k = k + 1
+                }
+                if (neg) { out.add(0 - total) } else { out.add(total) }
+            }
+            if (end >= len) { break }
+            pos = end + 1
+        }
+        return out
+    }
+
     /// 字符串转整数（支持负号前缀）。
     fun strToInt(text: String): Int {
         if (text == "") {
@@ -560,7 +615,8 @@ object MachineDagUtils {
         var k: Int = 0
         if (text.charAt(0).toString() == "-") { k = 1 }
         if (k >= text.length) { return false }
-        while (k < text.length) {
+        val textLen: Int = text.length
+        while (k < textLen) {
             if ("0123456789".indexOf(text.charAt(k)) < 0) { return false }
             k = k + 1
         }

@@ -54,6 +54,17 @@ class InstructionSelector {
     /// LIR 程序引用（用于 selectValue 时查询真实 LirValue）。
     private var lir: LirProgram = null
 
+    /// [R96] `lir.phiPredMap` 的解析索引（一次构建，查找退化为整数比较）。
+    ///
+    /// ⚠️ 旧 `phiPredFind` 每次查询都把整张 map 从头扫一遍，且**每条记录都
+    /// `map.substring()`**；而 `substring` 内部要先 `strlen(整串)`。自举实测：
+    /// 14,331,200 次 substring、平均源串 202KB、累计 strlen 扫描 **2.77 TB**，
+    /// 是 Phase C 的最大单项开销（比任何算法开销都高一个量级）。
+    /// 改为一趟解析成「phiId 列表 + 记录体列表」后，查询 = 整数线性比较、零分配。
+    private var phiRecKeys: List<Int> = null
+    private var phiRecBodies: List<String> = null
+    private var phiRecBuilt: Boolean = false
+
     /// 标签计数器（用于控制流块的本地标签）。
     private var labelCount: Int = 0
 
@@ -822,14 +833,35 @@ class InstructionSelector {
         //
         // 成员方法有两种拼写形态（`Collections.getAt` / `Collections_getAt`），
         // 这里把 `.` 统一成 `_` 后比较，两边都命中。
-        val n: String = this.dotToUnderscore(name)
-        val parts: List<String> = LirUtils.splitArgs(this.runtimeSymbolNames)
-        var i: Int = 0
-        while (i < parts.size) {
-            if (this.dotToUnderscore(parts[i]) == n) {
-                return true
+        // [R94] 原地比较（零分配）。旧实现每次调用都：
+        //   ① `dotToUnderscore(name)` 逐字符拼接（O(len²) 分配）；
+        //   ② `LirUtils.splitArgs(runtimeSymbolNames)` 把 80+ 项拆成一堆 String；
+        //   ③ 对每一项再 dotToUnderscore 一次。
+        // 而本函数在发射期按「每条指令」被调用（3 个调用点都在 per-node 路径上），
+        // ⇒ 千万级小分配 + O(表长) 扫描。改为逐段原地比较（`.`≡`_`），零分配。
+        val nl: Int = name.length
+        if (nl == 0) { return false }
+        val csv: String = this.runtimeSymbolNames
+        val cl: Int = csv.length
+        var pos: Int = 0
+        while (pos <= cl) {
+            var segEnd: Int = pos
+            while (segEnd < cl && (csv.charCodeAt(segEnd) as Int) != 44) { segEnd = segEnd + 1 }
+            if (segEnd - pos == nl) {
+                var eq: Boolean = true
+                var k: Int = 0
+                while (k < nl && eq) {
+                    var a: Int = csv.charCodeAt(pos + k) as Int
+                    if (a == 46) { a = 95 }
+                    var b: Int = name.charCodeAt(k) as Int
+                    if (b == 46) { b = 95 }
+                    if (a != b) { eq = false }
+                    k = k + 1
+                }
+                if (eq) { return true }
             }
-            i = i + 1
+            if (segEnd >= cl) { break }
+            pos = segEnd + 1
         }
         return false
     }
@@ -872,7 +904,8 @@ class InstructionSelector {
         var dotAt: Int = -1  // 小数点在 digits 中的下标（若 mantissa 带小数点）
         var di: Int = mStart
         var digitsStart: Int = mStart
-        while (di < mantText.length) {
+        val mantTextLen: Int = mantText.length
+        while (di < mantTextLen) {
             val c: Int = mantText.charCodeAt(di)
             if (c == 46) {
                 // 记录小数点：位于「下一个数字字符」在 digits 中的位置
@@ -896,7 +929,8 @@ class InstructionSelector {
         }
         var exp: Int = 0
         var ei: Int = eStart
-        while (ei < expText.length) {
+        val expTextLen: Int = expText.length
+        while (ei < expTextLen) {
             val c: Int = expText.charCodeAt(ei)
             if (c >= 48 && c <= 57) { exp = exp * 10 + (c - 48) }
             ei = ei + 1
@@ -1437,10 +1471,11 @@ class InstructionSelector {
                                 val seg: String = pairs[ai9]
                                 var colon2: Int = -1
                                 var qi9: Int = 0
-                                while (qi9 < seg.length) {
+                                val segLen: Int = seg.length
+                                while (qi9 < segLen) {
                                     if ((seg.charCodeAt(qi9) as Int) == 58) {
                                         colon2 = qi9
-                                        qi9 = seg.length
+                                        qi9 = segLen
                                     }
                                     qi9 = qi9 + 1
                                 }
@@ -1580,69 +1615,113 @@ class InstructionSelector {
         }
     }
 
-    /// 在 `lir.phiPredMap` 中找 phi 的旁路记录下标（记录序），无则 -1。
-    /// 逐字符扫描（禁带 from 的 indexOf，红线②）。
-    private fun phiPredFind(src: LirProgram, phiVid: Int): Int {
-        if (this.lir == null) { return -1 }
+    /// 一次性构建 `phiPredMap` 的记录索引（惰性，首次查询时执行）。
+    ///
+    /// map 形态：`phiVid|p1:vid1,p2:vid2;phiVid|...`。这里只做一趟扫描：
+    /// 数字前缀就地累加、记录体只 substring 一次，之后所有查询都不再分配。
+    private fun ensurePhiMap(): Boolean {
+        if (this.phiRecBuilt) { return this.phiRecKeys != null }
+        this.phiRecBuilt = true
+        if (this.lir == null) { return false }
+        val keys: List<Int> = arrayListOf<Int>()
+        val bodies: List<String> = arrayListOf<String>()
+        // [R131] Lowering 现在把记录写进 `lir.phiPredRecs`（List），此处直接
+        // 逐条解析「phiVid|body」建索引 —— 不再经过 202KB 的 CSV 中间串。
+        // 旧 CSV 解析路径保留为回退（recs 为空且 phiPredMap 非空时）。
+        val recs: List<String> = this.lir.phiPredRecs
+        if (recs.size() > 0) {
+            var ri: Int = 0
+            while (ri < recs.size()) {
+                val rec: String = recs[ri]
+                val rlen: Int = rec.length
+                var bar: Int = 0
+                while (bar < rlen && (rec.charCodeAt(bar) as Int) != 124) { bar = bar + 1 }
+                if (bar > 0 && bar < rlen) {
+                    var key: Int = 0
+                    var nd: Int = 0
+                    var qi: Int = 0
+                    var scanning: Boolean = true
+                    while (qi < bar && scanning) {
+                        val c: Int = rec.charCodeAt(qi) as Int
+                        if (c >= 48 && c <= 57) {
+                            key = key * 10 + (c - 48)
+                            nd = nd + 1
+                            qi = qi + 1
+                        } else {
+                            scanning = false
+                        }
+                    }
+                    if (nd > 0 && qi == bar) {
+                        keys.add(key)
+                        bodies.add(rec.substring(bar + 1, rlen))
+                    }
+                }
+                ri = ri + 1
+            }
+            this.phiRecKeys = keys
+            this.phiRecBodies = bodies
+            return true
+        }
         val map: String = this.lir.phiPredMap
-        if (map == "") { return -1 }
-        val want: String = LirUtils.toStr(phiVid)
+        if (map == "") { return false }
+        val len: Int = map.length
         var pos: Int = 0
         var segStart: Int = 0
-        val len: Int = map.length
         while (pos <= len) {
             if (pos == len || (map.charCodeAt(pos) as Int) == 59) {
                 if (pos > segStart) {
-                    val rec: String = map.substring(segStart, pos)
-                    // rec = "phiVid|p1:vid1,..."
-                    var bar: Int = -1
-                    var qi: Int = 0
-                    while (qi < rec.length) {
-                        if ((rec.charCodeAt(qi) as Int) == 124) {
-                            bar = qi
-                            qi = rec.length
+                    var key: Int = 0
+                    var nd: Int = 0
+                    var qi: Int = segStart
+                    var scanning: Boolean = true
+                    while (qi < pos && scanning) {
+                        val c: Int = map.charCodeAt(qi) as Int
+                        if (c >= 48 && c <= 57) {
+                            key = key * 10 + (c - 48)
+                            nd = nd + 1
+                            qi = qi + 1
+                        } else {
+                            scanning = false
                         }
-                        qi = qi + 1
                     }
-                    if (bar > 0 && rec.substring(0, bar) == want) {
-                        return segStart
+                    if (nd > 0 && qi < pos && (map.charCodeAt(qi) as Int) == 124) {
+                        keys.add(key)
+                        bodies.add(map.substring(qi + 1, pos))
                     }
                 }
                 segStart = pos + 1
             }
             pos = pos + 1
         }
+        this.phiRecKeys = keys
+        this.phiRecBodies = bodies
+        return true
+    }
+
+    /// 在 `lir.phiPredMap` 中找 phi 的旁路记录下标（记录序），无则 -1。
+    /// [R96] 走预建索引：整数比较、零分配（旧实现是 O(记录数) 次 substring）。
+    private fun phiPredFind(src: LirProgram, phiVid: Int): Int {
+        if (!this.ensurePhiMap()) { return -1 }
+        val keys: List<Int> = this.phiRecKeys
+        var i: Int = 0
+        while (i < keys.size) {
+            if (keys[i] == phiVid) { return i }
+            i = i + 1
+        }
         return -1
     }
 
     /// 取 `phiPredFind` 命中记录的 `p:vid` 对列表。
-    private fun phiPredPairs(recStart: Int): List<String> {
-        val map: String = this.lir.phiPredMap
-        var bar: Int = -1
-        var qi: Int = recStart
-        val len: Int = map.length
-        while (qi < len) {
-            if ((map.charCodeAt(qi) as Int) == 124) {
-                bar = qi
-                qi = len
-            }
-            qi = qi + 1
-        }
-        var endPos: Int = len
-        var ej: Int = bar + 1
-        while (ej < len) {
-            if ((map.charCodeAt(ej) as Int) == 59) {
-                endPos = ej
-                ej = len
-            }
-            ej = ej + 1
-        }
-        val body: String = map.substring(bar + 1, endPos)
+    private fun phiPredPairs(recIdx: Int): List<String> {
         val out: List<String> = arrayListOf<String>()
+        if (this.phiRecBodies == null) { return out }
+        if (recIdx < 0 || recIdx >= this.phiRecBodies.size) { return out }
+        val body: String = this.phiRecBodies[recIdx]
         var pos: Int = 0
         var start: Int = 0
-        while (pos <= body.length) {
-            if (pos == body.length || (body.charCodeAt(pos) as Int) == 44) {
+        val bodyLen: Int = body.length
+        while (pos <= bodyLen) {
+            if (pos == bodyLen || (body.charCodeAt(pos) as Int) == 44) {
                 if (pos > start) {
                     out.add(body.substring(start, pos))
                 }
@@ -2180,7 +2259,8 @@ class InstructionSelector {
             //    `1.5e1`、`1.2E-3` 被剥成 `1.2E-`（P40x-k 回归，实测 01-lexer §1.4）。
             var cleaned: String = ""
             var ci: Int = 0
-            while (ci < fLit.length) {
+            val fLitLen: Int = fLit.length
+            while (ci < fLitLen) {
                 val ch: Int = fLit.charCodeAt(ci)
                 if (ch != 95) { cleaned = cleaned + fLit.substring(ci, ci + 1) }
                 ci = ci + 1
@@ -2189,12 +2269,13 @@ class InstructionSelector {
             // 定位最后一个 e/E 位置（若有）——作为后缀剥除的边界
             var expIdx: Int = -1
             var ei: Int = 0
-            while (ei < cleaned.length) {
+            val cleanedLen: Int = cleaned.length
+            while (ei < cleanedLen) {
                 val c: Int = cleaned.charCodeAt(ei)
                 if (c == 101 || c == 69) {
                     // 前一字符必须是数字/小数点（避免匹配非数值 e，如标识符）
                     val prevOk: Boolean = ei > 0
-                    val nextOk: Boolean = ei + 1 < cleaned.length
+                    val nextOk: Boolean = ei + 1 < cleanedLen
                     if (prevOk && nextOk) {
                         val pc: Int = cleaned.charCodeAt(ei - 1)
                         val nc: Int = cleaned.charCodeAt(ei + 1)
@@ -2437,7 +2518,7 @@ class InstructionSelector {
 
         // 设置调用实参（lhs=rcx, rhs=rdx）。
         val callNode: DagNode = this.dag.nodeOf(nodeId)
-        callNode.args = MachineDagUtils.toStr(lhsNode) + "," + MachineDagUtils.toStr(rhsNode)
+        callNode.setArgs(MachineDagUtils.toStr(lhsNode) + "," + MachineDagUtils.toStr(rhsNode))
 
         // 选择 call 模式（pattern 50: "call %func"）。
         this.dag.selectPattern(50, MachineDagUtils.toStr(nodeId), -1)
@@ -2471,7 +2552,7 @@ class InstructionSelector {
             val fConvId: Int = this.dag.addNode("Value", "Call", fstrTy,
                                                 "", "", "", this.curChain, "toStringFloat")
             val fConvNode: DagNode = this.dag.nodeOf(fConvId)
-            fConvNode.args = MachineDagUtils.toStr(argNode)
+            fConvNode.setArgs(MachineDagUtils.toStr(argNode))
             this.dag.selectPattern(50, MachineDagUtils.toStr(fConvId), -1)
             return fConvId
         }
@@ -2497,7 +2578,7 @@ class InstructionSelector {
                         val fConvId2: Int = this.dag.addNode("Value", "Call", fstrTy2,
                                                              "", "", "", this.curChain, "toStringFloat")
                         val fConvNode2: DagNode = this.dag.nodeOf(fConvId2)
-                        fConvNode2.args = MachineDagUtils.toStr(argNode)
+                        fConvNode2.setArgs(MachineDagUtils.toStr(argNode))
                         this.dag.selectPattern(50, MachineDagUtils.toStr(fConvId2), -1)
                         return fConvId2
                     }
@@ -2514,7 +2595,7 @@ class InstructionSelector {
                                                     this.types.fromTypeName("String"),
                                                     "", "", "", this.curChain, "refToStr")
                 val objNode: DagNode = this.dag.nodeOf(objConv)
-                objNode.args = MachineDagUtils.toStr(argNode)
+                objNode.setArgs(MachineDagUtils.toStr(argNode))
                 this.dag.selectPattern(50, MachineDagUtils.toStr(objConv), -1)
                 return objConv
             }
@@ -2540,22 +2621,24 @@ class InstructionSelector {
                 var isStrProducer: Boolean = false
                 var si: Int = 0
                 val producers: String = "toStr,strcat,boolToStr,charToStr,toString,String_substring,String_fromCharCode,env_get,Env_get,String_trim,String_split,String_substringBefore"
-                while (si < producers.length) {
+                val producersLen: Int = producers.length
+                while (si < producersLen) {
                     var ej: Int = si
-                    while (ej < producers.length && producers.charCodeAt(ej) != 44) {
+                    while (ej < producersLen && producers.charCodeAt(ej) != 44) {
                         ej = ej + 1
                     }
                     if (ej - si == auxName.length) {
                         var match: Boolean = true
                         var mj: Int = 0
-                        while (mj < auxName.length) {
+                        val auxNameLen: Int = auxName.length
+                        while (mj < auxNameLen) {
                             if (producers.charCodeAt(si + mj) != auxName.charCodeAt(mj)) {
                                 match = false
-                                mj = auxName.length
+                                mj = auxNameLen
                             }
                             mj = mj + 1
                         }
-                        if (match) { isStrProducer = true; si = producers.length }
+                        if (match) { isStrProducer = true; si = producersLen }
                     }
                     si = ej + 1
                 }
@@ -2596,7 +2679,7 @@ class InstructionSelector {
         val convId: Int = this.dag.addNode("Value", "Call", strTy,
                                            "", "", "", this.curChain, fname)
         val convNode: DagNode = this.dag.nodeOf(convId)
-        convNode.args = MachineDagUtils.toStr(argNode)
+        convNode.setArgs(MachineDagUtils.toStr(argNode))
         // pattern 50 立即选择：保证转换调用先于消费它的外层调用编码
         this.dag.selectPattern(50, MachineDagUtils.toStr(convId), -1)
         return convId
@@ -2899,7 +2982,8 @@ class InstructionSelector {
         var k: Int = 0
         var seenDot: Int = 0
         var seenDigit: Int = 0
-        while (p < text.length) {
+        val textLen: Int = text.length
+        while (p < textLen) {
             val c: Int = text.charCodeAt(p)
             val dv: Long = this.digitVal(c)
             if (dv >= 0L) {
@@ -2923,7 +3007,8 @@ class InstructionSelector {
             }
             var ev: Int = 0
             var has: Int = 0
-            while (q < text.length && text.charCodeAt(q) >= 48 && text.charCodeAt(q) <= 57) {
+            val textLen2: Int = text.length
+            while (q < textLen2 && text.charCodeAt(q) >= 48 && text.charCodeAt(q) <= 57) {
                 has = 1
                 if (ev < 300) { ev = ev * 10 + (text.charCodeAt(q) - 48) }
                 q = q + 1
@@ -3452,10 +3537,11 @@ class InstructionSelector {
         // Collections_indexOf（字符串被当列表走），实测驱动段错误。
         var hasDot: Boolean = false
         var di: Int = 0
-        while (di < name.length) {
+        val nameLen: Int = name.length
+        while (di < nameLen) {
             if (name.charCodeAt(di) == 46) {
                 hasDot = true
-                di = name.length
+                di = nameLen
             } else {
                 di = di + 1
             }
@@ -3493,7 +3579,7 @@ class InstructionSelector {
         val callNode: Int = this.dag.addNode("Value", "Call", val.type,
                                              "", "", "", this.curChain, "streq")
         val cn: DagNode = this.dag.nodeOf(callNode)
-        cn.args = MachineDagUtils.toStr(lhsNode) + "," + MachineDagUtils.toStr(rhsNode)
+        cn.setArgs(MachineDagUtils.toStr(lhsNode) + "," + MachineDagUtils.toStr(rhsNode))
         this.dag.selectPattern(50, MachineDagUtils.toStr(callNode), -1)
 
         // cmp <call>, 0 → ZF/其它标志位由 streq 的返回值决定。
@@ -3695,7 +3781,7 @@ class InstructionSelector {
             ai = ai + 1
         }
         val callNode: DagNode = this.dag.nodeOf(nodeId)
-        callNode.args = argNodes
+        callNode.setArgs(argNodes)
 
         this.dag.selectPattern(50, MachineDagUtils.toStr(nodeId), -1)
         return nodeId
@@ -4006,10 +4092,10 @@ class InstructionSelector {
                     && instr.output >= 0 && next.nodeAt(0) == instr.output) {
                     // 合并：Load 后立即 Store 同一值 → 消除
                     instr.template = "nop"
-                    instr.nodes = ""
+                    instr.setNodes("")
                     instr.output = -1
                     next.template = "nop"
-                    next.nodes = ""
+                    next.setNodes("")
                     next.output = -1
                     this.selectedCount = this.selectedCount - 2
                     changed = true

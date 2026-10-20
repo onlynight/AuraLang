@@ -479,7 +479,8 @@ object MainUtils {
     fun cliStem(p: String): String {
         var start: Int = 0
         var i: Int = 0
-        while (i < p.length) {
+        val pLen: Int = p.length
+        while (i < pLen) {
             val cc: Int = p.charCodeAt(i)
             if (cc == 47 || cc == 92) {
                 start = i + 1
@@ -489,7 +490,8 @@ object MainUtils {
         var name: String = JitUtil.jitSlice(p, start, p.length - start)
         var dot: Int = -1
         var j: Int = 0
-        while (j < name.length) {
+        val nameLen: Int = name.length
+        while (j < nameLen) {
             if (name.charCodeAt(j) == 46) {
                 dot = j
             }
@@ -772,7 +774,8 @@ fun cliEnvArgCount(): Int {
     }
     var n: Int = 0
     var k: Int = 0
-    while (k < s.length) {
+    val sLen: Int = s.length
+    while (k < sLen) {
         val c: Int = s.charCodeAt(k)
         if (c < 48 || c > 57) {
             return -1

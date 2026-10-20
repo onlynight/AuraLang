@@ -899,7 +899,8 @@ object VmOps {
             return false
         }
         var i: Int = 0
-        while (i < s.length) {
+        val sLen2: Int = s.length
+        while (i < sLen2) {
             val c: Int = s.charCodeAt(i)
             if (c < 48 || c > 57) {
                 return false
@@ -970,7 +971,8 @@ object VmOps {
             return false
         }
         var i: Int = 0
-        while (i < prefix.length) {
+        val prefixLen: Int = prefix.length
+        while (i < prefixLen) {
             if (text.charCodeAt(i) != prefix.charCodeAt(i)) {
                 return false
             }
@@ -989,7 +991,8 @@ object VmOps {
         }
         val diff: Int = text.length - suffix.length
         var i: Int = 0
-        while (i < suffix.length) {
+        val suffixLen: Int = suffix.length
+        while (i < suffixLen) {
             if (text.charCodeAt(diff + i) != suffix.charCodeAt(i)) {
                 return false
             }
@@ -1176,10 +1179,11 @@ object VmOps {
                     if (p1 - start == funcName.length) {
                         var match: Boolean = true
                         var ci: Int = 0
-                        while (ci < funcName.length) {
+                        val funcNameLen: Int = funcName.length
+                        while (ci < funcNameLen) {
                             if (funcTable.charCodeAt(start + ci) != funcName.charCodeAt(ci)) {
                                 match = false
-                                ci = funcName.length
+                                ci = funcNameLen
                             }
                             ci = ci + 1
                         }
@@ -1227,10 +1231,11 @@ object VmOps {
                     if (p1 - start == funcName.length) {
                         var match: Boolean = true
                         var ci: Int = 0
-                        while (ci < funcName.length) {
+                        val funcNameLen2: Int = funcName.length
+                        while (ci < funcNameLen2) {
                             if (funcTable.charCodeAt(start + ci) != funcName.charCodeAt(ci)) {
                                 match = false
-                                ci = funcName.length
+                                ci = funcNameLen2
                             }
                             ci = ci + 1
                         }

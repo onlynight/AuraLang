@@ -553,16 +553,30 @@ class PhotonPipeline {
         // 设置链接器：main 对象 + 可选 runtime 对象
         val linker = PhotonSystemLinkerUtils.defaultLinker()
         linker.setOutputType(this.outputType)
+        // [R91] 补齐链接符号：aura_runtime.obj 提供 Memory_alloc/Free/Copy 等
+        // 带前缀符号，但 Collections.aura emit 路径生成裸名 alloc/copy/free/
+        // StringOps_strcmp 外调。aura_link_fix.obj 提供裸名→runtime 桥接
+        // （不依赖 libc，适配 /NODEFAULTLIB）。
+        // [R92] CFFI 不再链接（区域管理已移入 aura_link_fix.c）。
+        // /FORCE:MULTIPLE 忽略重复符号（toString/toStr/env_get 等在 runtime 与 CFFI 中重复定义）。
+        val linkFixObj: String = Env.get("AURA_LINK_FIX_OBJ",
+                "D:/Code/AuraLang/build/aura_link_fix_exe.obj")
+        val cffiObj: String = Env.get("AURA_CFFI_OBJ", "")
+        var extraObjs: String = if (linkFixObj != "") { " " + linkFixObj } else { "" }
+        if (cffiObj != "") {
+            extraObjs = extraObjs + " " + cffiObj
+        }
         if (runtimeObjPath == "") {
-            linker.objectFiles = objPath
+            linker.objectFiles = objPath + extraObjs
         } else {
-            linker.objectFiles = objPath + " " + runtimeObjPath
+            linker.objectFiles = objPath + " " + runtimeObjPath + extraObjs
         }
         if (this.outputType == "exe") {
             linker.addFlag("/SUBSYSTEM:CONSOLE")
             linker.addFlag("/ENTRY:main")
             linker.addFlag("/MACHINE:X64")
             linker.addFlag("/NODEFAULTLIB")
+            // [R92] /FORCE:MULTIPLE 已移除（不再链接 CFFI，无重复符号）
             // P321: 大函数帧（ID 区间上界后仍可达数十 KB）× 深调用链需要更大栈；
             // reserve=commit 免去守卫页提交依赖（emitPrologue 的逐页下探仍在）。
             linker.addFlag("/STACK:16777216")
@@ -914,16 +928,30 @@ class PhotonPipeline {
         // 设置链接器：main 对象 + 可选 runtime 对象
         val linker = PhotonSystemLinkerUtils.defaultLinker()
         linker.setOutputType(this.outputType)
+        // [R91] 补齐链接符号：aura_runtime.obj 提供 Memory_alloc/Free/Copy 等
+        // 带前缀符号，但 Collections.aura emit 路径生成裸名 alloc/copy/free/
+        // StringOps_strcmp 外调。aura_link_fix.obj 提供裸名→runtime 桥接
+        // （不依赖 libc，适配 /NODEFAULTLIB）。
+        // [R92] CFFI 不再链接（区域管理已移入 aura_link_fix.c）。
+        // /FORCE:MULTIPLE 忽略重复符号（toString/toStr/env_get 等在 runtime 与 CFFI 中重复定义）。
+        val linkFixObj: String = Env.get("AURA_LINK_FIX_OBJ",
+                "D:/Code/AuraLang/build/aura_link_fix_exe.obj")
+        val cffiObj: String = Env.get("AURA_CFFI_OBJ", "")
+        var extraObjs: String = if (linkFixObj != "") { " " + linkFixObj } else { "" }
+        if (cffiObj != "") {
+            extraObjs = extraObjs + " " + cffiObj
+        }
         if (runtimeObjPath == "") {
-            linker.objectFiles = objPath
+            linker.objectFiles = objPath + extraObjs
         } else {
-            linker.objectFiles = objPath + " " + runtimeObjPath
+            linker.objectFiles = objPath + " " + runtimeObjPath + extraObjs
         }
         if (this.outputType == "exe") {
             linker.addFlag("/SUBSYSTEM:CONSOLE")
             linker.addFlag("/ENTRY:main")
             linker.addFlag("/MACHINE:X64")
             linker.addFlag("/NODEFAULTLIB")
+            // [R92] /FORCE:MULTIPLE 已移除（不再链接 CFFI，无重复符号）
             // P321: 大函数帧（ID 区间上界后仍可达数十 KB）× 深调用链需要更大栈；
             // reserve=commit 免去守卫页提交依赖（emitPrologue 的逐页下探仍在）。
             linker.addFlag("/STACK:16777216")
@@ -1273,7 +1301,8 @@ class PhotonPipeline {
     /// 查找字符在字符串中的位置（返回 -1 表示未找到）。
     private fun indexOf(text: String, ch: String): Int {
         var i: Int = 0
-        while (i < text.length) {
+        val textLen: Int = text.length
+        while (i < textLen) {
             if (text.charAt(i).toString() == ch) {
                 return i
             }

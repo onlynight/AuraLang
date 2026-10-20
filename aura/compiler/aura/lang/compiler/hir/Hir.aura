@@ -44,6 +44,9 @@ import aura.lang.std.String
 // （`[bytecode] error: 未解析的函数调用 'kidsOf'/'spanOf'` …）。
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.ast.Ast
+// [R90] 家族路由：HIR 节点字符串幸存者经 Memory.strdupRetain 落 retain era
+// （text/ty 源自 AST，AST 在 scratch，模块 rewind 后会悬挂）。
+import aura.lang.native.Memory
 
 object HirUtils {
 
@@ -268,6 +271,12 @@ class Hir {
     /// 根节点 id（由 lower 方法设置）。
     var rootId: Int = 0
 
+    /// [R93] 原文列（未转义），与 `texts` 一一对应。
+    /// 旧实现 `textOf` 每次访问都对含转义的文本**逐字符重建**（O(L²) 分配），
+    /// 而 textOf 是前端最热访问之一 —— 实测自举编译单点 2.33 亿次分配 / 5.8GB
+    /// （2026-10-19 AURA_ATTR_DUMP 归因）。改为 add 时一次性落列、textOf O(1) 直返。
+    private var textRaw: List<String> = arrayListOf<String>()
+
     // ── 构造 ──
 
     /// 追加一个节点，返回其 id。
@@ -288,28 +297,84 @@ class Hir {
         if (this.spanEndLine == null) { this.spanEndLine = arrayListOf<Int>() }
         if (this.spanEndCol == null) { this.spanEndCol = arrayListOf<Int>() }
         if (this.kids == null) { this.kids = arrayListOf<List<Int>>() }
+        if (this.textRaw == null) { this.textRaw = arrayListOf<String>() }
         val id: Int = this.kinds.size
-        this.kinds.add(kind)
-        // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）。
-        // 绝大多数 text 不含换行：单次 `contains`（C `strstr`，零分配）判定后
-        // 直接复用原串，避免逐字符重建长文本（token 文本可达数千字符）。
+        // [R93] 原文/转义分离：`texts` 存 .hat 线格式（换行已转义），
+        // `textRaw` 存原文。两条输入路径：
+        //   ① 编译器 lowering：text 为原文（可能含真实换行）→ 转义入 texts；
+        //   ② .hat 反序列化：text 已是转义形态 → 一次性反转义入 textRaw。
         var escaped: String = text
+        var rawText: String = text
         if (text.contains("\n")) {
+            // 分块转义 + 两两归并（O(L·log k)）；旧逐字符 `buf=buf+ch` 是 O(L²)。
             val tlen: Int = text.length
-            var buf: String = ""
-            var i: Int = 0
-            while (i < tlen) {
-                if (text.charCodeAt(i) == 10) {
-                    buf = buf + "\\n"
-                } else {
-                    buf = buf + text.substring(i, i + 1)
+            var segs: List<String> = arrayListOf<String>()
+            var segStart: Int = 0
+            var ci: Int = 0
+            while (ci < tlen) {
+                if (text.charCodeAt(ci) == 10) {
+                    segs.add(text.substring(segStart, ci))
+                    segStart = ci + 1
                 }
-                i = i + 1
+                ci = ci + 1
             }
-            escaped = buf
+            segs.add(text.substring(segStart, tlen))
+            while (segs.size > 1) {
+                val merged: List<String> = arrayListOf<String>()
+                var si: Int = 0
+                while (si < segs.size) {
+                    if (si + 1 < segs.size) {
+                        merged.add(segs[si] + "\\n" + segs[si + 1])
+                        si = si + 2
+                    } else {
+                        merged.add(segs[si])
+                        si = si + 1
+                    }
+                }
+                segs = merged
+            }
+            escaped = segs[0]
+        } else if (text.contains("\\n")) {
+            // 反序列化路径：入参是 `\n` 两字符转义 → 还原为真实换行（一次性）。
+            val tlen: Int = text.length
+            var segs: List<String> = arrayListOf<String>()
+            var segStart: Int = 0
+            var ci: Int = 0
+            while (ci < tlen) {
+                if (ci + 1 < tlen && text.charCodeAt(ci) == 92 && text.charCodeAt(ci + 1) == 110) {
+                    segs.add(text.substring(segStart, ci))
+                    segs.add("\n")
+                    ci = ci + 2
+                    segStart = ci
+                } else {
+                    ci = ci + 1
+                }
+            }
+            segs.add(text.substring(segStart, tlen))
+            while (segs.size > 1) {
+                val merged: List<String> = arrayListOf<String>()
+                var si: Int = 0
+                while (si < segs.size) {
+                    if (si + 1 < segs.size) {
+                        merged.add(segs[si] + segs[si + 1])
+                        si = si + 2
+                    } else {
+                        merged.add(segs[si])
+                        si = si + 1
+                    }
+                }
+                segs = merged
+            }
+            rawText = segs[0]
         }
-        this.texts.add(escaped)
-        this.tys.add(ty)
+        // [R90] 幸存者落 retain：kind/escaped/ty 三者可能是 AST 指针直传
+        //（escaped 无换行时即 text 本体，ty 多为 sema/AST 派生），scratch
+        // rewind 后全部悬挂。此处统一 strdupRetain 一份；.rodata 字面量
+        // 的多余复制代价可忽略（对齐到 16B，单节点 ~32B）。
+        this.kinds.add(Memory.strdupRetain(kind))
+        this.texts.add(Memory.strdupRetain(escaped))
+        this.textRaw.add(Memory.strdupRetain(rawText))
+        this.tys.add(Memory.strdupRetain(ty))
         this.spanStart.add(sp.start)
         this.spanEnd.add(sp.end)
         this.spanStartLine.add(sp.startLine)
@@ -338,12 +403,17 @@ class Hir {
 
     /// 第 id 个节点的主文本。
     fun textOf(id: Int): String {
+        // [R93] 直返原文列（O(1)、零分配）。旧实现对每次访问做 `contains` +
+        // 逐字符反转义，是前端 2.33 亿次分配 / 5.8GB 的根因。
+        if (this.textRaw != null && id >= 0 && id < this.textRaw.size) {
+            return HirUtils.hirItemAt(this.textRaw, id)
+        }
         if (this.texts == null) {
             return ""
         }
         val raw: String = HirUtils.hirItemAt(this.texts, id)
-        // 绝大多数 text 不含换行转义：单次 `contains` 判定后直接复用原串，
-        // 避免每次访问都逐字符重建（textOf 是发射期最热访问之一）。
+        // 回退路径（textRaw 缺失，例如旧 .hat 缓存/外部构造的 Hir）：
+        // 单次 `contains` 判定后直接复用原串。
         if (!raw.contains("\\")) {
             return raw
         }
@@ -1760,7 +1830,8 @@ class HirLowerer {
     private fun radixToDec(text: String, radix: Int, from: Int): String {
         var v: Int = 0
         var i: Int = from
-        while (i < text.length) {
+        val textLen: Int = text.length
+        while (i < textLen) {
             val ch: Int = text.charCodeAt(i)
             var d: Int = -1
             if (ch >= 48 && ch <= 57) { d = ch - 48 }
@@ -2247,12 +2318,29 @@ class HirLowerer {
     /// CSV（逗号分隔）中是否含指定条目。
     private fun csvContains(csv: String, item: String): Boolean {
         if (csv == "" || item == "") { return false }
+        // [R101] 原地逐项比较，**零分配**。旧实现每遇到一个逗号就
+        // `csv.substring(start, i)` 建一个临时串再比 —— 对 `typeMethods`
+        // （自举实测 57KB、约 2000 项）意味着**每次调用 2000 次分配**，
+        // 而它在每个成员访问上都会跑（PhotonRuntime 这类成员密集模块的
+        // 降级耗时被抬到同规模模块的 10 倍）。
+        val n: Int = csv.length
+        val ilen: Int = item.length
         var start: Int = 0
         var i: Int = 0
-        val n: Int = csv.length
         while (i <= n) {
             if (i == n || csv.charCodeAt(i) == 44) {
-                if (csv.substring(start, i) == item) { return true }
+                if (i - start == ilen) {
+                    var k: Int = 0
+                    var same: Boolean = true
+                    while (k < ilen) {
+                        if (csv.charCodeAt(start + k) != item.charCodeAt(k)) {
+                            same = false
+                            k = ilen
+                        }
+                        k = k + 1
+                    }
+                    if (same) { return true }
+                }
                 start = i + 1
             }
             i = i + 1
@@ -2270,11 +2358,24 @@ class HirLowerer {
     /// 键值查找（精确 key、首条命中——csvLookup 同语义,零分配）。
     private fun kvGet(list: List<String>, key: String): String {
         if (key == "") { return "" }
+        val kl: Int = key.length
         var i: Int = 0
         while (i < list.size) {
             val e: String = list[i]
-            if (e.startsWith(key + "=")) {
-                return e.substring(key.length + 1, e.length)
+            // [R93] 原地前缀比较。旧实现 `e.startsWith(key + "=")` **每次迭代
+            // 都分配一个 `key + "="` 临时串**：登记表（localVarTys/typeMemberTys/
+            // funcRetTys）随类型/方法数增长，每次查找产生 O(表长) 次小分配
+            // ⇒ 自举编译实测 2.33 亿次分配 / 5.8GB（AURA_ATTR_DUMP 归因主项）。
+            if (e.length > kl && e.charCodeAt(kl) == 61) {   // '='
+                var eq: Boolean = true
+                var j: Int = 0
+                while (j < kl && eq) {
+                    if (e.charCodeAt(j) != key.charCodeAt(j)) { eq = false }
+                    j = j + 1
+                }
+                if (eq) {
+                    return e.substring(kl + 1, e.length)
+                }
             }
             i = i + 1
         }
@@ -2283,16 +2384,35 @@ class HirLowerer {
 
     private fun csvLookup(csv: String, key: String): String {
         if (csv == "" || key == "") { return "" }
+        // [R101] 原地比较（同 csvContains）：旧实现每项建 `pair` + 两次 substring，
+        // 只有**命中那一项**才需要真正分配返回值。
+        val n: Int = csv.length
+        val kl: Int = key.length
         var start: Int = 0
         var i: Int = 0
-        val n: Int = csv.length
         while (i <= n) {
             if (i == n || csv.charCodeAt(i) == 44) {
                 if (i > start) {
-                    val pair: String = csv.substring(start, i)
-                    val eq: Int = pair.indexOf("=")
-                    if (eq > 0 && pair.substring(0, eq) == key) {
-                        return pair.substring(eq + 1, pair.length)
+                    var eq: Int = -1
+                    var p: Int = start
+                    while (p < i) {
+                        if (csv.charCodeAt(p) == 61) {
+                            eq = p
+                            p = i
+                        }
+                        p = p + 1
+                    }
+                    if (eq > start && eq - start == kl) {
+                        var k: Int = 0
+                        var same: Boolean = true
+                        while (k < kl) {
+                            if (csv.charCodeAt(start + k) != key.charCodeAt(k)) {
+                                same = false
+                                k = kl
+                            }
+                            k = k + 1
+                        }
+                        if (same) { return csv.substring(eq + 1, i) }
                     }
                 }
                 start = i + 1
@@ -2310,12 +2430,25 @@ class HirLowerer {
     /// P40x-e：name 是否为已声明类型名（knownTypes CSV 精确匹配）。
     private fun isKnownTypeName(name: String): Boolean {
         if (name == "" || this.knownTypes == "") { return false }
+        // [R101] 原地比较（零分配）。旧实现在**每个逗号位置**都
+        // `substring(i+1, i+1+nameLen)` 建一个临时串 —— 名单越长分配越多，
+        // 而本函数在每个标识符上都会被调用一次。
+        val csv: String = this.knownTypes
+        val n: Int = csv.length
+        val nameLen: Int = name.length
         var i: Int = 0
-        val n: Int = this.knownTypes.length
-        while (i + name.length + 1 <= n) {
-            if (this.knownTypes.charCodeAt(i) == 44
-                    && this.knownTypes.substring(i + 1, i + 1 + name.length) == name) {
-                return true
+        while (i + nameLen + 1 <= n) {
+            if (csv.charCodeAt(i) == 44) {
+                var k: Int = 0
+                var same: Boolean = true
+                while (k < nameLen) {
+                    if (csv.charCodeAt(i + 1 + k) != name.charCodeAt(k)) {
+                        same = false
+                        k = nameLen
+                    }
+                    k = k + 1
+                }
+                if (same) { return true }
             }
             i = i + 1
         }
@@ -2566,7 +2699,8 @@ class HirLowerer {
                     if (cq.startsWith("aura.")) {
                         var dots: Int = 0
                         var di: Int = 0
-                        while (di < cq.length) {
+                        val cqLen: Int = cq.length
+                        while (di < cqLen) {
                             if (cq.charCodeAt(di) == 46) { dots = dots + 1 }
                             di = di + 1
                         }

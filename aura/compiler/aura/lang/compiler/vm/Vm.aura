@@ -2454,7 +2454,8 @@ import aura.lang.compiler.serialize.AucLoader
             if (sepStr == "") {
                 // 空分隔符：每字符一个元素
                 var ci: Int = 0
-                while (ci < text.length) {
+                val textLen: Int = text.length
+                while (ci < textLen) {
                     VmCollections.push(result, String.fromCharCode(text.charCodeAt(ci)))
                     ci = ci + 1
                 }
@@ -2462,10 +2463,11 @@ import aura.lang.compiler.serialize.AucLoader
                 return
             }
             var pos: Int = 0
-            while (pos < text.length) {
+            val textLen2: Int = text.length
+            while (pos < textLen2) {
                 val idx: Int = VmOps.indexOf(text, sepStr, pos)
                 if (idx < 0) {
-                    VmCollections.push(result, VmOps.vmSubstr(text, pos, text.length - pos))
+                    VmCollections.push(result, VmOps.vmSubstr(text, pos, textLen2 - pos))
                     break
                 }
                 VmCollections.push(result, VmOps.vmSubstr(text, pos, idx - pos))
@@ -5197,7 +5199,8 @@ if (false && (r < n - 5
             return false
         }
         var i: Int = 0
-        while (i < prefix.length) {
+        val prefixLen: Int = prefix.length
+        while (i < prefixLen) {
             if (s.charCodeAt(i) != prefix.charCodeAt(i)) {
                 return false
             }

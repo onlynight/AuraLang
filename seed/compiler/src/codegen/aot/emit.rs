@@ -1043,11 +1043,15 @@ fn emit_native_wrapper(
             let method_lower = method_name.to_lowercase();
             let sym_lower = sym.to_lowercase();
             if sym_lower.contains("alloc") {
-                // Memory.alloc(n) → call malloc(n), ptrtoint to i64
-                "%ptr.alloc = call i8* @malloc(i64 %arg.0)\n%result = ptrtoint i8* %ptr.alloc to i64".to_string()
+                // Memory.alloc(n) → call aura_malloc(n), ptrtoint to i64
+                // [R90] 不能用 @malloc（/NODEFAULTLIB 下无 libc）；aura_malloc
+                // 带上限检查 + 记账，与第二路径（bare=="alloc"）一致。
+                "%ptr.alloc = call i8* @aura_malloc(i64 %arg.0)\n%result = ptrtoint i8* %ptr.alloc to i64".to_string()
             } else if sym_lower.contains("free") {
-                // Memory.free(addr) → inttoptr from i64, call free
-                "%ptr.free = inttoptr i64 %arg.0 to i8*\ncall void @free(i8* %ptr.free)".to_string()
+                // Memory.free(addr) → inttoptr from i64, call aura_free
+                // [R90] 不能用 @free（/NODEFAULTLIB 下无 libc 且 aura_mem_free
+                // 自身调 free 会递归）；aura_free 走 aura_mem_free 统一记账。
+                "%ptr.free = inttoptr i64 %arg.0 to i8*\ncall void @aura_free(i8* %ptr.free)".to_string()
             } else if func.name.contains("Memory") && method_lower.starts_with("read") {
                 // Memory.read(addr) / read16 / read32 / read64
                 let (load_ty, ptr_ty) = if method_lower == "read16" {
@@ -5434,6 +5438,47 @@ fn emit_call(
                 cur.body.push(format!("{} = inttoptr i64 {} to i8*", p, addr));
                 cur.body.push(format!("call void @aura_free(i8* {})", p));
                 return Ok(("0".to_string(), "i32".to_string()));
+            }
+            // [R91] 区域管理原语 → CFFI PascalCase 符号
+            if bare == "regionEnter" || bare == "regionReset" {
+                let r = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!(
+                    "{} = call i64 @{}()",
+                    r,
+                    if bare == "regionEnter" { "RegionEnter" } else { "RegionReset" }
+                ));
+                return Ok((r, "i64".to_string()));
+            }
+            if bare == "regionScratchTarget" || bare == "regionRetainTarget" {
+                let r = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!(
+                    "{} = call i64 @{}()",
+                    r,
+                    if bare == "regionScratchTarget" { "RegionScratchTarget" } else { "RegionRetainTarget" }
+                ));
+                return Ok((r, "i64".to_string()));
+            }
+            if bare == "scratchMark" {
+                let r = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!("{} = call i64 @ScratchMark()", r));
+                return Ok((r, "i64".to_string()));
+            }
+            if bare == "scratchRewind" {
+                let (mark, _) = arg(0);
+                let r = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!("{} = call i64 @ScratchRewind(i64 {})", r, mark));
+                return Ok((r, "i64".to_string()));
+            }
+            if bare == "strdupRetain" {
+                let (s, _) = arg(0);
+                let p = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!("{} = call i8* @StrdupRetain(i8* {})", p, s));
+                return Ok((p, "i8*".to_string()));
             }
         }
     }

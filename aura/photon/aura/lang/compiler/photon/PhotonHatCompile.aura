@@ -119,7 +119,11 @@ fun readPathEnv(name: String, default: String): String {
         val text: String = FileUtils.readText(path)
         var h: Int = 0x811c9dc5
         var i: Int = 0
-        while (i < text.length) {
+        // [R96] `text.length` = `strlen`：放进循环条件 ⇒ 每个字符都把整个
+        // 文件重扫一遍（O(n²)）。.hat 落盘前要对上百个源文件做 FNV 哈希，
+        // 实测 hatWrite 单项 55s 的主体就在这里。取一次长度即可。
+        val tlen: Int = text.length
+        while (i < tlen) {
             h = h * 0x01000193
             h = h ^ text.charCodeAt(i)
             i = i + 1
@@ -152,10 +156,11 @@ fun readPathEnv(name: String, default: String): String {
 fun writeBuildManifest(seenList: String, cacheMain: String, cacheRt: String, cacheManifest: String): Unit {
     var mf: String = "v1\nM " + cacheMain + "\nR " + cacheRt + "\n"
     var fi: Int = 0
-    while (fi < seenList.length) {
+    val seenListLen: Int = seenList.length
+    while (fi < seenListLen) {
         var nl: Int = -1
         var sc: Int = fi
-        while (sc < seenList.length) {
+        while (sc < seenListLen) {
             if (seenList.charCodeAt(sc) == 10) { nl = sc; break }
             sc = sc + 1
         }
@@ -388,10 +393,11 @@ fun main(): Int {
             var out: String = ""
             var fi: Int = 0
             var wroteL: Boolean = false
-            while (fi < mf.length) {
+            val mfLen: Int = mf.length
+            while (fi < mfLen) {
                 var nl: Int = -1
                 var sc: Int = fi
-                while (sc < mf.length) {
+                while (sc < mfLen) {
                     if (mf.charCodeAt(sc) == 10) { nl = sc; break }
                     sc = sc + 1
                 }
@@ -517,9 +523,10 @@ object HatGetPatchUtils {
         // 2) 逐个追加桩 getter（每次调用分配 64 字节零块）。
         var out: String = hat
         var p: Int = 0
-        while (p < calledCsv.length) {
+        val calledCsvLen: Int = calledCsv.length
+        while (p < calledCsvLen) {
             var e: Int = p
-            while (e < calledCsv.length) {
+            while (e < calledCsvLen) {
                 if ((calledCsv.charCodeAt(e) as Int) == 10) { break }
                 e = e + 1
             }
@@ -531,7 +538,7 @@ object HatGetPatchUtils {
                       "\n    @s1 = @call @Memory_alloc(@s0) : Long" +
                       "\n    @ret @s1 : Long\n"
             }
-            if (e >= calledCsv.length) { break }
+            if (e >= calledCsvLen) { break }
             p = e + 1
         }
         return out

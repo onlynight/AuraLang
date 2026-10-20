@@ -132,6 +132,9 @@ class SsaBuilder {
     /// 字段表（`\nClass|field|index|auraTy|defaultNodeId\n`）。
     private var classFields: String = ""
 
+
+
+
     // ── 类字段布局缓存（`buildClassIndex` 收尾一次性填充）──
     //
     // ⚠️ `classFields` 只在此阶段被写入，`buildClassIndex` 返回后**只读** ——
@@ -310,7 +313,13 @@ class SsaBuilder {
         this.tmpCount = 0
 
         // 类元数据必须在建函数之前就绪：方法与调用点都要用它解析字段/构造器。
+                " blocks=" + toStr(this.program.blockCount) +
+                " tys=" + toStr(this.types.count) +
+                " dcalls=" + toStr(this.types.dbgCalls) +
+                " dscan=" + toStr(this.types.dbgScanned) +
+                " funcs=" + toStr(this.program.functionCount))
         this.buildClassIndex(src)
+
         // 溶解对象的 getter 缺口由 `ensureSingletonGetter` 在 buildCall 发射点
         // 自愈（HirLowerer 对部分 `object X` 采用「方法限定名 + 体提升」的输出
         // 形态，对象声明节点不进降级 HIR，buildClassIndex 捕不到；方法体里被
@@ -1093,18 +1102,23 @@ class SsaBuilder {
     /// 纯 charCodeAt 逐字符扫描（与 localTypeOf/mapVidOf 同一纪律）。
     private fun unionCsvContains(csv: String, name: String): Boolean {
         if (csv == "" || name == "") { return false }
+        // [R96] `csv.length` 在 AOT 下就是 `strlen`：写进循环条件时每轮都把
+        // 整张 CSV 重扫一遍 ⇒ O(token 数 × CSV 长度) 的隐性平方项
+        //（联合查找的名字表可达数十 KB，且每个值都要判定）。取一次长度。
+        val csvLen: Int = csv.length
+        val nameLen: Int = name.length
         var i: Int = 0
-        while (i < csv.length) {
+        while (i < csvLen) {
             var end: Int = i
-            while (end < csv.length) {
+            while (end < csvLen) {
                 if ((csv.charCodeAt(end) as Int) == 44) { break }
                 end = end + 1
             }
             // token = [i, end)
-            if (end - i == name.length) {
+            if (end - i == nameLen) {
                 var k: Int = 0
                 var same: Boolean = true
-                while (k < name.length) {
+                while (k < nameLen) {
                     if ((csv.charCodeAt(i + k) as Int) != (name.charCodeAt(k) as Int)) {
                         same = false
                         break
@@ -1113,7 +1127,7 @@ class SsaBuilder {
                 }
                 if (same) { return true }
             }
-            if (end >= csv.length) { break }
+            if (end >= csvLen) { break }
             i = end + 1
         }
         return false
@@ -1125,7 +1139,9 @@ class SsaBuilder {
         if (csv == "") { return 0 }
         var n: Int = 1
         var i: Int = 0
-        while (i < csv.length) {
+        // [R96] 同 `unionCsvContains`：长度取一次，避免 strlen 逐轮重扫。
+        val csvLen: Int = csv.length
+        while (i < csvLen) {
             if ((csv.charCodeAt(i) as Int) == 44) { n = n + 1 }
             i = i + 1
         }
@@ -1138,8 +1154,9 @@ class SsaBuilder {
         var start: Int = 0
         var seen: Int = 0
         var i: Int = 0
-        while (i <= csv.length) {
-            if (i == csv.length || (csv.charCodeAt(i) as Int) == 44) {
+        val csvLen2: Int = csv.length
+        while (i <= csvLen2) {
+            if (i == csvLen2 || (csv.charCodeAt(i) as Int) == 44) {
                 if (seen == idx) {
                     if (i > start) { return csv.substring(start, i) }
                     return ""
@@ -1174,6 +1191,31 @@ class SsaBuilder {
     /// 只对**命中**的名字切片一次，整体 O(表长 × 变量数) 且零中间分配。
     private fun changedVarsCsv(before: String, after: String): String {
         if (before == after) { return "" }
+        // [R103] 快速路径：`varMap` 只**追加**（`varMapAdd` / 各 build* 都是
+        // `this.varMap = this.varMap + ...`，或从更早的快照恢复后再追加），
+        // 因此 `after` 几乎总以 `before` 为前缀 —— 变化集恰好是后缀那几行。
+        //
+        // 旧路径对 `after` 的**每个变量**都要在 `before` 里全文搜一遍
+        // （`O(变量数 × 表长)`，见本函数说明）。自举实测 `Emit_emitCall`
+        // 单函数 12.0 s、`Emit_callOrBuiltin` 7.1 s —— 这两个巨型 if/else 链
+        // 每条 `if` 都要付一次该代价，累计 19 s（占 SSA 阶段的 17%）。
+        //
+        // 前缀判定 O(表长)、后缀收集 O(后缀)。**前缀不成立时回落到原路径**，
+        // 输出格式（最新优先 + 去重）与旧实现逐位一致。
+        if (after.length > before.length) {
+            var samePrefix: Boolean = true
+            var k: Int = 0
+            while (k < before.length) {
+                if (after.charCodeAt(k) != before.charCodeAt(k)) {
+                    samePrefix = false
+                    k = before.length
+                }
+                k = k + 1
+            }
+            if (samePrefix) {
+                return this.changedSuffixCsv(after, before.length)
+            }
+        }
         var resultStr: String = ""
         var end: Int = after.length
         while (end > 0) {
@@ -1235,11 +1277,71 @@ class SsaBuilder {
         return resultStr
     }
 
+    /// [R103] `after[from..]` 这段后缀里的变量名，按「最新优先」去重成 CSV。
+    ///
+    /// 语义与 `changedVarsCsv` 的通用路径一致：每行形如 `name|vid`，
+    /// 取 `name`；结果按**出现顺序的逆序**（最新在前）并去重。
+    private fun changedSuffixCsv(after: String, from: Int): String {
+        // [R131] 旧实现：先把后缀各行拼成 namesCsv（O(k²) 整串拷贝），split 后
+        // 再倒序建 resultStr（又一次 O(k²)）——自举实测 53.7 万次 concat /
+        // 2.64GB，是前端 8.4GB 峰值的最大单项。改为：**倒序**扫行 + List 收集
+        // 去重（List<String>.add 走现行 AOT 的 dynlist 通道，可靠性已由
+        // parseIdCsvLenient 的逐字节等价输出验证）+ 两两归并拼接 O(R·log k)。
+        // 语义逐位一致：结果 = 后缀各行名字「最新优先 + 去重」的逗号 CSV。
+        var segs: List<String> = arrayListOf<String>()
+        var pos: Int = after.length
+        while (pos > from) {
+            // 当前条目 = [s, e)，条目末尾的 '\n' 在 pos-1
+            var e: Int = pos - 1
+            var s: Int = e
+            while (s > from && (after.charCodeAt(s - 1) as Int) != 10) { s = s - 1 }
+            if (e > s) {
+                var bar: Int = s
+                while (bar < e && (after.charCodeAt(bar) as Int) != 124) { bar = bar + 1 }
+                if (bar > s) {
+                    val nm: String = after.substring(s, bar)
+                    if (!this.strListHas(segs, nm)) {
+                        segs.add(nm)
+                    }
+                }
+            }
+            pos = s
+        }
+        if (segs.size() == 0) { return "" }
+        // 两两归并（O(R·log k)），顺序保持 segs 原序（最新在前）
+        while (segs.size() > 1) {
+            val merged: List<String> = arrayListOf<String>()
+            var i: Int = 0
+            while (i < segs.size()) {
+                if (i + 1 < segs.size()) {
+                    merged.add(segs[i] + "," + segs[i + 1])
+                    i = i + 2
+                } else {
+                    merged.add(segs[i])
+                    i = i + 1
+                }
+            }
+            segs = merged
+        }
+        return segs[0]
+    }
+
+    /// [R131] List<String> 精确成员判定（零分配，取代旧的 CSV contains）。
+    private fun strListHas(list: List<String>, item: String): Boolean {
+        var i: Int = 0
+        while (i < list.size()) {
+            if (list[i] == item) { return true }
+            i = i + 1
+        }
+        return false
+    }
+
     /// 比较 `s[from, to)` 是否与 `token` 逐字符相等（**零分配**）。
     private fun tokenRangeEquals(s: String, from: Int, to: Int, token: String): Boolean {
         if (to - from != token.length) { return false }
         var i: Int = 0
-        while (i < token.length) {
+        val tokenLen: Int = token.length
+        while (i < tokenLen) {
             if (s.charCodeAt(from + i) != token.charCodeAt(i)) { return false }
             i = i + 1
         }
@@ -1516,7 +1618,8 @@ class SsaBuilder {
                     // 2026-10-06）。
                     val phiTy: Int = this.program.valueOf(beforeVid).type
                     val phiVid: Int = this.makePhi(condBlock, phiTy, incoming, "")
-                    this.varMap = this.varMap + nm + "|" + toStr(phiVid) + "\n"
+                    val phiTail: String = nm + "|" + toStr(phiVid) + "\n"
+                    this.varMap = this.varMap + phiTail
                     phiVarEntries = phiVarEntries + nm + "|" + toStr(phiVid) + "\n"
                     phiRecs = phiRecs + nm + "|" + toStr(phiVid) + "|" + toStr(beforeVid) + "\n"
                 }
@@ -1598,7 +1701,8 @@ class SsaBuilder {
                                     var p1: Int = -1
                                     var p2: Int = -1
                                     var k: Int = 0
-                                    while (k < rec.length) {
+                                    val recLen: Int = rec.length
+                                    while (k < recLen) {
                                         if ((rec.charCodeAt(k) as Int) == 124) {
                                             if (p1 < 0) { p1 = k } else { if (p2 < 0) { p2 = k; break } }
                                         }
@@ -1798,7 +1902,8 @@ class SsaBuilder {
         val iPhiIncoming: String = toStr(entryBlock) + ":" + toStr(zeroVal) + "," +
                                    toStr(-1) + ":" + toStr(zeroVal)
         val iPhi: Int = this.makePhi(condBlock, i64, iPhiIncoming, "i")
-        this.varMap = this.varMap + "i|" + toStr(iPhi) + "\n"
+        val iPhiTail: String = "i|" + toStr(iPhi) + "\n"
+        this.varMap = this.varMap + iPhiTail
         phiVarEntries = phiVarEntries + "i|" + toStr(iPhi) + "\n"
         phiRecs = phiRecs + "i|" + toStr(iPhi) + "|" + toStr(zeroVal) + "\n"
 
@@ -1815,7 +1920,8 @@ class SsaBuilder {
                                                toStr(-1) + ":" + toStr(beforeVid)
                         val phiTy: Int = this.program.valueOf(beforeVid).type
                         val phiVid: Int = this.makePhi(condBlock, phiTy, incoming, "")
-                        this.varMap = this.varMap + nm + "|" + toStr(phiVid) + "\n"
+                        val phiTail2: String = nm + "|" + toStr(phiVid) + "\n"
+                        this.varMap = this.varMap + phiTail2
                         phiVarEntries = phiVarEntries + nm + "|" + toStr(phiVid) + "\n"
                         phiRecs = phiRecs + nm + "|" + toStr(phiVid) + "|" + toStr(beforeVid) + "\n"
                     }
@@ -1869,7 +1975,8 @@ class SsaBuilder {
         val getAtVal: Int = this.program.addValue("Shr", i64,
                                                    toStr(getAtRaw) + "," + toStr(oneVal0), "", this.curBlock)
         // 注册 loopVarName 到 varMap
-        this.varMap = this.varMap + loopVarName + "|" + toStr(getAtVal) + "\n"
+        val lvTail: String = loopVarName + "|" + toStr(getAtVal) + "\n"
+        this.varMap = this.varMap + lvTail
 
         // 执行用户循环体
         this.buildBlock(src, bodyKid)
@@ -1919,7 +2026,8 @@ class SsaBuilder {
                 var p1: Int = -1
                 var p2: Int = -1
                 var k: Int = 0
-                while (k < rec2.length) {
+                val rec2Len: Int = rec2.length
+                while (k < rec2Len) {
                     if ((rec2.charCodeAt(k) as Int) == 124) {
                         if (p1 < 0) { p1 = k } else { if (p2 < 0) { p2 = k; break } }
                     }
@@ -1970,7 +2078,8 @@ class SsaBuilder {
                                         var p1: Int = -1
                                         var p2: Int = -1
                                         var k: Int = 0
-                                        while (k < rec2.length) {
+                                        val rec2Len2: Int = rec2.length
+                                        while (k < rec2Len2) {
                                             if ((rec2.charCodeAt(k) as Int) == 124) {
                                                 if (p1 < 0) { p1 = k } else { if (p2 < 0) { p2 = k; break } }
                                             }
@@ -2652,7 +2761,8 @@ class SsaBuilder {
                 var ap: Int = 0
                 while (true) {
                     var ae: Int = ap
-                    while (ae < args.length && args.charCodeAt(ae) != 44) {
+                    val argsLen: Int = args.length
+                    while (ae < argsLen && args.charCodeAt(ae) != 44) {
                         ae = ae + 1
                     }
                     val vid: Int = LirUtils.strToInt(args.substring(ap, ae))
@@ -3000,7 +3110,10 @@ class SsaBuilder {
     ///
     /// 使用 \name|vid\n` 拼接格式，与 MirLower.aura 一致。
     private fun varMapAdd(name: String, vid: Int) {
-        this.varMap = this.varMap + name + "|" + toStr(vid) + "\n"
+        // [R131] tail-first：先拼小尾巴再一次大 concat（旧 4 段链每段都
+        // 整串拷贝 growing varMap，自举实测 ~760MB 滞留）。
+        val tail: String = name + "|" + toStr(vid) + "\n"
+        this.varMap = this.varMap + tail
         // Phase A S2: 变量重命名 — 每次赋值递增版本号
         this.bumpVarVersion(name)
     }
@@ -3024,7 +3137,9 @@ class SsaBuilder {
 
     /// Phase A S2: 设置变量版本号。
     private fun setVarVersion(name: String, version: Int): Unit {
-        this.varVersion = this.varVersion + name + "|" + toStr(version) + "\n"
+        // [R131] tail-first（同 varMapAdd）。
+        val tail: String = name + "|" + toStr(version) + "\n"
+        this.varVersion = this.varVersion + tail
     }
 
     /// 从变量映射表查找变量值，返回 SSA ValueID。
@@ -3089,7 +3204,8 @@ class SsaBuilder {
             return false
         }
         var i: Int = 0
-        while (i < key.length) {
+        val keyLen: Int = key.length
+        while (i < keyLen) {
             if (text.charCodeAt(pos + i) != key.charCodeAt(i)) {
                 return false
             }
@@ -3103,12 +3219,39 @@ class SsaBuilder {
         if (text == "" || key == "") {
             return 0
         }
+        // [R130] 长度提升 + 首字符过滤 + 内联比较，**循环内零 strlen、零调用**。
+        //
+        // ⚠️ 旧实现对**每个字符位置**都调 `flatStartsWith(text, i, key)`，而
+        // 后者体内有 `pos + key.length > text.length` —— Aura String 是 NUL
+        // 结尾 C 串，`.length` 就是 `strlen` ⇒ 每个位置 2 次全串扫描。
+        // 自举实测：`classFields` ~26KB × 26K 位置 × 2 次 strlen ≈ **1.4G 字节
+        // 扫描/每次调用**；`ownFieldCount`（210 次）+ 单例字段判定（108 次）
+        // 合计 ~22s，是 buildClassIndex 24.3s 的主体。
+        // 语义与旧实现逐位一致：统计 `key` 在 `text` 中的**可重叠**出现次数
+        //（key 首字符 '\n' 不在 key 其余位置出现 ⇒ 重叠不可能命中，行为相同）。
+        val tlen: Int = text.length
+        val klen: Int = key.length
+        val last: Int = tlen - klen
+        if (last < 0) {
+            return 0
+        }
+        val first: Int = key.charCodeAt(0) as Int
         var n: Int = 0
         var i: Int = 0
-        val last: Int = text.length - key.length
         while (i <= last) {
-            if (this.flatStartsWith(text, i, key)) {
-                n = n + 1
+            if ((text.charCodeAt(i) as Int) == first) {
+                var k: Int = 1
+                var same: Boolean = true
+                while (k < klen) {
+                    if ((text.charCodeAt(i + k) as Int) != (key.charCodeAt(k) as Int)) {
+                        same = false
+                        k = klen
+                    }
+                    k = k + 1
+                }
+                if (same) {
+                    n = n + 1
+                }
             }
             i = i + 1
         }
@@ -3137,7 +3280,7 @@ class SsaBuilder {
         if (name == "" || this.classNamesCsv == "") {
             return false
         }
-        return this.classNamesCsv.indexOf("\n" + name + "\n") >= 0
+        return this.csvLineHas(this.classNamesCsv, name)
     }
 
     /// 是否为**单例模块**（`object` / `extern interface`）声明。
@@ -3145,12 +3288,47 @@ class SsaBuilder {
     /// 与 `isClassName` 的区别：单例的调用点**没有接收者实参**
     ///（`Mutex.lock(m)` 只传 `m`），调用点解析必须丢弃降级进来的接收者，
     /// 否则实参整体错位一位（实测 `Cpu.atomicAdd(addr, 1)` 的 `addr` 落进
+    /// [R98] 判定 `csv` 里是否存在**整行**等于 `entry`（行分隔符 `\n`）。
+    ///
+    /// 与原写法 `this.csvLineHas(csv, entry)` 逐位等价，但：
+    ///  * **零分配**——旧写法每次调用都要拼两个临时串（本项目无 GC，全部滞留）；
+    ///  * 单遍原地扫描，不依赖 `indexOf` 原语（带 `from` 的 indexOf 在本 VM 下
+    ///    已知失效，一律避免）。
+    /// CSV 名单（classNamesCsv / singletonCsv / externCsv / freeFuncs …）在
+    /// 自举规模下可达数十 KB，而这些判定在**每个值、每个调用点**上都会跑。
+    private fun csvLineHas(csv: String, entry: String): Boolean {
+        if (csv == "") { return false }
+        if (entry == "") { return csv.indexOf("\n\n") >= 0 }
+        val clen: Int = csv.length
+        val elen: Int = entry.length
+        var i: Int = 0
+        while (i < clen) {
+            if ((csv.charCodeAt(i) as Int) == 10) {
+                val st: Int = i + 1
+                if (st + elen < clen && (csv.charCodeAt(st + elen) as Int) == 10) {
+                    var k: Int = 0
+                    var same: Boolean = true
+                    while (k < elen) {
+                        if ((csv.charCodeAt(st + k) as Int) != (entry.charCodeAt(k) as Int)) {
+                            same = false
+                            k = elen
+                        }
+                        k = k + 1
+                    }
+                    if (same) { return true }
+                }
+            }
+            i = i + 1
+        }
+        return false
+    }
+
     /// 「接收者」槽、`1` 落进 `addr` 槽）。
     private fun isSingletonObj(name: String): Boolean {
         if (name == "" || this.singletonCsv == "") {
             return false
         }
-        return this.singletonCsv.indexOf("\n" + name + "\n") >= 0
+        return this.csvLineHas(this.singletonCsv, name)
     }
 
     /// 是否属于 `extern interface`（`HirExternObject`）成员。
@@ -3162,7 +3340,7 @@ class SsaBuilder {
         if (name == "" || this.externCsv == "") {
             return false
         }
-        return this.externCsv.indexOf("\n" + name + "\n") >= 0
+        return this.csvLineHas(this.externCsv, name)
     }
 
     /// 该 `HirFunction` 是否是 `extern interface` **声明**的方法（只有这些跳过代码生成）。
@@ -3171,7 +3349,7 @@ class SsaBuilder {
         if (owner == "" || this.externMethodsCsv == "") {
             return false
         }
-        return this.externMethodsCsv.indexOf("\n" + owner + "|" + src.textOf(node) + "\n") >= 0
+        return this.csvLineHas(this.externMethodsCsv, owner + "|" + src.textOf(node))
     }
 
     /// 单例模块是否带**字段状态**。
@@ -3527,7 +3705,8 @@ class SsaBuilder {
             return def
         }
         var n: Int = 0
-        while (i < t.length) {
+        val tLen: Int = t.length
+        while (i < tLen) {
             val c: Int = t.charCodeAt(i)
             if (c < 48 || c > 57) {
                 return def
@@ -3843,7 +4022,7 @@ class SsaBuilder {
         if (name == "" || this.freeFuncs == "") {
             return false
         }
-        return this.freeFuncs.indexOf("\n" + name + "\n") >= 0
+        return this.csvLineHas(this.freeFuncs, name)
     }
 
     /// 把自由函数列表拼接成 `\nfn1\nfn2\n` 格式（供 `isFreeFunc` 的 indexOf 匹配）。
@@ -4116,11 +4295,11 @@ class SsaBuilder {
         // 现在按「同类重复」判重：object / extern 各自查各自的表。
         // 同类重复才跳过：`HirExternObject` 查 `externCsv`，`HirObject` 查 `singletonCsv`。
         if (kind == "HirExternObject") {
-            if (this.externCsv.indexOf("\n" + name + "\n") >= 0) {
+            if (this.csvLineHas(this.externCsv, name)) {
                 return
             }
         } else if (kind == "HirObject") {
-            if (this.singletonCsv.indexOf("\n" + name + "\n") >= 0) {
+            if (this.csvLineHas(this.singletonCsv, name)) {
                 return
             }
         } else if (this.isClassName(name)) {
@@ -4151,8 +4330,10 @@ class SsaBuilder {
 
         // 字段序号起点 = 继承链上祖先的字段总数（父类字段占据前缀）
         var idx: Int = this.classBaseIndex(name)
+
         val kids: List<Int> = src.kidsOfList(id)
         val kn: Int = HirUtils.hirKidsCount(kids)
+
         var j: Int = 0
         while (j < kn) {
             val child: Int = HirUtils.hirKidsAt(kids, j)
@@ -4363,7 +4544,7 @@ class SsaBuilder {
         if (cls == "" || method == "" || this.classMethods == "") {
             return false
         }
-        return this.classMethods.indexOf("\n" + cls + "|" + method + "\n") >= 0
+        return this.csvLineHas(this.classMethods, cls + "|" + method)
     }
 
     /// 沿继承链找**声明**该方法的类（未命中返回 ""）。
@@ -4435,7 +4616,9 @@ class SsaBuilder {
         }
         val key: String = "\n" + cls + "|" + method + "|"
         if (this.classMethodRetTypes.indexOf(key) < 0) {
-            this.classMethodRetTypes = this.classMethodRetTypes + key + ty + "\n"
+            // [R131] tail-first（旧 3 段链 ~200MB 滞留）。
+            val mrtTail: String = key + ty + "\n"
+            this.classMethodRetTypes = this.classMethodRetTypes + mrtTail
         }
     }
 
@@ -4631,7 +4814,7 @@ class SsaBuilder {
         // 只在「前缀是 `extern interface` 名」**且**「后缀确实是运行库裸名」时剥前缀，
         // 避免误伤本就带前缀的 `Memory_alloc` / `ProcessOps_execve` / `ThreadOps_*`。
         val us: Int = bare.indexOf("_")
-        if (us > 0 && this.externCsv.indexOf("\n" + bare.substring(0, us) + "\n") >= 0) {
+        if (us > 0 && this.csvLineHas(this.externCsv, bare.substring(0, us))) {
             val tail: String = bare.substring(us + 1, bare.length)
             if (this.isRuntimeBareName(tail)) {
                 return tail
@@ -4835,11 +5018,11 @@ class SsaBuilder {
                     val kn: Int = HirUtils.hirKidsCount(src.kidsOfList(i))
                     if (kn > 0) {
                         val known: String = this.initAritiesOf(callee)
-                        if (known.indexOf("\n" + toStr(kn) + "\n") < 0) {
+                        if (!this.csvLineHas(known, toStr(kn))) {
                             this.addCtorArity(callee, kn)
                         }
                         val km1: Int = kn - 1
-                        if (km1 >= 0 && known.indexOf("\n" + toStr(km1) + "\n") < 0) {
+                        if (km1 >= 0 && !this.csvLineHas(known, toStr(km1))) {
                             this.addCtorArity(callee, km1)
                         }
                     }
@@ -4867,8 +5050,10 @@ class SsaBuilder {
             val v: MirValue = this.program.valueOf(i)
             if (v.op == "Call" && v.aux != "") {
                 val nm: String = v.aux
-                if (seen.indexOf("\n" + nm + "\n") < 0) {
-                    seen = seen + "\n" + nm + "\n"
+                if (!this.csvLineHas(seen, nm)) {
+                    // [R131] tail-first（seen 链 ~330MB 滞留）。
+                    val seenTail: String = "\n" + nm + "\n"
+                    seen = seen + seenTail
                 }
             }
             i = i + 1
@@ -4877,15 +5062,18 @@ class SsaBuilder {
         var have: String = ""
         var fi: Int = 0
         while (fi < this.program.functionCount) {
-            have = have + "\n" + this.program.functionOf(fi).name + "\n"
+            // [R131] tail-first（have 链 ~330MB 滞留）。
+            val haveTail: String = "\n" + this.program.functionOf(fi).name + "\n"
+            have = have + haveTail
             fi = fi + 1
         }
         FileUtils.writeText("build/pt/s2_have.txt", have)
         var k: Int = 0
-        while (k < seen.length) {
+        val seenLen: Int = seen.length
+        while (k < seenLen) {
             if (seen.charCodeAt(k) == 10) {
                 var e: Int = k + 1
-                while (e < seen.length && seen.charCodeAt(e) != 10) { e = e + 1 }
+                while (e < seenLen && seen.charCodeAt(e) != 10) { e = e + 1 }
                 if (e > k + 1) {
                     val nm: String = seen.substring(k + 1, e)
                     FileUtils.writeText("build/pt/s3_cand.txt", nm)
@@ -4909,7 +5097,7 @@ class SsaBuilder {
 
     private fun needsStub(nm: String, have: String): Boolean {
         if (nm == "" || nm == "main") { return false }
-        if (have.indexOf("\n" + nm + "\n") >= 0) { return false }
+        if (this.csvLineHas(have, nm)) { return false }
         if (this.isFreeFunc(nm)) { return false }
         if (this.isRuntimeBareName(nm)) { return false }
         if (nm == "min" || nm == "max" || nm == "and" || nm == "or") { return false }
@@ -4918,7 +5106,8 @@ class SsaBuilder {
         // /唯一属主解析的真实目标，误桩 ⇒ duplicate/遮蔽（实测 13
         // duplicate symbol: FileOps_lseek）。
         var i: Int = 0
-        while (i < nm.length) {
+        val nmLen: Int = nm.length
+        while (i < nmLen) {
             val c: Int = nm.charCodeAt(i)
             if (c == 95 || (c >= 65 && c <= 90)) { return false }
             i = i + 1
@@ -4954,7 +5143,9 @@ class SsaBuilder {
                     val key: String = "\n" + qn + "|"
                     var pos: Int = stats.indexOf(key)
                     if (pos < 0) {
-                        stats = stats + key + "1|" + sig + "\n"
+                        // [R131] tail-first（stats 链 ~330MB 滞留）。
+                        val stTail: String = key + "1|" + sig + "\n"
+                        stats = stats + stTail
                     } else {
                         var ce: Int = pos + key.length
                         while (ce < stats.length && stats.charCodeAt(ce) != 124
@@ -4964,7 +5155,8 @@ class SsaBuilder {
                         var cnt: Int = SsaMirUtils.strToInt(stats.substring(pos + key.length, ce))
                         if (cnt < 1) { cnt = 1 }
                         var fs: Int = ce + 1
-                        while (fs < stats.length && stats.charCodeAt(fs) != 10) {
+                        val statsLen: Int = stats.length
+                        while (fs < statsLen && stats.charCodeAt(fs) != 10) {
                             fs = fs + 1
                         }
                         val firstSig: String = stats.substring(ce + 1, fs)
@@ -4972,7 +5164,7 @@ class SsaBuilder {
                             stats = stats.substring(0, pos) + key
                                     + toStr(cnt + 1) + "|" + firstSig
                                     + stats.substring(fs, stats.length)
-                            if (names.indexOf("\n" + qn + "\n") < 0) {
+                            if (!this.csvLineHas(names, qn)) {
                                 names = names + "\n" + qn + "\n"
                             }
                         }
@@ -4994,7 +5186,7 @@ class SsaBuilder {
                         if (owner2 != "") {
                             qn2 = owner2 + "_" + rawName2
                         }
-                        if (names.indexOf("\n" + qn2 + "\n") >= 0) {
+                        if (this.csvLineHas(names, qn2)) {
                             val sig2: String = toStr(this.hirExplicitParamCount(src, k2))
                                     + "|" + this.hirParamTysCsv(src, k2)
                             if (!this.sigIdxHas(sigIdx, qn2, sig2)) {
@@ -5016,7 +5208,8 @@ class SsaBuilder {
         val key: String = "\n" + nm + "|" + sig
         val klen: Int = key.length
         var i: Int = 0
-        while (i + klen <= sigIdx.length) {
+        val sigIdxLen: Int = sigIdx.length
+        while (i + klen <= sigIdxLen) {
             var m: Boolean = true
             var j: Int = 0
             while (j < klen) {
@@ -5028,7 +5221,7 @@ class SsaBuilder {
             }
             if (m) {
                 val after: Int = i + klen
-                if (after >= sigIdx.length || sigIdx.charCodeAt(after) == 10) {
+                if (after >= sigIdxLen || sigIdx.charCodeAt(after) == 10) {
                     return true
                 }
             }
@@ -5152,7 +5345,7 @@ class SsaBuilder {
         if (name == "" || this.overloadedNamesCsv == "") {
             return false
         }
-        return this.overloadedNamesCsv.indexOf("\n" + name + "\n") >= 0
+        return this.csvLineHas(this.overloadedNamesCsv, name)
     }
 
     /// 定义侧 mangle：签名在序表中的行号（0 基）⇒ `name_ov<N>`。
@@ -5170,7 +5363,8 @@ class SsaBuilder {
         val key: String = "\n" + name + "|" + arityStr + "|" + paramTys
         val klen: Int = key.length
         var i: Int = 0
-        while (i + klen <= this.overloadSigIdxCsv.length) {
+        val overloadSigIdxCsvLen: Int = this.overloadSigIdxCsv.length
+        while (i + klen <= overloadSigIdxCsvLen) {
             var m: Boolean = true
             var j: Int = 0
             while (j < klen) {
@@ -5182,7 +5376,7 @@ class SsaBuilder {
             }
             if (m) {
                 val after: Int = i + klen
-                if (after >= this.overloadSigIdxCsv.length
+                if (after >= overloadSigIdxCsvLen
                         || this.overloadSigIdxCsv.charCodeAt(after) == 10) {
                     var idx: Int = 0
                     var q: Int = 0
@@ -5233,7 +5427,7 @@ class SsaBuilder {
                 }
                 if (arEnd > arStart) {
                     val ar: String = csv.substring(arStart, arEnd)
-                    if (out.indexOf("\n" + ar + "\n") < 0) {
+                    if (!this.csvLineHas(out, ar)) {
                         out = out + "\n" + ar + "\n"
                     }
                 }
@@ -5487,14 +5681,15 @@ class SsaBuilder {
         // 会在条目间产生空行，必须跳过）。
         var total: Int = 0
         var p0: Int = 0
-        while (p0 < csv.length) {
+        val csvLen3: Int = csv.length
+        while (p0 < csvLen3) {
             var e0: Int = p0
-            while (e0 < csv.length) {
+            while (e0 < csvLen3) {
                 if ((csv.charCodeAt(e0) as Int) == 10) { break }
                 e0 = e0 + 1
             }
             if (e0 > p0) { total = total + 1 }
-            if (e0 >= csv.length) { break }
+            if (e0 >= csvLen3) { break }
             p0 = e0 + 1
         }
         var ci: Int = 0
@@ -5561,7 +5756,7 @@ class SsaBuilder {
                     // classNamesCsv（以类形态）却没进 singletonCsv」——若这里
                     // 还查 isClassName，MirUtils 会被挡住（实测 P130）。
                     if (c0 >= 65 && c0 <= 90 && !this.isSingletonObj(prefix)
-                            && missingCsv.indexOf("\n" + prefix + "\n") < 0) {
+                            && !this.csvLineHas(missingCsv, prefix)) {
                         missingCsv = missingCsv + "\n" + prefix + "\n"
                     }
                 }
@@ -5581,21 +5776,23 @@ class SsaBuilder {
         // 槽位起点 = singletonCsv 现有非空行数
         var slot: Int = 0
         var p0: Int = 0
-        while (p0 < this.singletonCsv.length) {
+        val singletonCsvLen: Int = this.singletonCsv.length
+        while (p0 < singletonCsvLen) {
             var e0: Int = p0
-            while (e0 < this.singletonCsv.length) {
+            while (e0 < singletonCsvLen) {
                 if ((this.singletonCsv.charCodeAt(e0) as Int) == 10) { break }
                 e0 = e0 + 1
             }
             if (e0 > p0) { slot = slot + 1 }
-            if (e0 >= this.singletonCsv.length) { break }
+            if (e0 >= singletonCsvLen) { break }
             p0 = e0 + 1
         }
         // 补登记 + 逐个合成
         var p: Int = 0
-        while (p < missingCsv.length) {
+        val missingCsvLen: Int = missingCsv.length
+        while (p < missingCsvLen) {
             var e: Int = p
-            while (e < missingCsv.length) {
+            while (e < missingCsvLen) {
                 if ((missingCsv.charCodeAt(e) as Int) == 10) { break }
                 e = e + 1
             }
@@ -5605,7 +5802,7 @@ class SsaBuilder {
                 this.synthesizeSingletonGetter(src, nm, lty, slot)
                 slot = slot + 1
             }
-            if (e >= missingCsv.length) { break }
+            if (e >= missingCsvLen) { break }
             p = e + 1
         }
         this.memHead = savedMem
@@ -5646,14 +5843,15 @@ class SsaBuilder {
         val csv: String = this.singletonCsv
         var slot: Int = 0
         var p: Int = 0
-        while (p < csv.length) {
+        val csvLen4: Int = csv.length
+        while (p < csvLen4) {
             var e: Int = p
-            while (e < csv.length) {
+            while (e < csvLen4) {
                 if ((csv.charCodeAt(e) as Int) == 10) { break }
                 e = e + 1
             }
             if (e > p) { slot = slot + 1 }
-            if (e >= csv.length) { break }
+            if (e >= csvLen4) { break }
             p = e + 1
         }
         this.synthesizeSingletonGetter(src, nm, this.types.fromTypeName("Long"),
@@ -5671,9 +5869,10 @@ class SsaBuilder {
     private fun singletonCsvLineAt(csv: String, idx: Int): String {
         var p: Int = 0
         var k: Int = 0
-        while (p < csv.length) {
+        val csvLen5: Int = csv.length
+        while (p < csvLen5) {
             var e: Int = p
-            while (e < csv.length) {
+            while (e < csvLen5) {
                 if ((csv.charCodeAt(e) as Int) == 10) { break }
                 e = e + 1
             }
@@ -5681,7 +5880,7 @@ class SsaBuilder {
                 if (k == idx) { return csv.substring(p, e) }
                 k = k + 1
             }
-            if (e >= csv.length) { break }
+            if (e >= csvLen5) { break }
             p = e + 1
         }
         return ""
@@ -5781,7 +5980,8 @@ class SsaBuilder {
     /// 首个逗号下标（纯 charCodeAt；带参 indexOf 在 seed AOT 下失效）。
     private fun csvFirstComma(text: String): Int {
         var i: Int = 0
-        while (i < text.length) {
+        val textLen2: Int = text.length
+        while (i < textLen2) {
             if ((text.charCodeAt(i) as Int) == 44) { return i }
             i = i + 1
         }
@@ -5843,7 +6043,8 @@ class SsaBuilder {
         var segEnd: Int = stackStr.length
         var si: Int = 0
         var prevNl: Boolean = false
-        while (si < stackStr.length) {
+        val stackStrLen: Int = stackStr.length
+        while (si < stackStrLen) {
             val cch: Int = stackStr.charCodeAt(si) as Int
             if (cch == 10) {
                 if (prevNl) {
@@ -5859,9 +6060,10 @@ class SsaBuilder {
         var top: String = stackStr.substring(0, segEnd)
         // 逐条目扫描（条目以真实换行分隔；字段以 | 分隔），纯 charCodeAt
         var i: Int = 0
-        while (i < top.length) {
+        val topLen: Int = top.length
+        while (i < topLen) {
             var eEnd: Int = i
-            while (eEnd < top.length) {
+            while (eEnd < topLen) {
                 if ((top.charCodeAt(eEnd) as Int) == 10) { break }
                 eEnd = eEnd + 1
             }
@@ -5869,7 +6071,8 @@ class SsaBuilder {
             if (entry != "") {
                 var bar: Int = -1
                 var k: Int = 0
-                while (k < entry.length) {
+                val entryLen: Int = entry.length
+                while (k < entryLen) {
                     if ((entry.charCodeAt(k) as Int) == 124) { bar = k; break }
                     k = k + 1
                 }
@@ -5910,7 +6113,7 @@ class SsaBuilder {
                     }
                 }
             }
-            if (eEnd >= top.length) { break }
+            if (eEnd >= topLen) { break }
             i = eEnd + 1
         }
         val blockObj: MirBlock = this.program.blockOf(this.curBlock)

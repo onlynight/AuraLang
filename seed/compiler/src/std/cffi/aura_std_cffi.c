@@ -162,7 +162,11 @@ typedef struct { void *a; const char *n; } AuraFnEnt;
 const char *aura_attr_who(void *ra);
 size_t aura_attr_off(void *ra);
 
-#define AURA_ATTR_MAX 64
+#define AURA_ATTR_MAX 16384
+/* [R131] 归因记录开关：仅 AURA_ATTR_DUMP=1 时记录。⚠️ 无开关时每次分配
+ * 也要付哈希/扫描代价（后端 ~4 亿次堆分配 × 哪怕 100ns 都是几十秒），
+ * 且 ra1 块曾是 O(AURA_ATTR_MAX) 线性扫——16384 桶时后端实测膨胀 6 倍。 */
+static int g_attr_enabled = -1;   /* -1 = 未初始化 */
 static void *g_attr_ra0[AURA_ATTR_MAX];
 static void *g_attr_ra1[AURA_ATTR_MAX];
 static void aura_attr_dump_atexit(void);
@@ -174,26 +178,37 @@ static int64_t g_attr_overflow = 0;      /* 桶满被丢弃的分配次数 */
 
 /* 归因登记（只按 ra0 分桶，见上方说明）。用宏而不是 static helper，避免
  * `__builtin_return_address` 经传参被常量折叠成 0x0。 */
+/* [R131] 哈希版归因：ra 直接散列 + 线性探查（8 步内），满了落 overflow。
+ * 旧版线性扫 64 桶：表被早期 C 内部地址占满后，其余全部丢弃 ⇒ 归因失真。 */
 #define AURA_ATTR_RECORD(ra, bytes) \
     do { \
-        int _ak, _af = 0; \
-        for (_ak = 0; _ak < AURA_ATTR_MAX; _ak++) { \
-            if (g_attr_ra0[_ak] == (ra)) { \
-                g_attr_calls[_ak] += 1; \
-                g_attr_bytes[_ak] += (bytes); \
-                _af = 1; \
-                break; \
+        static int _ae = -1; \
+        if (_ae < 0) { _ae = getenv("AURA_ATTR_DUMP") != 0; } \
+        if (_ae && ra) { \
+            unsigned long long _ah = ((unsigned long long)(ra)) >> 4; \
+            _ah = _ah * 0x9E3779B97F4A7C15ULL; \
+            int _ak, _af = 0; \
+            for (_ak = 0; _ak < 8; _ak++) { \
+                int _as = (int)((_ah + (unsigned long long)_ak) & (AURA_ATTR_MAX - 1)); \
+                if (g_attr_ra0[_as] == (ra)) { \
+                    g_attr_calls[_as] += 1; \
+                    g_attr_bytes[_as] += (bytes); \
+                    _af = 1; \
+                    break; \
+                } \
+                if (g_attr_ra0[_as] == NULL) { \
+                    g_attr_ra0[_as] = (ra); \
+                    g_attr_calls[_as] += 1; \
+                    g_attr_bytes[_as] += (bytes); \
+                    _af = 1; \
+                    break; \
+                } \
             } \
-            if (g_attr_ra0[_ak] == NULL) { \
-                g_attr_ra0[_ak] = (ra); \
-                g_attr_calls[_ak] += 1; \
-                g_attr_bytes[_ak] += (bytes); \
-                _af = 1; \
-                break; \
+            if (!_af) { \
+                g_attr_overflow += 1; \
             } \
-        } \
-        if (!_af) { \
-            g_attr_overflow += 1; \
+        } else { \
+            g_attr_null_ra0 += 1; \
         } \
     } while (0)
 
@@ -203,7 +218,13 @@ static void aura_attr_dump(FILE *f, const char *tag) {
     if (!f) return;
     fprintf(f, "   %s total_sites=%d overflow=%lld (桶满丢弃)\n",
             tag, AURA_ATTR_MAX, (long long)g_attr_overflow);
-    for (i = 0; i < 10 && i < AURA_ATTR_MAX; i++) {
+    {
+        /* [R131-DIAG] exe 映像基址：Aura 级 ra0 − base = RVA，可离线对照
+         * llvm-nm build/hat-native/hat-native.obj 的符号（RVA−0x1000）。 */
+        void *base = GetModuleHandleA((const char *)0);
+        fprintf(f, "   %s imagebase=%p\n", tag, base);
+    }
+    for (i = 0; i < 30 && i < AURA_ATTR_MAX; i++) {
         best = -1;
         for (j = 0; j < AURA_ATTR_MAX; j++) {
             if (g_attr_bytes[j] > 0 &&
@@ -972,10 +993,14 @@ typedef struct {
     int64_t n, cap;
     char *cur;
     int64_t off, cur_cap, used;
+    /* [R93] 当前 bump 所在 chunk 下标。rewind 只回拨 (cur_idx, off)，chunk
+     * 列表(n)保持不变 —— 列表本身就是复用池；bump 越过当前块时优先复用
+     * 下一个已提交块，而不是另 VirtualAlloc（R92 的泄漏根因）。 */
+    int64_t cur_idx;
 } AuraRgn;
-static AuraRgn g_rgn_ret = {0};
-static AuraRgn g_scr = {0};
-static int64_t g_rgn_target = 0; /* 0=retain(默认), 1=scratch */
+AuraRgn g_rgn_ret = {0};
+AuraRgn g_scr = {0};
+int64_t g_rgn_target = 0; /* 0=retain(默认), 1=scratch */
 
 static int aura_rgn_has(AuraRgn *r, int64_t need) {
     (void)need;
@@ -1006,12 +1031,23 @@ static void *aura_rgn_chunk(AuraRgn *r, int64_t need) {
     r->cur = (char *)c;
     r->off = 0;
     r->cur_cap = cap;
+    r->cur_idx = r->n - 1; /* [R93] */
     return c;
 }
 
 static int64_t g_rgn_probe_mark = 0;
 static void *aura_rgn_bump(AuraRgn *r, int64_t need) {
-    if (!r->cur || r->off + need > r->cur_cap) {
+    if (r->cur && r->off + need <= r->cur_cap) {
+        /* 当前块还有空间：就地 bump */
+    } else if (0 && r->cur && r->cur_idx + 1 < r->n && r->sizes[r->cur_idx + 1] >= need) {
+        /* [R93] 复用已提交的下一块。rewind 只回拨指针、不释放也不摘链，
+         * 高水位以内的块必须复用；否则每轮 rewind 之后再次 bump 都会
+         * 另建 64MB 块，旧块既不在链上也无从释放 ⇒ 线性泄漏。 */
+        r->cur_idx += 1;
+        r->cur = (char *)r->chunks[r->cur_idx];
+        r->off = 0;
+        r->cur_cap = r->sizes[r->cur_idx];
+    } else {
         if (!aura_rgn_chunk(r, need)) return NULL;
     }
     void *p = r->cur + r->off;
@@ -1040,19 +1076,40 @@ static void aura_rgn_free_all(AuraRgn *r) {
     r->cur = NULL;
     r->off = 0;
     r->cur_cap = 0;
+    r->cur_idx = 0; /* [R93] */
     g_aura_mem_used -= r->used;
     r->used = 0;
 }
 
-/* [R89] 家族路由：字符串临时物族（concat/substr/dup_n/strdup）强制 scratch——
-   rewind 批量回收；列表结构族（dynlist/list 原语/realloc）走原 target 路由。*/
+/* [R89] 家族路由：字符串临时物族（concat/substr/dup_n/strdup）按 target 分流——
+   scratch 相回收；retain 相存活。列表结构族（dynlist/list 原语/realloc）走原 target 路由。*/
+static void *aura_rgn_alloc_retain(int64_t n); /* [R93] 前置声明（定义在本函数之后） */
 static void *aura_scr_alloc(int64_t n) {
+    if (!g_rgn_active) {
+        /* [R90] 区域未进入（RegionEnter 之前）：走堆分配。
+         * 否则字符串拼接（aura_dup_n / aura_string_concat）会落入 region
+         * arena，而 RegionReset 释放全部 region 区块 ⇒ 主入口早于
+         * regionEnter 构建的 cacheMain / cacheRt / cacheManifest 等路径串
+         * 在 regionReset 后悬垂，后端 FileUtils.readText 触发
+         * File.__ctor1 → stringToBuffer → strlen AV（2026-10-18 定位）。 */
+        return aura_mem_alloc(n);
+    }
+    if (!g_rgn_target) {
+        /* [R93] retain 相必须落 retain，不能一律进 scratch。
+         * 反例（2026-10-19 实测）：HirLowerer 的跨模块登记表
+         * （knownTypes / typeMethods / funcRetTys 等）与 AotModuleLinker
+         * 的 cacheBlob / stdMods 都是字符串拼接构建，且**跨模块存活**；
+         * 若落 scratch，模块级 ScratchRewind 后即悬垂 ⇒ 后续模块类型/方法
+         * 解析全部退化为 Basic（自举 .hat 出现 1690 处 `: Basic`）。
+         * 只有 RegionScratchTarget 期间（parse 中间物）才可回收。 */
+        return aura_rgn_alloc_retain(n);
+    }
     int64_t need = ((n + 15) / 16) * 16;
     if (g_aura_mem_limit > 0 && g_aura_mem_used + need > g_aura_mem_limit) {
         aura_mem_oom(need);
     }
-    /* [BISECT] scratch å³é­ï¼è½ retain era */
-    return aura_rgn_bump(&g_rgn_ret, need);
+    /* [R90] scratch arena 启用（供 ScratchMark/ScratchRewind 逐模块回收）。 */
+    return aura_rgn_bump(&g_scr, need);
 }
 
 static void *aura_rgn_alloc_retain(int64_t n) {
@@ -1106,6 +1163,7 @@ int64_t ScratchReset(void) {
         g_scr.cur = (char *)g_scr.chunks[0];
         g_scr.off = 0;
         g_scr.cur_cap = g_scr.sizes[0];
+        g_scr.cur_idx = 0; /* [R93] */
     }
     return 0;
 }
@@ -1116,43 +1174,46 @@ int64_t ScratchMark(void) {
     if (g_scr.n <= 0 || !g_scr.cur) {
         return 0;
     }
-    int64_t idx = 0;
-    int64_t k;
-    for (k = 0; k < g_scr.n; k++) {
-        if (g_scr.chunks[k] == (void *)g_scr.cur) { idx = k + 1; break; }
-    }
-    if (idx == 0) { return 0; }
-    return (idx << 40) | (g_scr.off & ((1LL << 40) - 1));
+    /* [R93] 直接用 cur_idx，不再扫 chunks 找 cur（扫描在 chunk 复用后
+     * 可能命中重复指针，且 O(n)）。 */
+    return ((g_scr.cur_idx + 1) << 40) | (g_scr.off & ((1LL << 40) - 1));
 }
 
-/// [R87] 回退 scratch 到 mark：bump 指针回拨（块保留复用），mark 之后
+/// [R87/R93] 回退 scratch 到 mark：bump 指针回拨（块保留复用），mark 之后
 /// 分配的记账同步扣回。栈纪律：内层先 rewind，外层后 rewind。
+///
+/// [R93] 关键修正：**任何分支都不再摘链/丢弃 chunk**（旧实现在 mark==0
+/// 或标记失效时置 n=0，块指针被丢弃且从不 VirtualFree ⇒ 每个模块泄漏
+/// 自己的 scratch 高水位；且模块入口的 arena 必为空，mark 恒为 0，于是
+/// 设计中的"块复用"永不触发）。现在 n 保持不变，仅回拨 (cur_idx, off)，
+/// 后续 bump 复用链上的块。
 int64_t ScratchRewind(int64_t mark) {
-    int64_t idx = (int64_t)(mark >> 40);
+    int64_t idx = (int64_t)(mark >> 40);   /* 1-based chunk 序号；0 = mark 时 arena 为空 */
     int64_t off = mark & ((1LL << 40) - 1);
-    if (idx <= 0 || idx > g_scr.n) {
-        g_aura_mem_used -= g_scr.used;
-        g_scr.used = 0;
-        g_scr.cur = NULL;
-        g_scr.off = 0;
-        g_scr.cur_cap = 0;
-        g_scr.n = 0;
-        return 0;
-    }
-    int64_t drop = 0;
+    int64_t new_used = 0;
     int64_t k;
-    for (k = idx; k < g_scr.n; k++) {
-        drop += g_scr.sizes[k];
+
+    if (g_scr.n <= 0) { return 0; }        /* 无 chunk 可回拨 */
+
+    if (idx <= 0 || idx > g_scr.n) {
+        /* mark 时 arena 为空（或标记失效）：逻辑清零，回到第 0 块起点，
+         * **保留全部 chunk**。 */
+        idx = 1;
+        off = 0;
+    } else if (off > g_scr.sizes[idx - 1]) {
+        off = g_scr.sizes[idx - 1];        /* 容错：越界偏移钳到块尾 */
     }
-    drop += (int64_t)((char *)g_scr.cur - (char *)g_scr.chunks[idx - 1]) - off;
-    if (drop < 0) { drop = 0; }
-    if (drop > g_scr.used) { drop = g_scr.used; }
-    g_aura_mem_used -= drop;
-    g_scr.used -= drop;
+
+    for (k = 0; k < idx - 1; k++) { new_used += g_scr.sizes[k]; }
+    new_used += off;
+    if (new_used > g_scr.used) { new_used = g_scr.used; } /* 记账只减不增 */
+
+    g_aura_mem_used -= (g_scr.used - new_used);
+    g_scr.used = new_used;
+    g_scr.cur_idx = idx - 1;
     g_scr.cur = (char *)g_scr.chunks[idx - 1];
     g_scr.off = off;
     g_scr.cur_cap = g_scr.sizes[idx - 1];
-    g_scr.n = idx;
     return 0;
 }
 /// [R89] 字符串复制进 retain era（跨 scratch rewind 存活）。
@@ -1191,6 +1252,7 @@ int64_t RegionReset(void) {
     g_rgn_ret.off = 0;
     g_rgn_ret.cur_cap = 0;
     g_rgn_ret.used = 0;
+    g_rgn_ret.cur_idx = 0; /* [R93] */
     g_rgn_active = 0;
     return 0;
 }
@@ -1224,10 +1286,16 @@ void *aura_mem_alloc(int64_t n) {
             AURA_ATTR_RECORD(r0, n);
             /* ra1 = 调用者的调用者（AOT 产物内的调用点），供定位 Aura 级
              * 分配风暴：exe .text 布局 = obj 段布局，rva-0x1000 双分到
-             * llvm-nm obj 符号即可落到 Aura 函数。 */
-            {
+             * llvm-nm obj 符号即可落到 Aura 函数。
+             * ⚠️ [R131] 本块仅在 AURA_ATTR_DUMP 下启用，且扫描上限 64 ——
+             * 曾随 AURA_ATTR_MAX 扩到 16384 而变成 O(16K)/次分配，
+             * 后端 ~4 亿次堆分配被拖慢 6 倍（2026-10-20 定位）。 */
+            if (g_attr_enabled < 0) {
+                g_attr_enabled = getenv("AURA_ATTR_DUMP") != 0;
+            }
+            if (g_attr_enabled) {
                 int _a1, _f1 = 0;
-                for (_a1 = 0; _a1 < AURA_ATTR_MAX; _a1++) {
+                for (_a1 = 0; _a1 < 64; _a1++) {
                     if (g_attr_ra1[_a1] == (r1)) {
                         _f1 = 1;
                         break;
@@ -1398,6 +1466,7 @@ char *aura_mem_strdup(const char *s) {
         s = "";
     }
     size_t n = strlen(s);
+    AURA_ATTR_RECORD(__builtin_return_address(0), (int64_t)(n + 1));
     char *d = (char *)aura_scr_alloc((int64_t)n + 1);
     memcpy(d, s, n + 1);
     return d;
@@ -1652,6 +1721,7 @@ const char *aura_string_charAt(const char *s, int64_t idx) {
 const char *aura_string_substring(const char *s, int64_t start, int64_t end) {
     if (!s) return "";
     size_t len = strlen(s);
+    AURA_ATTR_RECORD(__builtin_return_address(0), 16);
     if (start < 0) start = 0;
     if (end > (int64_t)len) end = len;
     if (start > end) return "";
@@ -1741,6 +1811,9 @@ const char *aura_string_replace(const char *s, const char *from, const char *to)
 const char *aura_string_concat(const char *a, int64_t alen, const char *b, int64_t blen) {
     size_t a_len = (size_t)(alen > 0 ? alen : 0);
     size_t b_len = (size_t)(blen > 0 ? blen : 0);
+    /* [R131-DIAG] concat 由 AOT 直接从 Aura 调用点发射 ⇒ ra0 = Aura 调用点
+     * （记录已开关化，AURA_ATTR_DUMP 未设时仅一次静态标志检查）。 */
+    AURA_ATTR_RECORD(__builtin_return_address(0), (int64_t)(a_len + b_len + 1));
 
     // 必须返回新分配内存：同一表达式内的链式拼接（`a + b + c`）会把前一步的
     // 结果再当作输入，若返回共享 static 缓冲则前后互相覆盖。
@@ -2169,6 +2242,22 @@ void *aura_malloc(int64_t size) {
 // 堆释放：与 aura_malloc 配对
 void aura_free(const void *ptr) {
     aura_mem_free((void *)ptr);
+}
+
+/* [R90] 链接补齐：Collections.aura 的 Memory.alloc/copy 经 emit.rs 第一
+ * 路径（Builtin 分支）发射 @alloc/@copy，而 HIR 对 extern interface 成员
+ * 未带 Builtin 标记时走裸名外调。此处提供同语义桩，避免 /NODEFAULTLIB 下
+ * 无 libc 兜底导致未定义符号。
+ * StringOps_strcmp 同理（Collections_strEquals 调 StringOps.strcmp）。
+ * free 不在这里定义：aura_mem_free 自身调 libc free，重定义会递归。
+ * emit.rs 已改为 @aura_free（见 R90 emit.rs 补丁）。 */
+void *alloc(int64_t n) { return aura_malloc(n); }
+void copy(int64_t dst, int64_t src, int64_t n) {
+    memcpy((void *)(uintptr_t)dst, (const void *)(uintptr_t)src, (size_t)n);
+}
+int StringOps_strcmp(const char *a, const char *b) {
+    if (!a || !b) return a == b ? 0 : (a ? -1 : 1);
+    return strcmp(a, b);
 }
 
 // 创建字符串对象（返回字符串指针）
@@ -2676,6 +2765,9 @@ static AuraDynList *aura_dynlist_new(int64_t cap) {
 static void aura_dynlist_push(AuraDynList *l, const char *s) {
     if (!l) return;
     if (l->len >= l->cap) {
+        /* [R131-DIAG] realloc 归因到 Aura 级调用者（临时）：
+         * ra0=push 内(重分配点)、ra1=listAppend、ra2=Aura 调用点。 */
+        AURA_ATTR_RECORD(__builtin_return_address(1), l->cap * 2 * 8 + 64);
         int64_t ncap = l->cap * 2;
         const char **ni =
             (const char **)aura_mem_realloc((void *)l->items, (int64_t)sizeof(const char *) * ncap);
@@ -4496,6 +4588,9 @@ static AuraFnEnt g_fn_table[AURA_FN_COUNT] = {
     AURA_FN(aura_mem_realloc),
     AURA_FN(aura_mem_set_limit_mb),
     AURA_FN(aura_mem_strdup),
+    AURA_FN(aura_scr_alloc),
+    AURA_FN(StrdupRetain),
+    AURA_FN(aura_string_concat),
     AURA_FN(aura_mem_used_bytes),
     AURA_FN(aura_mem_used_mb),
     AURA_FN(aura_path_basename),

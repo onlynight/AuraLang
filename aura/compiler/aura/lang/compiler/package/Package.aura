@@ -496,7 +496,8 @@ object PackageUtils {
             sign = -1
             i = i + 1
         }
-        while (i < s.length) {
+        val sLen: Int = s.length
+        while (i < sLen) {
             val c: Int = s.charCodeAt(i)
             if (c < 48 || c > 57) { // not a digit
                 break

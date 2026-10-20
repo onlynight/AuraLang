@@ -674,7 +674,8 @@ object PhotonSystemLinkerUtils {
         // 检查是否包含空格
         var hasSpace: Boolean = false
         var i: Int = 0
-        while (i < arg.length) {
+        val argLen: Int = arg.length
+        while (i < argLen) {
             if (arg.charAt(i).toString() == " ") {
                 hasSpace = true
                 break

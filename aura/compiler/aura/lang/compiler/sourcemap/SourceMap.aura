@@ -66,7 +66,8 @@ class SourceFile {
         //（字段初始化尤其致命，后续 add/取值全部落在 null 上）
         this.lineStarts = listOf(0)
         var i: Int = 0
-        while (i < source.length) {
+        val sourceLen: Int = source.length
+        while (i < sourceLen) {
             if (source.charCodeAt(i) == 10) {
                 this.lineStarts.add(i + 1)
             }

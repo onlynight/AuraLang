@@ -197,6 +197,12 @@ pub fn link_to_executable(
             if let Some(clang_path) = find_tool("clang", options) {
                 let mut cmd = Command::new(clang_path);
                 cmd.arg(input_path);
+                // [R92] 添加 aura_link_fix.obj（提供区域管理 + libc 自含实现）
+                let link_fix_obj = std::env::var("AURA_LINK_FIX_OBJ")
+                    .unwrap_or_else(|_| "D:/Code/AuraLang/build/aura_link_fix.obj".to_string());
+                if !link_fix_obj.is_empty() {
+                    cmd.arg(&link_fix_obj);
+                }
                 for cffi_obj in &cffi_object_paths {
                     cmd.arg(cffi_obj);
                 }
@@ -209,6 +215,8 @@ pub fn link_to_executable(
                 // 无任何输出（实测 Photon 驱动编译任意输入瞬段错误，
                 // 64MB 栈重链后消失）。这里统一给 64MB。
                 cmd.arg("-Wl,/STACK:67108864");
+                // [R92] 允许重复符号定义（aura_link_fix.obj 与 CFFI 的 RegionEnter/ScratchMark 等）
+                cmd.arg("-Wl,/FORCE:MULTIPLE");
                 run_and_report(&mut cmd, "clang")?;
                 return Ok(());
             }
@@ -648,6 +656,8 @@ pub fn link_to_rust_host(
         use super::target::OperatingSystem;
         if options.target.os == OperatingSystem::Windows {
             cmd.arg("-Wl,/subsystem:console");
+            // [R92] 忽略重复符号错误（CFFI 与 runtime 的 toString/toStr/env_get 等）
+            cmd.arg("-Wl,/ERROR:4007");
         }
     }
 

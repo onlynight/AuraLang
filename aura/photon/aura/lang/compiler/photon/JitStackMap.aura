@@ -228,7 +228,8 @@ object JitStackMapUtils {
         var neg: Boolean = false
         if (s.charCodeAt(0) as Int == 45) { neg = true; i = 1 }  // '-'
         var total: Int = 0
-        while (i < s.length) {
+        val sLen: Int = s.length
+        while (i < sLen) {
             val c: Int = s.charCodeAt(i) as Int
             if (c < 48 || c > 57) { return 0 }
             total = total * 10 + (c - 48)
@@ -251,9 +252,10 @@ object JitStackMapUtils {
         var field: Int = 0
         var start: Int = 0
         var i: Int = 0
-        while (i <= seg.length) {
+        val segLen: Int = seg.length
+        while (i <= segLen) {
             var ch: Int = 124
-            if (i < seg.length) { ch = seg.charCodeAt(i) as Int }
+            if (i < segLen) { ch = seg.charCodeAt(i) as Int }
             if (ch == 124) {
                 if (field == 0) { e.callTarget = seg.substring(start, i) }
                 else if (field == 1) { e.pcOffset = JitStackMapUtils.parseIntRange(seg, start, i) }

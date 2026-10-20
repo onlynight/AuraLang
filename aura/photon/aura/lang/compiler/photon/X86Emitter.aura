@@ -99,6 +99,18 @@ class X86Emitter {
     /// 调用方跨调用存活的值会被悄悄改掉（实测 `"x = " + toStr(x)` 输出 `42`）。
     private var savedRegs: String = ""
 
+    /// [R96] 节点闭包访问标记（**按节点 id 直接下标**，epoch 打戳）。
+    ///
+    /// ⚠️ 旧实现用一张不断增长的 CSV 串 `walkSeenCsv` 做成员判定：
+    /// 每访问一个节点都 `walkSeenCsv.indexOf("|id|")` 全串线性扫描，
+    /// 再把 id `+` 到串尾（整串拷贝）。单函数闭包 N 个节点 ⇒ O(N²) 次
+    /// 字符比较 + O(N²) 字节拷贝 + 2N 次字符串分配。自举实测
+    /// `scanFunctionMaxSlots` 单项吃掉 emit 90s 里的 **84s**。
+    /// 改为「标记数组 + epoch」后每节点 O(1)、零分配，且**语义完全一致**
+    ///（新函数只需 `walkEpoch + 1`，取代把整串重置为 "|"）。
+    private var walkMark: List<Int> = arrayListOf<Int>()
+    private var walkEpoch: Int = 0
+
     /// P1（Phase 2.2）：本批次全部 call 点的 stack map（GC 根枚举用）。
     /// ⚠️ **List O(1) 追加**（序列化文本由 `getStackMaps` 归并产出）：
     /// 旧字符串增量拼接每 call 整段拷贝 O(call²)，见 getStackMaps 说明。
@@ -177,7 +189,17 @@ class X86Emitter {
         if (this.allocator == null) {
             return
         }
-        this.walkSeenCsv = "|"
+        // [R96] epoch 式访问标记（见 `walkMark` 字段说明）：节点数即上界，
+        // 首次分配后不再增长；新函数只把 epoch 加一即可「清空」。
+        if (this.walkMark.size < dag.nodeCount) {
+            this.walkMark = arrayListOf<Int>()
+            var wm: Int = 0
+            while (wm < dag.nodeCount) {
+                this.walkMark.add(0)
+                wm = wm + 1
+            }
+        }
+        this.walkEpoch = 1
         this.walkMinId = -1
         this.walkMaxId = -1
         var curFn: String = ""
@@ -190,7 +212,8 @@ class X86Emitter {
                     this.flushSlotGroup(curFn)
                 }
                 curFn = fn
-                this.walkSeenCsv = "|"
+                // [R96] 换 epoch 即「清空」访问标记（旧实现是重置整张 CSV 串）。
+                this.walkEpoch = this.walkEpoch + 1
                 this.walkMinId = -1
                 this.walkMaxId = -1
                 this.scanFn = fn
@@ -266,16 +289,18 @@ class X86Emitter {
     /// 节点 ID 稠密分布于 0..nodeCount-1，≥nodeCount 必非节点，直接剪枝。
     private fun walkExtraNodes(dag: MachineDag, nodeId: Int): Unit {
         if (nodeId < 0 || nodeId >= dag.nodeCount) { return }
-        val mark: String = "|" + toStr(nodeId) + "|"
-        if (this.walkSeenCsv.indexOf(mark) >= 0) { return }
-        this.walkSeenCsv = this.walkSeenCsv + toStr(nodeId) + "|"
+        if (nodeId >= this.walkMark.size) { return }
+        // [R96] 标记数组 + epoch：O(1) 判定，零分配（旧实现是 CSV 线性扫描）。
+        if (this.walkMark[nodeId] == this.walkEpoch) { return }
+        this.walkMark[nodeId] = this.walkEpoch
         if (this.walkMinId < 0 || nodeId < this.walkMinId) { this.walkMinId = nodeId }
         if (nodeId > this.walkMaxId) { this.walkMaxId = nodeId }
         val node: DagNode = dag.nodeOf(nodeId)
-        var args: List<String> = MachineDagUtils.splitArgs(node.args)
+        // [R96] 直接用 R95 已解析好的 `argIds`（旧实现每次 splitArgs 整串）。
+        val args: List<Int> = node.argIds
         var j: Int = 0
         while (j < args.size) {
-            val aid: Int = MachineDagUtils.strToInt(args[j])
+            val aid: Int = args[j]
             if (aid >= 0) { this.walkExtraNodes(dag, aid) }
             j = j + 1
         }
@@ -333,7 +358,11 @@ class X86Emitter {
                 this.funcOffsetsList.add(instrFunc + "|" + toStr(offset))
                 // 计算本函数用到的非易失寄存器并在 prologue 之前 push。
                 this.isMainFunc = (instrFunc == "main")
-                this.savedRegs = this.collectSavedRegs(dag, i, instrFunc)
+                // [R96] 删掉 `collectSavedRegs(dag, i, instrFunc)` 调用：
+                // 它的结果在下一条语句就被固定 7 寄存器串覆盖，属纯死代码——
+                // 却要按函数扫完本函数全部指令、并对每个操作数 `splitArgs`
+                //（自举 197K 指令 / 数千函数，全是白烧的分配）。
+                this.savedRegs = "" 
                 // ⚠️ 2026-10-06 P226 结构性修复：savedRegs **固定为全部 7 个**
                 // callee-saved 寄存器（rbx,rsi,rdi,r12,r13,r14,r15）。旧实现只
                 // push 实际用到的子集——而 emitParam 的栈参偏移（0x30 基址）
@@ -890,7 +919,8 @@ class X86Emitter {
             i = 1
         }
         val start: Int = i
-        while (i < s.length) {
+        val sLen: Int = s.length
+        while (i < sLen) {
             val c: Int = s.charCodeAt(i)
             if (c < 48 || c > 57) { return false }
             i = i + 1
@@ -948,7 +978,8 @@ class X86Emitter {
         // R61:emitImulRR(dst, src) 编码 = Intel `imul dst, src`（Reg=dst，R/M=src）。
         // 每轮：dstReg = dstReg * 10 + d。r11 作为 scratch 承载系数 10。
         var ci: Int = 0
-        while (ci < s.length) {
+        val sLen2: Int = s.length
+        while (ci < sLen2) {
             val dc: Int = s.charCodeAt(ci)
             if (dc >= 48 && dc <= 57) {
                 val d: Int = dc - 48
@@ -1783,7 +1814,8 @@ class X86Emitter {
             i = i + 1
         }
         var acc: Int = 0
-        while (i < v.length) {
+        val vLen: Int = v.length
+        while (i < vLen) {
             val c: Int = v.charCodeAt(i) as Int
             if (c >= 48 && c <= 57) {
                 acc = acc * 10 + (c - 48)

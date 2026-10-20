@@ -366,7 +366,8 @@ object JitRelocBatchUtils {
             return -1
         }
         var i: Int = 0
-        while (i + nlen <= text.length) {
+        val textLen: Int = text.length
+        while (i + nlen <= textLen) {
             var j: Int = 0
             var ok: Boolean = true
             while (j < nlen) {

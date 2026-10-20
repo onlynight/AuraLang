@@ -191,6 +191,8 @@ object Aot {
         // 栈跑导入解析递归，此处对齐到 32MB。
         if (tgt.contains("windows")) {
             clangCmd = clangCmd + " -Wl,/subsystem:console -Wl,/stack:33554432"
+            // [R92] 忽略重复符号错误（CFFI 与 runtime 的 toString/toStr/env_get 等）
+            clangCmd = clangCmd + " -Wl,/ERROR:4007"
         }
         r.clangExit = Process.run(clangCmd)
 

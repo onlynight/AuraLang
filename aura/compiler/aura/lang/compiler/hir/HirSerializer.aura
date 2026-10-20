@@ -207,7 +207,8 @@ class HirSerializer {
 
     /// 跳过空白字符。
     private fun skipWhitespace(s: String, pos: Int): Int {
-        while (pos < s.length) {
+        val sLen: Int = s.length
+        while (pos < sLen) {
             val c: String = s.substring(pos, pos + 1)
             if (c == " " || c == "\t" || c == "\n" || c == "\r") {
                 pos = pos + 1
