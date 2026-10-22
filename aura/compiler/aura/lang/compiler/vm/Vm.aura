@@ -234,12 +234,27 @@ import aura.lang.compiler.serialize.AucLoader
     // 异常处理器栈
     private var handlerStack: VmStrStack = VmStrStack()
 
-    // 闭包表：closureId -> funcName
-    private var closureTable: HashMap<Int, String> = HashMap<Int, String>()
+    // 闭包表：下标 = closureId（0,1,2,... 顺序追加）→ 目标函数名。
+    //
+    // [R178] 原为 `HashMap<Int, String>`，已改为**平行 List**，与本文档
+    // `gKeys`/`gVals` 的模式一致。理由（三条实测）：
+    //   1. 表示分裂：前端把 `put` 劫持到 C 侧 `Collections.hashMapPut`
+    //      （`AuraDynMap` 平铺结构），而 `getOrDefault`/`getSize` **不在**
+    //      劫持名单、走 Aura `HashMap_*` 桶链表示 ⇒ 同一对象两套表示各写各读
+    //      （实测 put 后 `getSize()` 恒 0、get 恒返回默认值 ⇒ 03-functions
+    //      "Invalid closure id: 0"）；
+    //   2. `.hashCode()` 在机器码后端被发射成**裸名** `hashCode`（`Any.hashCode`
+    //      的无 this 旧展平体）⇒ 哈希随栈内容漂移，put 与 get 算到不同桶；
+    //   3. 改用 Aura `HashMap.put` 则每次 put 都要 `toStr(key)` 分配临时串
+    //      且运行时不回收 ⇒ 解释器每次字段赋值泄漏一次 ⇒ 15-advanced/
+    //      test_this/test_super 三个用例 `exit=70` 假 OOM（JIT 19→16，实测）。
+    // 平行 List 无哈希、无表示分歧、用的是本文档已验证可靠的 List 原语。
+    private var closureNames: List<String> = arrayListOf<String>()
 
-    // 闭包捕获表（P1.3）：closureId -> 捕获值列表（按压入顺序，下标即 upvalue 序号）。
-    // STORE_UPVALUE 可原位改写捕获值（闭包对象共享可变状态）。
-    private var closureCaptures: HashMap<Int, List<Any>> = HashMap<Int, List<Any>>()
+    // 闭包捕获表（P1.3）：下标 = closureId → 捕获值列表（按压入顺序，
+    // 下标即 upvalue 序号）。STORE_UPVALUE 可原位改写捕获值（闭包对象共享
+    // 可变状态）。[R178] 同 `closureNames` 一并改为平行 List。
+    private var closureCaps: List<List<Any>> = arrayListOf<List<Any>>()
     private var nextClosureId: Int = 0
     // 捕获值总数（getUpvalueCount 用；避免宿主对泛型 List 迭代/求和的推导问题）
     private var upvalueTotal: Int = 0
@@ -306,8 +321,8 @@ import aura.lang.compiler.serialize.AucLoader
         this.currentFunc = ""
         this.instructionCount = 0
         this.handlerStack = VmStrStack()
-        this.closureTable = HashMap<Int, String>()
-        this.closureCaptures = HashMap<Int, List<Any>>()
+        this.closureNames = arrayListOf<String>()
+        this.closureCaps = arrayListOf<List<Any>>()
         this.nextClosureId = 0
         this.upvalueTotal = 0
         this.currentClosure = -1
@@ -351,7 +366,7 @@ import aura.lang.compiler.serialize.AucLoader
         this.classParents = HashMap<String, String>()
         this.heapKinds = HashMap<String, String>()
         this.boxValues = HashMap<String, Any>()
-        this.closureCaptures = HashMap<Int, List<Any>>()
+        this.closureCaps = arrayListOf<List<Any>>()
         this.currentClosure = -1
         this.buildLineCache()
         this.buildLoadCaches()
@@ -419,7 +434,7 @@ import aura.lang.compiler.serialize.AucLoader
         this.classParents = HashMap<String, String>()
         this.heapKinds = HashMap<String, String>()
         this.boxValues = HashMap<String, Any>()
-        this.closureCaptures = HashMap<Int, List<Any>>()
+        this.closureCaps = arrayListOf<List<Any>>()
         this.currentClosure = -1
         this.buildLineCache()
         this.buildLoadCaches()
@@ -486,7 +501,7 @@ import aura.lang.compiler.serialize.AucLoader
         this.objectClass = HashMap<String, String>()
         this.heapKinds = HashMap<String, String>()
         this.boxValues = HashMap<String, Any>()
-        this.closureCaptures = HashMap<Int, List<Any>>()
+        this.closureCaps = arrayListOf<List<Any>>()
         this.currentClosure = -1
         this.accelEnabled = false
         this.accelTable = HashMap<String, Int>()
@@ -2292,7 +2307,7 @@ import aura.lang.compiler.serialize.AucLoader
             val sig: Any = this.stack.pop()  // 忽略
             val arg: Any = this.stack.pop()
             val cid: Int = VmOps.intOf(closureId)
-            val funcName2: String = this.closureTable.getOrDefault(cid, "")
+            val funcName2: String = this.closureNameOf(cid)
             if (funcName2 == "") {
                 this.error = "Invalid closure id: " + toStr(cid)
                 this.running = false
@@ -3532,8 +3547,8 @@ import aura.lang.compiler.serialize.AucLoader
         }
         val closureId: Int = this.nextClosureId
         this.nextClosureId = this.nextClosureId + 1
-        this.closureTable.put(closureId, funcName)
-        this.closureCaptures.put(closureId, caps)
+        this.closureNames.add(funcName)
+        this.closureCaps.add(caps)
         this.upvalueTotal = this.upvalueTotal + n
         this.stack.push(closureId)
     }
@@ -3563,7 +3578,7 @@ import aura.lang.compiler.serialize.AucLoader
         }
         val closureIdAny: Any = this.stack.pop()
         val cid: Int = VmOps.intOf(closureIdAny)
-        val funcName: String = this.closureTable.getOrDefault(cid, "")
+        val funcName: String = this.closureNameOf(cid)
         if (funcName == "") {
             this.error = "Invalid closure id: " + toStr(cid)
             this.running = false
@@ -3587,7 +3602,7 @@ import aura.lang.compiler.serialize.AucLoader
             this.running = false
             return
         }
-        val caps: List<Any> = this.closureCaptures.getOrDefault(this.currentClosure, arrayListOf<Any>())
+        val caps: List<Any> = this.closureCapsOf(this.currentClosure)
         if (idx < 0 || idx >= caps.size()) {
             this.error = "LOAD_UPVALUE: index " + toStr(idx) + " out of range"
             this.running = false
@@ -3603,7 +3618,7 @@ import aura.lang.compiler.serialize.AucLoader
             this.running = false
             return
         }
-        val caps: List<Any> = this.closureCaptures.getOrDefault(this.currentClosure, arrayListOf<Any>())
+        val caps: List<Any> = this.closureCapsOf(this.currentClosure)
         if (idx < 0 || idx >= caps.size()) {
             this.error = "STORE_UPVALUE: index " + toStr(idx) + " out of range"
             this.running = false
@@ -5339,9 +5354,37 @@ if (false && (r < n - 5
         }
     }
 
+    /// [R178] 闭包 id → 目标函数名（越界/非法 id 返回 `""`）。
+    ///
+    /// 走平行 List 而非 HashMap（理由见 `closureNames` 字段注释）。
+    /// `size()` 先落局部再判定——沿用 [R173] 的可靠模式：直接消费 Int 型
+    /// 调用返回值是已知错译家族（`VmStrStack.size()` 曾致异常三例全灭）。
+    private fun closureNameOf(cid: Int): String {
+        val n: Int = this.closureNames.size()
+        if (cid >= 0 && cid < n) {
+            return this.closureNames[cid]
+        }
+        return ""
+    }
+
+    /// [R178] 闭包 id → 捕获值列表（越界/非法 id 返回空表）。
+    private fun closureCapsOf(cid: Int): List<Any> {
+        val n: Int = this.closureCaps.size()
+        if (cid >= 0 && cid < n) {
+            return this.closureCaps[cid]
+        }
+        return arrayListOf<Any>()
+    }
+
+    /// [R178] 闭包总数（`closureNames` 的长度）。
+    private fun closureCountOf(): Int {
+        val n: Int = this.closureNames.size()
+        return n
+    }
+
     /// 获取闭包总数。
         fun getClosureCount(): Int {
-        return this.closureTable.getSize()
+        return this.closureCountOf()
     }
 
     /// 获取捕获值（upvalue）总数（P1.3）。
