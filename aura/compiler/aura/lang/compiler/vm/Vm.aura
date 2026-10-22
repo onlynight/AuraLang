@@ -176,6 +176,9 @@ import aura.lang.compiler.serialize.AucLoader
     /// [根修轮R4] op62 诊断计数（独立计数器，独立于 instructionCount）
     private var p62DiagCount: Int = 0
 
+    /// [R175 诊断] listOf 臂命中计数（有界打印）。
+    private var lofDiagN: Int = 0
+
     // [R24] 堆对象 kind 线性登记（HashMap.getOrDefault 调用窗在宿主下
     // 无界挂起——实测 Collections.set 卡死；List 直操全已证）
     private var cbDiag: Int = 0
@@ -1648,10 +1651,25 @@ import aura.lang.compiler.serialize.AucLoader
         }
         // [R27] Collections.listOf 族前置（35+ 字符长串撞剥离扫描骰，
         // 15-advanced 挂点；argc 元素按源顺序入表）。
+        // [R175] 补 emptyList：`aura.lang.std.Collections.emptyList`（35 字符）
+        // 同样撞剥离扫描无零区自旋（实测 m 系列 + 15-advanced 挂死于
+        // emptyList 分派），必须赶在剥离块之前接住。
         if (funcName0 == "aura.lang.std.Collections.listOf" || funcName0 == "aura.lang.std.Collections.mutableListOf"
-            || funcName0 == "Collections.listOf" || funcName0 == "Collections.mutableListOf") {
+            || funcName0 == "Collections.listOf" || funcName0 == "Collections.mutableListOf"
+            || funcName0 == "aura.lang.std.Collections.emptyList" || funcName0 == "Collections.emptyList"
+            || funcName0 == "emptyList"
+            || funcName0 == "listOf" || funcName0 == "mutableListOf" || funcName0 == "arrayListOf") {
+            // [R175 诊断] 臂命中 + 分步探针（AURA_VM_EXCDIAG=1，各 ≤4 条）：
+            // 区分「臂没进」与「VmCollections.newList 单例调用被劫持」。
+            if (Env.get("AURA_VM_EXCDIAG", "") == "1" && this.lofDiagN < 4) {
+                this.lofDiagN = this.lofDiagN + 1
+                println("[DBG-LOF] hit argc=" + toStr(argc) + " len=" + toStr(funcName0.length()))
+            }
             val baseQ: Int = this.stack.stackDepth() - argc
             val nlQ: Any = VmCollections.newList()
+            if (Env.get("AURA_VM_EXCDIAG", "") == "1" && this.lofDiagN <= 4) {
+                println("[DBG-LOF] newList=" + VmOps.toStrAny(nlQ))
+            }
             var jQ: Int = 0
             while (jQ < argc) {
                 if (baseQ >= 0) {
@@ -2138,6 +2156,10 @@ import aura.lang.compiler.serialize.AucLoader
                 }
                 ki = ki + 1
             }
+            // ⚠️ [S3]/[S4] 两条 println 是**承重墙**：P5-① 布局敏感家族——
+            // 删掉它们会移动 callOrBuiltin（37KB 帧）的产码布局，把 18/26
+            // 的通过集整体洗牌（r175e 实测 JIT 18→3，几乎全 AV）。语义上
+            // 它们只是 set 臂的旧调试打印，但布局上不可动。留置并注明。
             println("[S3] kind=[" + kindS + "]")
             if (kindS == "map") {
                 VmCollections.mapSet(listS, idxS, valS)
@@ -2876,6 +2898,11 @@ import aura.lang.compiler.serialize.AucLoader
             }
             return
         }
+
+        // [R175-撤] 裸名→导入表重定向曾加于此（importQualifiedOf），实测
+        // 把所有 op60 用户函数调用全灭（JIT 18→3，幸存者恰为纯 native
+        // 调用三例）——根因待查（疑似大函数内 indexOf/scan 错译族）。
+        // 已撤：裸名 listOf/emptyList 族由 [R27] 前置臂扩展覆盖（语义等价）。
 
         // 用户函数：压栈返回地址，跳转到函数入口
         //
@@ -4381,6 +4408,9 @@ import aura.lang.compiler.serialize.AucLoader
         private fun callExport(symName: String): Unit {
         this.callOrBuiltin(symName, 0)
     }
+
+    // [R175-撤] importQualifiedOf 已随裸名重定向一并撤销（见 callOrBuiltin
+    // 用户函数路径前的说明）。保留占位注释防止同位再插。
 
     private fun callExternal(modIdx: String, symIdx: String): Unit {
         // CALL_EXTERNAL(modIdx, symIdx)：

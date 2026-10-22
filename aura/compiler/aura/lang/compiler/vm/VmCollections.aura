@@ -31,6 +31,7 @@ import aura.lang.collection.HashMap
 object VmCollections {
 
     /// 列表头部大小（`len` + `cap` + `items` 三个 i64）。
+    /// [R175] 已退役为字面量：单例字段读在部分函数帧被错译成指针垃圾。
     private val LIST_HDR_SIZE: Long = 24
     /// 映射表头部大小（`len` + `cap` + `keys` + `vals` 四个 i64）。
     private val MAP_HDR_SIZE: Long = 32
@@ -42,26 +43,30 @@ object VmCollections {
     // ═══════════════════════════════════════════════════════════
 
     /// 创建空列表，返回堆指针（`Any` 位模式）。
+    ///
+    /// [R175] newListCap 主体**内联**于此：`newList → newListCap(4)` 的
+    /// 单参传递在宿主编译下被错译（capIn 槽收到调用者栈地址 0x7FF…，
+    /// DBG-NL 实证）⇒ alloc(cap*8) 巨大 = 40ms 假 OOM（15-advanced/
+    /// 01-lexer/02-types 家族）。cap 恒为 4（唯一调用点），内联后该
+    /// 传参点消失，且少一层调用窗（P5-① 高危区）。
     fun newList(): Any {
-        return this.newListCap(MIN_CAP)
-    }
-
-    /// 按容量创建空列表。
-    private fun newListCap(capIn: Long): Any {
-        var cap: Long = capIn
-        if (cap < MIN_CAP) {
-            cap = MIN_CAP
+        if (Env.get("AURA_VM_EXCDIAG", "") == "1" && this.diagN < 8) {
+            this.diagN = this.diagN + 1
+            println("[DBG-NL] newList inline cap=4")
         }
-        val l: Long = Memory.alloc(LIST_HDR_SIZE)
+        val l: Long = Memory.alloc(24)
         if (l == 0) {
             return 0
         }
         Memory.write64(l, 0)          // len
-        Memory.write64(l + 8, cap)    // cap
-        val items: Long = Memory.alloc(cap * 8)
+        Memory.write64(l + 8, 4)      // cap
+        val items: Long = Memory.alloc(32)
         Memory.write64(l + 16, items)
         return l
     }
+
+    /// [R175 诊断] newListCap 有界打印计数。
+    private var diagN: Int = 0
 
     /// 获取列表长度。
     ///
@@ -105,8 +110,8 @@ object VmCollections {
         val cap: Long = Memory.read64(ptr + 8)
         if (len >= cap) {
             var newcap: Long = cap * 2
-            if (newcap < MIN_CAP) {
-                newcap = MIN_CAP
+            if (newcap < 4) {
+                newcap = 4
             }
             val oldItems: Long = Memory.read64(ptr + 16)
             val newItems: Long = Memory.alloc(newcap * 8)
@@ -207,24 +212,17 @@ object VmCollections {
     // ═══════════════════════════════════════════════════════════
 
     /// 创建空 Map，返回堆指针。
+    ///
+    /// [R175] newMapCap 主体内联（同 newList：单参传递点被错译，消灭之）。
     fun newMap(): Any {
-        return this.newMapCap(MIN_CAP)
-    }
-
-    /// 按容量创建空 Map。
-    private fun newMapCap(capIn: Long): Any {
-        var cap: Long = capIn
-        if (cap < MIN_CAP) {
-            cap = MIN_CAP
-        }
-        val m: Long = Memory.alloc(MAP_HDR_SIZE)
+        val m: Long = Memory.alloc(32)
         if (m == 0) {
             return 0
         }
-        Memory.write64(m, 0)
-        Memory.write64(m + 8, cap)
-        val keys: Long = Memory.alloc(cap * 8)
-        val vals: Long = Memory.alloc(cap * 8)
+        Memory.write64(m, 0)          // len
+        Memory.write64(m + 8, 4)      // cap
+        val keys: Long = Memory.alloc(32)
+        val vals: Long = Memory.alloc(32)
         Memory.write64(m + 16, keys)
         Memory.write64(m + 24, vals)
         return m
@@ -270,8 +268,8 @@ object VmCollections {
         var vp: Long = vals
         if (len >= cap) {
             var newcap: Long = cap * 2
-            if (newcap < MIN_CAP) {
-                newcap = MIN_CAP
+            if (newcap < 4) {
+                newcap = 4
             }
             val nk: Long = Memory.alloc(newcap * 8)
             val nv: Long = Memory.alloc(newcap * 8)
