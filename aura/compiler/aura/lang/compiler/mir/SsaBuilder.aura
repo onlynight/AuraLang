@@ -1067,6 +1067,21 @@ class SsaBuilder {
         var i2: Int = 0
         while (i2 < this.unionCsvCount(unionCsv)) {
             val varName: String = this.unionCsvName(unionCsv, i2)
+            // ⚠️ R170（P5-① 根治）：**分支内局部声明**的变量（before 中无该
+            // 名字）不得进入合并后的作用域——不建 Phi、不向 varMap 发布值。
+            // 旧实现把 else 子树深处某臂的值经 phi else 边发布到合并点：
+            // `Vm.dispatch` 的 `val val` 在 op-1/op-2/op-85 三个臂同名声明，
+            // op-85 臂的 `stack.pop()` 值因此串进 op-2 臂合并点的 phi else 边
+            // （.hat 实证 `phi(bb4467=@t23634, bb4468=@t24860)`，bb4468 是
+            // else 入口块而非真实前驱 bb4472，值更不流经该路径）。后端 ISel
+            // 按传递闭包把该陈旧值配到真实前驱，并在 Phi 链中**就地发射**它
+            // ⇒ 插入一次 `VmStack_pop`，把 LOAD_CONST 刚 push 的常量当场弹掉
+            // （.auc 值模型打 `0`、宿主 hello-jit 失效的根因）。
+            // 纪律同 `insertPhisAtBlock`（回边 Phi）的 `beforeVid >= 0` 门。
+            if (this.mapVidOf(before, varName) < 0) {
+                i2 = i2 + 1
+                continue
+            }
             val thenVid: Int = this.lookupVar(before, varName, afterThen)
             val elseVid: Int = if (hasElse) {
                 this.lookupVar(before, varName, afterElse)
