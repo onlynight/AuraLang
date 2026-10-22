@@ -1357,21 +1357,15 @@ class X86Emitter {
             println("    [X86] emitCallArgs callNode.args=" + callNode.args + " aux=" + callNode.aux)
         }
         val argParts: List<String> = MachineDagUtils.splitArgs(callNode.args)
-        val argRegs: List<String> = listOf("rcx", "rdx", "r8", "r9")
         // ── 第 5+ 参：栈传递（Win64：arg5+i 在 [rsp+0x20+i*8]，call 前写）──
         //
-        // ⚠️ 旧实现只装 4 个寄存器参——栈参**从来没人写**，被调方读到的是
-        // 残留垃圾（实测 decodeNumeric 11 参的 `mod` = 打包字节码 →
-        // listAppend 野指针，2026-10-06）。必须**先写栈参、后装寄存器参**：
-        // 栈参的值可能暂存在后续寄存器参装载会覆写的寄存器里。
-        // 上限 24 个栈参（0x20+24*8=0xC0，远离帧尾 canary 区 [rsp+fs-0x80]）。
+        // 必须先写栈参、后装寄存器参：栈参的值可能暂存在后续寄存器参装载会
+        // 覆写的寄存器里。上限 24 个栈参（0x20+24*8=0xC0，远离帧尾 canary 区）。
         var si: Int = 4
         while (si < argParts.size && si < 28) {
             val sNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[si]))
             val sDisp: Int = 0x20 + (si - 4) * 8
-            // 整数常量：mov r11, imm
             if (sNode.kind == "Const" && !sNode.aux.startsWith("@str.")) {
-                // R65：大整数（超 int32）走 emitLargeImmediate
                 if (this.isDecimalOutRangeInt32(sNode.aux)) {
                     this.emitLargeImmediate("r11", sNode.aux)
                 } else {
@@ -1381,155 +1375,60 @@ class X86Emitter {
                 si = si + 1
                 continue
             }
-            // 字符串常量：leaq r11, @str.N（重物化，不依赖颜色寄存器）
             if (sNode.kind == "Const" && sNode.aux.startsWith("@str.")) {
                 this.enc.emitLeaRIP("r11", sNode.aux)
                 this.enc.emitStoreMemDisp32("rsp", sDisp, "r11")
                 si = si + 1
                 continue
             }
-            // 普通值：先取进 r11（栈引用由 resolveToReg 装载），再落栈参区
             val sReg: String = this.regOfNode(sNode)
             val sReal: String = this.resolveToReg(sReg, "r11")
             this.enc.emitStoreMemDisp32("rsp", sDisp, sReal)
             si = si + 1
         }
-        // ── [P5-① 根修 v5] 寄存器参装载 = 标量展开的并行搬移安全序 ──
+        // ── [R172 根修] 寄存器参装载 = 先落槽、后定序，构造上无踩踏 ──
         //
-        // 就绪规则（与 v3 相同）：
-        //   就绪(i) ⟺ 无未发射 j≠i 满足 (a) srcs[j]==tgts[i]（i 等 j 先读）
-        //                                (b) tgts[j]==srcs[i]（i 等 j 先写）
-        // 无就绪 = 环 → 一员源存 r11 并 deferred（最后发射）。
-        // v5：**全标量**。v3/v4 的多 ArrayList 方案在种子编译的驱动里
-        // 五个列表互相 alias（构建后立即读回全为同一标量垃圾，PMBUILD
-        // 探针实证 2026-10-10）——种子对同函数多 ArrayList 实例的
-        // 泛型/别名处理有缺陷（新入档种子缺陷）。n4≤4 标量展开零容器。
-        var n4: Int = argParts.size
-        if (n4 > 4) { n4 = 4 }
-        var tracePm: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
-        // 槽 0..3：kind("imm"/"str"/"reg"/"none") + src（imm 文本/@str.N/寄存器/"r11"=已断环）
-        var tg0: String = "rcx"
-        var tg1: String = "rdx"
-        var tg2: String = "r8"
-        var tg3: String = "r9"
-        var k0: String = "none"
-        var k1: String = "none"
-        var k2: String = "none"
-        var k3: String = "none"
-        var s0: String = ""
-        var s1: String = ""
-        var s2: String = ""
-        var s3: String = ""
-        var d0: Int = 0
-        var d1: Int = 0
-        var d2: Int = 0
-        var d3: Int = 0
-        var f0: Int = 0
-        var f1: Int = 0
-        var f2: Int = 0
-        var f3: Int = 0
-        var k4: Int = 0
-        while (k4 < n4) {
-            val srcNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[k4]))
-            var kk: String = "reg"
-            var ss: String = ""
-            if (srcNode.kind == "Const" || srcNode.kind == "ConstImm") {
-                if (srcNode.aux.startsWith("@str.")) { kk = "str" } else { kk = "imm" }
-                ss = srcNode.aux
+        // 旧 v5 调度器在寄存器着色/别名下会踩踏（布局敏感腐坏家族 P5-① 的根）：
+        // 当某实参源是栈引用（被标成 r10）时，另实参经 resolveToReg(.,"r10")
+        // 解析会改写 r10，而调度器就绪判定不追踪 r10/r11，源值被覆盖 → 随
+        // 源码布局漂移。
+        //
+        // 新方案：4 个寄存器参先各自落到**独立**暂存槽（区A 空闲区
+        // [rbp-16..rbp-40]，永不与其他值槽冲突），全程只用 r11 作暂存；
+        // 等全部落槽后，再按固定次序 rcx/rdx/r8/r9 从槽读回。读前绝不碰这
+        // 四个目标寄存器 ⇒ 任何着色/别名/环都不再能造成踩踏。语义与正确
+        // Win64 调用约定逐位等价。
+        val targRegs: List<String> = listOf("rcx", "rdx", "r8", "r9")
+        val stageSlots: List<Int> = listOf(-16, -24, -32, -40)
+        var ai: Int = 0
+        while (ai < 4 && ai < argParts.size) {
+            val aNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[ai]))
+            val stg: Int = stageSlots[ai]
+            if (aNode.kind == "Const" || aNode.kind == "ConstImm") {
+                if (aNode.aux.startsWith("@str.")) {
+                    this.enc.emitLeaRIP("r11", aNode.aux)
+                    this.enc.emitStackStore(stg, "r11")
+                } else if (this.isDecimalOutRangeInt32(aNode.aux)) {
+                    this.emitLargeImmediate("r11", aNode.aux)
+                    this.enc.emitStackStore(stg, "r11")
+                } else {
+                    this.enc.emitMovRI("r11", MachineDagUtils.strToInt(aNode.aux))
+                    this.enc.emitStackStore(stg, "r11")
+                }
             } else {
-                val r: String = this.regOfNode(srcNode)
-                if (this.isStackRef(r)) { ss = "r10" } else { ss = r }
+                val aReg: String = this.regOfNode(aNode)
+                val aReal: String = this.resolveToReg(aReg, "r11")
+                if (aReal != "") {
+                    this.enc.emitStackStore(stg, aReal)
+                }
             }
-            if (k4 == 0) { k0 = kk; s0 = ss }
-            else if (k4 == 1) { k1 = kk; s1 = ss }
-            else if (k4 == 2) { k2 = kk; s2 = ss }
-            else { k3 = kk; s3 = ss }
-            k4 = k4 + 1
+            ai = ai + 1
         }
-        var guard: Int = 0
-        var doneCnt: Int = 0
-        while (doneCnt < n4 && guard < 24) {
-            guard = guard + 1
-            var picked: Int = -1
-            // 就绪扫描（4 槽全展开；deferred/done 不参与互阻）
-            var rd0: Boolean = true
-            if (n4 > 0 && d0 == 0 && f0 == 0) {
-                if (d1 == 0 && f1 == 0 && s1 != "" && s1 == tg0) { rd0 = false }
-                if (d2 == 0 && f2 == 0 && s2 != "" && s2 == tg0) { rd0 = false }
-                if (d3 == 0 && f3 == 0 && s3 != "" && s3 == tg0) { rd0 = false }
-            } else { rd0 = false }
-            var rd1: Boolean = true
-            if (n4 > 1 && d1 == 0 && f1 == 0) {
-                if (d0 == 0 && f0 == 0 && s0 != "" && s0 == tg1) { rd1 = false }
-                if (d2 == 0 && f2 == 0 && s2 != "" && s2 == tg1) { rd1 = false }
-                if (d3 == 0 && f3 == 0 && s3 != "" && s3 == tg1) { rd1 = false }
-            } else { rd1 = false }
-            var rd2: Boolean = true
-            if (n4 > 2 && d2 == 0 && f2 == 0) {
-                if (d0 == 0 && f0 == 0 && s0 != "" && s0 == tg2) { rd2 = false }
-                if (d1 == 0 && f1 == 0 && s1 != "" && s1 == tg2) { rd2 = false }
-                if (d3 == 0 && f3 == 0 && s3 != "" && s3 == tg2) { rd2 = false }
-            } else { rd2 = false }
-            var rd3: Boolean = true
-            if (n4 > 3 && d3 == 0 && f3 == 0) {
-                if (d0 == 0 && f0 == 0 && s0 != "" && s0 == tg3) { rd3 = false }
-                if (d1 == 0 && f1 == 0 && s1 != "" && s1 == tg3) { rd3 = false }
-                if (d2 == 0 && f2 == 0 && s2 != "" && s2 == tg3) { rd3 = false }
-            } else { rd3 = false }
-            if (rd3) { picked = 3 }
-            if (rd2) { picked = 2 }
-            if (rd1) { picked = 1 }
-            if (rd0) { picked = 0 }
-            if (picked < 0) {
-                // 环：首个未发射 reg 槽源存 r11 并 deferred
-                if (d0 == 0 && f0 == 0 && k0 == "reg" && s0 != "r11") {
-                    this.enc.emitMovRR("r11", s0)
-                    s0 = "r11"; f0 = 1
-                } else if (d1 == 0 && f1 == 0 && k1 == "reg" && s1 != "r11") {
-                    this.enc.emitMovRR("r11", s1)
-                    s1 = "r11"; f1 = 1
-                } else if (d2 == 0 && f2 == 0 && k2 == "reg" && s2 != "r11") {
-                    this.enc.emitMovRR("r11", s2)
-                    s2 = "r11"; f2 = 1
-                } else if (d3 == 0 && f3 == 0 && k3 == "reg" && s3 != "r11") {
-                    this.enc.emitMovRR("r11", s3)
-                    s3 = "r11"; f3 = 1
-                }
-                continue
-            }
-            var pk: String = "none"
-            var ps: String = ""
-            var pt: String = ""
-            if (picked == 0) { pk = k0; ps = s0; pt = tg0 }
-            else if (picked == 1) { pk = k1; ps = s1; pt = tg1 }
-            else if (picked == 2) { pk = k2; ps = s2; pt = tg2 }
-            else { pk = k3; ps = s3; pt = tg3 }
-            if (tracePm) {
-                println("    [X86][PM] pick=" + toStr(picked) + " kind=" + pk + " src=" + ps + " -> " + pt)
-            }
-            if (pk == "imm") {
-                // R65：大整数（超 int32）走 emitLargeImmediate
-                if (this.isDecimalOutRangeInt32(ps)) {
-                    this.emitLargeImmediate(pt, ps)
-                } else {
-                    this.enc.emitMovRI(pt, MachineDagUtils.strToInt(ps))
-                }
-            } else if (pk == "str") {
-                this.enc.emitLeaRIP(pt, ps)
-            } else {
-                if (ps == "r11") {
-                    this.enc.emitMovRR(pt, "r11")
-                } else {
-                    val srcNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[picked]))
-                    val srcReg: String = this.regOfNode(srcNode)
-                    val realReg: String = this.resolveToReg(srcReg, "r10")
-                    if (realReg != "" && realReg != pt) {
-                        this.enc.emitMovRR(pt, realReg)
-                    }
-                }
-            }
-            if (picked == 0) { d0 = 1 } else if (picked == 1) { d1 = 1 } else if (picked == 2) { d2 = 1 } else { d3 = 1 }
-            doneCnt = doneCnt + 1
+        // 定序装载：固定次序，rcx..r9 先读后写，绝无踩踏。
+        var li: Int = 0
+        while (li < 4 && li < argParts.size) {
+            this.enc.emitStackLoad(targRegs[li], stageSlots[li])
+            li = li + 1
         }
     }
 
