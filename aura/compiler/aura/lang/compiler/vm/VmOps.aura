@@ -620,27 +620,27 @@ object VmOps {
     /// （实测 `x shl 8` 直接退化成 `x`，移位量被丢弃）——`.auc` 读取小端整数
     /// 因此高字节恒为 0（`natives_count` 594 被读成 82）。
     fun bitAnd(a: Any, b: Any): Any {
-        return intOf(a) & intOf(b)
+        return toAny(intOf(a) & intOf(b))
     }
 
     /// 按位或。
     fun bitOr(a: Any, b: Any): Any {
-        return intOf(a) | intOf(b)
+        return toAny(intOf(a) | intOf(b))
     }
 
     /// 按位异或。
     fun bitXor(a: Any, b: Any): Any {
-        return intOf(a) ^ intOf(b)
+        return toAny(intOf(a) ^ intOf(b))
     }
 
     /// 左移。
     fun shl(a: Any, b: Any): Any {
-        return intOf(a) << intOf(b)
+        return toAny(intOf(a) << intOf(b))
     }
 
     /// 右移。
     fun shr(a: Any, b: Any): Any {
-        return intOf(a) >> intOf(b)
+        return toAny(intOf(a) >> intOf(b))
     }
 
     // ═══════════════════════════════════════════════════════════

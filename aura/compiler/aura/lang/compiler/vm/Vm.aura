@@ -1673,7 +1673,17 @@ import aura.lang.compiler.serialize.AucLoader
             || funcName0 == "Collections.listOf" || funcName0 == "Collections.mutableListOf"
             || funcName0 == "aura.lang.std.Collections.emptyList" || funcName0 == "Collections.emptyList"
             || funcName0 == "emptyList"
-            || funcName0 == "listOf" || funcName0 == "mutableListOf" || funcName0 == "arrayListOf") {
+            || funcName0 == "listOf" || funcName0 == "mutableListOf" || funcName0 == "arrayListOf"
+            // [R179] `k to v`（map entry）→ `aura.lang.std.Collections.pairOf`
+            //（32 字符限定名），同样撞剥离扫描无零区自旋 ⇒ 01-lexer /
+            // 02-types-variables 在 §1.9 的 `1 to 2` 处**挂死**（30s 超时）。
+            // 表示与 Rust VM 对齐：Pair = **2 元素列表**（VM 实测
+            // `toStr(1 to 2)` = "[1, 2]"）。
+            // 刻意**复用本臂主体**（argc 个元素按源顺序入表）而不新增代码块：
+            // 主体语义对 pairOf(k, v) 恰好就是 [k, v]，且不往 callOrBuiltin
+            // 里加行（R175 血泪：任何增删行都整体洗牌通过集）。
+            || funcName0 == "aura.lang.std.Collections.pairOf" || funcName0 == "Collections.pairOf"
+            || funcName0 == "pairOf" || funcName0 == "to") {
             // [R175 诊断] 臂命中 + 分步探针（AURA_VM_EXCDIAG=1，各 ≤4 条）：
             // 区分「臂没进」与「VmCollections.newList 单例调用被劫持」。
             if (Env.get("AURA_VM_EXCDIAG", "") == "1" && this.lofDiagN < 4) {
