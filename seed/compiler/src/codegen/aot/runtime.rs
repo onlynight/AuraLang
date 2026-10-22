@@ -25,6 +25,27 @@ pub struct RuntimeFn {
 
 /// 所有 runtime 函数的声明
 pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
+    // [P0/D2] 门控 ARC 原语（时代闸门/.rdata/magic/标签校验，见 aura_std_cffi.c）。
+    // [P2] 发射器在 AURA_ARC=1 时对槽位/字段/实参/返回值插入调用。
+    RuntimeFn {
+        name: "aura_arc_retain",
+        ret: "void",
+        params: &[("ptr", "i8*")],
+    },
+    RuntimeFn {
+        name: "aura_arc_release",
+        ret: "i32",
+        params: &[("ptr", "i8*")],
+    },
+    // [P2] 闭包 env 的带标签分配（TAG_ENV + count 字段，析构级联用）。
+    RuntimeFn {
+        name: "aura_arc_alloc_env",
+        ret: "i8*",
+        params: &[
+            ("size", "i64"),
+            ("count", "i64"),
+        ],
+    },
     RuntimeFn {
         name: "aura_arc_increment",
         ret: "void",
@@ -32,7 +53,7 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
     },
     RuntimeFn {
         name: "aura_arc_decrement",
-        ret: "void",
+        ret: "i32",
         params: &[("ptr", "i8*")],
     },
     RuntimeFn {

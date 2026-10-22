@@ -339,6 +339,23 @@ class LlvmEmitter {
     /// 当前位置是否已终结（ret/br）。
     var fTerminated: Boolean = false
 
+    // ── [P2-B] ARC 发射状态（对齐 seed `emit.rs` 的 D4 规则表）──────────
+    //
+    // 默认**全关**：只有 `AURA_ARC=1` 才注入 retain/release，且 `arcUsed`
+    // 只用于**惰性**补运行时 `declare`（默认路径产物逐字节不变 —— 这是
+    // 双发射器长期共存的前提，见 `arc_implementation_plan.md` §六）。
+    //
+    // 语义与 seed 侧的对应关系（D4 表）：
+    //   · `x = <expr>` 覆盖：复制类右值先 retain → load 旧值 → release → store
+    //   · 逃逸闸门：`arcScan` 收集「出现在存储/逃逸位置下的变量」并整体剔除
+    //   · 仅 String（LLVM `i8*`）槽参与 —— 与 P3 已验证的那一档同构
+    var arcOn: Int = -1
+    var arcUsed: Boolean = false
+    var arcEsc: String = " "
+    var arcEscCount: Int = 0
+    var arcRetainCount: Int = 0
+    var arcReleaseCount: Int = 0
+
     init() {
         this.targetTriple = "x86_64-pc-windows-msvc"
         this.moduleName = "main"
@@ -436,6 +453,16 @@ class LlvmEmitter {
 
     fun emitProgramEx(hir: Hir, moduleName: String, target: String, basePath: String): String {
         this.reset()
+        // [P2-B] ARC 状态显式初始化。⚠️ 不能依赖字段声明处的初值：本类的字段
+        // 初始化并不在构造期全部生效（实测 `var arcOn: Int = -1` 落地为 0 ⇒
+        // `-1 = 未初始化` 的哨兵判据失效、整个 ARC 通道静默不生效）。
+        this.arcOn = -1
+        this.arcUsed = false
+        this.arcEsc = " "
+        this.arcEscCount = 0
+        this.arcRetainCount = 0
+        this.arcReleaseCount = 0
+        println("[ARC-P2B] enter emitProgramEx arc=" + toStr(Env.get("AURA_ARC", "?")))
         this.moduleName = moduleName
         this.targetTriple = target
         this.basePath = basePath
@@ -708,6 +735,16 @@ class LlvmEmitter {
             out.sbAdd(runtimeDeclarationsEx(this.fDefNames, this.basePath))
             out.sbAdd("\n")
         }
+        // [P2-B] ARC 运行时声明**惰性**注入：只有真的发过 retain/release 才补
+        // （默认路径一个字节都不加，双发射器才能长期共存而不动基线）。
+        if (this.arcUsed) {
+            out.sbAdd("; ---- ARC (P2-B, AURA_ARC=1) ----\n")
+            out.sbAdd("declare void @aura_arc_retain(i8*)\n")
+            out.sbAdd("declare void @aura_arc_release(i8*)\n")
+            out.sbAdd("\n")
+            out.sbAdd("; [P2-B] ARC 已启用（retain/release 由 emitAssign 注入）\n")
+        }
+
         if (this.emitDebug) {
             val di: DebugInfo = DebugInfo(moduleName, ".", true)
             out.sbAdd(debugMetadata(di))
@@ -2196,6 +2233,12 @@ class LlvmEmitter {
         if (this.fTerminated == false && this.emitConcurrentBuiltin(fullFn, ownerCls, name, retTy)) {
             // 已发射完整函数体（含 ret）
         } else if (bodyId >= 0) {
+            // [P2-B] 逃逸扫描（每函数一次，先于发射）。默认 `AURA_ARC` 未设
+            // ⇒ 不扫描，这一段对产物零影响。
+            this.arcEsc = " "
+            if (this.arcEmitOn()) {
+                this.arcScan(hir, bodyId)
+            }
             this.emitBody(hir, bodyId)
         }
         if (!this.fTerminated) {
@@ -4507,6 +4550,134 @@ class LlvmEmitter {
     }
 
     /// 发射赋值语句。
+    // ── [P2-B] ARC 发射助手（与 seed `emit.rs` 的 D4 规则表逐条对齐）────
+
+    /// `AURA_ARC=1` 才注入 retain/release。结果缓存在 `arcOn`（-1=未初始化）。
+    fun arcEmitOn(): Boolean {
+        if (this.arcOn < 0) {
+            if (Env.get("AURA_ARC", "") == "1") {
+                this.arcOn = 1
+            } else {
+                this.arcOn = 0
+            }
+            // ⚠️ 这里不能靠 println 做诊断：本类方法里的 println 会被静默丢弃
+            // （字符串会进产物，但运行时一行都不打）。诊断要走「符号引用」或
+            // 往生成的 IR 里写注释，见 R153 记录。
+        }
+        return this.arcOn == 1
+    }
+
+    /// `AURA_ARC_RELEASE=1` 原始读取（不依赖 `arcEmitOn`，供诊断用）。
+    fun arcRelKnob(): Int {
+        if (Env.get("AURA_ARC_RELEASE", "") == "1") {
+            return 1
+        }
+        return 0
+    }
+
+    /// 释放必须再显式 `AURA_ARC_RELEASE=1`（释放是唯一会让内存消失的操作）。
+    fun arcRelOn(): Boolean {
+        if (!this.arcEmitOn()) {
+            return false
+        }
+        return Env.get("AURA_ARC_RELEASE", "") == "1"
+    }
+
+    /// 记录一个逃逸变量名（空格分隔的集合串；名字不含空格）。
+    fun arcMarkEsc(n: String) {
+        if (n == "") {
+            return
+        }
+        if (!this.arcEsc.contains(" " + n + " ")) {
+            this.arcEsc = this.arcEsc + n + " "
+            this.arcEscCount = this.arcEscCount + 1
+        }
+    }
+
+    /// 该变量是否已判定逃逸（逃逸 ⇒ 不参与 release，只 retain）。
+    fun arcEscapes(n: String): Boolean {
+        return this.arcEsc.contains(" " + n + " ")
+    }
+
+    /// 把某棵子树里的**所有变量名**标记为逃逸（用于「值被存进别处」）。
+    fun arcMarkSubtree(hir: Hir, id: Int) {
+        if (id < 0 || id >= hir.count) {
+            return
+        }
+        if (hir.kindOf(id) == "HirVar") {
+            this.arcMarkEsc(hir.textOf(id))
+            return
+        }
+        val kids: String = hir.kidsOfList(id)
+        val nk: Int = hirKidsCount(kids)
+        var i: Int = 0
+        while (i < nk) {
+            this.arcMarkSubtree(hir, hirKidsAt(kids, i))
+            i = i + 1
+        }
+    }
+
+    /// 存储型调用（把实参存进容器/对象）：与 seed `scan_escapes` 的清单同源。
+    /// 命中即「实参逃逸」——这是 P2 报告里「逃逸引用未计数」的主要来源。
+    fun arcStorageCallee(n: String): Boolean {
+        if (n == "") {
+            return false
+        }
+        if (n.contains("push") || n.contains("append") || n.contains("insert") ||
+            n.contains("add") || n.contains("set") || n.contains("put") ||
+            n.contains("addAll") || n.contains("addFirst") || n.contains("addLast") ||
+            n.contains("offer") || n.contains("enqueue") || n.contains("register")) {
+            return true
+        }
+        return false
+    }
+
+    /// 通用 HIR 递归：标记**逃逸写点**上的变量（与 seed `scan_escapes` 同构）。
+    ///
+    /// 逃逸写点（命中即该变量整体不参与 release）：
+    ///   · `obj.f = v` / `a[i] = v`（目标不是本帧变量）⇒ 值子树全逃逸；
+    ///   · 存储型调用实参（`add`/`set`/`put`/`push`/`insert`/`append`…）⇒ 实参全逃逸；
+    ///   · `Box` / `WeakRef` / `New` / `Await` / `Lambda` / `Try` / `Defer` ⇒ 子树全逃逸
+    ///     （跨帧生命周期，编译器看不见别名）。
+    ///
+    /// 普通读取（`println(s)`、`s.length`、`s + "x"`）**不**判逃逸 —— 与 seed 一致。
+    fun arcScan(hir: Hir, id: Int) {
+        if (id < 0 || id >= hir.count) {
+            return
+        }
+        val k: String = hir.kindOf(id)
+        val kids: String = hir.kidsOfList(id)
+        val nk: Int = hirKidsCount(kids)
+        if (k == "HirAssign" && nk >= 2) {
+            val tgt: Int = hirKidsAt(kids, 0)
+            if (hir.kindOf(tgt) != "HirVar") {
+                this.arcMarkSubtree(hir, hirKidsAt(kids, 1))
+            }
+        } else if (k == "HirCall" && nk >= 2) {
+            val callee: Int = hirKidsAt(kids, 0)
+            if (hir.kindOf(callee) == "HirVar" && this.arcStorageCallee(hir.textOf(callee))) {
+                var i: Int = 1
+                while (i < nk) {
+                    this.arcMarkSubtree(hir, hirKidsAt(kids, i))
+                    i = i + 1
+                }
+            }
+        } else if (k == "HirBox" || k == "HirWeakRef" || k == "HirNew" ||
+                   k == "HirAwait" || k == "HirLambda" || k == "HirTry" ||
+                   k == "HirDefer" || k == "HirSpawn") {
+            var i: Int = 0
+            while (i < nk) {
+                this.arcMarkSubtree(hir, hirKidsAt(kids, i))
+                i = i + 1
+            }
+        }
+        var i: Int = 0
+        while (i < nk) {
+            this.arcScan(hir, hirKidsAt(kids, i))
+            i = i + 1
+        }
+    }
+
     fun emitAssign(hir: Hir, id: Int) {
         val kids: String = hir.kidsOfList(id)
         if (hirKidsCount(kids) < 2) {
@@ -4577,6 +4748,34 @@ class LlvmEmitter {
         }
         val coerced: String = this.coerceValue(value, valueTy, ty)
         val addr: String = this.declareVar(name, ty)
+        // [P2-B/D4] 覆盖释放：复制类右值先 retain → load 旧值 → release → store。
+        // 只在「ARC 开 + 槽是 String(i8*) + 未逃逸 + 非自赋值」时发射，
+        // 与 seed `emit_assign` 的已验证那一档同构（P3 二分矩阵：只有覆盖释放通过）。
+        if (this.arcEmitOn() && ty == "i8*" && !this.arcEscapes(name)) {
+            val isCopy: Boolean = hir.kindOf(valueId) == "HirVar" &&
+                hir.textOf(valueId) != name
+            if (isCopy && valueTy == "i8*") {
+                this.fBody.sbAdd("  call void @aura_arc_retain(i8* ")
+                this.fBody.sbAdd(coerced)
+                this.fBody.sbAdd(")\n")
+                this.arcUsed = true
+                this.arcRetainCount = this.arcRetainCount + 1
+            }
+            if (this.arcRelOn()) {
+                val oldv: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(oldv)
+                this.fBody.sbAdd(" = load i8*, ")
+                this.fBody.sbAdd(EmitUtils.toPtrTySp(ty))
+                this.fBody.sbAdd(addr)
+                this.fBody.sbAdd("\n")
+                this.fBody.sbAdd("  call void @aura_arc_release(i8* ")
+                this.fBody.sbAdd(oldv)
+                this.fBody.sbAdd(")\n")
+                this.arcUsed = true
+                this.arcReleaseCount = this.arcReleaseCount + 1
+            }
+        }
         this.fBody.sbAdd("  store ")
         this.fBody.sbAdd(ty)
         this.fBody.sbAdd(" ")

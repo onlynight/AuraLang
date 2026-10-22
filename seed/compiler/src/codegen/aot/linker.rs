@@ -217,6 +217,13 @@ pub fn link_to_executable(
                 cmd.arg("-Wl,/STACK:67108864");
                 // [R92] 允许重复符号定义（aura_link_fix.obj 与 CFFI 的 RegionEnter/ScratchMark 等）
                 cmd.arg("-Wl,/FORCE:MULTIPLE");
+                // 诊断：AURA_LINK_MAP=1 时输出链接映射表（<exe>.map），
+                // 供 ARC 失衡点/崩溃地址按 RVA 反查符号（llvm-nm 读不到
+                // PE 符号表，map 是唯一可靠来源）。默认关闭，产物不变。
+                if std::env::var_os("AURA_LINK_MAP").is_some() {
+                    let map_path = exe_path.with_extension("map");
+                    cmd.arg(format!("-Wl,/MAP:{}", map_path.display()));
+                }
                 run_and_report(&mut cmd, "clang")?;
                 return Ok(());
             }

@@ -110,14 +110,86 @@ double aura_to_float(int64_t x) {
 
 /// 每个分配块的前置头：记录负载大小（16 字节，保证负载 16 字节对齐，
 /// `Plan A` 依赖「真实指针低位为 0」来区分装箱整数）。
+///
+/// [P0/D2] `pad` 升级为 ARC 字段（位布局不变，仍 16B ⇒ 负载对齐 / Plan A
+/// 不受影响，零额外空间）：
+///   · `rc`     [0..31]  引用计数（分配即持有 → 初始 1）
+///   · `magic`  [32..47] 0x4155（"AU"）头校验魔数
+///   · `flags`  [48..63] 保留（多线程原子模式等预留）
+/// magic 参与 `hdr_sane` 强校验：double-free / use-after-free / 外来指针
+/// （static 串缓存 / 字符串字面量 / 已释放块）从此可检测。
 typedef union AuraMemHdr {
     struct {
-        int64_t size;
-        int64_t pad;
+        int64_t size;      /* 负载字节数（现状保留） */
+        int32_t rc;        /* [0..31]  引用计数 */
+        uint16_t magic;    /* [32..47] 头校验魔数 */
+        uint16_t flags;    /* [48..63] 保留；[P2] 低 2 位 = 块类型标签 */
     } h;
     long double align_ld;
     void *align_p;
 } AuraMemHdr;
+
+/* [P2] 容器/闭包结构前向声明（定义在下方「调用点符号层」节）——
+ * ARC 析构级联（rc 归零时释放元素/捕获项）需要提前见到类型。 */
+typedef struct AuraDynList AuraDynList;
+typedef struct AuraDynMap AuraDynMap;
+static void aura_arc_destroy_tagged(void *p, uint16_t tag);
+
+/* [P0/D2] 头魔数与访问助手（单线程非原子 rc，D6；原子版见
+ * AURA_ARC_ATOMIC 分支）。rc 独立成 32 位字段 ⇒ 原子模式可直接对
+ * `&h->h.rc` 做 InterlockedIncrement/Decrement，不碰 magic。
+ *
+ * [P2] flags 低 2 位复用为**块类型标签**（0=普通 / 1=dynlist / 2=dynmap /
+ * 3=closure env），供 rc 归零时的析构级联释放元素/捕获项。标签校验把
+ * 头识别的假阳性率从 2^-16（16 位 magic）压到 ~2^-30：发射器插入的
+ * retain/release 会对**任意** i8* 值调用（栈地址 / 枚举变体 alloca /
+ * 函数指针 / 静态缓存），16 位魔数在千万级调用下会产生真实踩踏
+ * （rc 写到 p-8、甚至 free 栈地址）。⚠️ flags 高位（bit2..15）保留：
+ * 未来启用时必须保持「magic 匹配 + 高位为 0」的双重断言强度。 */
+#define AURA_MEM_MAGIC 0x4155u   /* "AU" */
+#define AURA_MEM_TAG_PLAIN  0u   /* 普通块（字符串/数组/类实例） */
+#define AURA_MEM_TAG_LIST   1u   /* AuraDynList：析构时释放 items 数组与元素 */
+#define AURA_MEM_TAG_MAP    2u   /* AuraDynMap：析构时释放 keys/vals 数组与元素 */
+#define AURA_MEM_TAG_ENV    3u   /* 闭包 env：析构时释放捕获项（count 在 +8） */
+#define AURA_MEM_TAG_MASK   0x3u /* 标签占 flags 低 2 位；高位须为 0 */
+
+static void aura_hdr_init(AuraMemHdr *h, int64_t size) {
+    h->h.size = size;
+    h->h.rc = 1;               /* 分配即持有（D2） */
+    h->h.magic = AURA_MEM_MAGIC;
+    h->h.flags = 0;
+}
+
+/* 头识别：magic 匹配且 flags 高位为 0（标签限定在低 2 位）。
+ * 双重断言 ⇒ 对栈/静态/字面量地址的假阳性 ~2^-30，可安全承受任意
+ * i8* 值上的 retain/release 调用（P2 发射器依赖此性质）。 */
+static int aura_hdr_magic_ok(const AuraMemHdr *h) {
+    return h->h.magic == AURA_MEM_MAGIC && (h->h.flags & (uint16_t)~AURA_MEM_TAG_MASK) == 0;
+}
+
+static uint16_t aura_hdr_tag(const AuraMemHdr *h) {
+    return (uint16_t)(h->h.flags & AURA_MEM_TAG_MASK);
+}
+
+/* rc++（保留返回值便于诊断；单线程普通加，D6）。 */
+static int32_t aura_hdr_rc_inc(AuraMemHdr *h) {
+#ifdef AURA_ARC_ATOMIC
+    return InterlockedIncrement((volatile LONG *)&h->h.rc);
+#else
+    h->h.rc += 1;
+    return h->h.rc;
+#endif
+}
+
+/* rc--，返回递减后的值（调用方据其判归零）。 */
+static int32_t aura_hdr_rc_dec(AuraMemHdr *h) {
+#ifdef AURA_ARC_ATOMIC
+    return InterlockedDecrement((volatile LONG *)&h->h.rc);
+#else
+    h->h.rc -= 1;
+    return h->h.rc;
+#endif
+}
 
 static int64_t g_aura_mem_limit = -1; /* -1 未初始化；0 = 不限制 */
 static int64_t g_aura_mem_used = 0;   /* 当前存活负载字节数 */
@@ -161,6 +233,11 @@ typedef struct { void *a; const char *n; } AuraFnEnt;
  * 函数才都已声明），见 `AURA_FN` 宏。`off` 异常大说明调用者不在表内。 */
 const char *aura_attr_who(void *ra);
 size_t aura_attr_off(void *ra);
+
+/* [R151] 大块普查前向声明（实现见「退出泄漏报告」之前）。 */
+static void aura_big_record(void *p, int64_t n);
+static void aura_big_forget(void *p);
+static void aura_big_dump(void);
 
 #define AURA_ATTR_MAX 16384
 /* [R131] 归因记录开关：仅 AURA_ATTR_DUMP=1 时记录。⚠️ 无开关时每次分配
@@ -529,8 +606,18 @@ static void aura_chain_post_check(int64_t out_len, void *cs_ra) {
  * ────────────────────────────────────────────────────────────── */
 #define AURA_MEM_MAX_BLOCK ((int64_t)1 << 30)
 
-static int aura_mem_hdr_sane(int64_t size) {
-    return size >= 0 && size <= AURA_MEM_MAX_BLOCK;
+/* [P0/D2] 强校验：size 范围 + magic。magic 使「外来指针」（static 串缓存 /
+ * 字符串字面量 / 已释放或被越界写入的块）可检测 —— 两个字段同时误配的
+ * 概率约 2^-48，实践上零误报。记账按 0 计（不虚增），并把空闲/重分配
+ * 请求降级为 no-op / 新分配（与旧 size-only 校验的行为一致）。 */
+static int aura_mem_hdr_sane(const AuraMemHdr *h) {
+    if (!h) {
+        return 0;
+    }
+    if (!aura_hdr_magic_ok(h)) {
+        return 0;
+    }
+    return h->h.size >= 0 && h->h.size <= AURA_MEM_MAX_BLOCK;
 }
 
 /* 记一次分配尺寸到直方图。 */
@@ -553,12 +640,126 @@ static void aura_mem_bucket(int64_t n) {
     g_aura_mem_bucket_bytes[i] += n;
 }
 
+/* ── [P0/D2b] .rdata 字面量永生区间 ──────────────────────────────
+ * HIR 字符串常量发射为 `private constant [n x i8] c"..."`（llc → COFF
+ * `.rdata`，只读段无法写 rc）⇒ retain/release 必须把落在该区间内的指针
+ * 判为「永生」直接 no-op。
+ *
+ * 注册方式（方案 D2b 候选②）：运行时解析**主模块 PE 头**取 `.rdata`
+ * 区段 —— 不依赖发射器符号，seed emit.rs 与自举 aot/Emit.aura 两条发射
+ * 链的产物（COFF .rdata 合并）一致适用；也不受符号裁剪影响。
+ * 解析失败（非 Windows / 非预期布局）时区间为空 ⇒ 闸门自然关闭，
+ * 退回 magic 防御（字面量无头 ⇒ 校验失败 ⇒ 安全 no-op）。
+ * ─────────────────────────────────────────────────────────────── */
+static char *g_lit_begin = NULL;
+static char *g_lit_end = NULL;
+
+/* [R152/D5] .rdata 之外的「永生长生」区间。
+ *
+ * D5 审计（方案 §四 D5 的遗留项）扫过全部返回 `char*` 的 C 导出，真正的
+ * 静态缓冲只剩两处 —— 都是**有意为之的小整数/单字符缓存**（AOT 无 GC，
+ * int→String 与 s[i] 是最高频分配，缓存把千万级分配降为一次写入）：
+ *   · `aura_to_str`   的 0..1023 表（1024 × 16B）
+ *   · `aura_char_cache` 的 256 槽（256 × 16B）
+ * 它们落在 **.bss/.data**（不是 .rdata），所以 D2b 的字面量闸门接不住，
+ * retain/release 会一路掉到 magic 校验失败、被计入 `bad_magic` —— 功能上
+ * 安全（no-op），但会污染 ARC 诊断计数（P3 验收以 `bad_magic==0` 为信号）。
+ * 因此显式把这两段注册为长生区间：O(1) 闸门、计数干净。
+ *
+ * 语义前提：两处槽位都是「写一次、此后只读」，可在调用间安全共享
+ * （见各自定义处的注释：按 16 字节对齐以维持 Plan A 的「指针低位为 0」）。 */
+#define AURA_LIT_EXTRA_MAX 4
+static char *g_lit_x_lo[AURA_LIT_EXTRA_MAX];
+static char *g_lit_x_hi[AURA_LIT_EXTRA_MAX];
+static int g_lit_x_n = 0;
+
+static void aura_lit_add_range(const void *lo, const void *hi) {
+    if (!lo || !hi || hi <= lo) { return; }
+    if (g_lit_x_n >= AURA_LIT_EXTRA_MAX) { return; }
+    g_lit_x_lo[g_lit_x_n] = (char *)lo;
+    g_lit_x_hi[g_lit_x_n] = (char *)hi;
+    g_lit_x_n += 1;
+}
+
+/* 静态缓存本体（原先定义在各自函数内；为注册区间提到文件作用域）。 */
+static char g_int_cache[1024][16];
+static unsigned char g_int_cache_ready[1024];
+static char g_char_cache_slots[256][16];
+static unsigned char g_char_cache_ready[256];
+
+static void aura_lit_register(void) {
+    /* 与 PE 布局无关的两段静态缓存：任何平台都注册。 */
+    aura_lit_add_range(g_int_cache, (char *)g_int_cache + sizeof(g_int_cache));
+    aura_lit_add_range(g_char_cache_slots,
+                       (char *)g_char_cache_slots + sizeof(g_char_cache_slots));
+#ifdef _WIN32
+    HMODULE base = GetModuleHandleA((const char *)0);
+    if (!base) {
+        return;
+    }
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        return;
+    }
+    const IMAGE_NT_HEADERS *nt =
+        (const IMAGE_NT_HEADERS *)((const char *)base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) {
+        return;
+    }
+    const IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
+    int i;
+    for (i = 0; i < (int)nt->FileHeader.NumberOfSections; i++) {
+        /* 段名 8 字节定长、NUL 填充；`.rdata` 恰好 6 字符 */
+        if (memcmp(sec[i].Name, ".rdata", 6) == 0 && sec[i].Name[6] == '\0') {
+            g_lit_begin = (char *)base + sec[i].VirtualAddress;
+            g_lit_end = g_lit_begin + sec[i].Misc.VirtualSize;
+            return;
+        }
+    }
+#endif
+}
+
+/// p 是否落在 .rdata 字面量区间 / 显式注册的静态缓存区间（永生对象，不参与 ARC）。
+static int aura_ptr_is_lit(const void *p) {
+    int i;
+    if (g_lit_begin && (const char *)p >= g_lit_begin && (const char *)p < g_lit_end) {
+        return 1;
+    }
+    for (i = 0; i < g_lit_x_n; i++) {
+        if ((const char *)p >= g_lit_x_lo[i] && (const char *)p < g_lit_x_hi[i]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* [P0] 退出泄漏报告（定义在下方 ARC 节；此处前置声明供 atexit 挂钩）。 */
+static void aura_leak_report_atexit(void);
+
+#ifdef _WIN32
+static LONG CALLBACK aura_arc_veh(EXCEPTION_POINTERS *ep);   /* [P2-DEBUG] 前向声明 */
+#endif
+
 static void aura_mem_init(void) {
+#ifdef _WIN32
+    if (getenv("AURA_ARC_DEBUG")) {
+        static int veh_inited = 0;
+        if (!veh_inited) {
+            veh_inited = 1;
+            AddVectoredExceptionHandler(1, aura_arc_veh);
+        }
+    }
+#endif
     if (g_aura_mem_limit >= 0) {
         return;
     }
     if (getenv("AURA_ATTR_DUMP")) {
         atexit(aura_attr_dump_atexit);
+    }
+    /* [P0] .rdata 字面量区间注册（D2b）+ 泄漏报告挂钩（见 ARC 节）。 */
+    aura_lit_register();
+    if (getenv("AURA_LEAK_REPORT")) {
+        atexit(aura_leak_report_atexit);
     }
     g_aura_mem_limit = (int64_t)AURA_MEM_DEFAULT_LIMIT_MB * 1024 * 1024;
     const char *env = getenv("AURA_MEM_LIMIT_MB");
@@ -1002,6 +1203,118 @@ AuraRgn g_rgn_ret = {0};
 AuraRgn g_scr = {0};
 int64_t g_rgn_target = 0; /* 0=retain(默认), 1=scratch */
 
+/* ── [P0/D2c] 已释放区域区间防线 ──────────────────────────────────
+ * 理论上后端 ARC 永远不接触前端区域对象（D1：.hat 序列化即时代边界，
+ * 前后端对象不共享），但若该不变量被违反（悬空区域指针泄漏到后端），
+ * RegionReset 后页已 unmap ⇒ 直接读头即 AV。这里把 Reset 时归还 OS 的
+ * 区块区间登记下来（有界表），ARC 路径读头前先查表：命中即按「非法头」
+ * 计数并 no-op，把潜在 AV 降级为可诊断事件。后端时代表不再增长，
+ * `g_freed_rgn_n == 0` ⇒ 查表 O(1)。 */
+#define AURA_FREED_RGN_MAX 1024
+static struct { char *lo; char *hi; } g_freed_rgn[AURA_FREED_RGN_MAX];
+static int g_freed_rgn_n = 0;
+static int g_freed_rgn_ovf = 0;   /* 区块数超表容量 ⇒ 防线不完整（计数告警） */
+/* 全区间的外包络（[min_lo, max_hi)）：窗外指针一次比较即排除，
+ * 把后端每次 retain/release 的区间扫描从 O(表长) 降为常态 O(1)。 */
+static char *g_freed_rgn_min_lo = NULL;
+static char *g_freed_rgn_max_hi = NULL;
+
+/* [P3] 区间命中判定的**页级带标签直映缓存**。
+ *
+ * 开启释放后实测：自举里 retain/release 进入 C 侧的量级达 4 亿次，而每次
+ * 落在包络窗口内都要把 1024 项区间表线性扫一遍（不释放时几乎没有区间登记，
+ * 这项成本趋于零，因此 P0/P1 的 A/B 完全看不出来）。同一页会被反复查询，
+ * 所以按 4KB 页做带标签缓存即可把摊还代价打成 O(1)：
+ *   · 标签存 page+1，0 表示空槽（避免 `page==0` 与空槽混淆）；
+ *   · 区间表只在 RegionReset 时新增（≤1024 次），故每次登记整体失效即可，
+ *     无需复杂的失效策略 —— 只在原判定上做「保守化」（页相交即命中，
+ *     见下面函数），不会少判，只会多走一次页探活。 */
+#define AURA_FR_CACHE_BITS 16
+#define AURA_FR_CACHE_N (1u << AURA_FR_CACHE_BITS)
+static uintptr_t g_fr_cache_tag[AURA_FR_CACHE_N];
+static int16_t g_fr_cache_val[AURA_FR_CACHE_N];
+
+static void aura_fr_cache_invalidate(void) {
+    memset(g_fr_cache_tag, 0, sizeof(g_fr_cache_tag));
+    memset(g_fr_cache_val, 0, sizeof(g_fr_cache_val));
+}
+
+static void aura_freed_rgn_record(char *lo, char *hi) {
+    if (g_freed_rgn_n < AURA_FREED_RGN_MAX) {
+        g_freed_rgn[g_freed_rgn_n].lo = lo;
+        g_freed_rgn[g_freed_rgn_n].hi = hi;
+        g_freed_rgn_n++;
+        if (!g_freed_rgn_min_lo || lo < g_freed_rgn_min_lo) g_freed_rgn_min_lo = lo;
+        if (!g_freed_rgn_max_hi || hi > g_freed_rgn_max_hi) g_freed_rgn_max_hi = hi;
+        aura_fr_cache_invalidate();
+    } else {
+        g_freed_rgn_ovf = 1;
+    }
+}
+
+/// p 是否落在已归还 OS 的区域区块内（RegionReset 后悬空的区域指针）。
+static int aura_ptr_in_freed_rgn(const void *p) {
+    int i;
+    uintptr_t page;
+    size_t slot;
+    if (g_freed_rgn_n == 0 || (const char *)p < g_freed_rgn_min_lo ||
+        (const char *)p >= g_freed_rgn_max_hi) {
+        return 0;   /* 后端时代常态：窗外 O(1) */
+    }
+    page = ((uintptr_t)p) >> 12;              /* 4KB 页粒度 */
+    slot = (size_t)(page & (AURA_FR_CACHE_N - 1));
+    if (g_fr_cache_tag[slot] == page + 1) {
+        return g_fr_cache_val[slot];
+    }
+    g_fr_cache_tag[slot] = page + 1;
+    g_fr_cache_val[slot] = 0;
+    /* [P0/D2c] 保守方向：页与任一区间**有交集**即记命中。
+     * 缓存是按页粒度的，若只按查询指针 p 的包含判定记账，同页内其它指针
+     * 可能被误判为「不在已归还区间」（假阴性）——那正是本防线要拦的情形
+     * （跳过 ⇒ 直接读头 ⇒ RegionReset 后页已 unmap ⇒ AV）。
+     * 宁可多一次后续页探活，也绝不漏判。 */
+    {
+        char *ps = (char *)(page << 12);
+        char *pe = ps + 4096;
+        for (i = 0; i < g_freed_rgn_n; i++) {
+            if (g_freed_rgn[i].lo < pe && ps < g_freed_rgn[i].hi) {
+                g_fr_cache_val[slot] = 1;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/// [P0/D2c] 真悬空判定：p 落在已释放区间内**且该页至今未重新映射**。
+///
+/// ⚠️ 仅凭区间表判定会**假阳性**：RegionReset 归还的地址空间会被后端
+/// 堆段增长（CRT 堆 VirtualAlloc / 大块 malloc）复用——复用处页已提交、
+/// 装的是合法堆块，误判为悬空会跳过合法 retain/release（P2 起 rc 少计
+/// ⇒ 提前释放 ⇒ UAF）。这里对区间命中者做一次 VirtualQuery 探活：
+///   · 页未提交（MEM_RESERVE/free）⇒ 真悬空（RegionReset 后未复用）⇒ no-op；
+///   · 页已提交且可读 ⇒ 地址空间已复用 ⇒ 放行到 magic 校验（合法块通
+///     过、区间内部指针被 magic 挡下），把潜在 AV 与假阳性同时消除。
+/// 只在区间命中时调用（后端 retain/release 的极少数），成本可忽略。
+static int aura_freed_rgn_page_gone(const void *p) {
+#ifdef _WIN32
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery((LPCVOID)p, &mbi, sizeof(mbi)) != sizeof(mbi)) {
+        return 1;   /* 查询失败：保守按悬空处理 */
+    }
+    if (mbi.State == MEM_COMMIT &&
+        (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ |
+                        PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY |
+                        PAGE_EXECUTE_WRITECOPY))) {
+        return 0;   /* 已提交可读 ⇒ 已复用，非悬空 */
+    }
+    return 1;
+#else
+    (void)p;
+    return 1;   /* 非 Windows 无探活手段：保守按悬空 */
+#endif
+}
+
 static int aura_rgn_has(AuraRgn *r, int64_t need) {
     (void)need;
     if (r->cap >= r->n + 1) return 1;
@@ -1069,6 +1382,9 @@ static void aura_rgn_free_all(AuraRgn *r) {
     int64_t i;
     for (i = 0; i < r->n; i++) {
         if (r->chunks[i]) {
+            /* [P0/D2c] 归还前登记区间（区域指针防线，见 g_freed_rgn） */
+            aura_freed_rgn_record((char *)r->chunks[i],
+                                  (char *)r->chunks[i] + r->sizes[i]);
             VirtualFree(r->chunks[i], 0, 0x8000 /*MEM_RELEASE*/);
         }
     }
@@ -1243,6 +1559,9 @@ int64_t RegionReset(void) {
     g_rgn_target = 0;
     for (i = 0; i < g_rgn_ret.n; i++) {
         if (g_rgn_ret.chunks[i]) {
+            /* [P0/D2c] 归还前登记区间（区域指针防线，见 g_freed_rgn） */
+            aura_freed_rgn_record((char *)g_rgn_ret.chunks[i],
+                                  (char *)g_rgn_ret.chunks[i] + g_rgn_ret.sizes[i]);
             VirtualFree(g_rgn_ret.chunks[i], 0, 0x8000 /*MEM_RELEASE*/);
         }
     }
@@ -1333,8 +1652,11 @@ void *aura_mem_alloc(int64_t n) {
     if (!h) {
         aura_mem_oom(n);
     }
-    h->h.size = n;
+    /* [P0/D2] 分配即持有：rc=1 + magic（原 `h->h.size = n` 只写 size）。 */
+    aura_hdr_init(h, n);
     g_aura_mem_used += n;
+    /* [R151] 大块普查（默认关闭 ⇒ 热路径零开销）。 */
+    aura_big_record((void *)((char *)h + sizeof(AuraMemHdr)), n);
     return (void *)((char *)h + sizeof(AuraMemHdr));
 }
 
@@ -1384,8 +1706,9 @@ void *aura_mem_realloc(void *p, int64_t n) {
     }
     /* 非法头（见 AURA_MEM_MAX_BLOCK 说明）：p 不是本运行时的负载。
      * 绝不能拿 `old` 去记账（会虚增），也不能对陌生指针 realloc —— 改为
-     * 新分配 + 拷贝（长度以新旧较小值为准，避免越界读）。 */
-    if (!aura_mem_hdr_sane(old)) {
+     * 新分配 + 拷贝（长度以新旧较小值为准，避免越界读）。
+     * [P0/D2] magic 参与强校验：静态缓存 / 字面量 / 已释放块一并识别。 */
+    if (!aura_mem_hdr_sane(h)) {
         g_aura_mem_bad_hdr += 1;
         char *np = (char *)aura_mem_alloc(n);
         if (!np) {
@@ -1409,12 +1732,17 @@ void *aura_mem_realloc(void *p, int64_t n) {
     if (g_aura_mem_limit > 0 && g_aura_mem_used - old + n > g_aura_mem_limit) {
         aura_mem_oom(n - old);
     }
+    /* [R151] 大块普查：realloc 可能整块搬迁，旧指针先摘除、新指针重新登记。 */
+    aura_big_forget(p);
     AuraMemHdr *nh = (AuraMemHdr *)realloc((void *)h, sizeof(AuraMemHdr) + (size_t)n);
     if (!nh) {
         aura_mem_oom(n - old);
     }
+    /* [P0/D2] realloc 整块搬迁（含 16B 头）⇒ rc/magic 原样保留，
+     * 无需重建 —— dynlist 扩容等热路径零额外开销。 */
     nh->h.size = n;
     g_aura_mem_used += (n - old);
+    aura_big_record((void *)((char *)nh + sizeof(AuraMemHdr)), n);
     return (void *)((char *)nh + sizeof(AuraMemHdr));
 }
 
@@ -1448,8 +1776,9 @@ void aura_mem_free(void *p) {
     int64_t sz = h->h.size;
     g_aura_mem_free_calls += 1;
     /* 非法头：不是本运行时的负载 —— 既不记账（避免 `used -= 负数` 虚增），
-     * 也**不** free（对陌生指针 free 会污染堆）。 */
-    if (!aura_mem_hdr_sane(sz)) {
+     * 也**不** free（对陌生指针 free 会污染堆）。
+     * [P0/D2] magic 参与强校验：静态缓存 / 字面量 / 已释放块一并识别。 */
+    if (!aura_mem_hdr_sane(h)) {
         g_aura_mem_bad_hdr += 1;
         return;
     }
@@ -1457,7 +1786,645 @@ void aura_mem_free(void *p) {
     if (g_aura_mem_used < 0) {
         g_aura_mem_used = 0;
     }
+    aura_big_forget(p);   /* [R151] 大块普查：存活集合摘除 */
     free((void *)h);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * [P0/D2] ARC 引用计数（AuraMemHdr.rc）
+ *
+ * 契约（方案 D3 所有权不变量）：任何在 SSA/槽位中存续的 String/List/
+ * Object 值，持有者对其计数 +1；覆盖、离开作用域、从容器移除时持有者
+ * 负责 release。整数/浮点/布尔走 Plan A 低位装箱（bit0=1），天然不参与。
+ *
+ * retain/release 的四道防线（任一不过即安全 no-op，**绝不写不该写的
+ * 内存**——这是「外来指针不会被写坏」的根基）：
+ *   1. D1  时代闸门：`g_rgn_active`（前端区域时代）→ no-op
+ *      （区域对象由 RegionReset 整块回收，逐对象释放既不可能也无必要；
+ *        前后端对象经 .hat 序列化不共享 ⇒ 后端 ARC 永不接触区域对象）；
+ *   2. Plan A 装箱：指针低位为 1 = 装箱整数 → 跳过；
+ *   3. D2b .rdata 闸门：字面量永生区间 → no-op；
+ *   4. D2c 区域防线：已归还 OS 的区域区块 → 按非法头计数并 no-op；
+ *   5. magic 强校验：头不是本运行时的 → 计数并 no-op（静态串缓存 /
+ *      外来 / 已释放块落到这里，把潜在 AV 降级为可诊断事件）。
+ *
+ * D6：单线程非原子 rc（编译器场景）；`-DAURA_ARC_ATOMIC` 切原子版
+ * （Interlocked，供多线程场景）。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* ARC 计数（诊断用）：retain/release 次数与各闸门 no-op 次数。
+ * P1 阶段（尚无发射器 release）这些数字全部来自 C 侧容器操作。 */
+static int64_t g_arc_retain_calls = 0;
+static int64_t g_arc_release_calls = 0;
+static int64_t g_arc_freed = 0;        /* release 归零并真正释放的次数 */
+static int64_t g_arc_noop_era = 0;     /* D1 时代闸门 */
+static int64_t g_arc_noop_lit = 0;     /* D2b .rdata 字面量 */
+static int64_t g_arc_noop_rgn = 0;     /* D2c 已释放区域 */
+static int64_t g_arc_noop_boxed = 0;   /* Plan A 装箱整数 */
+static int64_t g_arc_bad_magic = 0;    /* 头校验失败（外来/静态指针） */
+static int64_t g_arc_rgn_reused = 0;   /* D2c 区间命中但页已复用（假阳性排除） */
+
+/* ── [P2-DEBUG] 释放日志（AURA_ARC_DEBUG=1）───────────────────────────
+ * 记录每个「rc 归零并真正 free」的块（ptr + 释放调用点返回地址 + size），
+ * 用于在后续过量释放命中时反查「谁先释放了它」（二次释放定位）。
+ * 定长环形，仅供诊断；非 debug 环境零成本（写入点由 env 判空）。 */
+#define AURA_FREE_LOG_N 65536
+static struct {
+    const void *p;
+    void *ra;
+    int64_t sz;
+    int32_t rc_seen;
+} g_arc_free_log[AURA_FREE_LOG_N];
+static int64_t g_arc_free_log_seq = 0;
+
+/// AURA_ARC_DEBUG 只读一次（热路径上避免反复 getenv）。
+static int aura_arc_debug_on(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        cached = getenv("AURA_ARC_DEBUG") ? 1 : 0;
+    }
+    return cached;
+}
+
+static void aura_arc_free_log_record(const void *p, void *ra, int64_t sz, int32_t rc) {
+    int64_t i = g_arc_free_log_seq & (AURA_FREE_LOG_N - 1);
+    g_arc_free_log[i].p = p;
+    g_arc_free_log[i].ra = ra;
+    g_arc_free_log[i].sz = sz;
+    g_arc_free_log[i].rc_seen = rc;
+    g_arc_free_log_seq++;
+}
+
+static void aura_arc_free_log_find(const void *p) {
+    int64_t i;
+    int64_t lo = g_arc_free_log_seq - AURA_FREE_LOG_N;
+    if (lo < 0) lo = 0;
+    for (i = g_arc_free_log_seq - 1; i >= lo; i--) {
+        int64_t k = i & (AURA_FREE_LOG_N - 1);
+        if (g_arc_free_log[k].p == p) {
+            fprintf(stderr,
+                    "[aura] ARC   prior free: seq=%lld size=%lld from ra=%p "
+                    "(back = %lld releases ago)\n",
+                    (long long)i, (long long)g_arc_free_log[k].sz,
+                    g_arc_free_log[k].ra, (long long)(g_arc_free_log_seq - 1 - i));
+            return;
+        }
+    }
+    fprintf(stderr, "[aura] ARC   prior free: not found in last %d frees\n",
+            AURA_FREE_LOG_N);
+}
+
+/* ── [P2-DEBUG] 失衡点调用栈转储（AURA_ARC_DEBUG=1）─────────────────
+ * 打印进程基址（ASLR 后帧地址 - base = PE 内 RVA）与裸帧地址；
+ * 离线用 `llvm-nm PhotonHatCompile-arc.exe` 按 RVA 反查所在函数
+ * （驱动模块的函数名是 aura_user_*，可直接读）。 */
+static void aura_arc_debug_frames(const char *why, const void *p, int rc, unsigned tag) {
+#ifdef _WIN32
+    void *frames[20];
+    USHORT n;
+    int i;
+    static int base_shown = 0;
+    if (!base_shown) {
+        base_shown = 1;
+        fprintf(stderr, "[aura] ARC-DEBUG image_base=%p\n",
+                (void *)GetModuleHandleA(NULL));
+    }
+    n = CaptureStackBackTrace(0, 20, frames, NULL);
+    fprintf(stderr, "[aura] ARC %s ptr=%p rc=%d tag=%u frames=%u\n",
+            why, p, rc, tag, (unsigned)n);    for (i = 0; i < (int)n; i++) {
+        fprintf(stderr, "    #%d %p\n", i, frames[i]);
+    }
+    fflush(stderr);
+#else
+    (void)why; (void)p; (void)rc; (void)tag;
+#endif
+}
+
+/* ── [P2-DEBUG] 访问违例捕获（AURA_ARC_DEBUG=1）─────────────────────
+ * 崩溃点常常早于「过量释放」可见点（悬空读不经过 release）。装一个
+ * vectored handler，把 AV 的指令地址/访问地址与调用栈打出来，配合
+ * AURA_LINK_MAP 生成的 map 直接反查函数名。 */
+#ifdef _WIN32
+static LONG CALLBACK aura_arc_veh(EXCEPTION_POINTERS *ep) {
+    if (ep && ep->ExceptionRecord &&
+        ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+        void *frames[24];
+        USHORT n = CaptureStackBackTrace(0, 24, frames, NULL);
+        int i;
+        fprintf(stderr,
+                "[aura] CRASH AV at %p kind=%llu addr=%p\n",
+                ep->ExceptionRecord->ExceptionAddress,
+                (unsigned long long)ep->ExceptionRecord->ExceptionInformation[0],
+                (void *)ep->ExceptionRecord->ExceptionInformation[1]);
+        for (i = 0; i < (int)n; i++) {
+            fprintf(stderr, "    #%d %p\n", i, frames[i]);
+        }
+        fflush(stderr);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
+/// [P0/D2] retain：持有一个堆对象（rc++）。
+void aura_arc_retain(const void *p) {
+    if (!p) {
+        return;
+    }
+    if ((uintptr_t)p & 1) {                    /* Plan A 装箱整数 */
+        g_arc_noop_boxed++;
+        return;
+    }
+    if (g_rgn_active) {                        /* D1 时代闸门 */
+        g_arc_noop_era++;
+        return;
+    }
+    if (aura_ptr_is_lit(p)) {                  /* D2b .rdata 字面量永生 */
+        g_arc_noop_lit++;
+        return;
+    }
+    if (aura_ptr_in_freed_rgn(p)) {            /* D2c 悬空区域指针 */
+        if (aura_freed_rgn_page_gone(p)) {
+            g_arc_noop_rgn++;
+            g_aura_mem_bad_hdr++;
+            return;
+        }
+        g_arc_rgn_reused++;   /* 页已复用 ⇒ 区间表假阳性，放行到 magic */
+    }
+    AuraMemHdr *h = (AuraMemHdr *)((char *)p - sizeof(AuraMemHdr));
+    if (!aura_hdr_magic_ok(h)) {               /* 外来/静态/已释放指针 */
+        g_arc_bad_magic++;
+        g_aura_mem_bad_hdr++;
+        return;
+    }
+    aura_hdr_rc_inc(h);
+    g_arc_retain_calls++;
+}
+
+/// [P0/D2] release：释放一个持有（rc--）；归零 → aura_mem_free。
+/// 返回值：1 = 本次归零并释放，0 = 仍被引用 / 安全 no-op。
+int aura_arc_release(const void *p) {
+    if (!p) {
+        return 0;
+    }
+    if ((uintptr_t)p & 1) {                    /* Plan A 装箱整数 */
+        g_arc_noop_boxed++;
+        return 0;
+    }
+    if (g_rgn_active) {                        /* D1 时代闸门 */
+        g_arc_noop_era++;
+        return 0;
+    }
+    if (aura_ptr_is_lit(p)) {                  /* D2b .rdata 字面量永生 */
+        g_arc_noop_lit++;
+        return 0;
+    }
+    if (aura_ptr_in_freed_rgn(p)) {            /* D2c 悬空区域指针 */
+        if (aura_freed_rgn_page_gone(p)) {
+            g_arc_noop_rgn++;
+            g_aura_mem_bad_hdr++;
+            return 0;
+        }
+        g_arc_rgn_reused++;   /* 页已复用 ⇒ 区间表假阳性，放行到 magic */
+    }
+    AuraMemHdr *h = (AuraMemHdr *)((char *)p - sizeof(AuraMemHdr));
+    if (!aura_hdr_magic_ok(h)) {               /* 外来/静态/已释放指针 */
+        g_arc_bad_magic++;
+        g_aura_mem_bad_hdr++;
+        /* [P3-DEBUG] 坏 magic 意味着 release 落在「不是自己分配的块」上
+         * （外来静态区 / 区域无头内存 / 已经 free 过的块）。只打前 5 次，
+         * 免得把日志冲爆；配合 AURA_LINK_MAP 的 .map 按 RVA 反查函数。 */
+        if (aura_arc_debug_on() && g_arc_bad_magic <= 5) {
+            fprintf(stderr,
+                    "[aura] ARC BAD-MAGIC ptr=%p size=%lld magic=0x%04x flags=0x%04x\n",
+                    p, (long long)h->h.size, (unsigned)h->h.magic,
+                    (unsigned)h->h.flags);
+            aura_arc_free_log_find(p);
+            aura_arc_debug_frames("BAD-MAGIC", p, 0, 0);
+        }
+        return 0;
+    }
+    /* [P2-DEBUG] 过量释放检测：rc 已 ≤0 仍来 release ⇒ retain/release
+     * 配对失衡（会走到二次 free ⇒ 堆损坏）。命中即打印并**不**释放，
+     * 把「0xC0000374 堆损坏」前移到第一处失衡点。AURA_ARC_DEBUG=1 启用；
+     * 同时打印调用栈（离线用 llvm-nm 反查函数名）。 */
+    if (h->h.rc <= 0 && aura_arc_debug_on()) {
+        fprintf(stderr, "[aura] ARC OVER-RELEASE size=%lld\n", (long long)h->h.size);
+        aura_arc_free_log_find(p);
+        aura_arc_debug_frames("OVER-RELEASE", p, (int)h->h.rc,
+                              (unsigned)aura_hdr_tag(h));
+        return 0;
+    }
+    int32_t rc = aura_hdr_rc_dec(h);
+    if (rc > 0) {
+        g_arc_release_calls++;
+        return 0;
+    }
+    /* 归零：先做标签块析构级联（释放容器元素/闭包捕获项——D3），
+     * 再经统一释放入口归还块自身（magic 已验证，必中正常释放路径）。
+     * rc 停在 0 无需回写——块即将 free。
+     * ⚠️ 区域时代的列表/映射未打标签（无头可打），析构不会误触；
+     * 它们由 RegionReset 整块回收。 */
+    if (aura_arc_debug_on()) {
+        aura_arc_free_log_record(p, __builtin_return_address(0), h->h.size, 0);
+    }
+    /* [P2] 析构级联默认**关闭**（AURA_ARC_DESTRUCT=1 才启用）：
+     * 容器析构会 release 元素，前提是「元素的所有别名都 retain 过」。
+     * 当前发射器还做不到（字段写/静态注册表/结构体值副本都会留下
+     * 未 retain 的别名），启用会把仍然被引用的元素释放掉
+     * （实测字符串被回收后再次使用 ⇒ 符号名损坏 / AV）。
+     * 关闭后：容器自身块与 items 数组仍会释放，元素按引用泄漏
+     * ——与 P1 之前的基线同量级，不影响正确性。 */
+    if (getenv("AURA_ARC_DESTRUCT")) {
+        aura_arc_destroy_tagged((void *)p, aura_hdr_tag(h));
+    }
+    aura_mem_free((void *)p);
+    g_arc_freed++;
+    return 1;
+}
+
+/* [P0/D5] 直堆分配（带 ARC 头），**不受区域路由影响**。
+ * 用途：返回值必须跨 RegionReset 存活的字符串入口（env_get /
+ * fromCharCode / io_readFile / io_readLine）—— 这些入口现行语义就是
+ * 「每次独立 malloc 副本、永生存活」，改为带头分配后行为不变，且纳入
+ * ARC 管辖（P2 起可被 release）与内存闸门记账。 */
+static void *aura_mem_alloc_heap(int64_t n) {
+    aura_mem_init();
+    if (n < 0) {
+        n = 0;
+    }
+    g_aura_mem_alloc_calls += 1;
+    g_aura_mem_alloc_bytes += n;
+    aura_mem_bucket(n);
+    {
+        void *r0 = __builtin_return_address(0);
+        if (r0 != NULL) {
+            AURA_ATTR_RECORD(r0, n);
+        }
+    }
+    if (n > g_aura_mem_max_block) {
+        g_aura_mem_max_block = n;
+    }
+    if (g_aura_mem_limit > 0 && g_aura_mem_used + n > g_aura_mem_limit) {
+        aura_mem_oom(n);
+    }
+    AuraMemHdr *h = (AuraMemHdr *)malloc(sizeof(AuraMemHdr) + (size_t)n);
+    if (!h) {
+        aura_mem_oom(n);
+    }
+    aura_hdr_init(h, n);
+    g_aura_mem_used += n;
+    return (void *)((char *)h + sizeof(AuraMemHdr));
+}
+
+/* ── [R151] 大块普查（AURA_BIG_CENSUS=1）───────────────────────────────
+ * P4 的入口问题：自举退出时 4293MB 存活载荷里 **2840MB 落在 3774 个 ≥64KB
+ * 的块上**（≤64B 的 3280 万个小块总共才 504MB），而既有的 big-alloc trace
+ * 只打前 40 次（采样窗口太窄，看不全景）。
+ *
+ * 做法：对**所有** ≥阈值 的分配按 `ra0` 分配点建账，并维护存活集合
+ * （free / realloc 时摘除），退出时按「存活字节」降序打印 top-20。
+ *
+ * 成本：≥64KB 的分配在自举里只有几千次（占 4 亿次堆分配的 ~0.001%）；
+ * 默认关闭 ⇒ 热路径零开销。阈值可用 `AURA_BIG_MIN_KB` 调（默认 64）。
+ * ─────────────────────────────────────────────────────────────────── */
+#define AURA_BIG_SITES 1024
+#define AURA_BIG_BUCK  1024
+#define AURA_BIG_POOL  (1 << 19)
+
+typedef struct AuraBigNode {
+    void *p;
+    struct AuraBigNode *next;
+    int64_t sz;
+    int site;
+} AuraBigNode;
+
+#define AURA_BIG_FRAMES 8
+
+static int64_t g_big_min = 0;          /* 0 = 未初始化 */
+static int     g_big_on  = -1;         /* -1 = 未初始化 */
+static void   *g_big_key[AURA_BIG_SITES][AURA_BIG_FRAMES];
+static int64_t g_big_calls[AURA_BIG_SITES];
+static int64_t g_big_bytes[AURA_BIG_SITES];
+static int64_t g_big_live_n[AURA_BIG_SITES];
+static int64_t g_big_live_b[AURA_BIG_SITES];
+static int64_t g_big_max[AURA_BIG_SITES];
+static AuraBigNode  *g_big_buckets[AURA_BIG_BUCK];
+static AuraBigNode   g_big_pool[AURA_BIG_POOL];
+static int           g_big_pool_n = 0;
+static AuraBigNode  *g_big_freelist = NULL;
+static int64_t g_big_overflow = 0;
+static int64_t g_big_live_total = 0, g_big_live_bytes = 0;
+static int64_t g_big_all_total = 0, g_big_all_bytes = 0;
+
+static void aura_big_init(void) {
+    if (g_big_on >= 0) return;
+    g_big_on = getenv("AURA_BIG_CENSUS") != 0;
+    if (!g_big_on) return;
+    {
+        const char *e = getenv("AURA_BIG_MIN_KB");
+        g_big_min = (int64_t)64 * 1024;
+        if (e && e[0]) {
+            long v = strtol(e, NULL, 10);
+            if (v > 0) g_big_min = (int64_t)v * 1024;
+        }
+    }
+    atexit(aura_big_dump);
+}
+
+/* 分配点用**栈回溯**而不是 `__builtin_return_address(1)`：后者在无帧指针的
+ * 优化产物里常取到垃圾（实测 `caller=(below-all)+0x0`）。回溯只在 ≥阈值 的
+ * 分配上做（自举里几千次），成本可忽略。`FramesToSkip=1` 跳过本函数自身，
+ * 于是 frames[0] = `aura_mem_alloc`/`aura_mem_realloc` 的调用者 = Aura 级
+ * 分配点，frames[1] = 其调用者。 */
+static int aura_big_site(void) {
+    void *fr[AURA_BIG_FRAMES];
+    unsigned long long h;
+    int k, f, got;
+    for (f = 0; f < AURA_BIG_FRAMES; f++) { fr[f] = NULL; }
+#ifdef _WIN32
+    /* skip=2：跳过本函数 + 记录的调用者（`aura_mem_alloc`/`aura_mem_realloc`），
+     * 于是 fr[0]=分配入口本身、fr[1]=其调用者（多为 C 包装 `aura_malloc`），
+     * fr[2..]=Aura 级调用点与其上层。键取 fr[2..4]。 */
+    got = (int)CaptureStackBackTrace(2, AURA_BIG_FRAMES, fr, NULL);
+#else
+    fr[0] = __builtin_return_address(0);
+    got = 1;
+#endif
+    for (f = got; f < AURA_BIG_FRAMES; f++) { fr[f] = NULL; }
+    h = ((unsigned long long)fr[2] >> 4) * 0x9E3779B97F4A7C15ULL;
+    h ^= ((unsigned long long)fr[3] >> 4) * 0xC2B2AE3D27D4EB4FULL;
+    h ^= ((unsigned long long)fr[4] >> 4) * 0x165667B19E3779F9ULL;
+    for (k = 0; k < 16; k++) {
+        int s = (int)((h + (unsigned long long)k) & (AURA_BIG_SITES - 1));
+        if (g_big_key[s][2] == fr[2] && g_big_key[s][3] == fr[3] &&
+            g_big_key[s][4] == fr[4]) {
+            return s;
+        }
+        if (g_big_key[s][0] == NULL) {
+            for (f = 0; f < AURA_BIG_FRAMES; f++) { g_big_key[s][f] = fr[f]; }
+            return s;
+        }
+    }
+    return -1;
+}
+
+static int aura_big_bidx(void *p) {
+    unsigned long long h = ((unsigned long long)p >> 4) * 0x9E3779B97F4A7C15ULL;
+    return (int)(h & (AURA_BIG_BUCK - 1));
+}
+
+static void aura_big_record(void *p, int64_t n) {
+    int s, b;
+    AuraBigNode *nd;
+    aura_big_init();
+    if (!g_big_on || !p || n < g_big_min) return;
+    g_big_all_total += 1;
+    g_big_all_bytes += n;
+    s = aura_big_site();
+    if (s < 0) { g_big_overflow += 1; return; }
+    g_big_calls[s] += 1;
+    g_big_bytes[s] += n;
+    if (n > g_big_max[s]) g_big_max[s] = n;
+    if (g_big_freelist) {
+        nd = g_big_freelist;
+        g_big_freelist = nd->next;
+    } else if (g_big_pool_n < AURA_BIG_POOL) {
+        nd = &g_big_pool[g_big_pool_n++];
+    } else {
+        g_big_overflow += 1;
+        return;
+    }
+    nd->p = p;
+    nd->sz = n;
+    nd->site = s;
+    b = aura_big_bidx(p);
+    nd->next = g_big_buckets[b];
+    g_big_buckets[b] = nd;
+    g_big_live_n[s] += 1;
+    g_big_live_b[s] += n;
+    g_big_live_total += 1;
+    g_big_live_bytes += n;
+}
+
+static void aura_big_forget(void *p) {
+    int b;
+    AuraBigNode *nd, *prev = NULL;
+    if (g_big_on != 1 || !p) return;
+    b = aura_big_bidx(p);
+    for (nd = g_big_buckets[b]; nd; nd = nd->next) {
+        if (nd->p == p) {
+            if (prev) { prev->next = nd->next; } else { g_big_buckets[b] = nd->next; }
+            g_big_live_n[nd->site] -= 1;
+            g_big_live_b[nd->site] -= nd->sz;
+            g_big_live_total -= 1;
+            g_big_live_bytes -= nd->sz;
+            nd->p = NULL;
+            nd->next = g_big_freelist;
+            g_big_freelist = nd;
+            return;
+        }
+        prev = nd;
+    }
+}
+
+static void aura_big_dump(void) {
+    int i, j, best;
+    if (!g_big_on) return;
+    fprintf(stderr,
+        "[aura] ==== big alloc census (AURA_BIG_CENSUS=1, >=%lldKB) ====\n",
+        (long long)(g_big_min / 1024));
+#ifdef _WIN32
+    /* AOT 产物被 strip，运行时只能给「最近 C 符号 + 原始地址」；原始地址减去
+     * imagebase 即 RVA，可离线对照 `<exe>.map`（AURA_LINK_MAP=1）落到 Aura 函数。 */
+    fprintf(stderr, "[aura] imagebase=%p  (RVA = addr - imagebase)\n",
+            (void *)GetModuleHandleA((const char *)0));
+#endif
+    fprintf(stderr,
+        "[aura] big allocs: %lld calls / %lld MB ; live: %lld blocks / %lld MB ; overflow=%lld\n",
+        (long long)g_big_all_total, (long long)(g_big_all_bytes / (1024 * 1024)),
+        (long long)g_big_live_total, (long long)(g_big_live_bytes / (1024 * 1024)),
+        (long long)g_big_overflow);
+    fprintf(stderr, "[aura] top-20 sites by LIVE bytes (site = 分配点栈帧):\n");
+    for (i = 0; i < 20; i++) {
+        best = -1;
+        for (j = 0; j < AURA_BIG_SITES; j++) {
+            if (g_big_key[j][0] && g_big_live_b[j] > 0 &&
+                (best < 0 || g_big_live_b[j] > g_big_live_b[best])) {
+                best = j;
+            }
+        }
+        if (best < 0) break;
+        fprintf(stderr,
+            "   #%d live=%lld blk/%lldMB calls=%lld tot=%lldMB max=%lldKB\n"
+            "      @2=%p(%s+0x%zx) @3=%p(%s+0x%zx) @4=%p(%s+0x%zx) @5=%p(%s+0x%zx)\n",
+            i + 1,
+            (long long)g_big_live_n[best],
+            (long long)(g_big_live_b[best] / (1024 * 1024)),
+            (long long)g_big_calls[best],
+            (long long)(g_big_bytes[best] / (1024 * 1024)),
+            (long long)(g_big_max[best] / 1024),
+            g_big_key[best][2], aura_attr_who(g_big_key[best][2]),
+            aura_attr_off(g_big_key[best][2]),
+            g_big_key[best][3], aura_attr_who(g_big_key[best][3]),
+            aura_attr_off(g_big_key[best][3]),
+            g_big_key[best][4], aura_attr_who(g_big_key[best][4]),
+            aura_attr_off(g_big_key[best][4]),
+            g_big_key[best][5], aura_attr_who(g_big_key[best][5]),
+            aura_attr_off(g_big_key[best][5]));
+        g_big_live_b[best] = 0;   /* 打印即清，下一组不重复 */
+    }
+    fprintf(stderr, "[aura] top-10 sites by TOTAL bytes:\n");
+    for (i = 0; i < 10; i++) {
+        best = -1;
+        for (j = 0; j < AURA_BIG_SITES; j++) {
+            if (g_big_key[j][0] && g_big_bytes[j] > 0 &&
+                (best < 0 || g_big_bytes[j] > g_big_bytes[best])) {
+                best = j;
+            }
+        }
+        if (best < 0) break;
+        fprintf(stderr,
+            "   #%d calls=%lld tot=%lldMB live=%lld blk/%lldMB avg=%lldKB"
+            " @2=%p(%s+0x%zx) @3=%p(%s+0x%zx)\n",
+            i + 1,
+            (long long)g_big_calls[best],
+            (long long)(g_big_bytes[best] / (1024 * 1024)),
+            (long long)g_big_live_n[best],
+            (long long)(g_big_live_b[best] / (1024 * 1024)),
+            (long long)(g_big_calls[best] > 0
+                        ? g_big_bytes[best] / g_big_calls[best] / 1024 : 0),
+            g_big_key[best][2], aura_attr_who(g_big_key[best][2]),
+            aura_attr_off(g_big_key[best][2]),
+            g_big_key[best][3], aura_attr_who(g_big_key[best][3]),
+            aura_attr_off(g_big_key[best][3]));
+        g_big_bytes[best] = 0;
+    }
+    fflush(stderr);
+}
+
+/* ── [P0] 退出泄漏报告（AURA_LEAK_REPORT=1）────────────────────────
+ * P0 验收设施：退出时走一遍 CRT 进程堆（MSVC malloc 即进程默认堆），
+ * 对每个 BUSY 块按 magic 识别「本运行时的负载」，汇总：
+ *   · size 直方图（与分配侧同一套桶口径）+ 总块数/总字节；
+ *   · rc 直方图（P1 起区分「无 release 发射」与「漏 release」：
+ *     rc=1 多为从未进容器的临时物，rc>1 为被容器持有的共享块）；
+ *   · top-20 最大存活块（ptr/size/rc， ptr 可离线反查归属）。
+ * 热路径零成本：只在退出时走一次堆；默认关闭。
+ * ─────────────────────────────────────────────────────────────── */
+#define AURA_LEAK_TOPN 20
+
+static void aura_leak_report_atexit(void) {
+#ifdef _WIN32
+    HANDLE heap = GetProcessHeap();
+    PROCESS_HEAP_ENTRY ent;
+    int64_t total = 0, nblocks = 0;
+    int64_t bucket_calls[7], bucket_bytes[7];
+    int64_t rc_hist[6];        /* rc=1, 2, 3-5, 6-31, 32-1023, >=1024 */
+    void *top_ptr[AURA_LEAK_TOPN];
+    int64_t top_sz[AURA_LEAK_TOPN];
+    int32_t top_rc[AURA_LEAK_TOPN];
+    int i, j;
+
+    memset(bucket_calls, 0, sizeof(bucket_calls));
+    memset(bucket_bytes, 0, sizeof(bucket_bytes));
+    memset(rc_hist, 0, sizeof(rc_hist));
+    for (i = 0; i < AURA_LEAK_TOPN; i++) {
+        top_ptr[i] = NULL;
+        top_sz[i] = 0;
+        top_rc[i] = 0;
+    }
+
+    if (heap) {
+        memset(&ent, 0, sizeof(ent));
+        while (HeapWalk(heap, &ent)) {
+            AuraMemHdr *h;
+            int64_t sz;
+            int32_t rc;
+            int b;
+            if (!(ent.wFlags & PROCESS_HEAP_ENTRY_BUSY)) {
+                continue;
+            }
+            if (ent.cbData < (DWORD)(sizeof(AuraMemHdr) + 1)) {
+                continue;
+            }
+            h = (AuraMemHdr *)ent.lpData;
+            if (!aura_hdr_magic_ok(h)) {
+                continue;   /* 非本运行时负载（CRT 自身/并发原语等） */
+            }
+            sz = h->h.size;
+            rc = h->h.rc;
+            total += sz;
+            nblocks += 1;
+            b = 6;
+            if (sz <= 64) b = 0;
+            else if (sz <= 256) b = 1;
+            else if (sz <= 1024) b = 2;
+            else if (sz <= 8192) b = 3;
+            else if (sz <= 65536) b = 4;
+            else if (sz <= (1 << 20)) b = 5;
+            bucket_calls[b] += 1;
+            bucket_bytes[b] += sz;
+            if (rc <= 1) rc_hist[0] += 1;
+            else if (rc == 2) rc_hist[1] += 1;
+            else if (rc <= 5) rc_hist[2] += 1;
+            else if (rc <= 31) rc_hist[3] += 1;
+            else if (rc <= 1023) rc_hist[4] += 1;
+            else rc_hist[5] += 1;
+            /* top-N 最大块（简单插入排序维护） */
+            if (sz > top_sz[AURA_LEAK_TOPN - 1]) {
+                for (j = AURA_LEAK_TOPN - 1; j > 0 && sz > top_sz[j - 1]; j--) {
+                    top_sz[j] = top_sz[j - 1];
+                    top_ptr[j] = top_ptr[j - 1];
+                    top_rc[j] = top_rc[j - 1];
+                }
+                top_sz[j] = sz;
+                top_ptr[j] = (void *)((char *)h + sizeof(AuraMemHdr));
+                top_rc[j] = rc;
+            }
+        }
+    }
+
+    fprintf(stderr, "[aura] ==== ARC leak report (AURA_LEAK_REPORT=1) ====\n");
+    fprintf(stderr,
+        "[aura] live heap blocks: %lld (payload %lld MB)\n",
+        (long long)nblocks, (long long)(total / (1024 * 1024)));
+    fprintf(stderr,
+        "[aura] size buckets (blocks/MB): <=64:%lld/%lld <=256:%lld/%lld "
+        "<=1K:%lld/%lld <=8K:%lld/%lld <=64K:%lld/%lld <=1M:%lld/%lld >1M:%lld/%lld\n",
+        (long long)bucket_calls[0], (long long)(bucket_bytes[0] / (1024 * 1024)),
+        (long long)bucket_calls[1], (long long)(bucket_bytes[1] / (1024 * 1024)),
+        (long long)bucket_calls[2], (long long)(bucket_bytes[2] / (1024 * 1024)),
+        (long long)bucket_calls[3], (long long)(bucket_bytes[3] / (1024 * 1024)),
+        (long long)bucket_calls[4], (long long)(bucket_bytes[4] / (1024 * 1024)),
+        (long long)bucket_calls[5], (long long)(bucket_bytes[5] / (1024 * 1024)),
+        (long long)bucket_calls[6], (long long)(bucket_bytes[6] / (1024 * 1024)));
+    fprintf(stderr,
+        "[aura] rc histogram (blocks): rc=1:%lld rc=2:%lld rc=3-5:%lld "
+        "rc=6-31:%lld rc=32-1023:%lld rc>=1024:%lld\n",
+        (long long)rc_hist[0], (long long)rc_hist[1], (long long)rc_hist[2],
+        (long long)rc_hist[3], (long long)rc_hist[4], (long long)rc_hist[5]);
+    fprintf(stderr, "[aura] top-%d largest live blocks (ptr size rc):\n", AURA_LEAK_TOPN);
+    for (i = 0; i < AURA_LEAK_TOPN; i++) {
+        if (!top_ptr[i]) {
+            break;
+        }
+        fprintf(stderr, "   live %p %lld %ld\n", top_ptr[i],
+                (long long)top_sz[i], (long)top_rc[i]);
+    }
+    fprintf(stderr,
+        "[aura] arc stats: retain=%lld release=%lld freed=%lld "
+        "noop(era=%lld lit=%lld rgn=%lld boxed=%lld) bad_magic=%lld "
+        "rgn_reused=%lld mem_free_calls=%lld\n",
+        (long long)g_arc_retain_calls, (long long)g_arc_release_calls,
+        (long long)g_arc_freed, (long long)g_arc_noop_era,
+        (long long)g_arc_noop_lit, (long long)g_arc_noop_rgn,
+        (long long)g_arc_noop_boxed, (long long)g_arc_bad_magic,
+        (long long)g_arc_rgn_reused,
+        (long long)g_aura_mem_free_calls);
+    fflush(stderr);
+#else
+    fprintf(stderr, "[aura] ARC leak report: Windows-only (HeapWalk); skipped.\n");
+#endif
 }
 
 /// 复制一份以 NUL 结尾的字符串（受内存上限管辖）。
@@ -1498,13 +2465,12 @@ const char *aura_to_str(int64_t x) {
      * （见 argv 拷贝处的同类注释），若返回非对齐内部指针会被误判为装箱整数。
      * 槽内容只写一次、此后只读，可安全在多次调用间共享。 */
     if (x >= 0 && x < 1024) {
-        static char cache[1024][16];
-        static unsigned char ready[1024];
-        if (!ready[x]) {
-            snprintf(cache[x], 16, "%lld", (long long)x);
-            ready[x] = 1;
+        /* [R152/D5] 数组已提到文件作用域（g_int_cache），供 ARC 注册长生区间。 */
+        if (!g_int_cache_ready[x]) {
+            snprintf(g_int_cache[x], 16, "%lld", (long long)x);
+            g_int_cache_ready[x] = 1;
         }
-        return cache[x];
+        return g_int_cache[x];
     }
     /* 其余按实际位数分配（原先固定 64 字节，对绝大多数数字都过度分配）。 */
     char tmp[24];
@@ -1556,14 +2522,20 @@ int64_t aura_strlen(const char *s) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const char *aura_io_readLine(void) {
+    /* [P0/D5] 旧实现返回 static 缓冲 —— 连续两次 readLine 的结果会互相
+     * 覆盖（同 aura_env_get 的历史教训）。改为带头直堆分配：每次独立
+     * 副本、可被 ARC 管辖；EOF 仍返回 NULL。 */
     static char buf[4096];
     if (fgets(buf, sizeof(buf), stdin)) {
-        // 去掉末尾换行
         size_t len = strlen(buf);
         if (len > 0 && buf[len - 1] == '\n') {
             buf[len - 1] = '\0';
         }
-        return buf;
+        char *out = (char *)aura_mem_alloc_heap((int64_t)len + 1);
+        if (!out) return NULL;
+        if (len > 0) memcpy(out, buf, len);
+        out[len] = '\0';
+        return out;
     }
     return NULL;
 }
@@ -1682,9 +2654,11 @@ int64_t aura_string_charCodeAt(const char *s, int64_t idx) {
  * 未定义）→ llc 报 `use of undefined value '@String_fromCharCode'`。
  * 与 `charAt` 一样按字节值处理（Aura 的 Char 是单字节码元），
  * 并且**每次分配独立 2 字节**（不能返回静态缓冲，否则多次调用互相覆盖，
- * 同 `aura_env_get` 的教训）。 */
+ * 同 `aura_env_get` 的教训）。
+ * [P0/D5] 改为 `aura_mem_alloc_heap`（带 ARC 头、跨 RegionReset 存活的
+ * 直堆分配）—— 行为与旧 malloc 完全一致（独立副本），且纳入 ARC 管辖。 */
 const char *aura_string_fromCharCode(int64_t code) {
-    char *p = (char *)malloc(2);
+    char *p = (char *)aura_mem_alloc_heap(2);
     if (!p) return "";
     p[0] = (char)(code & 0xFF);
     p[1] = 0;
@@ -1703,14 +2677,13 @@ const char *aura_string_fromCharCode(int64_t code) {
  * 之后只读，可在多次调用间安全共享。
  */
 static const char *aura_char_cache(unsigned char c) {
-    static char slots[256][16];
-    static unsigned char ready[256];
-    if (!ready[c]) {
-        slots[c][0] = (char)c;
-        slots[c][1] = '\0';
-        ready[c] = 1;
+    /* [R152/D5] 数组已提到文件作用域（g_char_cache_slots），供 ARC 注册长生区间。 */
+    if (!g_char_cache_ready[c]) {
+        g_char_cache_slots[c][0] = (char)c;
+        g_char_cache_slots[c][1] = '\0';
+        g_char_cache_ready[c] = 1;
     }
-    return slots[c];
+    return g_char_cache_slots[c];
 }
 
 const char *aura_string_charAt(const char *s, int64_t idx) {
@@ -1779,14 +2752,18 @@ int aura_string_endsWith(const char *s, const char *suffix) {
 }
 
 const char *aura_string_replace(const char *s, const char *from, const char *to) {
-    static char buf[65536];
-    if (!s || !from) return s ? s : "";
+    /* [P0/D5] 早退路径旧为 `return s`（借用返回）—— 违反 D5 所有权契约
+     * （P2 发射器把调用结果当新持有）。改为新副本，语义不变。 */
+    if (!s || !from) return aura_dup_n(s ? s : "", s ? strlen(s) : 0);
     size_t from_len = strlen(from);
-    if (from_len == 0) return s ? s : "";
+    if (from_len == 0) return aura_dup_n(s, strlen(s));
     size_t to_len = strlen(to);
 
     size_t i = 0;
     size_t j = 0;
+    /* 栈上临时缓冲（旧为 static —— 重入/并发互相覆盖；64KB 栈帧在
+     * 64MB 栈预算内，且本函数为叶子调用）。 */
+    char buf[65536];
     /* ⚠️ 长度必须提到循环外：`i < strlen(s)` 会让每次迭代都重扫整个源串（O(n²)）。 */
     size_t slen = strlen(s);
     while (i < slen && j < sizeof(buf) - 1) {
@@ -1883,16 +2860,18 @@ int64_t aura_time_epochMillis(void) {
 }
 
 const char *aura_time_format(int64_t timestamp) {
-    static char buf[64];
+    /* [P0/D5] 旧实现返回 static buf[64] —— 多次调用互相覆盖（同
+     * aura_env_get 教训）。改为带头直堆分配：每次独立副本。 */
+    char tmp[64];
     time_t t = (time_t)timestamp;
     struct tm tm;
 #ifdef _WIN32
     localtime_s(&tm, &t);
 #else
-    localtime_r(&t, &tm);
+    localtime_r(&tm, &t);
 #endif
-    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
-    return buf;
+    strftime(tmp, sizeof(tmp), "%Y-%m-%d %H:%M:%S", &tm);
+    return aura_dup_n(tmp, strlen(tmp));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2189,41 +3168,21 @@ _Bool aura_concurrent_actorAlive(int32_t id) {
 // 通过 AOT FFI 直连 libc，获得接近原生的性能
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ARC 引用计数结构体（对象头部）
-typedef struct {
-    volatile int32_t refcount;
-    // 对象数据紧跟其后
-} AuraArcHeader;
-
-// ARC 引用计数 +1（原子操作）
-// ptr: 对象指针（指向 AuraArcHeader）
+// [P0/D2] 旧 ARC 入口（`Memory.arcIncrement/arcDecrement` 的 C 侧落点，
+// emit.rs 可对其发 atomicrmw）保持名字兼容，语义统一转发到上方门控
+// retain/release（D1 时代闸门 + D2b .rdata + D2c 区域防线 + magic）。
+//
+// ⚠️ 旧实现把 refcount 写在**负载首字节**（ptr 即头，AuraArcHeader），
+// 与 D2「头在负载前 16 字节」的布局不符，且无任何闸门 —— 对 .rdata
+// 字面量/静态缓存指针调用会直接写坏只读段或他人数据。原全仓零调用者；
+// 转发后行为由 D2 流程接管，原子性由 AURA_ARC_ATOMIC 统一控制（D6）。
+// aura_arc_decrement 返回递减后的引用计数（<=0 表示已释放）。
 void aura_arc_increment(const void *ptr) {
-    if (!ptr) return;
-    const AuraArcHeader *header = (const AuraArcHeader *)ptr;
-#ifdef _WIN32
-    // Windows: InterlockedIncrement
-    InterlockedIncrement((volatile LONG*)(&header->refcount));
-#else
-    // POSIX: __sync_fetch_and_add
-    __sync_fetch_and_add(&header->refcount, 1);
-#endif
+    aura_arc_retain(ptr);
 }
 
-// ARC 引用计数 -1，归零时释放（原子操作）
-void aura_arc_decrement(const void *ptr) {
-    if (!ptr) return;
-    AuraArcHeader *header = (AuraArcHeader *)ptr;
-    int32_t old_count;
-#ifdef _WIN32
-    old_count = InterlockedDecrement((volatile LONG*)(&header->refcount));
-#else
-    old_count = __sync_sub_and_fetch(&header->refcount, 1);
-#endif
-    if (old_count <= 0) {
-        // 引用计数归零，释放对象内存
-        // 注意：这里假设对象是通过 aura_malloc 分配的
-        aura_free(ptr);
-    }
+int aura_arc_decrement(const void *ptr) {
+    return aura_arc_release(ptr);
 }
 
 // 协程挂起（AOT 下为 no-op，VM 运行时处理）
@@ -2714,11 +3673,15 @@ const char *aura_env_get(const char *name) {
      * `Failed to read .phir file: 01_hello_world`。
      *
      * 泄漏量可忽略（环境变量读取次数极少），换来正确的值语义。
-     * def 参数是 Aura 侧 `Env.get(name, default)` 的默认值，这里不使用。 */
+     * def 参数是 Aura 侧 `Env.get(name, default)` 的默认值，这里不使用。
+     *
+     * [P0/D5] 改为 `aura_mem_alloc_heap`（带 ARC 头、不受区域路由影响的
+     * 直堆分配）：与旧 malloc 语义逐字节一致（每次独立副本、永生存活），
+     * 且 ARC 可管辖（P2 起槽位 release 能真正回收它）。 */
     const char *v = getenv(name ? name : "");
     if (!v) return "";
     size_t n = strlen(v) + 1;
-    char *p = (char *)malloc(n);
+    char *p = (char *)aura_mem_alloc_heap((int64_t)n);
     if (!p) return "";
     memcpy(p, v, n);
     return p;
@@ -2746,19 +3709,49 @@ const char *env_get(const char *name) {
 
 /* ── 极简动态列表：元素为字符串指针（AOT 下 List<T> 映射为 i8*） ── */
 
-typedef struct {
+struct AuraDynList {
     int64_t len;
     int64_t cap;
     const char **items;
-} AuraDynList;
+};
+
+/* [P0/P1] 元素入场券：元素统一为 i8* 句柄 —— Plan A 低位标记的装箱整数
+ * （(v<<1)|1，奇数）不参与 ARC；真实指针（字符串/列表/映射/类实例，均为
+ * aura_mem_alloc 产物带头）入表即 retain（容器成为共同持有者，D3）。
+ * aura_arc_retain 自带四道防线，外来/静态指针安全 no-op。 */
+static void aura_list_elem_retain(const char *s) {
+    aura_arc_retain(s);
+}
+
+/* [P0/P1] 元素退场：被容器移除/覆盖且所有权不转出时 release。
+ * 所有权**转出**的路径（listPop 返回值、removeAt 的语义由调用方接管）
+ * 不得调用本函数 —— 见各调用点注释。 */
+static void aura_list_elem_release(const char *s) {
+    aura_arc_release(s);
+}
 
 static AuraDynList *aura_dynlist_new(int64_t cap) {
+    /* [P0/D2] 结构体与 items 数组均经 aura_mem_alloc（带头、rc=1）——
+     * 列表自身所有权随返回值转移给调用者（D4），无需额外 retain。
+     * [P2] 结构体块打 LIST 标签：rc 归零时析构级联（释放 items 数组 +
+     * 逐元素 release），把「列表死亡 = 元素引用全部释放」变成机制。 */
     AuraDynList *l = (AuraDynList *)aura_mem_alloc((int64_t)sizeof(AuraDynList));
     if (!l) return NULL;
     if (cap < 4) cap = 4;
     l->len = 0;
     l->cap = cap;
     l->items = (const char **)aura_mem_alloc((int64_t)sizeof(const char *) * cap);
+    /* [P2] 结构体块打 LIST 标签：rc 归零时析构级联（释放 items 数组 +
+     * 逐元素 release），把「列表死亡 = 元素引用全部释放」变成机制。
+     * ⚠️ 仅堆时代可打：区域时代（g_rgn_active）的 aura_mem_alloc 返回
+     * region bump 指针，其前方 16B 是别的块的数据/区块元数据，写 flags
+     * 会直接破坏区域内存（2026-10-20 实测：前端类型名 "Boolean" 被踩成
+     * "Booleam" ⇒ .hat 全量偏移 ⇒ 产物缺符号）。区域对象由 RegionReset
+     * 整块回收，无需逐对象析构。 */
+    if (l->items && !g_rgn_active) {
+        AuraMemHdr *lh = (AuraMemHdr *)((char *)l - sizeof(AuraMemHdr));
+        lh->h.flags = (uint16_t)((lh->h.flags & (uint16_t)~AURA_MEM_TAG_MASK) | AURA_MEM_TAG_LIST);
+    }
     return l;
 }
 
@@ -2771,6 +3764,19 @@ static void aura_dynlist_push(AuraDynList *l, const char *s) {
         if (!ni) return;
         l->items = ni;
         l->cap = ncap;
+    }
+    /* [P1] 入场 retain（装箱整数/字面量/静态指针被 retain 内部防线跳过）。
+     * NULL 归一为 ""（.rdata 字面量，永生）—— 无需 retain。
+     *
+     * ⚠️ 装箱检查内联在调用点：Plan A 下 range 类列表的元素绝大多数是
+     * 装箱整数（自举后端实测 3.68 亿次 retain 调用中 ~89% 是装箱跳过），
+     * 而本运行时按 -O0 编译（compile_std_cffi 无 -O）⇒ 每次调用都是真实
+     * 函数调用。内联这道检查把 retain 调用量降两个数量级；真实指针交给
+     * retain 内部的时代/.rdata/magic 防线（语义不变）。 */
+    if (s && !((uintptr_t)s & 1)) {
+        aura_arc_retain(s);
+    } else {
+        g_arc_noop_boxed++;
     }
     l->items[l->len++] = s ? s : "";
 }
@@ -2917,9 +3923,11 @@ int64_t aura_lang_std_String_countChar(const char *s, const char *ch) {
 }
 
 const char *aura_lang_std_String_substringBefore(const char *s, const char *sep) {
-    if (!s || !sep || !sep[0]) return s ? s : "";
+    /* [P0/D5] 未命中分隔符时旧为 `return s`（借用返回）—— 违反 D5 所有
+     * 权契约。改为新副本，语义不变。 */
+    if (!s || !sep || !sep[0]) return aura_dup_n(s ? s : "", s ? strlen(s) : 0);
     const char *p = strstr(s, sep);
-    if (!p) return s;
+    if (!p) return aura_dup_n(s, strlen(s));
     return aura_substr_dup(s, (size_t)(p - s));
 }
 
@@ -2936,12 +3944,24 @@ const char *aura_lang_std_String_substringAfter(const char *s, const char *sep) 
 }
 
 const char *aura_lang_std_String_padStart(const char *s, int64_t width, const char *pad) {
+    /* [P0/D5] 三处修正：
+     *  ① 旧实现写 static buf[4096] 后返回它 —— 多次调用互相覆盖
+     *     （同 aura_env_get 的历史教训）；
+     *  ② 旧实现在 `sl >= width` / `pl == 0` 时直接 `return s`（借用返回）
+     *     —— 违反 D5「返回的 String 一律是新持有或永生」，P2 发射器会把
+     *     结果当新持有存入槽位 ⇒ rc 少 1 ⇒ 提前释放；
+     *  ③ 统一改为 aura_dup_n 新副本（区域时代进区域、后端进堆，路由正确）。
+     * 语义不变（值语义），仅分配位置与所有权契约修正。 */
     if (!s) return "";
     size_t sl = strlen(s);
-    if ((int64_t)sl >= width) return s;
+    if ((int64_t)sl >= width) {
+        return aura_dup_n(s, sl);
+    }
     size_t pl = pad ? strlen(pad) : 0;
-    if (pl == 0) return s;
-    static char buf[4096];
+    if (pl == 0) {
+        return aura_dup_n(s, sl);
+    }
+    char buf[4096];
     size_t need = (size_t)width;
     if (need >= sizeof(buf)) need = sizeof(buf) - 1;
     size_t fill = need - sl;
@@ -2952,7 +3972,7 @@ const char *aura_lang_std_String_padStart(const char *s, int64_t width, const ch
     }
     memcpy(buf + fill, s, sl);
     buf[need] = '\0';
-    return buf;
+    return aura_dup_n(buf, need);
 }
 
 /** 按分隔符切分 → AuraDynList（元素为堆分配的 C 字符串） */
@@ -3057,12 +4077,12 @@ static const char *aura_strdup(const char *s) {
     return aura_mem_strdup(s);
 }
 
-typedef struct {
+struct AuraDynMap {
     int64_t len;
     int64_t cap;
     const char **keys;
     const char **vals;
-} AuraDynMap;
+};
 
 static AuraDynMap *aura_map_new(int64_t cap) {
     AuraDynMap *m = (AuraDynMap *)aura_mem_alloc((int64_t)sizeof(AuraDynMap));
@@ -3072,7 +4092,69 @@ static AuraDynMap *aura_map_new(int64_t cap) {
     m->cap = cap;
     m->keys = (const char **)aura_mem_alloc((int64_t)sizeof(const char *) * cap);
     m->vals = (const char **)aura_mem_alloc((int64_t)sizeof(const char *) * cap);
+    /* [P2] 打 MAP 标签：rc 归零时析构级联（释放 keys/vals 数组 + 逐元素）。
+     * 同 dynlist_new：仅堆时代可打（区域时代无头，写 flags = 破坏区域内存）。 */
+    if (m->keys && m->vals && !g_rgn_active) {
+        AuraMemHdr *mh = (AuraMemHdr *)((char *)m - sizeof(AuraMemHdr));
+        mh->h.flags = (uint16_t)((mh->h.flags & (uint16_t)~AURA_MEM_TAG_MASK) | AURA_MEM_TAG_MAP);
+    }
     return m;
+}
+
+/* [P2] 标签块析构级联：rc 归零时由 aura_arc_release 调用（aura_mem_free
+ * 之前）。语义 = D3「容器消失 ⇒ 其持有的元素引用全部释放」：
+ *   · LIST：逐元素 release，再释放 items 数组；
+ *   · MAP ：逐键/值 release，再释放两个数组；
+ *   · ENV ：闭包 env（布局 { ptr fn; i64 count; caps… }），逐捕获项
+ *           release（非指针/装箱值被 retain 内部防线跳过）。
+ * 级联可递归（列表的列表），深度 = 结构嵌套深度（编译器 IR 的 DAG
+ * 父子边是拥有边、owner 反指按 D7 不 retain ⇒ 不成环）。 */
+static void aura_arc_destroy_tagged(void *p, uint16_t tag) {
+    if (!p) return;
+    if (tag == AURA_MEM_TAG_LIST) {
+        AuraDynList *l = (AuraDynList *)p;
+        int64_t i;
+        if (l->items) {
+            for (i = 0; i < l->len; i++) {
+                aura_arc_release(l->items[i]);
+            }
+            aura_mem_free((void *)l->items);
+        }
+    } else if (tag == AURA_MEM_TAG_MAP) {
+        AuraDynMap *m = (AuraDynMap *)p;
+        int64_t i;
+        if (m->keys && m->vals) {
+            for (i = 0; i < m->len; i++) {
+                aura_arc_release(m->keys[i]);
+                aura_arc_release(m->vals[i]);
+            }
+            aura_mem_free((void *)m->keys);
+            aura_mem_free((void *)m->vals);
+        }
+    } else if (tag == AURA_MEM_TAG_ENV) {
+        /* 布局：{ ptr fn; i64 count; T1; T2; … } —— count 在 +8。 */
+        int64_t count = *(const int64_t *)((const char *)p + 8);
+        int64_t i;
+        for (i = 0; i < count; i++) {
+            const char *cap = *(const char *const *)((const char *)p + 16 + i * 8);
+            aura_arc_release(cap);
+        }
+    }
+}
+
+/// [P2] 闭包 env 分配（发射器 AURA_ARC=1 时使用）：
+/// 分配 `{ ptr fn; i64 count; caps… }` 布局的块、写 count、打 ENV 标签。
+/// 旧路径（AURA_ARC 未设）保持 `aura_malloc` + 手写字段，产物逐字节不变。
+/// ⚠️ 仅堆时代打标签（区域时代 aura_mem_alloc 无 16B 头，见 dynlist_new）。
+void *aura_arc_alloc_env(int64_t size, int64_t count) {
+    char *raw = (char *)aura_mem_alloc(size);
+    if (!raw) return NULL;
+    *(int64_t *)(raw + 8) = count;
+    if (!g_rgn_active) {
+        AuraMemHdr *h = (AuraMemHdr *)((char *)raw - sizeof(AuraMemHdr));
+        h->h.flags = (uint16_t)((h->h.flags & (uint16_t)~AURA_MEM_TAG_MASK) | AURA_MEM_TAG_ENV);
+    }
+    return raw;
 }
 
 const void *aura_lang_std_Collections_mutableMapOf(void) {
@@ -3083,13 +4165,18 @@ const void *aura_lang_std_Collections_emptyMap(void) {
     return (const void *)aura_map_new(4);
 }
 
-/** 就地写入（Map 为可变堆对象，调用方拿到的是同一指针） */
+/** 就地写入（Map 为可变堆对象，调用方拿到的是同一指针）
+ * [P1] 覆盖语义：旧值所有权被容器放弃 ⇒ release 旧值 + retain 新值；
+ * 键插入时经 aura_strdup 新建（rc=1，所有权随存储转移）无需 retain；
+ * 值插入（新键）同样 retain（与键对称，D3 容器持有 +1）。 */
 void aura_lang_std_Collections_mapSet(const void *map, const char *key, const void *value) {
     AuraDynMap *m = (AuraDynMap *)map;
     if (!m || !key) return;
     const char *v = value ? (const char *)value : "";
     for (int64_t i = 0; i < m->len; i++) {
         if (m->keys[i] && strcmp(m->keys[i], key) == 0) {
+            aura_list_elem_release(m->vals[i]);
+            aura_list_elem_retain(v);
             m->vals[i] = v;
             return;
         }
@@ -3106,6 +4193,7 @@ void aura_lang_std_Collections_mapSet(const void *map, const char *key, const vo
         m->cap = ncap;
     }
     m->keys[m->len] = aura_strdup(key);
+    aura_list_elem_retain(v);
     m->vals[m->len] = v;
     m->len++;
 }
@@ -3197,6 +4285,9 @@ const void *aura_lang_std_Collections_mapValues(const void *map) {
     return (const void *)out;
 }
 
+/* [P1] ARC 化：键/值入表均 retain（容器成为共同持有者）；覆盖旧值时
+ * 先 release 旧值（所有权被容器放弃，D3）。键不复制、直接 retain 后存
+ * （保留原 ABI 行为，仅补引用计数）。 */
 const void *aura_lang_std_Collections_hashMapPut(const void *map, const void *key, const void *value) {
     AuraDynMap *m = (AuraDynMap *)map;
     if (!m) {
@@ -3207,6 +4298,8 @@ const void *aura_lang_std_Collections_hashMapPut(const void *map, const void *ke
     const char *v = value ? (const char *)value : "";
     for (int64_t i = 0; i < m->len; i++) {
         if (m->keys[i] && strcmp(m->keys[i], k) == 0) {
+            aura_list_elem_release(m->vals[i]);
+            aura_list_elem_retain(v);
             m->vals[i] = v;
             return (const void *)m;
         }
@@ -3220,22 +4313,32 @@ const void *aura_lang_std_Collections_hashMapPut(const void *map, const void *ke
             nk[i] = m->keys[i];
             nv[i] = m->vals[i];
         }
+        /* [P2] 旧数组归还（旧实现在此处直接覆盖指针 ⇒ 每次翻倍泄漏一份
+         * 旧 keys/vals；map 扩容频繁时是可观滞留）。 */
+        aura_mem_free((void *)m->keys);
+        aura_mem_free((void *)m->vals);
         m->keys = nk;
         m->vals = nv;
         m->cap = ncap;
     }
+    aura_list_elem_retain(k);
+    aura_list_elem_retain(v);
     m->keys[m->len] = k;
     m->vals[m->len] = v;
     m->len++;
     return (const void *)m;
 }
 
-/** 列表按下标写入（越界则追加） */
+/** 列表按下标写入（越界则追加）
+ * [P1] 覆盖语义：旧值所有权被容器放弃 ⇒ release 旧值 + retain 新值
+ *（D3/D4 字段存/列表 set 规则）；越界追加路径经 push 已 retain。 */
 void aura_lang_std_Collections_listSet(const void *list, int64_t idx, const void *value) {
     AuraDynList *l = (AuraDynList *)list;
     if (!l) return;
     const char *v = value ? (const char *)value : "";
     if (idx >= 0 && idx < l->len) {
+        aura_list_elem_release(l->items[idx]);
+        aura_list_elem_retain(v);
         l->items[idx] = v;
     } else {
         aura_dynlist_push(l, v);
@@ -3306,10 +4409,16 @@ const void *aura_lang_std_Collections_listAppend(const void *list, const void *v
 /* listRemoveAt(list, idx)：删除下标 idx 处的元素并左移后续元素（len--）。
  * 2026-10-02 补齐：HIR 把 `remove(i)`/`removeAt(i)` 重路由到 `__list_remove_at`
  * （见 codegen/hir.rs），而 AOT 侧此前没有实现 → 自举编译器链接期
- * `undefined symbol: __list_remove_at`（实测 PhotonHatCompile 驱动构建）。 */
+ * `undefined symbol: __list_remove_at`（实测 PhotonHatCompile 驱动构建）。
+ *
+ * [P1] 被移除元素的所有权处置：本函数返回**列表**而非被移除元素 ⇒ 元素
+ * 所有权被容器放弃且无转出对象 ⇒ 容器职责 release（D3「从容器移除时持有者
+ * 负责 release」）。对照：listPop 返回被弹出的元素 ⇒ 所有权转出给调用方，
+ * C 侧**不得** release（见该函数注释）。 */
 const void *aura_lang_std_Collections_listRemoveAt(const void *list, int64_t idx) {
     AuraDynList *l = (AuraDynList *)list;
     if (!l || idx < 0 || idx >= l->len) return (const void *)l;
+    aura_list_elem_release(l->items[idx]);
     for (int64_t i = idx; i + 1 < l->len; i++) {
         l->items[i] = l->items[i + 1];
     }
@@ -3390,7 +4499,11 @@ const void *aura_lang_std_Collections_take(const void *list, int64_t n) {
 }
 
 /** list.pop()：弹出并返回末尾元素（AOT 下列表元素为 i8* 句柄）。
- *  空列表返回 NULL；返回值经 getAt 的逆转换还原为原类型。 */
+ *  空列表返回 NULL；返回值经 getAt 的逆转换还原为原类型。
+ *
+ *  [P1] 所有权**转出**：返回值即被弹出元素，调用方槽位成为新持有者
+ *  （D4「函数返回值：所有权随返回值转移给调用者」）⇒ C 侧**不** release
+ *  （与 listRemoveAt 的处置相反，那里所有权无转出对象）。 */
 const void *aura_lang_std_Collections_listPop(const void *list) {
     AuraDynList *l = (AuraDynList *)list;
     if (!l || l->len <= 0) return (const void *)0;
@@ -4912,7 +6025,9 @@ const char *aura_io_readFile(const char *path) {
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (size < 0) { fclose(f); return NULL; }
-    char *buf = (char *)malloc(size + 1);
+    /* [P0/D5] 带头直堆分配（旧为裸 malloc）：文件内容是 String，须可被
+     * ARC 管辖；语义不变（每次独立副本）。 */
+    char *buf = (char *)aura_mem_alloc_heap((int64_t)size + 1);
     if (!buf) { fclose(f); return NULL; }
     size_t read = fread(buf, 1, size, f);
     fclose(f);
