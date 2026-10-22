@@ -45,6 +45,25 @@ class InstructionSelector {
     /// ⇒ 整条 Phase C 退化为 O(N²) 并持续吃内存。键就是整数 ID，直接下标即可。
     private var nodeMapIds: List<Int> = arrayListOf<Int>()
 
+    /// [P4-1/L2] 索引基准（本函数据最小 vid / blockId）。
+    ///
+    /// ⚠️ **LIR 的 vid 与 blockId 是程序级单调递增的**（`LirProgram.valueCount` /
+    /// `blockCount`，见 `Lir.aura:284/287`；`LirFunction` 上没有计数器，
+    /// `v.id = this.valueCount`）。旧实现直接用绝对 id 当下标
+    /// （`while (size <= id) add(-1)`），于是**第 k 个函数建的表长度 ≈ 此刻的全局 id 数**
+    /// ⇒ 全程序 O(n²)：自举实测记账表合计 **1441MB**（`nodeMapIds`）+ **344MB**（`labelNames`），
+    /// 同时带来约 1.8 亿次 append。
+    ///
+    /// 修法：`selectFunction` 入口算基准，主表按 `id - base` 下标（表长只与**本函数**规模有关）；
+    /// 少数落在基准之外的 id 走下面两张**越界侧表**（线性查，数量极少），
+    /// 语义与旧实现逐位等价 —— 这是产物能保持逐字节一致的关键。
+    private var vidBase: Int = 0
+    private var blockBase: Int = 0
+    private var nodeOverIds: List<Int> = arrayListOf<Int>()
+    private var nodeOverDag: List<Int> = arrayListOf<Int>()
+    private var labelOverIds: List<Int> = arrayListOf<Int>()
+    private var labelOverNames: List<String> = arrayListOf<String>()
+
     /// 当前内存链头节点 ID（-1 表示无内存依赖）。
     private var curChain: Int = -1
 
@@ -990,10 +1009,66 @@ class InstructionSelector {
     // ── 函数级选择 ──
 
     /// 选择单个函数的指令（S1.2 修复：通过 LirProgram 获取真实块）。
+    /// [P4-1/L2] 本函数块 id 的最小值（无块时 0）。
+    private fun computeBlockBase(func: LirFunction): Int {
+        var base: Int = -1
+        var i: Int = 0
+        // [R161] 形参 vid 一并纳入基准（它们在本函数块之前分配，id 可能更小）。
+        // 这里能安全读 `func.params` 的前提是 Lowering 不再把字符串赋给该字段。
+        val ps: List<Int> = func.params
+        while (i < ps.size) {
+            val v: Int = ps[i]
+            if (v >= 0 && (base < 0 || v < base)) { base = v }
+            i = i + 1
+        }
+        i = 0
+        while (i < func.blocks.size) {
+            val b: Int = func.blocks[i]
+            if (b >= 0 && (base < 0 || b < base)) { base = b }
+            i = i + 1
+        }
+        if (base < 0) { base = 0 }
+        return base
+    }
+
+    /// [P4-1/L2] 本函数值 id 的最小值（各块 phi/instr/term）。
+    /// 形参 vid 在本函数块之前分配、可能更小 —— 它们会落进越界侧表（正确性由侧表保证）；
+    /// 不在这里读 `func.params`（R160 实测该访问会让驱动段错误）。
+    private fun computeVidBase(func: LirFunction, src: LirProgram): Int {
+        var base: Int = -1
+        var i: Int = 0
+        while (i < func.blocks.size) {
+            val blk: LirBlock = src.blockOf(func.blocks[i])
+            var j: Int = 0
+            while (j < blk.phis.size) {
+                val v: Int = blk.phis[j]
+                if (v >= 0 && (base < 0 || v < base)) { base = v }
+                j = j + 1
+            }
+            j = 0
+            while (j < blk.instrs.size) {
+                val v: Int = blk.instrs[j]
+                if (v >= 0 && (base < 0 || v < base)) { base = v }
+                j = j + 1
+            }
+            if (blk.term >= 0 && (base < 0 || blk.term < base)) { base = blk.term }
+            i = i + 1
+        }
+        if (base < 0) { base = 0 }
+        return base
+    }
+
     fun selectFunction(func: LirFunction, src: LirProgram): Unit {
         this.funcName = func.name
         this.labelCount = 0
         this.labelNames = arrayListOf<String>()
+        // [P4-1/L2] 索引基准与本函数越界侧表的复位（必须先于任何 register/lookup）。
+        this.vidBase = this.computeVidBase(func, src)
+        this.blockBase = this.computeBlockBase(func)
+        this.nodeOverIds = arrayListOf<Int>()
+        this.nodeOverDag = arrayListOf<Int>()
+        this.labelOverIds = arrayListOf<Int>()
+        this.labelOverNames = arrayListOf<String>()
         this.paramIndex = 0
         this.constRegCounter = 0
         this.phiPreds = ""
@@ -3948,8 +4023,22 @@ class InstructionSelector {
     /// 注册块 ID → 标签名映射。
     private fun registerLabel(blockId: Int, label: String): Unit {
         if (blockId < 0) { return }
-        while (this.labelNames.size <= blockId) { this.labelNames.add("") }
-        this.labelNames[blockId] = label
+        val idx: Int = blockId - this.blockBase
+        if (idx < 0) {
+            var k: Int = 0
+            while (k < this.labelOverIds.size) {
+                if (this.labelOverIds[k] == blockId) {
+                    this.labelOverNames[k] = label
+                    return
+                }
+                k = k + 1
+            }
+            this.labelOverIds.add(blockId)
+            this.labelOverNames.add(label)
+            return
+        }
+        while (this.labelNames.size <= idx) { this.labelNames.add("") }
+        this.labelNames[idx] = label
     }
 
     /// 查找块 ID 对应的标签名。
@@ -3961,9 +4050,18 @@ class InstructionSelector {
     /// 兜底名恰好与 `selectBlock` 现在的命名一致，所以此前“看起来能用”，
     /// 但任何命名约定变化都会立刻退化成标签解析失败。
     private fun lookupLabel(blockId: Int): String {
-        if (blockId >= 0 && blockId < this.labelNames.size) {
-            val s: String = this.labelNames[blockId]
+        val idx: Int = blockId - this.blockBase
+        if (blockId >= 0 && idx >= 0 && idx < this.labelNames.size) {
+            val s: String = this.labelNames[idx]
             if (s != "") { return s }
+        }
+        var k: Int = 0
+        while (k < this.labelOverIds.size) {
+            if (this.labelOverIds[k] == blockId) {
+                val so: String = this.labelOverNames[k]
+                if (so != "") { return so }
+            }
+            k = k + 1
         }
         return "bb" + LirUtils.toStr(blockId)
     }
@@ -4051,9 +4149,28 @@ class InstructionSelector {
     /// `list.set(i, v)` 亦不可靠；`list[i]` / `list[i] = v` 才是可用路径。
     private fun registerNode(lirId: Int, dagId: Int): Unit {
         if (lirId < 0) { return }
-        while (this.nodeMapIds.size <= lirId) { this.nodeMapIds.add(-1) }
-        if (this.nodeMapIds[lirId] < 0) {
-            this.nodeMapIds[lirId] = dagId
+        val idx: Int = lirId - this.vidBase
+        if (idx < 0) {
+            // 越界（不在本函数 blocks 范围内）：走侧表，保持旧语义。
+            // ⚠️ 侧表查找必须**内联**：把 `List<Int>` 当参数传给本类方法在该 AOT
+            // 路径下不可靠（R160 实测直接段错误）。
+            var k: Int = 0
+            while (k < this.nodeOverIds.size) {
+                if (this.nodeOverIds[k] == lirId) { return }
+                k = k + 1
+            }
+            this.nodeOverIds.add(lirId)
+            this.nodeOverDag.add(dagId)
+            val pn0: Int = this.phiClaimTarget(lirId)
+            if (pn0 >= 0 && dagId != pn0) {
+                this.slotAliasFrom.add(dagId)
+                this.slotAliasTo.add(pn0)
+            }
+            return
+        }
+        while (this.nodeMapIds.size <= idx) { this.nodeMapIds.add(-1) }
+        if (this.nodeMapIds[idx] < 0) {
+            this.nodeMapIds[idx] = dagId
             // P372：该 vid 若被某 phi 认领，其**定义节点**的栈槽别名到
             // phi 节点的槽（定义写 = phi 写；MOV 退化为自拷贝）。
             val phiNode: Int = this.phiClaimTarget(lirId)
@@ -4066,8 +4183,17 @@ class InstructionSelector {
 
     /// 查找 LIR ID 对应的 DAG ID（O(1)）。
     private fun lookupNode(lirId: Int): Int {
-        if (lirId < 0 || lirId >= this.nodeMapIds.size) { return -1 }
-        return this.nodeMapIds[lirId]
+        if (lirId < 0) { return -1 }
+        val idx: Int = lirId - this.vidBase
+        if (idx >= 0 && idx < this.nodeMapIds.size) {
+            return this.nodeMapIds[idx]
+        }
+        var k: Int = 0
+        while (k < this.nodeOverIds.size) {
+            if (this.nodeOverIds[k] == lirId) { return this.nodeOverDag[k] }
+            k = k + 1
+        }
+        return -1
     }
 
     /// 生成下一个临时值计数器。
