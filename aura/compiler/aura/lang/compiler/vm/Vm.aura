@@ -3989,12 +3989,23 @@ import aura.lang.compiler.serialize.AucLoader
         if (this.argCountOf() >= 2) { slot = this.argStrOf(1) }
         var catchType: String = ""
         if (this.argCountOf() >= 3) { catchType = this.argStrOf(2) }
+        if (Env.get("AURA_VM_EXCDIAG", "") == "1" && this.excDiagN < 24) {
+            this.excDiagN = this.excDiagN + 1
+            println("[DBG-HANDLER] push target=" + target + " slot=" + slot + " catch=" + catchType
+                    + " depth=" + this.handlerStack.size()
+                    + " peekAfter=[" + this.handlerStack.peek() + "]")
+        }
         this.handlerStack.push(target + "|" + toStr(this.ip) + "|" + slot + "|" + catchType
             + "|" + toStr(this.currentFrame))
     }
 
+    /// [R173 诊断] 异常路径有界诊断计数。
+    private var excDiagN: Int = 0
+
     private fun popHandler(): Unit {
-        if (this.handlerStack.size() > 0) {
+        // [R173] 经 hasHandler()（peek 通道）判定 —— 同 throwException，
+        // 绕开 Int 调用返回值错译家族。
+        if (this.handlerStack.hasHandler()) {
             this.handlerStack.pop()
         }
     }
@@ -4023,9 +4034,18 @@ import aura.lang.compiler.serialize.AucLoader
 
     private fun throwException(): Unit {
         val ex: Any = if (this.stack.stackDepth() > 0) this.stack.pop() else "Exception"
+        if (Env.get("AURA_VM_EXCDIAG", "") == "1" && this.excDiagN < 24) {
+            this.excDiagN = this.excDiagN + 1
+            println("[DBG-THROW] ex=[" + VmOps.toStrAny(ex) + "] tn=" + VmOps.typeName(ex)
+                    + " szDbg=[" + this.handlerStack.sizeDbg() + "] peek=[" + this.handlerStack.peek() + "]")
+        }
 
         // 自内向外逐层过滤（P1.4 多级过滤：内层不匹配则继续外层）
-        while (this.handlerStack.size() > 0) {
+        // [R173] 循环驱动改走 hasHandler()（peek 通道）：size() 的 Int 调用
+        // 返回值在大函数（throwException）里是错译家族成员，读回坏值 ⇒
+        // 循环整段跳过 ⇒ handler 明明在栈里却报 "Uncaught exception"
+        //（07-exception-* 三例根因）。
+        while (this.handlerStack.hasHandler()) {
             val handler: String = this.handlerStack.peek()
             this.handlerStack.pop()
             val parts: List<String> = VmOps.split(handler, "|")
@@ -4036,7 +4056,12 @@ import aura.lang.compiler.serialize.AucLoader
             val slot: Int = VmOps.toI32(parts[2])
             val catchType: String = parts[3]
             val frame: Int = VmOps.toI32(parts[4])
-            if (!this.exceptionMatches(ex, catchType)) {
+            val matched: Boolean = this.exceptionMatches(ex, catchType)
+            if (Env.get("AURA_VM_EXCDIAG", "") == "1" && this.excDiagN < 24) {
+                this.excDiagN = this.excDiagN + 1
+                println("[DBG-THROW] try catch=[" + catchType + "] matched=" + toStr(matched))
+            }
+            if (!matched) {
                 continue
             }
             // 帧截断：丢弃 handler 之上（含当前）的调用帧，恢复到 handler 帧

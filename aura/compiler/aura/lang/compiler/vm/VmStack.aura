@@ -144,7 +144,26 @@ class VmStrStack {
     }
 
     fun size(): Int {
-        return this.d.size()
+        // [R173] 可靠模式（同 peek/pop 的先入局部）：`return this.d.size()`
+        // 的直接返回形态是已知错译家族（见 vmSlotAt [R19] 注释）——
+        // 实测 JIT 宿主异常处理 pushHandlerAt 已 push、throwException 处
+        // size() 读回 0/坏值 ⇒ while 循环整段跳过 ⇒ "Uncaught exception"
+        //（07-exception-* 三例的根因）。先落局部再返回。
+        val n: Int = this.d.size()
+        return n
+    }
+
+    /// [R173 诊断] 经 String 通道回报 size（String 返回路径已证可靠）。
+    fun sizeDbg(): String {
+        val n: Int = this.d.size()
+        return "n=" + n
+    }
+
+    /// [R173] 处理器栈非空判定 —— 经 peek() 通道（String 返回路径已证可靠，
+    /// 绕开大函数里 Int 调用返回值的错译家族）。记录恒含 `|`，永非空串。
+    fun hasHandler(): Boolean {
+        val v: String = this.peek()
+        return v != ""
     }
 
     fun clear(): Unit {
