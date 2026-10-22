@@ -1940,9 +1940,16 @@ import aura.lang.compiler.serialize.AucLoader
         // 掷骰死：实测 29 字符 "aura.lang.std.Collections.set" 挂起于本点。
         var qual24: Boolean = true
         if (argc < -1000) { qual24 = false }
+        // [R167] 字面量接收者先落局部：`"aura.lang.".charCodeAt(qc)` 的
+        // 接收者是指向 .rdata 的字符串字面量，Photon 后端在这条调用点上
+        // （大函数 + 深调用栈）会把它译成野指针 ⇒ 首轮比较即 0xC0000005。
+        // 同一表达式在小函数里是好的（build/vmhost-src/litprobe.aura 实测
+        // 逐字符正确）⇒ 是后端布局敏感的已知缺陷（P5-①），不是本段语义问题。
+        // 落成局部后接收者走栈槽，实测稳定。
+        val qref: String = "aura.lang."
         var qc: Int = 0
         while (qc < 10) {
-            if (funcName0.charCodeAt(qc) != "aura.lang.".charCodeAt(qc)) {
+            if (funcName0.charCodeAt(qc) != qref.charCodeAt(qc)) {
                 qual24 = false
                 qc = 10
             }

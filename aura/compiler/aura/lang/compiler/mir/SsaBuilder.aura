@@ -4891,6 +4891,41 @@ class SsaBuilder {
                 }
             }
         }
+        // 1.5) **`Memory` 单例的内置操作 → 运行库 `Memory_*`**
+        //
+        // `Memory.free(addr)` / `Memory.alloc(n)` / `Memory.write*(...)` 的接收者是
+        // **单例模块名**（不是实例）：`buildCall` 会把 kids[0] 这个占位接收者
+        // 丢弃，方法名保持裸名（`free` / `alloc` / …），最终由 ISel 的
+        // 「首参 Long」规则映射到 `Memory_free` / `Memory_alloc` / …
+        //
+        // 但这个裸名若**先**掉进下面第 2 步「隐式 this」，就会被错误地限定到
+        // **当前所在类**的同名方法上。实测（R167）：
+        //   `Allocator.free(addr)` 体内的 `Memory.free(addr)`
+        //     → `@call @Allocator_free(@addr, @mem)`  ← 自调用
+        //     → 无限递归 → 0xC00000FD（栈溢出）
+        // 后果是**任何包含 Allocator 的 AOT 产物**在第一次 malloc/free 就死：
+        // VM 宿主（VmRunner → AucReader → readFileToBuffer）重建后必崩，
+        // 于是 VM 侧一切修复都无法验证（本轮的结构性阻塞）。
+        //
+        // 修法：接收者是单例 `Memory` 且方法名属于「内存内置族」时，直接给出
+        // 运行库符号。表与 `InstructionSelection.resolveMethodSymbol` 的
+        // 「`name == "free"/"alloc"/…" && recvTy == "Long"」一组严格对齐 ——
+        // 那里能映射的这里才映射，避免造出 runtime 里不存在的 `Memory_*`。
+        if (kCount >= 1) {
+            val r0: Int = HirUtils.hirKidsAt(kids, 0)
+            if (src.kindOf(r0) == "HirVar" && src.textOf(r0) == "Memory") {
+                if (bare == "free") { return "Memory_free" }
+                if (bare == "alloc") { return "Memory_alloc" }
+                if (bare == "write") { return "Memory_write" }
+                if (bare == "read") { return "Memory_read" }
+                if (bare == "write16") { return "Memory_write16" }
+                if (bare == "read16") { return "Memory_read16" }
+                if (bare == "write32") { return "Memory_write32" }
+                if (bare == "read32") { return "Memory_read32" }
+                if (bare == "write64") { return "Memory_write64" }
+                if (bare == "read64") { return "Memory_read64" }
+            }
+        }
         // 2) **隐式 `this`**：无接收者可判时（`hexDigit(hi)` 这种类内裸调用），
         //    当前方法所属类若声明了该方法就用它 —— 私有 helper 的常规形态。
         //
