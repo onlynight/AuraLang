@@ -1,8 +1,10 @@
 ﻿# langtest-3modes.ps1 -- tests/language-test/*.aura × 三种执行模式矩阵
 #
 #   模式 A：Aura VM     —— 种子 VM 编译并解释（aura.exe run）
-#   模式 B：Photon JIT  —— 编译成 .auc，交 Photon 原生宿主 jit_vmhost.exe 执行
-#                          （宿主内建 JitBackend；AURA_VM_AUC 指定字节码）
+#   模式 B：Photon JIT  —— 编译成 .auc，交 Photon 原生宿主执行
+#                          （默认 build/hat-vmhost/current.exe，槽交换喂入；
+#                            -JitHost 可换 build/jit-verify/jit_vmhost.exe，
+#                            但那条路是 P5-④ 不承诺项，见下方注释）
 #   模式 C：Photon AOT  —— HAT 驱动 PhotonHatCompile.exe 编译成原生 exe 后执行
 #
 # 判据（与仓库既有口径一致）：退出码 0 且未超时 = PASS。
@@ -15,7 +17,9 @@
 param(
   [string]$Only = '',
   [string]$Tag  = 'lt3',
-  [int]$TimeoutSecs = 180
+  [int]$TimeoutSecs = 180,
+  [string]$JitHost = '',
+  [bool]$SlotSwap = $true
 )
 $ErrorActionPreference = 'Continue'
 $Root   = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -24,7 +28,14 @@ $env:Path = "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc\bin;$env:
 
 $Seed   = Join-Path $Root 'rust\target\release\aura.exe'
 $Driver = Join-Path $Root 'build\hat-native\PhotonHatCompile.exe'
-$JitHst = Join-Path $Root 'build\jit-verify\jit_vmhost.exe'
+# ⚠️ 2026-10-22：默认 JIT 宿主改为**纯 Aura VM 宿主** build/hat-vmhost/current.exe。
+# 旧默认 build/jit-verify/jit_vmhost.exe 把 `.auc` 与 JitBackend 闭包装在同一进程，
+# 属 docs/pure_aura_jit/09 的 **P5-④「不承诺」**项：自检 13/13 全绿，但 `.auc`
+# 分派实参被 P5-① 布局腐坏，任何用例（含 4 行 hello）都崩 —— 拿它出数没有意义。
+# 纯宿主不认 AURA_VM_AUC，走槽交换（-SlotSwap，默认开）。
+$JitHst = Join-Path $Root 'build\hat-vmhost\current.exe'
+if ($JitHost -ne '') { $JitHst = (Resolve-Path $JitHost).Path }
+$AucSlot = Join-Path $Root 'build\vm\current.auc'
 $Work   = Join-Path $Root ('build\langtest-3modes\' + $Tag)
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
 
@@ -92,6 +103,14 @@ function LastLine([string]$text) {
   return $best
 }
 
+# SlotSwap 模式的槽备份（跑完恢复）
+$slotBak = $null
+if ($SlotSwap) {
+  $slotDir = Split-Path $AucSlot -Parent
+  if (-not (Test-Path $slotDir)) { New-Item -ItemType Directory -Force $slotDir | Out-Null }
+  if (Test-Path $AucSlot) { $slotBak = Join-Path $Work '_slot.bak'; Copy-Item $AucSlot $slotBak -Force }
+}
+
 $tests = Get-ChildItem (Join-Path $Root 'tests\language-test') -Filter '*.aura' -File | Sort-Object Name
 if ($Only -ne '') {
   $keys = $Only -split ','
@@ -119,7 +138,14 @@ foreach ($t in $tests) {
   $rB = Run-Probe $Seed @('build', ('"' + $src + '"'), '--output', ('"' + $auc + '"')) $null $ms
   $jitOk = $false; $jitNote = ''
   if ((Test-Path $auc) -and $rB.Exit -eq 0) {
-    $rJ = Run-Probe $JitHst @() @{ 'AURA_VM_AUC' = $auc } $ms
+    # -SlotSwap：宿主硬编码 build/vm/current.auc（不带 AURA_VM_AUC 通道的纯 VM
+    # 宿主，如 build/hat-vmhost/current.exe），改为「备份→换槽→跑→恢复」。
+    if ($SlotSwap) {
+      Copy-Item $auc $AucSlot -Force
+    }
+    $jitEnv = $null
+    if (-not $SlotSwap) { $jitEnv = @{ 'AURA_VM_AUC' = $auc } }
+    $rJ = Run-Probe $JitHst @() $jitEnv $ms
     $jitOk = ($rJ.Exit -eq 0) -and (-not $rJ.Tmo)
     if (-not $jitOk) {
       $m = [regex]::Match(($rJ.Out + $rJ.Err), 'VM-ERROR=([^\r\n]+)')
@@ -178,6 +204,12 @@ foreach ($t in $tests) {
   $color = if ($tag -eq 'PASS') { 'Gray' } else { 'Yellow' }
   Write-Host ("[" + $idx + "/" + $tests.Count + "] " + $tag.PadRight(16) + " " + $stem.PadRight(28) +
               " diff=" + $diff.PadRight(8) + " " + (($jitNote + ' ' + $aotNote).Trim())) -ForegroundColor $color
+}
+
+# 恢复 .auc 槽（SlotSwap 模式）
+if ($SlotSwap -and $slotBak -ne $null -and (Test-Path $slotBak)) {
+  Copy-Item $slotBak $AucSlot -Force
+  Write-Host ("[lt3] .auc 槽已恢复: " + $AucSlot) -ForegroundColor DarkGray
 }
 
 $csv = Join-Path $Work 'results.csv'
