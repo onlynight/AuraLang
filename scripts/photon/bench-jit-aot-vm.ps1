@@ -54,7 +54,16 @@ function Run-WithPeak([string]$Exe, [System.Collections.Generic.Dictionary[strin
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.WorkingDirectory = $Root
-    foreach ($kv in $EnvMap.GetEnumerator()) { $psi.EnvironmentVariables[$kv.Key] = $kv.Value }
+    # ⚠️ 2026-10-22 修：PS 5.1 下 `$psi.EnvironmentVariables[$k] = $v` 实测抛
+    # 「无法对 Null 数组建立索引」（该属性在此环境为 $null）⇒ AURA_BENCH=1
+    # 根本没传给子进程 ⇒ jit_vmhost 走非基准路径、无 [BENCH-*] 标记，
+    # JIT 目标恒 MedMs=-1，且「自检+哨兵门」被误判成 P5-① 布局漂移。
+    # 改为进程级环境变量赋值，跑完恢复。
+    $savedEnv = @{}
+    foreach ($kv in $EnvMap.GetEnumerator()) {
+        $savedEnv[$kv.Key] = [Environment]::GetEnvironmentVariable($kv.Key)
+        [Environment]::SetEnvironmentVariable($kv.Key, $kv.Value)
+    }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $p = [System.Diagnostics.Process]::Start($psi)
     $soT = $p.StandardOutput.ReadToEndAsync()
@@ -70,6 +79,7 @@ function Run-WithPeak([string]$Exe, [System.Collections.Generic.Dictionary[strin
     if ($p.HasExited) {
         try { $ws = $p.PeakWorkingSet64; if ($ws -gt $peak) { $peak = $ws } } catch {}
     }
+    foreach ($k in @($savedEnv.Keys)) { [Environment]::SetEnvironmentVariable($k, $savedEnv[$k]) }
     return @{ Ms = [math]::Round($sw.Elapsed.TotalMilliseconds, 0); PeakMB = [math]::Round($peak / 1MB, 1); Out = $so }
 }
 
