@@ -63,3 +63,35 @@ VM-ERROR=loadonly valid=false numeric=false err=[] funcs=0 consts=0 name=
 同批里 `07-exception-simple` / `test_this` / `10-memory` 却是
 `valid=true numeric=true funcs=5..8 consts=11..16 name=default` —— 说明 `.auc`
 格式本身没问题（三者头部字节完全相同），是**内容相关**的装载分支。
+
+## 五、续查（同日）：8 例 INT-DIV-0 收敛到**一个函数**
+
+用最小特性探针二分（`build/divprobe/`，每例 `aura build` → 槽交换 → 纯宿主）：
+
+| 探针 | 内容 | 结果 |
+|---|---|---|
+| p1 | `7 % 3` + while 循环 | exit 0 ✅ |
+| p2 | class + 方法 + 字段 | exit 0 ✅ |
+| p4 | `arrayListOf` + add + 下标 | exit 0 ✅ |
+| p5 | 字符串插值 `"hi ${name}!"` | exit 0 ✅（插值里 name 为空，另一处小缺口） |
+| **p6** | **`println(toStr(1.5))`** | **0xC0000094** ❌ |
+| **p7** | `val f: Float = 1.5; println(toStr(f))` | **0xC0000094** ❌ |
+
+⇒ **8 例 INT-DIV-0 是同一个根因：`toStr(Float)` / Float 渲染路径上的整数除零**。
+定位范围收窄到 `VmOps` 的「Float 文本通道」（`isFloatText` / `floatMantissaOf` /
+`floatPow10` 一族，`VmOps.aura:95-200`）与 `Vm.aura` 的 toStr 分派；
+`%` 常量、类、列表、插值均无关。
+
+## 六、结构性阻塞：VM 侧修复目前**无法验证**
+
+- `jit_vmhost.aura` **可以**用当前驱动重建（`build/vmhost-jv2/jit_vmhost.exe`，
+  582,144 B，自检 13/13 全绿）——但 `.auc` 路径**旧构建与新构建崩得一模一样**
+  （同一 hello `.auc`，两边都 AV）⇒ P5-④ 是**代码缺陷**，不是陈旧二进制，
+  重建成不了救命稻草。
+- 纯 VM 宿主 `build/hat-vmhost/current.aura` **重建失败**：补 `Heap.init()` 后仍是
+  `0xC00000FD`（栈溢出），而 Oct 17 的旧 `current.exe` 是好的。
+
+⇒ 现状是：**唯一能跑 `.auc` 的宿主（current.exe）无法重建**，所以 `VmOps`/`Vm`
+里的 Float 修复即使写出来，也没有可执行的验证载体。下一轮的第一件事应该是
+**让 `current.aura` 能被当前后端编出可用宿主**（对齐 jit_vmhost 的
+`Heap.init` + 自检/VEH 骨架），否则所有 VM 侧修复都是"改了看不到效果"。
