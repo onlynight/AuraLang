@@ -741,6 +741,27 @@ static LONG CALLBACK aura_arc_veh(EXCEPTION_POINTERS *ep);   /* [P2-DEBUG] 前�
 #endif
 
 static void aura_mem_init(void) {
+    /* [T3-ALLOC 2026-10-21] 一次性初始化闸门**必须放在最前面**。
+     *
+     * 旧实现在这里先 `getenv("AURA_ARC_DEBUG")`（Windows 分支的 VEH 钩子），
+     * 之后才判 `g_aura_mem_limit >= 0` 走快返回。UCRT 的 getenv 是线性扫
+     * environ（实测 **12.2µs/次**），而 `aura_mem_alloc` 每次分配要调本函数
+     * **两次**（见该函数体内重复的 init 调用）⇒ 单次分配固定 24µs。
+     *
+     * 实测（build/_obw/ObwBench.aura，AOT -O2）：
+     *   Memory.alloc(16)            24,492 ns/次   ← 应为 ~50 ns
+     *   2 字符字符串拼接             24,376 ns/次
+     *   substring(3,9)              24,762 ns/次
+     *   arrayListOf + add×3         49,383 ns/次
+     * ⇒ 整个后端的「分配风暴」全是这一个 getenv 造成的假象：
+     *   writer 段 130 s 里的上百次小分配，实际算力不到 2 s。
+     *
+     * 修法：闸门前置（语义不变 —— 首次调用仍完成 VEH/atexit/limit 全套初始化，
+     * 之后立刻返回），并把分配器里重复的 init 调用删掉。
+     */
+    if (g_aura_mem_limit >= 0) {
+        return;
+    }
 #ifdef _WIN32
     if (getenv("AURA_ARC_DEBUG")) {
         static int veh_inited = 0;
@@ -750,9 +771,6 @@ static void aura_mem_init(void) {
         }
     }
 #endif
-    if (g_aura_mem_limit >= 0) {
-        return;
-    }
     if (getenv("AURA_ATTR_DUMP")) {
         atexit(aura_attr_dump_atexit);
     }
@@ -1587,10 +1605,9 @@ void *aura_mem_alloc(int64_t n) {
         AURA_ATTR_RECORD(__builtin_return_address(0), n);
         return rgn_alloc(n);
     }
-    aura_mem_init();
-    if (n < 0) {
-        n = 0;
-    }
+    /* [T3-ALLOC] 重复的 `aura_mem_init()` 已删（入口处已调一次）；
+     * 旧实现在这里再调一次，叠加 `getenv("AURA_ARC_DEBUG")` 的 12µs，
+     * 单次分配固定 24µs。 */
     g_aura_mem_alloc_calls += 1;
     g_aura_mem_alloc_bytes += n;
     aura_mem_bucket(n);
@@ -2691,9 +2708,43 @@ const char *aura_string_charAt(const char *s, int64_t idx) {
     return aura_char_cache((unsigned char)s[idx]);
 }
 
+/* [T3-SUBSTR 2026-10-21] 源串长度的单条 memo。
+ *
+ * `aura_string_substring` 旧实现每次都 `strlen(s)` 求全长（用于把 `end` 夹到
+ * 串尾），于是「对一个长串切 N 刀」是 O(N·|s|)：
+ *   writer 段实测：重定位串 2.29 MB 切 63,692 条，
+ *   `parseRelocEntries` 20.3 s + `composeRelocations` 20.5 s = 占 writer 62%；
+ *   前端 `HatParser` 对 10.9 MB .hat 逐 token 切片是同一病灶。
+ *
+ * 归约到「同一源串连续切 N 刀只算一次 strlen」：命中条件为指针相等 +
+ * `s[len] == '\0'`（长度正确的必要条件）。后者 1 字节读取把「地址被复用成
+ * 另一个串」的陈旧长度挡在门外 —— 长度真变了则 s[len] 非 NUL，立刻重算。
+ * 末位校验读的正是原串自己的终止符位置，不会越过任何合法串的分配。 */
+static const char *g_ss_src = NULL;
+static size_t g_ss_len = 0;
+static int g_ss_memo = -1;   /* -1 未初始化；0 = 关闭（AURA_SS_MEMO=0，回退旧 strlen） */
+
+static size_t aura_str_len_cached(const char *s) {
+    if (g_ss_memo < 0) {
+        const char *e = getenv("AURA_SS_MEMO");
+        g_ss_memo = (e && e[0] == '0') ? 0 : 1;
+    }
+    if (g_ss_memo == 0) {
+        return strlen(s);
+    }
+    if (s == g_ss_src && s[g_ss_len] == '\0') {
+        return g_ss_len;
+    }
+    size_t n = strlen(s);
+    g_ss_src = s;
+    g_ss_len = n;
+    return n;
+}
+
 const char *aura_string_substring(const char *s, int64_t start, int64_t end) {
     if (!s) return "";
-    size_t len = strlen(s);
+    /* 语义与旧实现逐位一致，只是 strlen 走 memo（见上）。 */
+    size_t len = aura_str_len_cached(s);
     AURA_ATTR_RECORD(__builtin_return_address(0), 16);
     if (start < 0) start = 0;
     if (end > (int64_t)len) end = len;
