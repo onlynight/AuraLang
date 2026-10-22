@@ -2242,6 +2242,93 @@ class HirLowerer {
             || ty.startsWith("LinkedHashSet") || ty.startsWith("TreeSet")
     }
 
+    /// [R174] 接收者的解析类型是否为**用户类**且该类确实声明了此方法。
+    ///
+    /// 背景（实测 JIT 宿主 07-exception-* 三例 "Uncaught exception"）：
+    /// `count/getSize/size/isEmpty/clear` 的集合内建拦截（lowerMemberCall）
+    /// 只靠 `receiverNotForCollections` 排除非集合接收者——而该守卫对
+    /// **Member 接收者**（`this.handlerStack`）取 `ast.tyOf` 为空 ⇒ return
+    /// false ⇒ 用户方法被劫持成 `Collections.count(非列表对象)`，读对象头
+    /// 当列表长度 ⇒ 垃圾值（throwException 的 handler 循环整段跳过）。
+    ///
+    /// 本判定与 lowerCall 的限定逻辑同源（localVarTy / typeMemberTy /
+    /// typeMethods）：命中 ⇒ 调用必须走用户方法限定路径（`Class_method`），
+    /// 集合内建不得拦截。集合族类型（List/Map/Set/ArrayList…）即使声明了
+    /// 同名方法也保持内建语义（其 size/clear 由 Collections.count/clear
+    /// 承载，无 `List_size` 符号）。
+    private fun userClassDeclaresMember(recvId: Int, memberName: String): Boolean {
+        var owner: String = ""
+        val k: String = this.ast.kindOf(recvId)
+        if (k == "This") {
+            owner = this.curTypeDecl
+        } else if (k == "Ident") {
+            val n: String = this.ast.textOf(recvId)
+            if (n == "this") {
+                owner = this.curTypeDecl
+            } else {
+                owner = this.cleanTy(this.localVarTy(n))
+                if (owner == "") {
+                    owner = this.cleanTy(this.typeMemberTy(this.curTypeDecl, n))
+                }
+            }
+        } else if (k == "Member") {
+            val fieldName: String = this.ast.textOf(recvId)
+            val m2: List<Int> = this.ast.kidsOfList(recvId)
+            if (fieldName != "" && HirUtils.hirKidsCount(m2) >= 1) {
+                val baseId: Int = HirUtils.hirKidsAt(m2, 0)
+                val baseKind: String = this.ast.kindOf(baseId)
+                var ok: Boolean = false
+                if (baseKind == "This") {
+                    owner = this.curTypeDecl
+                    ok = true
+                } else if (baseKind == "Ident") {
+                    val bn: String = this.ast.textOf(baseId)
+                    if (bn.length() > 0) {
+                        val fc: Int = bn.substring(0, 1).charCodeAt(0)
+                        if (fc >= 97 && fc <= 122) {
+                            val lt: String = this.localVarTy(bn)
+                            if (lt != "") {
+                                owner = lt
+                                ok = true
+                            }
+                        }
+                    }
+                }
+                if (ok) {
+                    owner = this.cleanTy(this.typeMemberTy(owner, fieldName))
+                } else {
+                    owner = ""
+                }
+            }
+        }
+        // [R174 实测] 字段声明类型登记值带尾部 "="（解析器把 `: Ty = init`
+        // 的 "=" 一起吃进注解文本，如 "VmStrStack="；cleanTy 只剥 "|" 前缀）。
+        // 不剥掉则 key 拼成 "VmStrStack=.size"，csvContains 恒 false。
+        while (owner.length() > 0 && owner.charCodeAt(owner.length() - 1) == 61) {
+            owner = owner.substring(0, owner.length() - 1)
+        }
+        if (owner == "" || owner == "Any" || owner == "String") {
+            return false
+        }
+        if (owner.startsWith("List") || owner.startsWith("Map") || owner.startsWith("Set")
+                || owner.startsWith("ArrayList") || owner.startsWith("LinkedList")
+                || owner.startsWith("HashMap") || owner.startsWith("LinkedHashMap")
+                || owner.startsWith("TreeMap") || owner.startsWith("HashSet")
+                || owner.startsWith("TreeSet") || owner.startsWith("Deque")) {
+            return false
+        }
+        val found: Boolean = this.csvContains(this.typeMethods, owner + "." + memberName)
+        if (Env.get("AURA_MAP_TRACE", "") == "1" && this.ucdmDiagN < 48) {
+            this.ucdmDiagN = this.ucdmDiagN + 1
+            println("[UCDM] recv=[" + this.ast.textOf(recvId) + "] m=" + memberName
+                    + " owner=" + owner + " has=" + toStr(if (found) 1 else 0))
+        }
+        return found
+    }
+
+    /// [R174 诊断] userClassDeclaresMember 有界打印计数。
+    private var ucdmDiagN: Int = 0
+
     /// `Env.get(...)` 的接收者是否为 std 的 `Env` 对象。
     ///
     /// 见 `lowerCall` 里该分支的说明：不拦下就会被当成集合取值。
@@ -2266,10 +2353,20 @@ class HirLowerer {
     private fun cleanTy(ty: String): String {
         if (ty == "") { return "" }
         val bar: Int = ty.indexOf("|")
+        var out: String = ty
         if (bar >= 0) {
-            return ty.substring(bar + 1, ty.length)
+            out = ty.substring(bar + 1, ty.length)
         }
-        return ty
+        // [R174 实测] 字段注解文本带尾部 "="（解析器把 `: Ty = init` 的
+        // "=" 吃进类型文本，如 "VmStrStack="）。不剥则 typeMemberTys 登记
+        // 值带 =，所有 `Class.method`/`Class.field` 的 kv/csv key 拼接恒错
+        // ⇒ Member 接收者的方法限定全链失效（裸名兜底撞 stdlib 名单被
+        // 劫持 —— JIT 宿主异常处理三例 "Uncaught exception" 的根因链）。
+        // 正当类型名不含 "="，尾部剥除对所有消费方只会更正确。
+        while (out.length() > 0 && out.charCodeAt(out.length() - 1) == 61) {
+            out = out.substring(0, out.length() - 1)
+        }
+        return out
     }
 
     /// 数值类型宽度序（取宽用）：Double > Float > Long > Int > 其它(0)。
@@ -2830,7 +2927,10 @@ class HirLowerer {
                         val recvId: Int = HirUtils.hirKidsAt(calleeKids, 0)
                         val recvTy: String = ast.tyOf(recvId)
                         // 仅当接收者不是 String、且不是用户集合类实例时才转换为 Collections 调用
-                        if (recvTy != "String" && !this.receiverNotForCollections(recvId)) {
+                        // [R174] 用户类声明了同名方法 ⇒ 走用户方法限定路径，不得劫持
+                        //（`this.handlerStack.contains(x)` 这类此前被静默劫持）。
+                        if (recvTy != "String" && !this.receiverNotForCollections(recvId)
+                            && !this.userClassDeclaresMember(recvId, memberName)) {
                             var hirKids: List<Int> = HirUtils.hirNoKids()
                             val recvHirId: Int = this.lowerExpr(ast, recvId)
                             if (recvHirId >= 0) {
@@ -2870,9 +2970,14 @@ class HirLowerer {
                         val recvTy: String = ast.tyOf(recvId)
                         // String 有同名成员（`s.count()` / `s.size`），必须排除；
                         // Map/Set 族要放行（见 `isCollectionMapOrSetTy`）。
+                        // [R174] 用户类声明了同名方法（如 VmStrStack.size）⇒ 不劫持，
+                        // 交给 lowerCall 限定成 Class_method —— Member 接收者在
+                        // receiverNotForCollections 里 tyOf 为空被误判为集合（实测
+                        // JIT 宿主异常处理三例 "Uncaught exception" 的根因）。
                         if (recvTy != "String"
                             && (!this.receiverNotForCollections(recvId)
-                                || this.isCollectionMapOrSetTy(recvTy))) {
+                                || this.isCollectionMapOrSetTy(recvTy))
+                            && !this.userClassDeclaresMember(recvId, memberName)) {
                             var hirKids: List<Int> = HirUtils.hirNoKids()
                             val recvHirId: Int = this.lowerExpr(ast, recvId)
                             if (recvHirId >= 0) {
