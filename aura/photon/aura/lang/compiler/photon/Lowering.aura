@@ -117,7 +117,14 @@ class Lowering {
         val lfunc: LirFunction = dst.functionOf(lfuncId)
 
         // 降低参数
-        lfunc.params = srcFunc.params
+        //
+        // ⚠️ [R161] **不要**写 `lfunc.params = srcFunc.params`：两者的类型完全不同 ——
+        // `MirFunction.params` 是逗号分隔的**字符串**（参数名/类型表），
+        // 而 `LirFunction.params` 是 `List<Int>`（参数 ValueID 列表）。
+        // AOT 下两者都是 8 字节句柄，赋值不会报错，但字段里装进了**字符串指针**：
+        // 之后任何 `params.size` / `params[i]` 都会把字符串头当长度读 →
+        // 巨大长度 → 野指针 → 段错误（R160/R161 实测：驱动编译任意样例即崩）。
+        // 参数 ValueID 由 SsaBuilder 分配在入口块，需要时从 block 里取，不从这里来。
         lfunc.returnType = srcFunc.returnType
         lfunc.calledFunctions = ""
 
