@@ -1,0 +1,28 @@
+import aura.lang.std.String
+import aura.lang.std.Env
+import aura.lang.native.Memory
+import aura.lang.compiler.photon.JitBackend
+import aura.lang.compiler.photon.JitStackMap
+
+fun main() {
+    Heap.init()
+    println("[A] heap ok")
+    val nStr: String = "" + Env.get("AURA_BENCH_N", "1000000000")
+    println("[B] nStr=" + nStr)
+    val n: Int = JitStackMapUtils.parseInt(nStr)
+    println("[C] n=" + toStr(n))
+    val be = JitBackend()
+    be.enableNativeExec()
+    println("[D] backend ready")
+    val hex: String = "4C8B053900000031C031C94C39C17D084801C848FFC1EBF3C3"
+    val entry = be.emitFunction("bench_fn", hex)
+    println("[E] entry=" + toStr(entry))
+    if (entry == 0) {
+        println("[ERR] emitFunction 0")
+        return 1
+    }
+    Memory.write64((entry + 64) as Long, 10 as Long)
+    println("[F] wrote n")
+    val r: Long = be.executeNative(entry, 10)
+    println("[G] r=" + toStr(r))
+}
