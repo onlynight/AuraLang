@@ -1,0 +1,30 @@
+// 定向：Any 形参 → `v as Long` → 裸内存 → 读回 as Any，是否保真。
+import aura.lang.std.String
+import aura.lang.native.Heap
+import aura.lang.native.Memory
+
+// [R169] 不用全局变量：mc 作参数传（排除全局读写的干扰）
+// [R169] 单参形态：mc 在函数内自己分配（排除多参调用实参错位）
+fun roundTrip(v: Any): Any {
+    val mc: Long = Memory.alloc(64)
+    val raw: Long = v as Long
+    Memory.write64(mc, raw)
+    val back: Long = Memory.read64(mc)
+    val out: Any = back as Any
+    return out
+}
+
+fun main(): Int {
+    Heap.init()
+    gmc = Memory.alloc(64)
+    val s: String = "world"
+    println("[1] direct=" + s)
+    println("[2] rt(s)=" + roundTrip(s))
+    val a: Any = s
+    println("[3] rt(a)=" + roundTrip(a))
+    val r1: Any = roundTrip(s)
+    println("[4] r1=" + r1)
+    val t: String = (roundTrip(s)) as String
+    println("[5] t=" + t)
+    return 0
+}

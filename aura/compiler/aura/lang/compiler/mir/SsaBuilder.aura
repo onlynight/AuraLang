@@ -2431,6 +2431,58 @@ class SsaBuilder {
 
         val left: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
         val right: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 1))
+
+        // ── `as` / `is`：Parser 把它俩产出成 **Binary**（op = "As" / "Is"，
+        //    右侧 kids[1] 是承载**类型名**的 `Lit`，见 Parser.aura:1791）──
+        //
+        // ⚠️ 旧实现没有这两个 case，`mapBinaryOp` 一路落到**默认 `"Add"`**：
+        //    `x as T` 被编成 `strcat(x, "T")` / 指针加法。实测
+        //    （tests/photon/debug/cast_inline_probe.aura）：
+        //      val t: String = v as String ; "[" + t + "]"  → [hello]    （偶然对）
+        //      "[" + (v as String) + "]"                    → [<ref#-1>] （坏）
+        //    VM 宿主的热路径全是这个形状（`Memory.write64(addr, v as Long)`、
+        //    `Memory.read64(..) as Any`、`VmLocals.putSlot`），于是 `.auc` 的
+        //    字符串常量经「栈 → 局部」一轮就变成 `0`（R168 的 `[CA] raw=1`）。
+        //
+        // `as`：Plan A 下 Int/Long/String/对象指针都是同一 64 位表示，转换即
+        // **位等价**（与 ISel 对 `Cast` 的处理 `emitMovValue` 一致）。这里产出
+        // 真正的 `Cast` 值：语义是 mov，但**类型**记成目标类型，供下游
+        // （拼接定型 / 字段读 / 返回类型）判断。
+        if (op == "As") {
+            // 目标类型取**二元节点自身的静态类型**（sema 给的 `T`），而不是
+            // kids[1] 那个 Lit 的文本——实测 textOf 拿到的是 `"Lit"`（节点
+            // kind），fromTypeName 于是造出一个叫 "Lit" 的类型，下游拼接就
+            // 认不出 String、改走 toString(Any)，`.auc` 取值链随之崩。
+            // kids[1] 是 Parser 塞进去的「类型名 Leaf」，但经 HIR 降级后它的
+            // text 是 `"Lit: String"` 这种 `<kind>: <类型名>` 拼接（实测
+            // [AS] kidKind=[HirExpr] kidText=[Lit: String]），直接拿整串去
+            // fromTypeName 会造出一个叫 "Lit: String" 的类型 ⇒ 下游认不出
+            // String、拼接改走 toString(Any) ⇒ 打印 <ref#-1>。取最后一个
+            // ": " 之后的部分作为真实类型名。
+            val rk: Int = HirUtils.hirKidsAt(kids, 1)
+            val rawTy: String = src.textOf(rk)
+            var typeName: String = rawTy
+            val sepAt: Int = rawTy.indexOf(": ")
+            if (sepAt >= 0) {
+                typeName = rawTy.substring(sepAt + 2, rawTy.length)
+            }
+            var tgtTy: Int = this.types.fromTypeName(typeName)
+            if (tgtTy == this.types.fromTypeName("")) {
+                tgtTy = this.program.valueOf(left).type
+            }
+            return this.program.addValue("Cast", tgtTy, toStr(left), "", this.curBlock)
+        }
+        // `is`：`v is T` → `aura_isOfType(v, "T")`。runtime 侧当前是**桩**
+        //（恒返回 1，见 PhotonRuntime.emitAuraIsOfType：AOT 对象模型无类型头），
+        //所以只传两个实参；语义修正待对象头专项。要点是别再落到 `Add`。
+        if (op == "Is") {
+            val typeName2: String = src.textOf(HirUtils.hirKidsAt(kids, 1))
+            val strTy: Int = this.types.fromTypeName("String")
+            val nameVal: Int = this.program.addValue("Const", strTy, "", typeName2, this.curBlock)
+            val boolTy: Int = this.types.fromTypeName("Boolean")
+            val isArgs: String = toStr(left) + "," + toStr(nameVal)
+            return this.program.addValue("Call", boolTy, isArgs, "aura_isOfType", this.curBlock)
+        }
         // R49:算术结果解包可空后缀——sema 对 `e1 + e2`(e 为 Int?)定型 "Int?",
         // 值类型带 ? ⇒ toString 走 toStrN ⇒ 0 打 "null"(实测 06 最后一行
         // (null ?: 0)+(null ?: 0))。elvis 已收敛空值,算术结果按内部类型。

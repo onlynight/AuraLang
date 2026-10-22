@@ -2748,6 +2748,17 @@ class InstructionSelector {
             val tn: String = this.types.nameOf(argVal.type)
             if (tn == "Char") {
                 fname = "charToStr"
+            } else if (tn == "Any") {
+                // [R169] Plan A 值模型：Any 非空即 String（`aura_typeof` 对任意
+                // 非空值恒折叠为 "String"）。旧实现把 "Any" 落进下面的「非标量
+                // ⇒ 对象类型」臂 → refToStr ⇒ 字符串打成 <ref#-1>。实测
+                // build/vmhost-src/retprobe.aura：
+                //   val t: String = retStr() as String ; println(t)  → hello    ✅
+                //   println("x=" + retStr())（返回类型 Any）           → <ref#-1> ❌
+                // 这正是 VM 宿主 `.auc` 取值链的最后一环：VM 栈/局部槽都是 Any，
+                // collectArgs 拼参时全被 refToStr 化。toString 在 runtime 是
+                // 恒等桩 → 字符串原样透传。
+                fname = "toString"
             } else if (tn != "Int" && tn != "Long" && tn != "Short" && tn != "Byte"
                     && tn != "Basic" && tn != ""
                     && !endsWithStr(tn, "|Int") && !endsWithStr(tn, "|Long")
