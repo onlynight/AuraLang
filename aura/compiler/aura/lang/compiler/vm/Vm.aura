@@ -908,7 +908,12 @@ import aura.lang.compiler.serialize.AucLoader
             // [R21] Float 文本分支在 dispatch 层内联（push(String) = toUpper
             // 已证形状）——VmOps.add 的双类型返回合并会被 Int 装箱（P364
             // getConstByIdx 同款病）。
-            if (VmOps.isFloatText(a) || VmOps.isFloatText(b)) {
+            // [R198] 浮点分支条件收紧为**两侧皆浮点文本**：旧 `||` 把
+            // `"a=" + 3.14`（String+Float 应拼接）误当浮点加法，把标签串当
+            // 尾数 ⇒ 产出 "指针.14" 级垃圾串（13-stdlib 崩溃的垃圾指针源之一）。
+            // `&&` 后：Float+Float 相加、String+Float 拼接（VmOps.add）；
+            // 代价 Int+Float 退化为拼接（不再产垃圾；原路径本就产垃圾指针）。
+            if (VmOps.isFloatText(a) && VmOps.isFloatText(b)) {
                 val dA20: Int = VmOps.floatDecimalsOf(a)
                 val dB20: Int = VmOps.floatDecimalsOf(b)
                 var d20: Int = dA20
@@ -922,7 +927,8 @@ import aura.lang.compiler.serialize.AucLoader
         } else if (op == 21) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            if (VmOps.isFloatText(a) || VmOps.isFloatText(b)) {
+            // [R198] 条件同 op==20：仅两侧皆浮点文本才走浮点减法，否则拼接/整数减。
+            if (VmOps.isFloatText(a) && VmOps.isFloatText(b)) {
                 val dA21: Int = VmOps.floatDecimalsOf(a)
                 val dB21: Int = VmOps.floatDecimalsOf(b)
                 var d21: Int = dA21
