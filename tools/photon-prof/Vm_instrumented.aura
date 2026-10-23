@@ -1027,10 +1027,10 @@ class Vm {
             // `.auc`（Rust MIR）语义是 **pop**（`Instr::ListLen`）；Aura 文本字节码用 peek
             if (this.aucMode) {
                 val list: Any = this.stack.pop()
-                this.stack.push(VmCollections.length(list))
+                this.stack.push(VmCollections.listLen(list))
             } else {
                 val list: Any = this.stack.peek()
-                this.stack.push(VmCollections.length(list))
+                this.stack.push(VmCollections.listLen(list))
             }
         } else if (op == 85) {
             val map: Any = this.stack.pop()
@@ -1399,7 +1399,7 @@ class Vm {
         } else if (funcName == "Collections.count" || funcName == "aura.lang.std.Collections.count"
             || funcName == "__size") {
             val list: Any = this.stack.pop()
-            this.stack.push(VmCollections.length(list))
+            this.stack.push(VmCollections.listLen(list))
             return
         } else if (funcName == "length" || funcName == "String.length" || funcName == "strlen") {
             // `.auc` 里 `s.length` 被编译成原生调用（原生表下标 563 = `String.length`）。
@@ -2050,7 +2050,7 @@ class Vm {
             return
         }
         if (fieldName == "first" || fieldName == "last") {
-            val n: Int = VmCollections.length(obj)
+            val n: Int = VmCollections.listLen(obj)
             if (n <= 0) {
                 this.stack.push(null)
                 return

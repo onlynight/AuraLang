@@ -204,9 +204,15 @@ object VmOps {
         return p
     }
 
-    /// 定标尾数 → 显示文本（种子 Display 风格）：(50,1)→"5.0"，
-    /// (25,1)→"2.5"，(-125,2)→"-1.25"。去尾零但至少保留 1 位小数。
+    /// 定标尾数 → 显示文本（种子 Display 风格）：(50,1)→"5.0"、
+    /// (25,1)→"2.5"、(-125,2)→"-1.25"。去尾零但至少保留 1 位小数。
     /// [R20] 补零走单次 vmSubstr + 一次拼接（无自建累加循环）。
+    ///
+    /// ⚠️ [R201] **渲染必须内联**：旧实现调 `intToStr`/`floatPow10`，这两个
+    /// 调用窗在本函数产码下被腐坏（实测 `floatTextOf(25,1)` → "指针.5"——
+    /// 入参 25/1 正确（尾数 .5 对）、`intToStr(2)` 返回栈地址）。P5-① 同族：
+    /// 同一函数在别的调用窗（ptrKeyOf 内）是好的。改为逐位内联
+    /// （intToStr 同款形状：Int 算术 + 字面量比较 + 前缀拼接，零调用窗）。
     fun floatTextOf(m: Int, d: Int): String {
         var mag: Int = m
         var dec: Int = d
@@ -222,19 +228,158 @@ object VmOps {
             mag = mag / 10
             dec = dec - 1
         }
-        val p: Int = floatPow10(dec)
-        val ip: Int = mag / p
-        val fp: Int = mag % p
-        var fs: String = intToStr(fp)
-        val fd: Int = strLenRaw(fs)
-        if (fd < dec) {
-            fs = vmSubstr("000000000", 0, dec - fd) + fs
+        // [R201] 内联 Int→十进制文本（零调用窗）
+        var digits: String = ""
+        var n: Int = mag
+        if (n == 0) {
+            digits = "0"
         }
+        while (n > 0) {
+            val digit: Int = n % 10
+            var ch: String = "0"
+            if (digit == 1) { ch = "1" }
+            else if (digit == 2) { ch = "2" }
+            else if (digit == 3) { ch = "3" }
+            else if (digit == 4) { ch = "4" }
+            else if (digit == 5) { ch = "5" }
+            else if (digit == 6) { ch = "6" }
+            else if (digit == 7) { ch = "7" }
+            else if (digit == 8) { ch = "8" }
+            else if (digit == 9) { ch = "9" }
+            digits = ch + digits
+            n = n / 10
+        }
+        val total: Int = strLenRaw(digits)
         var out: String = ""
         if (neg) {
             out = "-"
         }
-        return out + intToStr(ip) + "." + fs
+        if (total <= dec) {
+            out = out + "0."
+            var pad: Int = dec - total
+            while (pad > 0) {
+                out = out + "0"
+                pad = pad - 1
+            }
+            out = out + digits
+        } else {
+            val ipT: String = vmSubstr(digits, 0, total - dec)
+            val fpT: String = vmSubstr(digits, total - dec, dec)
+            out = out + ipT + "." + fpT
+        }
+        return out
+    }
+
+    // ═══════════════════════════════════════════════════════
+    //  [R201] Math 原生臂的纯 Int 定标域实现
+    //
+    //  背景（11-imports JIT 挂点的三层实锤）：
+    //   ① `VmOps.parseFloat` → `toFloat` 运行时实现是简化版（忽略小数），
+    //      实测 parseFloat("16.0") = 0 ⇒ 旧 sqrt/cos/sin 臂的入参解析全错；
+    //   ② `floatToTextF` 走 `af as Int` + intToStr，调用窗腐坏 ⇒ 指针垃圾；
+    //   ③ Aura 源码级 Newton/Taylor 编成 .auc 后走 VM ADD/DIV/CMP 的浮点
+    //      文本分支，其 helper 调用窗同样腐坏（fop 探针：a+b → "指针.0"）。
+    //  ⇒ 一律改为**纯 Int 定点**（10^6），输入输出都是 R20 文本通道，
+    //  只用已证原语（toStrAny/floatMantissaOf/floatDecimalsOf/vmSubstr/
+    //  strLenRaw + Int 算术），无 Float 位、无 parseFloat、无 intToStr 调用。
+    // ═══════════════════════════════════════════════════════
+
+    /// 平方根：浮点文本 → 平方根文本（"16.0"→"4.0"，1 位小数）。
+    /// V = m/10^d；R = √V 以 k 位小数渲染 ⇒ R·10^k = isqrt(m·10^(2k-d))，
+    /// k = max(1, ⌈d/2⌉)，整数牛顿迭代后交 floatTextOf 渲染。
+    fun sqrtTextOf(v: Any): String {
+        val s: String = toStrAny(v)
+        val m: Int = floatMantissaOf(s)
+        val d: Int = floatDecimalsOf(s)
+        if (m <= 0) {
+            return "0.0"
+        }
+        var k: Int = 1
+        while (k * 2 < d) {
+            k = k + 1
+        }
+        var scaled: Int = m
+        var e: Int = k * 2 - d
+        while (e > 0) {
+            scaled = scaled * 10
+            e = e - 1
+        }
+        var x: Int = scaled
+        if (x < 1) {
+            x = 1
+        }
+        var y: Int = (x + scaled / x) / 2
+        while (y < x) {
+            x = y
+            y = (x + scaled / x) / 2
+        }
+        return floatTextOf(x, k)
+    }
+
+    /// 余弦：浮点文本 → 余弦文本（Taylor 12 项，定点 10^6，6 位小数渲染）。
+    /// [R201] 角度归一化内联（private 同类调用窗无先例，不冒险）。
+    fun cosTextOf(v: Any): String {
+        val s: String = toStrAny(v)
+        val m: Int = floatMantissaOf(s)
+        val d: Int = floatDecimalsOf(s)
+        var t: Int = m
+        var e: Int = 6 - d
+        while (e > 0) {
+            t = t * 10
+            e = e - 1
+        }
+        while (e < 0) {
+            t = t / 10
+            e = e + 1
+        }
+        while (t > 3141593) {
+            t = t - 6283185
+        }
+        while (t < 0 - 3141593) {
+            t = t + 6283185
+        }
+        var term: Int = 1000000
+        var sum: Int = 1000000
+        var n: Int = 1
+        while (n < 12) {
+            term = term * (0 - t) / 1000000 * t / ((2 * n - 1) * (2 * n))
+            sum = sum + term
+            n = n + 1
+        }
+        return floatTextOf(sum, 6)
+    }
+
+    /// 正弦：浮点文本 → 正弦文本（Taylor 12 项，定点 10^6，6 位小数渲染）。
+    /// [R201] 角度归一化内联（同 cosTextOf）。
+    fun sinTextOf(v: Any): String {
+        val s: String = toStrAny(v)
+        val m: Int = floatMantissaOf(s)
+        val d: Int = floatDecimalsOf(s)
+        var t: Int = m
+        var e: Int = 6 - d
+        while (e > 0) {
+            t = t * 10
+            e = e - 1
+        }
+        while (e < 0) {
+            t = t / 10
+            e = e + 1
+        }
+        while (t > 3141593) {
+            t = t - 6283185
+        }
+        while (t < 0 - 3141593) {
+            t = t + 6283185
+        }
+        var term: Int = t
+        var sum: Int = t
+        var n: Int = 1
+        while (n < 12) {
+            term = term * (0 - t) / 1000000 * t / ((2 * n) * (2 * n + 1))
+            sum = sum + term
+            n = n + 1
+        }
+        return floatTextOf(sum, 6)
     }
 
     /// 检查是否为字符串类型。
@@ -539,6 +684,12 @@ object VmOps {
             return "false"
         } else if (isFloat(a) || isFloat(b)) {
             return vmBool(parseFloat(toStr(a)) == parseFloat(toStr(b)))
+        } else if (isString(a) || isString(b)) {
+            // [R203] 字符串相等必须比**内容**：`a == b` 在 `Any` 上是位比较，
+            // 内容相同的两个串（闭包分派 / `path[i]` vs 字面量）恒不相等
+            // ⇒ 03-functions 的 `isPositive(5)` 打成 0。
+            // `toStrAny(a) == toStrAny(b)` 为 String==String（运行时 streq）。
+            return vmBool(toStrAny(a) == toStrAny(b))
         } else {
             return vmBool(a == b)
         }
@@ -862,6 +1013,29 @@ object VmOps {
             return v as String
         }
         return toStr(v)
+    }
+
+    /// 取最后一个 `.` 之后的尾段（限定名剥离专供）；无点或无尾段则原样返回。
+    ///
+    /// [R203] 从 `Vm.callOrBuiltin` 剥离块搬出：那段内联的 charCodeAt 扫描在
+    /// 千行巨函数里被译坏（实测 `aura.lang.std.IO.fileExists` len=27 正确、
+    /// 但 `lastDot` 落到 26 ⇒ `vmSubstr(f0,27,0)` 返回 "" ⇒ funcName 空 ⇒
+    /// `Unknown function:`）。小函数体沿用 `isFloatText` 的点位扫描 +
+    /// `floatMantissaOf` 的 vmSubstr 切分——两处均已证。
+    fun tailAfterLastDot(s: String): String {
+        val n: Int = strLenRaw(s)
+        var dot: Int = -1
+        var p: Int = 0
+        while (p < n) {
+            if (s.charCodeAt(p) == 46) {
+                dot = p
+            }
+            p = p + 1
+        }
+        if (dot >= 0 && dot + 1 < n) {
+            return vmSubstr(s, dot + 1, n - dot - 1)
+        }
+        return s
     }
 
     /// Int → String（不依赖 toStr，避免 AOT 转换问题）。

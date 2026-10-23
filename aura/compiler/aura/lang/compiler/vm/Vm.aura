@@ -1111,19 +1111,57 @@ import aura.lang.compiler.serialize.AucLoader
         } else if (op == 32) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            this.stack.push(VmOps.lt(a, b))
+            // [R201] 浮点文本比较：定标对齐后比尾数（对齐用内联乘 10 循环，
+            // 不调 floatPow10；仅两侧皆浮点文本才走，混合类型维持旧路径）。
+            if (VmOps.isFloatText(a) && VmOps.isFloatText(b)) {
+                var ma32: Int = VmOps.floatMantissaOf(a)
+                var mb32: Int = VmOps.floatMantissaOf(b)
+                var e32: Int = VmOps.floatDecimalsOf(b) - VmOps.floatDecimalsOf(a)
+                while (e32 > 0) { ma32 = ma32 * 10; e32 = e32 - 1 }
+                while (e32 < 0) { mb32 = mb32 * 10; e32 = e32 + 1 }
+                this.stack.push(ma32 < mb32)
+            } else {
+                this.stack.push(VmOps.lt(a, b))
+            }
         } else if (op == 33) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            this.stack.push(VmOps.gt(a, b))
+            if (VmOps.isFloatText(a) && VmOps.isFloatText(b)) {
+                var ma33: Int = VmOps.floatMantissaOf(a)
+                var mb33: Int = VmOps.floatMantissaOf(b)
+                var e33: Int = VmOps.floatDecimalsOf(b) - VmOps.floatDecimalsOf(a)
+                while (e33 > 0) { ma33 = ma33 * 10; e33 = e33 - 1 }
+                while (e33 < 0) { mb33 = mb33 * 10; e33 = e33 + 1 }
+                this.stack.push(ma33 > mb33)
+            } else {
+                this.stack.push(VmOps.gt(a, b))
+            }
         } else if (op == 34) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            this.stack.push(VmOps.le(a, b))
+            if (VmOps.isFloatText(a) && VmOps.isFloatText(b)) {
+                var ma34: Int = VmOps.floatMantissaOf(a)
+                var mb34: Int = VmOps.floatMantissaOf(b)
+                var e34: Int = VmOps.floatDecimalsOf(b) - VmOps.floatDecimalsOf(a)
+                while (e34 > 0) { ma34 = ma34 * 10; e34 = e34 - 1 }
+                while (e34 < 0) { mb34 = mb34 * 10; e34 = e34 + 1 }
+                this.stack.push(ma34 <= mb34)
+            } else {
+                this.stack.push(VmOps.le(a, b))
+            }
         } else if (op == 35) {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            this.stack.push(VmOps.ge(a, b))
+            if (VmOps.isFloatText(a) && VmOps.isFloatText(b)) {
+                var ma35: Int = VmOps.floatMantissaOf(a)
+                var mb35: Int = VmOps.floatMantissaOf(b)
+                var e35: Int = VmOps.floatDecimalsOf(b) - VmOps.floatDecimalsOf(a)
+                while (e35 > 0) { ma35 = ma35 * 10; e35 = e35 - 1 }
+                while (e35 < 0) { mb35 = mb35 * 10; e35 = e35 + 1 }
+                this.stack.push(ma35 >= mb35)
+            } else {
+                this.stack.push(VmOps.ge(a, b))
+            }
         }
 
         // ── 逻辑/位运算 ──
@@ -1299,10 +1337,10 @@ import aura.lang.compiler.serialize.AucLoader
             // `.auc`（Rust MIR）语义是 **pop**（`Instr::ListLen`）；Aura 文本字节码用 peek
             if (this.aucMode) {
                 val list: Any = this.stack.pop()
-                this.stack.push(VmCollections.length(list))
+                this.stack.push(VmCollections.listLen(list))
             } else {
                 val list: Any = this.stack.peek()
-                this.stack.push(VmCollections.length(list))
+                this.stack.push(VmCollections.listLen(list))
             }
         } else if (op == 85) {
             val map: Any = this.stack.pop()
@@ -1646,22 +1684,14 @@ import aura.lang.compiler.serialize.AucLoader
         // [R25b] Math.sqrt 全名（11-imports 挂点）：牛顿迭代（纯 Int/Float
         // 标量，宿主 Float 标量乘除在双基底已证）。
         if (funcName0 == "aura.lang.std.Math.sqrt" || funcName0 == "Math.sqrt" || funcName0 == "sqrt") {
+            // [R201] 纯 Int 定标域（VmOps.sqrtTextOf）：旧径三处皆坏——
+            // parseFloat→toFloat 简化版返回 0（实测 parseFloat("16.0")=0）；
+            // floatToTextF 的 intToStr 窗腐坏；Aura 源码 Newton 编成 .auc 后
+            // 走 VM ADD/DIV/CMP 浮点分支，helper 调用窗同样腐坏（fop 探针
+            // a+b → "指针.0"）。新径无 Float 位、无 parseFloat、零新增调用窗
+            // （sqrtTextOf 内部只用已证原语）。
             val sQ: Any = this.stack.pop()
-            val xQ: Float = VmOps.parseFloat(VmOps.toStrAny(sQ))
-            if (xQ <= 0) {
-                this.stack.push(0.0 as Any)
-                return
-            }
-            var g: Float = xQ
-            var itQ: Int = 0
-            while (itQ < 40) {
-                val ng: Float = (g + xQ / g) / 2
-                val d: Float = ng - g
-                if (d < 0) { g = ng } else { g = ng }
-                if (d > -0.000001 && d < 0.000001) { itQ = 40 }
-                itQ = itQ + 1
-            }
-            this.stack.push(g as Any)
+            this.stack.push(VmOps.sqrtTextOf(sQ))
             return
         }
         // [R25b] StringBuilder.appendChar（aot/string_builder_runtime 挂点）
@@ -1734,45 +1764,28 @@ import aura.lang.compiler.serialize.AucLoader
                 this.stack.pop()
                 kQ = kQ + 1
             }
+            // [R202] kind 登记（`Path.join(vararg)` 的 GET_FIELD `.length` 依赖）：
+            // 旧前置臂**只建表不登记**，而 2241 行的 Collections.listOf 臂会登记 ——
+            // 前置臂抢先命中后，getField 的 kindF 恒 "" → `.length` 落到字符串
+            // 路径（把列表头 02 00… 当 C 串读 ⇒ strlen=1）⇒ Path.join 的
+            // vararg 遍历越界读野指针（13-stdlib §13.5 崩点）。两处必须同款。
+            this.heapKindKeys.add(VmOps.ptrKeyOf(nlQ))
+            this.heapKindVals.add("list")
             this.stack.push(nlQ)
             return
         }
-        // [R27] Math 三角族前置（11-imports 挂点；Taylor 级数，Float 标量
-        // 乘除双基底已证；角度归一到 [-pi,pi]）。
+        // [R27] Math 三角族前置（11-imports 挂点）。[R201] 改为纯 Int 定标域
+        // （VmOps.cosTextOf/sinTextOf）：旧径 parseFloat→toFloat 返回 0、
+        // Aura 源码 Taylor 的 Float 标量运算编成 .auc 后走 VM 浮点文本分支
+        // （helper 调用窗腐坏）——详见 VmOps 的 [R201] 段注释。
         if (funcName0 == "aura.lang.std.Math.cos" || funcName0 == "Math.cos" || funcName0 == "cos") {
             val xC: Any = this.stack.pop()
-            val xf: Float = VmOps.parseFloat(VmOps.toStrAny(xC))
-            var t: Float = xf
-            val pi2: Float = 6.28318530718
-            while (t > 3.14159265359) { t = t - pi2 }
-            while (t < -3.14159265359) { t = t + pi2 }
-            var term: Float = 1.0
-            var sumC: Float = 1.0
-            var nC: Int = 1
-            while (nC < 12) {
-                term = term * (0.0 - t) * t / ((2 * nC - 1) * (2 * nC))
-                sumC = sumC + term
-                nC = nC + 1
-            }
-            this.stack.push(sumC as Any)
+            this.stack.push(VmOps.cosTextOf(xC))
             return
         }
         if (funcName0 == "aura.lang.std.Math.sin" || funcName0 == "Math.sin" || funcName0 == "sin") {
             val xS: Any = this.stack.pop()
-            val xf2: Float = VmOps.parseFloat(VmOps.toStrAny(xS))
-            var t2: Float = xf2
-            val pi2b: Float = 6.28318530718
-            while (t2 > 3.14159265359) { t2 = t2 - pi2b }
-            while (t2 < -3.14159265359) { t2 = t2 + pi2b }
-            var term2: Float = t2
-            var sumS: Float = t2
-            var nS: Int = 1
-            while (nS < 12) {
-                term2 = term2 * (0.0 - t2) * t2 / ((2 * nS) * (2 * nS + 1))
-                sumS = sumS + term2
-                nS = nS + 1
-            }
-            this.stack.push(sumS as Any)
+            this.stack.push(VmOps.sinTextOf(xS))
             return
         }
         // [R28] 并发族前置路由（种子 concurrent_native.rs 对齐；宿主单线程
@@ -2026,25 +2039,11 @@ import aura.lang.compiler.serialize.AucLoader
             qc = qc + 1
         }
         val funcName: String = if (qual24) {
-            // [R181] 长度取**已证原语** `VmOps.strLenRaw`（小函数形态）：
-            // 原先在此内联的 `while (charCodeAt(n) != 0)` NUL 扫描在
-            // callOrBuiltin 这个千行巨函数里是挂死源——实测
-            // `aura.lang.std.Math.max`（24 字符，未超既往 35 字符口径）
-            // 进入本块后 20s 超时无输出。剥离子句本身不变（仍是
-            // 末段 `.` 定位 + vmSubstr），只把长度来源换成已证原语。
-            var fnLen: Int = VmOps.strLenRaw(funcName0)
-            var lastDot: Int = -1
-            var q: Int = 0
-            while (q < fnLen) {
-                if (funcName0.charCodeAt(q) == 46) { lastDot = q }
-                q = q + 1
-            }
-            if (lastDot >= 0 && lastDot + 1 < fnLen) {
-                val stripped: String = VmOps.vmSubstr(funcName0, lastDot + 1, fnLen - lastDot - 1)
-                stripped
-            } else {
-                funcName0
-            }
+            // [R203] 剥离整体交给 VmOps.tailAfterLastDot（小函数 + 已证形状）：
+            // 旧内联实现（strLenRaw + 同函数内 charCodeAt 扫描 + vmSubstr）
+            // 在本巨函数里 lastDot 被译成 26 ⇒ 尾段空 ⇒ `Unknown function:`。
+            // 语义不变：末段 `.` 之后的内容；无点则原名。
+            VmOps.tailAfterLastDot(funcName0)
         } else {
             funcName0
         }
@@ -2110,7 +2109,7 @@ import aura.lang.compiler.serialize.AucLoader
         }
         if (funcName == "__list_is_empty") {
             val list: Any = this.stack.pop()
-            this.stack.push(if (VmCollections.length(list) == 0) { 1 } else { 0 })
+            this.stack.push(if (VmCollections.listLen(list) == 0) { 1 } else { 0 })
             return
         }
         // [根修轮R5] 异常族路由（P5 缺口③）：throwException 语义完备
@@ -2267,11 +2266,11 @@ import aura.lang.compiler.serialize.AucLoader
             return
         } else if (funcName == "Collections.listSize" || funcName == "aura.lang.std.Collections.listSize") {
             val lI: Any = this.stack.pop()
-            this.stack.push(VmCollections.length(lI))
+            this.stack.push(VmCollections.listLen(lI))
             return
         } else if (funcName == "Collections.isEmpty" || funcName == "aura.lang.std.Collections.isEmpty") {
             val lE: Any = this.stack.pop()
-            val nE: Any = VmCollections.length(lE)
+            val nE: Any = VmCollections.listLen(lE)
             this.stack.push(VmOps.toI32(VmOps.toStrAny(nE)) == 0)
             return
         } else if (funcName == "Collections.listGet" || funcName == "aura.lang.std.Collections.listGet") {
@@ -2432,6 +2431,10 @@ import aura.lang.compiler.serialize.AucLoader
                 VmCollections.mapSet(map, key, val)
                 i = i - 1
             }
+            // [R202] kind 登记（同 listOf 前置臂：`.size`/`.length` 的
+            // GET_FIELD 容器分派依赖；旧路径漏登记 ⇒ 走字符串路径）。
+            this.heapKindKeys.add(VmOps.ptrKeyOf(map))
+            this.heapKindVals.add("map")
             this.stack.push(map)
             return
         } else if (funcName == "stringConcat") {
@@ -2454,7 +2457,7 @@ import aura.lang.compiler.serialize.AucLoader
         } else if (funcName == "Collections.count" || funcName == "aura.lang.std.Collections.count"
             || funcName == "__size") {
             val list: Any = this.stack.pop()
-            this.stack.push(VmCollections.length(list))
+            this.stack.push(VmCollections.listLen(list))
             return
         } else if (funcName == "length" || funcName == "String.length" || funcName == "strlen") {
             // `.auc` 里 `s.length` 被编译成原生调用（原生表下标 563 = `String.length`）。
@@ -2503,13 +2506,13 @@ import aura.lang.compiler.serialize.AucLoader
             return
         } else if (funcName == "aura.lang.std.Math.sqrt" || funcName == "Math.sqrt") {
             val v: Any = this.stack.pop()
-            val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
-            this.stack.push(VmOps.sqrt(fv))
+            // [R201] 纯 Int 定标域（同前置臂）。
+            this.stack.push(VmOps.sqrtTextOf(v))
             return
         } else if (funcName == "aura.lang.std.Math.pow" || funcName == "Math.pow") {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            this.stack.push(VmOps.pow(VmOps.parseFloat(toStr(a)), VmOps.parseFloat(toStr(b))))
+            this.stack.push(VmOps.pow(VmOps.parseFloat(VmOps.toStrAny(a)), VmOps.parseFloat(VmOps.toStrAny(b))))
             return
         }
 
@@ -2629,13 +2632,18 @@ import aura.lang.compiler.serialize.AucLoader
         } else if (funcName == "String.indexOf" || funcName == "indexOf") {
             val sub: Any = this.stack.pop()
             val v: Any = this.stack.pop()
-            this.stack.push(VmOps.indexOf(toStr(v), toStr(sub), 0))
+            // [R203] 接收者/子串转换改 toStrAny（R197：裸 toStr 在本宿主
+            // 布局多调用窗返回陈旧值/野指针 ⇒ 子串是垃圾内存的十进制）。
+            this.stack.push(VmOps.indexOf(VmOps.toStrAny(v), VmOps.toStrAny(sub), 0))
             return
         } else if (funcName == "String.substring" || funcName == "substring") {
             val endI: Any = this.stack.pop()
             val startI: Any = this.stack.pop()
             val v: Any = this.stack.pop()
-            val s: String = toStr(v)
+            // [R203] 同 indexOf：裸 toStr → toStrAny。旧径对接收者取到野指针后
+            // `vmSubstr` 从垃圾内存逐字符取 ⇒ 长度对、内容是十进制垃圾
+            //（实测 "02545871"/"99523810"，逐构建变化，P5-① 布局骰）。
+            val s: String = VmOps.toStrAny(v)
             val st: Int = VmOps.intOf(startI)
             var en: Int = VmOps.intOf(endI)
             if (st < 0) { this.stack.push(""); return }
@@ -2654,7 +2662,25 @@ import aura.lang.compiler.serialize.AucLoader
         }
 
         // ── 文件 I/O ──
-        else if (funcName == "fileRead" || funcName == "IO.fileRead"
+        else if (funcName == "fileExists" || funcName == "IO.fileExists"
+            || funcName == "aura.lang.std.IO.fileExists" || funcName == "Stdio.fileExists"
+            || funcName == "aura.lang.native.io.Stdio.fileExists") {
+            // [R203] 11-imports §11.2 / 13-stdlib §13.12 挂点：宿主无此臂 ⇒
+            // `Unknown function`（旧败因是崩，sqrt 修好后暴露）。
+            // 运行时 `IO_fileExists(rcx=path)` 只读 rcx（emitIoFileExists 里
+            // rdx 被清零）；rax=1/0 是**裸 i64**（非 Plan A 装箱），故用
+            // `as Long`（aura_cast Long = 恒等透传）比较后推文本布尔——
+            // toBool/toString 与 toStrAny 都把 "true"/"false" 处理正确
+            //（与 §13.2 contains=true 的渲染口径一致）。
+            val pathE: Any = this.stack.pop()
+            val rawE: Long = IO.fileExists(VmOps.toStrAny(pathE)) as Long
+            if (rawE != 0L) {
+                this.stack.push("true")
+            } else {
+                this.stack.push("false")
+            }
+            return
+        } else if (funcName == "fileRead" || funcName == "IO.fileRead"
             || funcName == "aura.lang.std.IO.fileRead") {
             val path: Any = this.stack.pop()
             this.stack.push(IO.readFile(toStr(path)))
@@ -2849,15 +2875,20 @@ import aura.lang.compiler.serialize.AucLoader
             this.stack.push(JitExec.protect(VmOps.addrOf(addr), VmOps.addrOf(size),
                                             VmOps.intOf(prot)))
             return
-        } else if (funcName == "charCodeAt") {
+        } else if (funcName == "charCodeAt" || funcName == "String.charCodeAt"
+            || funcName == "String_charCodeAt") {
             // 字符串原语族：种子 .auc 的裸名原生（自举 Stage-2 的编译器
             // 代码大量使用，2026-10-05 补齐）。⚠️ 越界返回 -1（与
             // VmOps/AucLoader 的防御语义一致）：编译器对残缺行存在
             // idx==len 的探测读，直接透传会在 AOT 载体下段错误
             //（实测 CEA-1 后崩，2026-10-05）。
+            // [R203] 补限定名 `String.charCodeAt`（13-stdlib 的 Path.basename
+            // 链经 guest Stdio/Path 调用该名，裸名臂接不住 ⇒ Unknown function）；
+            // 接收者转换改 toStrAny（R197：裸 toStr 在本宿主布局多调用窗返回
+            // 陈旧值/野指针）。
             val idx: Any = this.stack.pop()
             val s: Any = this.stack.pop()
-            val sv: String = toStr(s)
+            val sv: String = VmOps.toStrAny(s)
             val ii: Int = VmOps.intOf(idx)
             if (ii < 0 || ii >= sv.length) {
                 this.stack.push(-1)
@@ -2875,8 +2906,16 @@ import aura.lang.compiler.serialize.AucLoader
             println(toStr(s))
             this.stack.push("Unit")
             return
-        } else if (funcName == "String.fromCharCode" || funcName == "String_fromCharCode") {
+        } else if (funcName == "String.fromCharCode" || funcName == "String_fromCharCode"
+            || funcName == "fromCharCode") {
+            // [R203] 静态调用的 argc 含**接收者占位**：.auc 实测
+            // `String.fromCharCode(c)` → argc=2（receiver + char）。旧臂只
+            // pop 1 个 ⇒ 每次调用栈净多 1 项 ⇒ 后续取值整体错位
+            //（13-stdlib 的 vmSubstr 逐字符拼接产出 "02783636" 级垃圾）。
             val c: Any = this.stack.pop()
+            if (argc >= 2) {
+                this.stack.pop()
+            }
             this.stack.push(String.fromCharCode(VmOps.intOf(c)))
             return
         } else if (funcName == "substring" || funcName == "String_substring"
@@ -2900,9 +2939,31 @@ import aura.lang.compiler.serialize.AucLoader
             this.exitCode = VmOps.intOf(code)
             this.running = false
             return
-        } else if (funcName == "Process.env" || funcName == "aura.lang.std.Process.env") {
-            val name: Any = this.stack.pop()
-            this.stack.push(Env.get(toStr(name), ""))
+        } else if (funcName == "Process.env" || funcName == "aura.lang.std.Process.env"
+            || funcName == "EnvOps.get" || funcName == "aura.lang.native.env.EnvOps.get") {
+            // [R214] 增接 EnvOps.get（2 参）：13-stdlib §13.6 的 guest `EnvOps.get`
+            // 是纯 Aura 实现（readEnviron syscall + Stdio.stringToBuffer），
+            // .auc 布局下读 environ 得垃圾 ⇒ 乱码 + 假 OOM。宿主自身
+            // `Env.get` 已映射 runtime `Env_get`（诊断打印一直可用即证）。
+            if (argc >= 2) {
+                val dfltE: Any = this.stack.pop()
+                val nameE: Any = this.stack.pop()
+                this.stack.push(Env.get(VmOps.toStrAny(nameE), VmOps.toStrAny(dfltE)))
+            } else {
+                val name: Any = this.stack.pop()
+                this.stack.push(Env.get(toStr(name), ""))
+            }
+            return
+        } else if (funcName == "EnvOps.has" || funcName == "aura.lang.native.env.EnvOps.has") {
+            // [R214] 同 EnvOps.get；`Env.get(...,"")` 非空即视为存在
+            //（与 Aura VM 的空环境语义一致：13-stdlib 期望 has(PATH)=false）。
+            val nameHs: Any = this.stack.pop()
+            val hitHs: String = Env.get(VmOps.toStrAny(nameHs), "")
+            if (hitHs == "") {
+                this.stack.push("false")
+            } else {
+                this.stack.push("true")
+            }
             return
         }
 
@@ -3221,7 +3282,7 @@ import aura.lang.compiler.serialize.AucLoader
                 kiF = kiF + 1
             }
             if (kindF == "list" || kindF == "map") {
-                this.stack.push(VmCollections.length(obj))
+                this.stack.push(VmCollections.listLen(obj))
             } else {
                 this.stack.push(toAny(VmOps.strLenRaw(VmOps.toStrAny(obj))))
             }
@@ -3240,7 +3301,7 @@ import aura.lang.compiler.serialize.AucLoader
                 kiE = kiE + 1
             }
             if (kindE == "list" || kindE == "map") {
-                val nE2: Any = VmCollections.length(obj)
+                val nE2: Any = VmCollections.listLen(obj)
                 this.stack.push(VmOps.toI32(VmOps.toStrAny(nE2)) == 0)
                 return
             }
@@ -3252,7 +3313,7 @@ import aura.lang.compiler.serialize.AucLoader
             return
         }
         if (fieldName == "first" || fieldName == "last") {
-            val n: Int = VmCollections.length(obj)
+            val n: Int = VmCollections.listLen(obj)
             if (n <= 0) {
                 this.stack.push(null)
                 return
@@ -3374,7 +3435,28 @@ import aura.lang.compiler.serialize.AucLoader
         private fun getIndex(): Unit {
         val idx: Any = this.stack.pop()
         val objAny: Any = this.stack.pop()
-        this.stack.push(VmCollections.vmListAt(objAny, idx))
+        // [R202] 容器分派：**字符串下标**（`.auc` 的 `s[i]`、`s[len-1]`）必须走
+        // 单字符子串，不能进 vmListAt —— 后者把接收者当列表头
+        // （len@0/cap@8/items@16），对 String 会读 `read64(ptr+16)` 当 items
+        // 指针 ⇒ 野指针解引用（13-stdlib §13.5 `Path.join` 的
+        // `result[result.length-1] == '/'` 崩点）。kind 表查询与 getField 同款。
+        val keyG: String = VmOps.ptrKeyOf(objAny)
+        val knG: Int = this.heapKindKeys.size()
+        var kindG: String = ""
+        var kiG: Int = 0
+        while (kiG < knG) {
+            if (VmOps.toI32(this.heapKindKeys[kiG]) == VmOps.toI32(keyG)) {
+                kindG = this.heapKindVals[kiG]
+                kiG = knG
+            }
+            kiG = kiG + 1
+        }
+        if (kindG == "list") {
+            this.stack.push(VmCollections.vmListAt(objAny, idx))
+        } else {
+            val sG: String = VmOps.toStrAny(objAny)
+            this.stack.push(VmOps.vmSubstr(sG, VmOps.intOf(idx), 1))
+        }
     }
 
     /// 数组元素写入。

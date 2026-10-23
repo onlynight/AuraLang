@@ -73,7 +73,15 @@ object VmCollections {
     /// 返回值必须**显式装箱**：`Long → Any` 的隐式转换在本 AOT 下**不做装箱**
     /// （实测：长度 5 原样返回 5，调用方按「已装箱 Any」再解箱 → 得到 2，
     /// 于是 `list.size` 打印 2）。经 `Int` 走装箱路径（`Int → Any` 会装箱）。
-    fun length(list: Any): Any {
+    ///
+    /// ⚠️ [R200] **方法名不得叫 `length`**：`length` 是 seed 全链路的内建成员名
+    /// （`String.length` / 集合 `length`，见 `seed/.../hir.rs:1438`、
+    /// `emit.rs:6161/8153`、`codegen/emit.rs:100`）。`VmCollections.length(list)`
+    /// 会被名字解析拦进内建族 ⇒ `VmCollections_length` **符号从不被发射**
+    /// （llvm-nm 实锤：obj 里只有 mapLen/push/vmListAt，没有 length）⇒ 所有
+    /// `.size` 恒 0（listOf.size 隔离复现）。同款安全名：`mapLen`（在役）。
+    /// 读长度用 `read32`（P400 内联为 64 位 mov，语义等价；长度 < 2^32）。
+    fun listLen(list: Any): Any {
         if (list == null) {
             return 0
         }
@@ -81,8 +89,7 @@ object VmCollections {
         if (ptr == 0) {
             return 0
         }
-        val n: Long = Memory.read64(ptr)
-        return VmOps.toAny(n as Int)
+        return VmOps.toAny(Memory.read32(ptr))
     }
 
     /// 列表是否为空。
@@ -237,8 +244,11 @@ object VmCollections {
         if (ptr == 0) {
             return 0
         }
-        val n: Long = Memory.read64(ptr)
-        return VmOps.toAny(n as Int)
+        // [R199→R200] read32 取低 32 位即 Int（长度 < 2^32）。R199 曾以为
+        // `.size` 恒 0 是 `Long as Int` 截断坏，R200 实锤真因是 `length`
+        // 方法名撞 seed 内建族（见 listLen 注释）——本函数名 `mapLen` 不在
+        // 内建表里，故一直在役。
+        return VmOps.toAny(Memory.read32(ptr))
     }
 
     /// 向 Map 插入键值对（覆盖已有键）。
