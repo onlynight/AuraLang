@@ -214,6 +214,17 @@ import aura.lang.compiler.serialize.AucLoader
     // [R33] 类继承登记：键 = 类名
     private var cpKeys: List<String> = arrayListOf<String>()
     private var cpVals: List<String> = arrayListOf<String>()
+    // [R236] 对象 → 类 ID（与 ocKeys 平行；虚表槽位分派只认类 ID——
+    // 类名不唯一，05-classes 的类表里 "Any" 出现两次）
+    private var ocCidKeys: List<String> = arrayListOf<String>()
+    private var ocCidVals: List<Int> = arrayListOf<Int>()
+    // [R236] 按类的虚表槽位 → 全限定函数名；键 = 类ID * 4096 + 槽位
+    private var clsSlotKey: List<Int> = arrayListOf<Int>()
+    private var clsSlotName: List<String> = arrayListOf<String>()
+    // [R236] 类 ID → 类名（NEW_OBJECT 只带类 ID）
+    private var classNamesL: List<String> = arrayListOf<String>()
+    // 全局槽位 → 方法名（加载器的旧解析表；仅当按类槽位表未命中时回退）
+    private var slotNameL: List<String> = arrayListOf<String>()
 
     // ── 运行期 arena 水位 / 值栈容量探针（P1-RETAIN 诊断，2026-10-08）──
     //
@@ -408,6 +419,11 @@ import aura.lang.compiler.serialize.AucLoader
             // P241 窗口二分：registerAucClasses 之前
                 // P2.2c：类表 → 类继承注册表（parent_id 0 = Any；防自环）
                 this.registerAucClasses(mod.classNames, mod.classParentIds)
+                // [R236] 类 ID → 类名 + 按类的虚表槽位表（虚分派真值来源）
+                this.classNamesL = mod.classNames
+                this.clsSlotKey = mod.clsSlotKey
+                this.clsSlotName = mod.clsSlotName
+                this.slotNameL = mod.slotMethodNames
                         this.loadPredecoded(mod.numOpNames, mod.numOpCodes, mod.numArgsFlat, mod.constPool,
                 mod.constLines, mod.funcTable, mod.exports, mod.imports)
             println("[VMLOADOK]")
@@ -3400,12 +3416,25 @@ import aura.lang.compiler.serialize.AucLoader
         Memory.write64(ptr, 0)          // 类型标签（0 = 通用对象；类表接入 P1.2 后写类 id）
         Memory.write32(ptr + 8, 1)      // 引用计数 = 1
         this.stack.push(ptr)
+        // [R236] `.auc` 的 NEW_OBJECT 操作数是**类 ID**（Rust `class_id_map`），
+        // 加载器此前翻译成类名——但类名不唯一（类表里 "Any" 出现两次），
+        // 虚表槽位分派必须按 ID。这里同时登记 ID 与名字。
+        var cls: String = className
+        var cid: Int = -1
+        if (this.aucMode) {
+            cid = VmOps.toI32(className)
+            if (cid >= 0 && cid < this.classNamesL.size()) {
+                cls = this.classNamesL[cid]
+            }
+        }
         // 类名键取栈值的 toStrAny 形态——与 get/set/方法解析同一转换路径；
         // 不得对 Long 局部变量做 toStr（装箱路径不一致会导致键不匹配）。
         val objKey: String = VmOps.ptrKeyOf(this.stack.peek())
         // [R33] 线性登记
         this.ocKeys.add(objKey)
-        this.ocVals.add(className)
+        this.ocVals.add(cls)
+        this.ocCidKeys.add(objKey)
+        this.ocCidVals.add(cid)
         this.heapKindKeys.add(objKey)
         this.heapKindVals.add("object")
         // [R33] 旧 heapKinds(HashMap).put 调用窗骰跳过——线性登记已完成
@@ -3705,7 +3734,10 @@ import aura.lang.compiler.serialize.AucLoader
     /// 对象值是否为注册的堆对象（P1.2/P1.5 共用），是则返回其类名。
         private fun heapObjectClass(v: Any): String {
         if (v == null) { return "" }
-        val key: String = VmOps.toStrAny(v)
+        // [R236] 键必须与 `newObject` 的登记键同形：`ptrKeyOf`（指针低位十进制）。
+        // 旧径 `toStrAny(v)` 对 Long 指针打出**完整 64 位**十进制，而登记侧是
+        // 32 位截断 ⇒ 键恒不匹配 ⇒ 虚分派拿到空类名（`[CM] cls=[]` 实锤）。
+        val key: String = VmOps.ptrKeyOf(v)
         if (this.heapKinds.getOrDefault(key, "") != "object") { return "" }
         // [R33] 线性读
         val cn2: Int = this.ocKeys.size()
@@ -3718,6 +3750,43 @@ import aura.lang.compiler.serialize.AucLoader
         }
         return ""
     }
+        /// [R236] 接收者的**类 ID**（depth 同上）；未登记（非堆对象/未注册）返回 -1。
+        /// 与 `receiverClassAt` 同键（`ptrKeyOf`），只是取值走 ocCid 平行表。
+        private fun receiverCidAt(depth: Int): Int {
+        if (depth < 0) { return -1 }
+        val idx: Int = this.stack.stackDepth() - 1 - depth
+        if (idx < 0) { return -1 }
+        val v: Any = this.stack.vmSlotAt(idx)
+        if (v == null) { return -1 }
+        if (!VmOps.isNumeric(v)) { return -1 }
+        val key4: String = VmOps.ptrKeyOf(v)
+        val cn4: Int = this.ocCidKeys.size()
+        var ci4: Int = 0
+        while (ci4 < cn4) {
+            if (this.ocCidKeys[ci4] == key4) {
+                return this.ocCidVals[ci4]
+            }
+            ci4 = ci4 + 1
+        }
+        return -1
+    }
+
+    /// [R236] 类 `cid` 的虚表第 `slot` 位对应的**全限定函数名**（无命中返回 ""）。
+    /// 键 = cid * 4096 + slot（加载器按 子类→父类 顺序登记，先登记者胜）。
+        private fun slotFuncOf(cid: Int, slot: Int): String {
+        if (cid < 0 || slot < 0) { return "" }
+        val want: Int = cid * 4096 + slot
+        var si: Int = 0
+        val sn: Int = this.clsSlotKey.size()
+        while (si < sn) {
+            if (this.clsSlotKey[si] == want) {
+                return this.clsSlotName[si]
+            }
+            si = si + 1
+        }
+        return ""
+    }
+
     ///
     /// depth = 接收者之下压着的实参个数（0 = 接收者在栈顶）。
         private fun receiverClassAt(depth: Int): String {
@@ -3730,7 +3799,8 @@ import aura.lang.compiler.serialize.AucLoader
         // 见 getField 注释）；字符串/布尔等直接排除
         if (!VmOps.isNumeric(v)) { return "" }
         // [R33] 线性读
-        val key3: String = VmOps.toStrAny(v)
+        // [R236] 同上：键用 `ptrKeyOf`（与 newObject 登记侧同形）。
+        val key3: String = VmOps.ptrKeyOf(v)
         val cn3: Int = this.ocKeys.size()
         var ci3: Int = 0
         while (ci3 < cn3) {
@@ -3753,14 +3823,31 @@ import aura.lang.compiler.serialize.AucLoader
             // `.auc` 布局（Rust emit.rs CallMethod）：[self, args..., receiverCopy]，
             // 栈顶是接收者**副本**，仅用于虚分派（Rust VM 同样丢弃该副本）。
             // 绑定：丢弃副本后按目标函数形参个数（含 self）整体绑定。
+            //
+            // [R236] 操作数是**虚表槽位号**（加载器不再翻译成方法名）：
+            // 与 Rust `do_call_method` 同语义——用接收者**自己的类**的虚表
+            // 查槽位，得到全限定函数名。旧径用全局「槽位→方法名」表，在多个
+            // 类共用槽位编号时串号（05-classes 把 Animal.name 的 slot0 解析成
+            // Point.manhattan ⇒ dog.name() 变 manhattan）。
+            val slot: Int = VmOps.toI32(methodName)
+            val cid: Int = this.receiverCidAt(0)
             val cls0: String = this.receiverClassAt(0)
-            var resolved: String = methodName
-            if (cls0 != "") {
-                val chainHit: String = this.resolveMethodInChain(cls0, methodName)
-                if (chainHit != "") { resolved = chainHit }
-            }
             if (this.stack.stackDepth() > 0) {
                 this.stack.pop()  // 丢弃接收者副本
+            }
+            var resolved: String = this.slotFuncOf(cid, slot)
+            if (resolved == "") {
+                // 回退：接收者不是已登记对象（或无类表/槽位表）时，退回旧的
+                // 「全局槽位名 + 父类链」解析，行为与 R235 一致。
+                var nm: String = methodName
+                if (slot >= 0 && slot < this.slotNameL.size() && this.slotNameL[slot] != "") {
+                    nm = this.slotNameL[slot]
+                }
+                if (cls0 != "") {
+                    val chainHit: String = this.resolveMethodInChain(cls0, nm)
+                    if (chainHit != "") { resolved = chainHit }
+                }
+                if (resolved == "") { resolved = nm }
             }
             val pc: Int = this.funcParamCount(resolved)
             if (pc < 0) {

@@ -79,6 +79,18 @@ import aura.lang.compiler.serialize.AucSerializer
     var classNames: List<String> = arrayListOf<String>()
     /// 类定义表：父类 ID（-1 = 无父类；Rust 端 0 = Any 且无自环）。
     var classParentIds: List<Int> = arrayListOf<Int>()
+    /// 类定义表：本类的虚表下标（-1 = 无虚表）。
+    var classVtIdx: List<Int> = arrayListOf<Int>()
+    /// 虚表扁平槽位（各表槽位依次拼接；`65535` = 该槽无方法）。
+    var vtSlotFlat: List<Int> = arrayListOf<Int>()
+    /// 每个虚表的槽位数（与 `vtSlotFlat` 配合还原二维结构）。
+    var vtSlotCount: List<Int> = arrayListOf<Int>()
+    /// [R236] **按类**的虚表槽位 → 全限定函数名（"Dog.name"）。
+    /// 键 = `类ID * 4096 + 槽位`，值 = 函数名；沿父类链回落（子类覆写优先）。
+    /// 取代全局 `slotMethodNames`——后者在多个类共用同一槽位编号时
+    /// （05-classes：slot0 对 Point 是 manhattan、对 Animal 是 name）必然串号。
+    var clsSlotKey: List<Int> = arrayListOf<Int>()
+    var clsSlotName: List<String> = arrayListOf<String>()
     /// 类字段名表（每类一行，逗号分隔；仅供诊断）。
     var classFieldNames: String = ""
     /// AOT 段数量（段数据不再解析——随 Photon 任务）。
@@ -461,6 +473,8 @@ import aura.lang.compiler.serialize.AucSerializer
         //     的方法名部分；覆写只改函数、不改槽位语义，故任取即安全。
         val noMethodSentinel: Int = 65535
         var slotNames: List<String> = arrayListOf<String>()
+        var vtFlat: List<Int> = arrayListOf<Int>()
+        var vtCounts: List<Int> = arrayListOf<Int>()
         if (version >= 5 && reader.pos < reader.dataLen) {
             val nVtL: Long = reader.readU16()
             var vi: Int = 0
@@ -468,10 +482,12 @@ import aura.lang.compiler.serialize.AucSerializer
                 reader.readU16()          // type_tag
                 val nSlotsL: Long = reader.readU16()
                 val nSlots: Int = nSlotsL as Int
+                vtCounts.add(nSlots)
                 var sj: Int = 0
                 while (sj < nSlots) {
                     val fidxL: Long = reader.readU16()
                     val fidx: Int = fidxL as Int
+                    vtFlat.add(fidx)
                     if (fidx != noMethodSentinel) {
                         // 扩容 slotNames 到 sj+1
                         while (slotNames.size() <= sj) {
@@ -488,6 +504,8 @@ import aura.lang.compiler.serialize.AucSerializer
             }
         }
         mod.slotMethodNames = slotNames
+        mod.vtSlotFlat = vtFlat
+        mod.vtSlotCount = vtCounts
 
         // 15. v6: 类定义表（P2.2a/P2.2c）
         //     仅当 version >= 6 且 headerFlags 含 HEADER_HAS_CLASS_DEFS(1<<4=16)
@@ -502,7 +520,7 @@ import aura.lang.compiler.serialize.AucSerializer
                 mod.classNames.add(reader.readStr())
                 mod.classParentIds.add(reader.readU16() as Int)
                 reader.readU16()          // field_count
-                reader.readU16()          // vtable_idx
+                mod.classVtIdx.add(reader.readU16() as Int)
                 val nIfL: Long = reader.readU16()
                 var ii2: Int = 0
                 while (ii2 < (nIfL as Int)) {
@@ -522,6 +540,58 @@ import aura.lang.compiler.serialize.AucSerializer
                 mod.classFieldNames = mod.classFieldNames + fnLine + "\n"
                 ci2 = ci2 + 1
             }
+        }
+
+        // 15b. [R236] **按类**的虚表槽位 → 全限定函数名（"Dog.name"）。
+        //      语义对齐 Rust VM `do_call_method`：槽位编号只在**同一个类**的
+        //      虚表内有意义；此前用全局 `slotMethodNames`（任取首个非空槽）
+        //      在多类程序里必然串号（05-classes 实测 slot0 解析成 "manhattan"）。
+        //      遍历顺序 子类 → 父类，先登记者胜（子类覆写优先）。
+        var ci4: Int = 0
+        while (ci4 < mod.classNames.size()) {
+            var cur4: Int = ci4
+            var d4: Int = 0
+            while (cur4 >= 0 && cur4 < mod.classNames.size() && d4 < 64) {
+                val vt4: Int = mod.classVtIdx[cur4]
+                if (vt4 >= 0 && vt4 < vtCounts.size()) {
+                    var base4: Int = 0
+                    var k4: Int = 0
+                    while (k4 < vt4) {
+                        base4 = base4 + vtCounts[k4]
+                        k4 = k4 + 1
+                    }
+                    var s4: Int = 0
+                    while (s4 < vtCounts[vt4]) {
+                        val f4: Int = vtFlat[base4 + s4]
+                        if (f4 != noMethodSentinel && f4 < funcNames.size()) {
+                            val key4: Int = ci4 * 4096 + s4
+                            var qi: Int = 0
+                            val qn: Int = mod.clsSlotKey.size()
+                            var had4: Int = 0
+                            while (qi < qn) {
+                                if (mod.clsSlotKey[qi] == key4) {
+                                    had4 = 1
+                                    qi = qn
+                                }
+                                qi = qi + 1
+                            }
+                            if (had4 == 0) {
+                                mod.clsSlotKey.add(key4)
+                                mod.clsSlotName.add(funcNames[f4])
+                            }
+                        }
+                        s4 = s4 + 1
+                    }
+                }
+                val p4: Int = mod.classParentIds[cur4]
+                if (p4 == cur4 || p4 < 0 || p4 >= mod.classNames.size()) {
+                    cur4 = -1
+                } else {
+                    cur4 = p4
+                }
+                d4 = d4 + 1
+            }
+            ci4 = ci4 + 1
         }
 
         // 16. v6: 源码索引段（LSP 专用，跳过其字节）
@@ -701,12 +771,28 @@ import aura.lang.compiler.serialize.AucSerializer
             // 逐 32 位读取：写端是 `i64`，但字节码语义是 32 位 Int。
             // 高 32 位为 0（正）或 -1（负数）时，低 32 位的有符号值即真值
             //（实测 `-2` 若按无符号 Long 输出会变成 18446744073709551614）。
-            val low: Int = reader.readI32()
-            val high: Int = reader.readI32()
-            if (high == 0 || high == -1) {
-                return toStr(low)
+            // [R237] 两道失真叠加，必须各修一处：
+            //  ① **符号扩展**：`readI32` = `b0|(b1<<8)|(b2<<16)|(b3<<24)`，
+            //     Photon 的 Int 是 **64 位** ⇒ 0xFFFFFFFB 不会被符号扩展成
+            //     -5，而是 4294967291（实测 `[CI]` 诊断窗从不打印）。
+            //  ② **无符号打印**：`toStr` 在 Photon 运行时按无符号十进制输出
+            //     （toStr(-5) = "4294967291"），故取绝对值后手工补负号。
+            //
+            // 两处修正都用 **16 位分块** 表达，绕开整数字面量上限：
+            // ⚠️ 字面量 2147483648 / 4294967296 在种子前端按 i32 解析会溢出
+            // （2147483648 → -2147483648 ⇒ `cv >= 2147483648` 恒真 ⇒ 正数
+            //   被误减 2^32，实测 42 → "-4294967254"，26 个用例全线崩）。
+            val lo16: Int = reader.readU16()
+            val hi16: Int = reader.readU16()
+            reader.readU16()             // 高 32 位（符号扩展位，弃用）
+            reader.readU16()
+            if (hi16 >= 32768) {
+                // 负数：真值 = -(2^32 - u)，u = hi16*65536 + lo16
+                // 2^32 - u = (65536 - hi16) * 65536 - lo16（各量均 < 2^32）
+                val mag: Int = (65536 - hi16) * 65536 - lo16
+                return "-" + toStr(mag)
             }
-            return toStr(low)
+            return toStr(hi16 * 65536 + lo16)
         } else if (tag == 1) {  // CONST_FLOAT：[R22] 十进制**文本**（种子端直接写文本，线格式与 CONST_STR 同形）
             // 旧实现 = 8 字节位模式 + f64BitsToText（纯 Aura 拆位）——该内核
             //（52 次 Float 累加 + VmOps.pow + toStr(Float)，宿主 toStr =
@@ -969,11 +1055,12 @@ import aura.lang.compiler.serialize.AucSerializer
                 offset = offset + adv
                 continue
             } else if (opcode == 30) {
-                // NewObject(类 ID) → 类名（类表下标即 ID，与 Rust class_id_map 一致）
+                // NewObject(类 ID) → [R236] 直接传 **类 ID**（VM 侧按 ID 查
+                // 虚表槽位；类名不唯一，见 Vm.newObject 注释）
                 val cid: Int = reader.readU16()
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numOpCodes.add(aucToVmOp(opcode))
-                mod.numArgsFlat.add(classNameAt(classNames, cid))
+                mod.numArgsFlat.add(toStr(cid))
                 count = count + 1
                 var adv: Int = 1 + operandSize
                 offset = offset + adv
@@ -992,12 +1079,12 @@ import aura.lang.compiler.serialize.AucSerializer
                 offset = offset + adv
                 continue
             } else if (opcode == 40) {
-                // CallMethod(vtable 槽位) → 方法名
+                // CallMethod(vtable 槽位)
+                // [R236] 传**裸槽位号**：槽位→方法名由 VM 按接收者的类解析
+                // （`clsSlotKey/clsSlotName`）。旧径传全局槽位表里的名字，
+                // 多类程序里 slot0 会解析到别的类的方法（实测 "manhattan"）。
                 val slot: Int = reader.readU16()
                 var a0: String = toStr(slot)
-                if (slot >= 0 && slot < slotNames.size() && slotNames.get(slot) != "") {
-                    a0 = slotNames.get(slot)
-                }
                 mod.numOpNames.add(opcodeName(opcode))
                 mod.numOpCodes.add(aucToVmOp(opcode))
                 mod.numArgsFlat.add(a0)
