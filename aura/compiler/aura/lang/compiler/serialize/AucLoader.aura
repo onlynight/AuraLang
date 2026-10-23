@@ -117,8 +117,13 @@ import aura.lang.compiler.serialize.AucSerializer
         /// 整体错位。装载期直接携带数值，文本名仅供诊断）。
         /// LoadConst（aucOp 0）按常量标签分派，由调用方特判。
         fun aucToVmOp(aucOp: Int): Int {
-            if (aucOp == 110) { return 110 }
-            if (aucOp == 111) { return 111 }
+            // ⚠️ P3.2：`.auc` 的 LoadGlobal(110)/StoreGlobal(111) 与 VM 的
+            // INC_REF(110)/DEC_REF(111) **编号冲突**。旧代码直接 `return 110/111`
+            // 把全局变量读写误当成引用计数操作 ⇒ 顶层 val/var 在 JIT 宿主里
+            // 从不真正存取（16-script-mode 脚本模式 while 死循环的根因）。
+            // IncRef/DecRef 走 `.auc` 字节 34/35 → VM 110/111，与此不冲突。
+            if (aucOp == 110) { return 212 }
+            if (aucOp == 111) { return 213 }
 
         if (aucOp == 0) { return 0 }
         if (aucOp == 1) { return 10 }

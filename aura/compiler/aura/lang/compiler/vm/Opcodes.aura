@@ -221,6 +221,12 @@ internal object Opcodes {
     const val DEF_CLASS: Int = 210
     /// 尾调用（帧复用）：`CALL_TAIL name argc`，语义同 CALL 但不压新调用帧。
     const val CALL_TAIL: Int = 211
+    /// 模块级全局变量读：`LOAD_GLOBAL slot`（P3.2 顶层 val/var 共享槽）。
+    /// `.auc` 里 LoadGlobal 字节是 110，与 VM 的 INC_REF(110) 编号冲突，
+    /// 故 AucLoader.aucToVmOp 把 `.auc` 110 映射到本号（212）。
+    const val LOAD_GLOBAL: Int = 212
+    /// 模块级全局变量写：`STORE_GLOBAL slot`。`.auc` 111 → 本号（213）。
+    const val STORE_GLOBAL: Int = 213
 
     // ── 助记符 → 编号（加载期转换表，惰性构建一次）──
 
@@ -526,6 +532,10 @@ internal object Opcodes {
         this.flatCodes.add(DEF_CLASS)
         this.flatNames.add("CALL_TAIL")
         this.flatCodes.add(CALL_TAIL)
+        this.flatNames.add("LOAD_GLOBAL")
+        this.flatCodes.add(LOAD_GLOBAL)
+        this.flatNames.add("STORE_GLOBAL")
+        this.flatCodes.add(STORE_GLOBAL)
         this.nameMapReady = true
     }
 
@@ -659,6 +669,8 @@ internal object Opcodes {
             MAKE_FN_REF          -> "MAKE_FN_REF"
             DEF_CLASS            -> "DEF_CLASS"
             CALL_TAIL            -> "CALL_TAIL"
+            LOAD_GLOBAL          -> "LOAD_GLOBAL"
+            STORE_GLOBAL         -> "STORE_GLOBAL"
             OP_NOP               -> "#NOP"
             OP_UNKNOWN           -> "#UNKNOWN"
             else                 -> "UNKNOWN"

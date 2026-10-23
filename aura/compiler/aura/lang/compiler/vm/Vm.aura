@@ -194,6 +194,11 @@ import aura.lang.compiler.serialize.AucLoader
     // [R33] 全局变量线性登记
     private var gKeys: List<String> = arrayListOf<String>()
     private var gVals: List<Any> = arrayListOf<Any>()
+    // [R196] 模块级全局变量帧：`.auc` 的 LOAD_GLOBAL/STORE_GLOBAL（顶层 val/var）
+    // 按**槽号**存取。复用 VmLocals（Memory 裸缓冲 + putSlot 自动扩容 +
+    // getSlot 未写返 null）—— ArrayList 的 field 读/下标写在 AOT 宿主下会漂移
+    // （实测 gVals[slot]=v 不持久，全局读写恒 0），VmLocals 是 VM 自身依赖的可靠存储。
+    private var gFrame: VmLocals = VmLocals()
     // [R33] 对象字段扁平登记：键 = "<objKey>|<fieldName>"
     private var ofKeys: List<String> = arrayListOf<String>()
     private var ofVals: List<Any> = arrayListOf<Any>()
@@ -1354,6 +1359,22 @@ import aura.lang.compiler.serialize.AucLoader
             this.boxAlloc()
         }
 
+        // ── 模块级全局变量（P3.2：.auc LoadGlobal/StoreGlobal 经 aucToVmOp 110/111 → 212/213）──
+        // 顶层 val/var 走模块级共享帧（gFrame，VmLocals），非帧局部；槽号 = hir.globals 收集序。
+        else if (op == 212) {
+            val gslot: Int = this.arg0IntOf()
+            val gv: Any = this.gFrame.getSlot(gslot)
+            if (gv == null) {
+                this.stack.push(toAny(0))
+            } else {
+                this.stack.push(gv)
+            }
+        } else if (op == 213) {
+            val gslot: Int = this.arg0IntOf()
+            val gsv: Any = this.stack.pop()
+            this.gFrame.putSlot(gslot, gsv)
+        }
+
         // ── defer ──
         else if (op == 120) {
             // defer 区域开始（由 VM 管理清理栈）
@@ -1999,10 +2020,13 @@ import aura.lang.compiler.serialize.AucLoader
             qc = qc + 1
         }
         val funcName: String = if (qual24) {
-            var fnLen: Int = 0
-            while (funcName0.charCodeAt(fnLen) != 0) {
-                fnLen = fnLen + 1
-            }
+            // [R181] 长度取**已证原语** `VmOps.strLenRaw`（小函数形态）：
+            // 原先在此内联的 `while (charCodeAt(n) != 0)` NUL 扫描在
+            // callOrBuiltin 这个千行巨函数里是挂死源——实测
+            // `aura.lang.std.Math.max`（24 字符，未超既往 35 字符口径）
+            // 进入本块后 20s 超时无输出。剥离子句本身不变（仍是
+            // 末段 `.` 定位 + vmSubstr），只把长度来源换成已证原语。
+            var fnLen: Int = VmOps.strLenRaw(funcName0)
             var lastDot: Int = -1
             var q: Int = 0
             while (q < fnLen) {
@@ -2105,8 +2129,22 @@ import aura.lang.compiler.serialize.AucLoader
             this.stack.push(Memory.alloc(n3))
             return
         }
-        if (funcName == "ThreadOps.cores" || funcName == "cores") {
-            this.stack.push(ThreadOps.cores())
+        if (funcName == "ThreadOps.cores" || funcName == "cores" || funcName == "ThreadOps.currentId") {
+            // [R184] Plan A 装箱：裸 Int 入 Any 槽时，`typeof` 只有
+            // 「奇=Int / 偶=String」两态（aot/runtime/libc.ll @aura_typeof），
+            // 偶的裸 Int 会被当字符串指针解引用 ⇒ `.toString()` 直接 0xC0000005
+            //（实测 c1 = `Thread.availableCores().toString()` 挂死，
+            // 而 c2 只取值不打印则正常）。
+            // 同臂并入 `ThreadOps.currentId`（`Thread.id()`）——此前无臂，
+            // 落到用户函数兜底时 `funcOffset` 意外命中函数表 ⇒ 跳到 ip=0 处
+            // 的野跳转（实测 08-concurrency 在 §8.1 后失控）。
+            // 刻意**并入本臂**而不新增块：行数不增，不惊动 P5-① 布局骰。
+            this.stack.push(VmOps.toAny(if (funcName == "ThreadOps.currentId") ThreadOps.currentId() else ThreadOps.cores()))
+            return
+        }
+        if (funcName == "ThreadOps.sleepMs") {
+            ThreadOps.sleepMs(VmOps.intOf(this.stack.pop()))
+            this.stack.push("Unit")
             return
         }
         if (funcName == "aura_isOfType") {
@@ -2422,6 +2460,8 @@ import aura.lang.compiler.serialize.AucLoader
         else if (funcName == "aura.lang.std.Math.abs" || funcName == "Math.abs") {
             val v: Any = this.stack.pop()
             val iv: Int = VmOps.toI32(VmOps.toStrAny(v))
+            // [R186] 裸 Int 入 Any 槽在 Plan A 下 typeof 恒报 String ⇒ 下游
+            // `.toString()` 误判为指针。统一 toAny 装箱（同 R180 位运算）。
             this.stack.push(if (iv < 0) -iv else iv)
             return
         } else if (funcName == "aura.lang.std.Math.min" || funcName == "Math.min") {
@@ -2483,7 +2523,10 @@ import aura.lang.compiler.serialize.AucLoader
         } else if (funcName == "String.contains" || funcName == "contains") {
             val sub: Any = this.stack.pop()
             val v: Any = this.stack.pop()
-            this.stack.push(VmOps.contains(toStr(v), toStr(sub)))
+            // [R184] 同 R184-cores：裸 Bool（1/0）入 Any 槽会被 typeof 判成
+            // String 指针 ⇒ 后续 `.toString()`/真值判定取野指针。
+            // 与 R180 位运算同一手法：结果经 `toAny` 装箱。
+            this.stack.push(VmOps.toAny(if (VmOps.contains(toStr(v), toStr(sub))) 1 else 0))
             return
         } else if (funcName == "String.trim" || funcName == "trim") {
             val v: Any = this.stack.pop()
