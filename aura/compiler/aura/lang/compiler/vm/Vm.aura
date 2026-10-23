@@ -2367,37 +2367,39 @@ import aura.lang.compiler.serialize.AucLoader
             return
         } else if (funcName == "abs") {
             val v: Any = this.stack.pop()
-            val iv: Int = VmOps.toI32(VmOps.toStrAny(v))
-            this.stack.push(if (iv < 0) -iv else iv)
+            val iv: Int = VmOps.intOf(v)
+            // [R197] Plan A：Int 结果必须 toAny 装箱（裸 Int 入 Any 槽被 typeof
+            // 判成 String 指针 ⇒ 下游 .toString() 读野地址，实测 abs(-5)=2147483645）。
+            this.stack.push(toAny(if (iv < 0) -iv else iv))
             return
         } else if (funcName == "min") {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             val av: Int = VmOps.intOf(a)
             val bv: Int = VmOps.intOf(b)
-            this.stack.push(if (av < bv) av else bv)
+            this.stack.push(toAny(if (av < bv) av else bv))
             return
         } else if (funcName == "max") {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             val av: Int = VmOps.intOf(a)
             val bv: Int = VmOps.intOf(b)
-            this.stack.push(if (av > bv) av else bv)
+            this.stack.push(toAny(if (av > bv) av else bv))
             return
         } else if (funcName == "round") {
             val v: Any = this.stack.pop()
             val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
-            this.stack.push(VmOps.toI32(toStr(fv + 0.5)))
+            this.stack.push(toAny(VmOps.toI32(toStr(fv + 0.5))))
             return
         } else if (funcName == "floor") {
             val v: Any = this.stack.pop()
             val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
-            this.stack.push(VmOps.intOf(fv))
+            this.stack.push(toAny(VmOps.intOf(fv)))
             return
         } else if (funcName == "ceil") {
             val v: Any = this.stack.pop()
             val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
-            this.stack.push(VmOps.toI32(toStr(fv + 1)))
+            this.stack.push(toAny(VmOps.toI32(toStr(fv + 1))))
             return
         } else if (funcName == "listOf") {
             // 按**原顺序**取实参（见 `VmStack.vmSlotAt`：逐个 pop 会反转元素顺序）
@@ -2459,39 +2461,39 @@ import aura.lang.compiler.serialize.AucLoader
         // ── Math（带命名空间） ──
         else if (funcName == "aura.lang.std.Math.abs" || funcName == "Math.abs") {
             val v: Any = this.stack.pop()
-            val iv: Int = VmOps.toI32(VmOps.toStrAny(v))
-            // [R186] 裸 Int 入 Any 槽在 Plan A 下 typeof 恒报 String ⇒ 下游
-            // `.toString()` 误判为指针。统一 toAny 装箱（同 R180 位运算）。
-            this.stack.push(if (iv < 0) -iv else iv)
+            val iv: Int = VmOps.intOf(v)
+            // [R197] Plan A：Int 结果必须 toAny 装箱（裸 Int 入 Any 槽被 typeof
+            // 判成 String 指针 ⇒ 下游 .toString() 读野地址，实测 abs(-5)=2147483645）。
+            this.stack.push(toAny(if (iv < 0) -iv else iv))
             return
         } else if (funcName == "aura.lang.std.Math.min" || funcName == "Math.min") {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             val av: Int = VmOps.intOf(a)
             val bv: Int = VmOps.intOf(b)
-            this.stack.push(if (av < bv) av else bv)
+            this.stack.push(toAny(if (av < bv) av else bv))
             return
         } else if (funcName == "aura.lang.std.Math.max" || funcName == "Math.max") {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             val av: Int = VmOps.intOf(a)
             val bv: Int = VmOps.intOf(b)
-            this.stack.push(if (av > bv) av else bv)
+            this.stack.push(toAny(if (av > bv) av else bv))
             return
         } else if (funcName == "aura.lang.std.Math.round" || funcName == "Math.round") {
             val v: Any = this.stack.pop()
             val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
-            this.stack.push(VmOps.toI32(toStr(fv + 0.5)))
+            this.stack.push(toAny(VmOps.toI32(toStr(fv + 0.5))))
             return
         } else if (funcName == "aura.lang.std.Math.floor" || funcName == "Math.floor") {
             val v: Any = this.stack.pop()
             val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
-            this.stack.push(VmOps.intOf(fv))
+            this.stack.push(toAny(VmOps.intOf(fv)))
             return
         } else if (funcName == "aura.lang.std.Math.ceil" || funcName == "Math.ceil") {
             val v: Any = this.stack.pop()
             val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
-            this.stack.push(VmOps.toI32(toStr(fv + 1)))
+            this.stack.push(toAny(VmOps.toI32(toStr(fv + 1))))
             return
         } else if (funcName == "aura.lang.std.Math.sqrt" || funcName == "Math.sqrt") {
             val v: Any = this.stack.pop()
@@ -2523,10 +2525,12 @@ import aura.lang.compiler.serialize.AucLoader
         } else if (funcName == "String.contains" || funcName == "contains") {
             val sub: Any = this.stack.pop()
             val v: Any = this.stack.pop()
-            // [R184] 同 R184-cores：裸 Bool（1/0）入 Any 槽会被 typeof 判成
-            // String 指针 ⇒ 后续 `.toString()`/真值判定取野指针。
-            // 与 R180 位运算同一手法：结果经 `toAny` 装箱。
-            this.stack.push(VmOps.toAny(if (VmOps.contains(toStr(v), toStr(sub))) 1 else 0))
+            // [R184] 裸 Bool（1/0）入 Any 槽会被 typeof 判成 String 指针 ⇒
+            // 后续 `.toString()`/真值判定取野指针。结果经 `toAny` 装箱。
+            // [R197] 实参改 VmOps.toStrAny：bare `toStr` 在本宿主布局下多调用窗
+            // 返回陈旧值/野指针（R19 注已警示），contains 对野指针解引用 = 段错误
+            //（13-stdlib §13.2 挂点）。
+            this.stack.push(VmOps.toAny(if (VmOps.contains(VmOps.toStrAny(v), VmOps.toStrAny(sub))) 1 else 0))
             return
         } else if (funcName == "String.trim" || funcName == "trim") {
             val v: Any = this.stack.pop()
