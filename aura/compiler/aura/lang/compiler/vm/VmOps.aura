@@ -589,6 +589,17 @@ object VmOps {
         return tagged as Any
     }
 
+    /// Long → Any 装箱（`(v<<1)|1`，恒奇）。**地址/句柄专用**（Int 版见
+    /// `toAny`；直接 `as Int` 会截断 47 位地址）。`addrOf` 可无损拆回。
+    ///
+    /// [R218] 用途：让 guest `.auc` 里的 `ptr + i` 走**数值** ADD 而非字符串
+    /// 拼接 —— Any 槽里裸 Long 与 String 指针同形（都是偶数），
+    /// `isString = !isTaggedInt` 对两者都为真（P409），没法和字符串区分。
+    fun toAnyL(v: Long): Any {
+        val t: Long = v * 2 + 1
+        return t as Any
+    }
+
     /// Any -> Long（**地址/整值统一入口**，2026-10-08 P1-3）。
     ///
     /// Memory.* / JitExec.* 等原生臂的实参在 Any 槽里有两种形态：

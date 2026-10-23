@@ -2634,7 +2634,8 @@ import aura.lang.compiler.serialize.AucLoader
             val v: Any = this.stack.pop()
             // [R203] 接收者/子串转换改 toStrAny（R197：裸 toStr 在本宿主
             // 布局多调用窗返回陈旧值/野指针 ⇒ 子串是垃圾内存的十进制）。
-            this.stack.push(VmOps.indexOf(VmOps.toStrAny(v), VmOps.toStrAny(sub), 0))
+            // [R218] 结果装箱（同 charCodeAt：裸 Int 被 toStrAny 误读 48 型）。
+            this.stack.push(VmOps.toAny(VmOps.indexOf(VmOps.toStrAny(v), VmOps.toStrAny(sub), 0)))
             return
         } else if (funcName == "String.substring" || funcName == "substring") {
             val endI: Any = this.stack.pop()
@@ -2696,6 +2697,44 @@ import aura.lang.compiler.serialize.AucLoader
             || funcName == "aura.lang.std.IO.readLine") {
             this.stack.push(IO.readLine())
             return
+        } else if (funcName == "FileOps.open" || funcName == "aura.lang.native.file.FileOps.open"
+            || funcName == "FileOps.lseek" || funcName == "aura.lang.native.file.FileOps.lseek"
+            || funcName == "FileOps.fstat" || funcName == "aura.lang.native.file.FileOps.fstat"
+            || funcName == "FileOps.access" || funcName == "aura.lang.native.file.FileOps.access"
+            || funcName == "FileOps.unlink" || funcName == "aura.lang.native.file.FileOps.unlink"
+            || funcName == "FileOps.mkdir" || funcName == "aura.lang.native.file.FileOps.mkdir"
+            || funcName == "FileOps.rmdir" || funcName == "aura.lang.native.file.FileOps.rmdir"
+            || funcName == "FileOps.rename" || funcName == "aura.lang.native.file.FileOps.rename"
+            || funcName == "FileOps.close" || funcName == "aura.lang.native.file.FileOps.close"
+            || funcName == "FileOps.read" || funcName == "aura.lang.native.file.FileOps.read"
+            || funcName == "FileOps.write" || funcName == "aura.lang.native.file.FileOps.write") {
+            // [R218] `FileOps.*` 是 `@native(SYS_*)` 的 **Linux syscall 封装**，
+            // 宿主（Windows、无 syscall 后端）无法兑现。按本项目既有的
+            // 「VM 沙箱语义」统一失败：open/lseek/fstat/access/unlink/mkdir/
+            // rmdir/rename → -1，close/read/write → 0。
+            // 不接会产生**假 OOM**：`File.readText` 的 `lseek(SEEK_END)` 得 0
+            // 与 `read` 得 0 交替 ⇒ guest 的错误分支不进、堆被填满
+            //（13-stdlib §13.11，实测 exit=70 且全程无输出）。
+            // 接住后 guest 走自带错误分支：写失败打消息 / 读空串 / exists=false。
+            var foN: Int = argc
+            while (foN > 0) {
+                this.stack.pop()
+                foN = foN - 1
+            }
+            val foFail: Boolean = funcName == "FileOps.open" || funcName == "aura.lang.native.file.FileOps.open"
+                || funcName == "FileOps.lseek" || funcName == "aura.lang.native.file.FileOps.lseek"
+                || funcName == "FileOps.fstat" || funcName == "aura.lang.native.file.FileOps.fstat"
+                || funcName == "FileOps.access" || funcName == "aura.lang.native.file.FileOps.access"
+                || funcName == "FileOps.unlink" || funcName == "aura.lang.native.file.FileOps.unlink"
+                || funcName == "FileOps.mkdir" || funcName == "aura.lang.native.file.FileOps.mkdir"
+                || funcName == "FileOps.rmdir" || funcName == "aura.lang.native.file.FileOps.rmdir"
+                || funcName == "FileOps.rename" || funcName == "aura.lang.native.file.FileOps.rename"
+            if (foFail) {
+                this.stack.push(VmOps.toAny(0 - 1))
+            } else {
+                this.stack.push(VmOps.toAny(0))
+            }
+            return
         }
 
         // ── Process ──
@@ -2732,7 +2771,16 @@ import aura.lang.compiler.serialize.AucLoader
             return
         } else if (funcName == "Memory.alloc") {
             val n: Any = this.stack.pop()
-            this.stack.push(Memory.alloc(VmOps.addrOf(n)))
+            // [R218] 返回**装箱地址**（toAnyL，(ptr<<1)|1 恒奇）：
+            // guest 里 `Memory.write(buf + i, ch)`（Stdio.stringToBuffer /
+            // 一切「指针 + 整数」的 .auc 代码）编成裸 ADD；裸 Long（偶）与
+            // String 指针在 Any 槽同形，`isString(!isTaggedInt)` 判真 ⇒ 旧径
+            // 走字符串拼接 ⇒ 地址变「指针串指针」，Memory.write 写进垃圾串
+            // 的字节堆 ⇒ 堆腐坏（13-stdlib §13.11 崩点，隔离探针可复现：
+            // 循环跑 2 轮后喷二进制垃圾）。
+            // 装箱后 ADD 走数值分支；Memory.* 臂经 addrOf 无损拆箱；
+            // `buf == 0` 仍成立（toAnyL(0)=1 == toAny(0)=1）。
+            this.stack.push(VmOps.toAnyL(Memory.alloc(VmOps.addrOf(n))))
             return
         } else if (funcName == "Memory.free") {
             val n: Any = this.stack.pop()
@@ -2741,15 +2789,19 @@ import aura.lang.compiler.serialize.AucLoader
             return
         } else if (funcName == "Memory.read") {
             val n: Any = this.stack.pop()
-            this.stack.push(Memory.read(VmOps.addrOf(n)) as Int)
+            // [R218] 结果**装箱**（R197 同族）：裸 Int 入 Any 槽后，偶数被
+            // `typeof` 判成 String 指针 ⇒ `eq`/`toStrAny` 解引用地址 N 崩溃。
+            // 实测 `Stdio.strlen(buf)` 的 `while (c != 0)`（c 是 Memory.read
+            // 的裸字节）首个偶数字节即段错误 —— 13-stdlib §13.11 崩点。
+            this.stack.push(VmOps.toAny(Memory.read(VmOps.addrOf(n)) as Int))
             return
         } else if (funcName == "Memory.read16") {
             val n: Any = this.stack.pop()
-            this.stack.push(Memory.read16(VmOps.addrOf(n)) as Int)
+            this.stack.push(VmOps.toAny(Memory.read16(VmOps.addrOf(n)) as Int))
             return
         } else if (funcName == "Memory.read32") {
             val n: Any = this.stack.pop()
-            this.stack.push(Memory.read32(VmOps.addrOf(n)))
+            this.stack.push(VmOps.toAny(Memory.read32(VmOps.addrOf(n))))
             return
         } else if (funcName == "Memory.read64") {
             val n: Any = this.stack.pop()
@@ -2890,10 +2942,15 @@ import aura.lang.compiler.serialize.AucLoader
             val s: Any = this.stack.pop()
             val sv: String = VmOps.toStrAny(s)
             val ii: Int = VmOps.intOf(idx)
+            // [R218] 结果必须**装箱**（toAny）：裸 Int 入 Any 槽后
+            // `toStrAny` 按 Plan A 读 —— 奇数被当装箱值 ⇒ (97-1)/2 = 48
+            //（实测 `"abc".charCodeAt(0)` 打印 48）；偶数被 `typeof` 判成
+            // String 指针 ⇒ 解引用地址 98 ⇒ 段错误（紧接的下一次调用）。
+            // 这是 R197「Math Int 结果裸推入」同族，字符串原语一直没补。
             if (ii < 0 || ii >= sv.length) {
-                this.stack.push(-1)
+                this.stack.push(VmOps.toAny(0 - 1))
             } else {
-                this.stack.push(sv.charCodeAt(ii))
+                this.stack.push(VmOps.toAny(sv.charCodeAt(ii)))
             }
             return
         } else if (funcName == "strcat") {
