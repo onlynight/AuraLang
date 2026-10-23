@@ -3954,7 +3954,10 @@ import aura.lang.compiler.serialize.AucLoader
         this.closureNames.add(funcName)
         this.closureCaps.add(caps)
         this.upvalueTotal = this.upvalueTotal + n
-        this.stack.push(closureId)
+        // [R241] 闭包 ID 必须按 Plan A **装箱**：裸 Int 入 Any 槽时，奇数 ID
+        // （第 2、4… 个闭包）会被 `intOf` 当成 `(v<<1)|1` 拆箱 ⇒ ID 错位
+        // （ID 1 → 0，调用到别的闭包函数）。
+        this.stack.push(toAny(closureId))
     }
 
     /// 调用闭包（P1.3）。
@@ -3964,22 +3967,19 @@ import aura.lang.compiler.serialize.AucLoader
     /// 的无参调用）。调用期间 currentClosure 指向该闭包，函数体内的
     /// LOAD_UPVALUE/STORE_UPVALUE 按此寻址。
         private fun callClosureAt(): Unit {
-        var argc: Int = 0
+        var argc: Int = -1
         if (this.argCountOf() >= 1) {
             argc = VmOps.toI32(this.argStrOf(0))
         }
-        if (this.stack.stackDepth() < argc + 1) {
+        if (this.stack.stackDepth() < 1) {
             this.error = "CALL_CLOSURE: stack underflow"
             this.running = false
             return
         }
-        // 先摘出实参再取 closureId，然后按原顺序压回实参
-        val argVals: List<Any> = arrayListOf<Any>()
-        var i: Int = 0
-        while (i < argc) {
-            argVals.add(this.stack.pop())
-            i = i + 1
-        }
+        // [R241] 先取 closureId（在栈顶）→ 由目标函数反推 argc。
+        // `.auc` 的 `CALL_CLOSURE` **不带 argc 操作数**（Rust 端按函数形参数
+        // 绑定），旧径 argc=0 ⇒ 闭包形参全未绑定 ⇒ 03-functions 的
+        // `doubleLambda(21)` / `increment(5)` / `makeAdder(5)(10)` 全得 0。
         val closureIdAny: Any = this.stack.pop()
         val cid: Int = VmOps.intOf(closureIdAny)
         val funcName: String = this.closureNameOf(cid)
@@ -3987,6 +3987,22 @@ import aura.lang.compiler.serialize.AucLoader
             this.error = "Invalid closure id: " + toStr(cid)
             this.running = false
             return
+        }
+        if (argc < 0) {
+            argc = this.funcParamCount(funcName)
+            if (argc < 0) { argc = 0 }
+        }
+        if (this.stack.stackDepth() < argc) {
+            this.error = "CALL_CLOSURE: stack underflow"
+            this.running = false
+            return
+        }
+        // 摘出实参再按原顺序压回（callOrBuiltin 会重新弹出 argc 个）
+        val argVals: List<Any> = arrayListOf<Any>()
+        var i: Int = 0
+        while (i < argc) {
+            argVals.add(this.stack.pop())
+            i = i + 1
         }
         if (argc > 0) {
             var j: Int = argc - 1
