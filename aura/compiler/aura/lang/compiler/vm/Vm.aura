@@ -3490,7 +3490,13 @@ import aura.lang.compiler.serialize.AucLoader
             this.stack.push(toAny(0))
             return
         }
-        val objKey: String = VmOps.toStrAny(obj)
+        // [R232] 键必须用 **ptrKeyOf（指针十进制）**，不能用 toStrAny：
+        // 对象指针是偶数 ⇒ toStrAny 走 String 分支 = 把对象头当 C 串读
+        // （newObject 写 [0]=类型标签 0 ⇒ 键恒空串）⇒ 下面 `toI64(key)==0`
+        // 直接返回 0 ⇒ **所有字段读恒 0**（实测 Point(3,4).x=0、
+        // Player.name=0、05-classes 34/69 行一致即此）。
+        // R34 的 ptrKeyOf 注释已警示过同一坑。
+        val objKey: String = VmOps.ptrKeyOf(obj)
         if (VmOps.toI64(objKey) == 0L) {
             // 空指针 / 非对象值：保持旧的容错语义（读缺失字段得 0）
             this.stack.push(toAny(0))
@@ -3514,16 +3520,26 @@ import aura.lang.compiler.serialize.AucLoader
     /// 设置对象字段。
     ///
     /// P0.5（ADR-003）：字段按**实例**存储（键 "<objPtr>|<name>"）。
-    /// 栈序：value 在顶、objPtr 在其下。
+    ///
+    /// ⚠️ [R232] 栈序是 **obj 在顶、value 在其下**（旧注释写反了）。
+    /// .auc 反汇编实证两处站点：
+    ///   默认初值 `var x: Int = 0` → `LOAD_VAR value; LOAD_VAR obj; SET_FIELD`
+    ///   方法体 `this.x = a`       → `LOAD_VAR this;  LOAD_VAR a;   SET_FIELD`
+    /// 两者都是「后压 obj」。旧实现先 pop value ⇒ 把对象当值写、
+    /// 把值当对象 ⇒ objKey 落到装箱 0（实测键 "1|19860"）而读侧是真指针
+    /// ⇒ **所有字段写丢失、读恒 0**（05-classes 34/69、Player.name=0、
+    /// 15-advanced 的 this/super 名字错、test_super 全灭，皆此一因）。
         private fun setField(fieldName: String): Unit {
-        val val: Any = this.stack.pop()
         val obj: Any = this.stack.pop()
+        val val: Any = this.stack.pop()
         // 指针装箱类型名随宿主可能是 "Int"/"Long"（见 getField 注释），接受整型
         if (!VmOps.isNumeric(obj)) {
             // 无接收者可写（遗留容错）：丢弃，行为与旧桩一致
             return
         }
-        val objKey: String = VmOps.toStrAny(obj)
+        // [R232] 键 = 指针十进制（同 getField 注释：toStrAny 对偶指针
+        // 走 String 分支 ⇒ 键恒空 ⇒ 所有字段写被丢弃）。
+        val objKey: String = VmOps.ptrKeyOf(obj)
         if (VmOps.toI64(objKey) == 0L) {
             return
         }
