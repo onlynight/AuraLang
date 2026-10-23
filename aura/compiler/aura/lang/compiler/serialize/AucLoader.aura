@@ -741,8 +741,15 @@ import aura.lang.compiler.serialize.AucSerializer
             // AucReader.readStrFrom 递归（funcNames 解码同款，已验证）。
             return reader.readStrN(len)
         } else if (tag == 3) {  // CONST_BOOL
+            // [R223] 必须落 **"true"/"false"**（不是 "1"/"0"）：Bool 常量的
+            // 消费端是 Vm 的 `op == 3`，它按 `argStrOf(0) == "true"` 取值。
+            // 旧径 `toStr(v)` 给 "1"/"0" ⇒ 恒不相等 ⇒ 恒压裸 false ⇒
+            // `active.toString()` 打印 "0"（03-functions §3.4 命名参数）。
             val v: Int = reader.readByte()
-            return toStr(v)
+            if (v != 0) {
+                return "true"
+            }
+            return "false"
         }
         // NULL: 无数据
         return "null"

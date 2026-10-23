@@ -96,7 +96,11 @@ function LastLine([string]$text) {
   foreach ($l in $lines) {
     $t = $l.Trim()
     if ($t -eq '') { continue }
-    if ($t -match '^\[(VEH|ST|CP|FLAT|AS|OC|CL|BLC|winC|MAIN|BENCH)') { continue }
+    # [R222] 宿主诊断行一律不算「末行」：`[LAF]`（flat 行切分）、`[A78]`
+    #（native 表构造）、`[62]`（CALL_NATIVE_ARGS 轨迹）、`[VMLOADOK]`/`[VMDONE]`
+    #（装载/退出标记）。它们无门控时会把末行比对污染成 "[VMDONE]" ⇒ 所有用例
+    # 全标 VM/JIT diff，真差异被埋掉（JIT 已 26/26 时仍 26 条 diff 即此因）。
+    if ($t -match '^\[(VEH|ST|CP|FLAT|AS|OC|CL|BLC|winC|MAIN|BENCH|LAF|A78|62|VMLOADOK|VMDONE)') { continue }
     if ($t -match '^(aura|Error|error):') { continue }
     $best = $t
   }

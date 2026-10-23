@@ -191,6 +191,12 @@ import aura.lang.compiler.serialize.AucLoader
     private var heapKindKeys: List<String> = arrayListOf<String>()
     private var heapKindVals: List<String> = arrayListOf<String>()
 
+    // [R223] Channel 表：chanTab 是 VmCollections 列表（元素 = 每通道的 FIFO
+    // 队列），句柄 = 1 起的序号（chanN 为已分配数）。用列表不用 field
+    // ArrayList——R196：字段列表跨调用漂移。
+    private var chanTab: Any = 0
+    private var chanN: Int = 0
+
     // [R33] 全局变量线性登记
     private var gKeys: List<String> = arrayListOf<String>()
     private var gVals: List<Any> = arrayListOf<Any>()
@@ -968,7 +974,12 @@ import aura.lang.compiler.serialize.AucLoader
             val val: Any = this.getConstByIdx(this.arg0IntOf())
             this.stack.push(val)
         } else if (op == 3) {
-            this.stack.push(this.argStrOf(0) == "true")
+            // [R223] Bool 常量必须压 **"true"/"false" 文本**（与 VmOps.vmBool
+            // 的比较结果同形）。旧径压裸 Boolean：`active.toString()`
+            //（03-functions §3.4 的命名参数）走 toStrAny —— 裸 true=1 是奇数，
+            // 被当 Plan A 装箱值拆箱 ⇒ intOf(1)=0 ⇒ 打印 "0"。
+            // 文本形态对 if/&&/||（toBool）与 ==（streq）同样正确。
+            this.stack.push(VmOps.vmBool(this.argStrOf(0) == "true"))
         } else if (op == 4) {
             this.stack.push(null)
         }
@@ -986,7 +997,14 @@ import aura.lang.compiler.serialize.AucLoader
         } else if (op == 7) {
             this.stack.push(this.getConstByIdx(this.arg0IntOf()))
         } else if (op == 8) {
-            this.stack.push(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())) == "1")
+            // [R223] Bool 常量：**压文本 "true"/"false"**（与 VmOps.vmBool 同形）。
+            // 旧实现 `... == "1"` 且压裸 Boolean —— 两处都错：
+            //  ① 加载器现在落 "true"/"false"（AucLoader CONST_BOOL），比 "1" 恒假；
+            //  ② 裸 true=1 是奇数，`toStrAny` 按 Plan A 拆箱 ⇒ 打印 "0"
+            //     （03-functions §3.4 `active.toString()`）。
+            // 两种文本编码都认，兼容旧 .auc / 文本字节码路径。
+            val bTxt: String = VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf()))
+            this.stack.push(VmOps.vmBool(bTxt == "1" || bTxt == "true"))
         } else if (op == 9) {
             this.stack.push(null)
         }
@@ -1119,7 +1137,7 @@ import aura.lang.compiler.serialize.AucLoader
                 var e32: Int = VmOps.floatDecimalsOf(b) - VmOps.floatDecimalsOf(a)
                 while (e32 > 0) { ma32 = ma32 * 10; e32 = e32 - 1 }
                 while (e32 < 0) { mb32 = mb32 * 10; e32 = e32 + 1 }
-                this.stack.push(ma32 < mb32)
+                this.stack.push(VmOps.vmBool(ma32 < mb32))
             } else {
                 this.stack.push(VmOps.lt(a, b))
             }
@@ -1132,7 +1150,7 @@ import aura.lang.compiler.serialize.AucLoader
                 var e33: Int = VmOps.floatDecimalsOf(b) - VmOps.floatDecimalsOf(a)
                 while (e33 > 0) { ma33 = ma33 * 10; e33 = e33 - 1 }
                 while (e33 < 0) { mb33 = mb33 * 10; e33 = e33 + 1 }
-                this.stack.push(ma33 > mb33)
+                this.stack.push(VmOps.vmBool(ma33 > mb33))
             } else {
                 this.stack.push(VmOps.gt(a, b))
             }
@@ -1145,7 +1163,7 @@ import aura.lang.compiler.serialize.AucLoader
                 var e34: Int = VmOps.floatDecimalsOf(b) - VmOps.floatDecimalsOf(a)
                 while (e34 > 0) { ma34 = ma34 * 10; e34 = e34 - 1 }
                 while (e34 < 0) { mb34 = mb34 * 10; e34 = e34 + 1 }
-                this.stack.push(ma34 <= mb34)
+                this.stack.push(VmOps.vmBool(ma34 <= mb34))
             } else {
                 this.stack.push(VmOps.le(a, b))
             }
@@ -1158,7 +1176,7 @@ import aura.lang.compiler.serialize.AucLoader
                 var e35: Int = VmOps.floatDecimalsOf(b) - VmOps.floatDecimalsOf(a)
                 while (e35 > 0) { ma35 = ma35 * 10; e35 = e35 - 1 }
                 while (e35 < 0) { mb35 = mb35 * 10; e35 = e35 + 1 }
-                this.stack.push(ma35 >= mb35)
+                this.stack.push(VmOps.vmBool(ma35 >= mb35))
             } else {
                 this.stack.push(VmOps.ge(a, b))
             }
@@ -1827,9 +1845,9 @@ import aura.lang.compiler.serialize.AucLoader
             val pT: Long = VmOps.addrOf(mT)
             if (pT != 0 && Memory.read64(pT) == 0) {
                 Memory.write64(pT, 1)
-                this.stack.push(true)
+                this.stack.push(VmOps.vmBool(true))
             } else {
-                this.stack.push(false)
+                this.stack.push(VmOps.vmBool(false))
             }
             return
         }
@@ -1892,9 +1910,9 @@ import aura.lang.compiler.serialize.AucLoader
             val pC: Long = VmOps.addrOf(aC)
             if (pC != 0 && Memory.read64(pC) == VmOps.intOf(eC) as Long) {
                 Memory.write64(pC, VmOps.intOf(nC) as Long)
-                this.stack.push(true)
+                this.stack.push(VmOps.vmBool(true))
             } else {
-                this.stack.push(false)
+                this.stack.push(VmOps.vmBool(false))
             }
             return
         }
@@ -1957,6 +1975,56 @@ import aura.lang.compiler.serialize.AucLoader
             Memory.write64(cH, 0)
             Memory.write64(cH + 8, 0)
             this.stack.push(VmOps.toAny(cH as Int))
+            return
+        }
+        // [R223] Channel 三件套（11-imports §11.4 挂点）。宿主是单线程，
+        // 语义按「FIFO 队列」给最小可兑现实现：句柄 = 1 起的**小整数**
+        //（Aura VM 同样打印 "1"），队列本体是 VmCollections 列表存进
+        // chanTab 这张表里（不用 field ArrayList——R196：字段列表跨调用漂移）。
+        // ⚠️ 没有这三条臂时 `Channel.newChannel` 落到用户函数回退，
+        // funcOffset 在本布局下返回**垃圾 target**（实测 140697851020152 =
+        // 栈地址）⇒ 跳进垃圾执行 ⇒ main 被**静默截断**（exit 0、无报错、
+        // 后续 §11.4/§11.5 整段不执行）。
+        if (funcName0 == "aura.lang.concurrent.Channel.newChannel") {
+            if (argc > 0) {
+                this.stack.pop()
+            }
+            if (this.chanTab == 0) {
+                this.chanTab = VmCollections.newList()
+            }
+            val qCh: Any = VmCollections.newList()
+            VmCollections.push(this.chanTab, qCh)
+            this.chanN = this.chanN + 1
+            this.stack.push(VmOps.toAny(this.chanN))
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.Channel.channelSend") {
+            val sVal: Any = null
+            var sCh: Any = null
+            if (argc >= 2) {
+                sVal = this.stack.pop()
+                sCh = this.stack.pop()
+            } else if (argc == 1) {
+                sCh = this.stack.pop()
+            }
+            if (sCh != null && this.chanTab != 0) {
+                val qS: Any = VmCollections.vmListAt(this.chanTab, VmOps.toAny(VmOps.intOf(sCh) - 1))
+                VmCollections.push(qS, sVal)
+            }
+            this.stack.push("Unit")
+            return
+        }
+        if (funcName0 == "aura.lang.concurrent.Channel.channelRecv") {
+            var rCh: Any = null
+            if (argc >= 1) {
+                rCh = this.stack.pop()
+            }
+            var rOut: Any = null
+            if (rCh != null && this.chanTab != 0) {
+                val qR: Any = VmCollections.vmListAt(this.chanTab, VmOps.toAny(VmOps.intOf(rCh) - 1))
+                rOut = VmCollections.pop(qR)
+            }
+            this.stack.push(rOut)
             return
         }
         if (funcName0 == "aura.lang.concurrent.Condvar.wait" || funcName0 == "aura.lang.concurrent.Condvar.signal"
@@ -2380,16 +2448,37 @@ import aura.lang.compiler.serialize.AucLoader
         } else if (funcName == "min") {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            val av: Int = VmOps.intOf(a)
-            val bv: Int = VmOps.intOf(b)
-            this.stack.push(toAny(if (av < bv) av else bv))
+            // [R223] 浮点文本实参（`aura.math.max(3.0,7.0)`，11-imports §11.5）：
+            // 全名经剥落后在此命中（LATER 的全名臂对本族是死码）；
+            // `intOf` 对文本走 `toI32(toStr(v))`，裸 toStr 对 String 打的是
+            // **指针十进制** ⇒ 返回指针垃圾。改定标交叉相乘比较，结果取胜者
+            // 整数部分（种子 min/max 返 Int，打印 "7" 而非 "7.0"）。
+            if (VmOps.isFloatText(a) || VmOps.isFloatText(b)) {
+                val maN: Int = VmOps.floatMantissaOf(a) * VmOps.floatPow10(VmOps.floatDecimalsOf(b))
+                val mbN: Int = VmOps.floatMantissaOf(b) * VmOps.floatPow10(VmOps.floatDecimalsOf(a))
+                var winN: Any = b
+                if (maN < mbN) { winN = a }
+                this.stack.push(VmOps.toAny(VmOps.floatMantissaOf(winN) / VmOps.floatPow10(VmOps.floatDecimalsOf(winN))))
+            } else {
+                val av: Int = VmOps.intOf(a)
+                val bv: Int = VmOps.intOf(b)
+                this.stack.push(toAny(if (av < bv) av else bv))
+            }
             return
         } else if (funcName == "max") {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            val av: Int = VmOps.intOf(a)
-            val bv: Int = VmOps.intOf(b)
-            this.stack.push(toAny(if (av > bv) av else bv))
+            if (VmOps.isFloatText(a) || VmOps.isFloatText(b)) {
+                val maX: Int = VmOps.floatMantissaOf(a) * VmOps.floatPow10(VmOps.floatDecimalsOf(b))
+                val mbX: Int = VmOps.floatMantissaOf(b) * VmOps.floatPow10(VmOps.floatDecimalsOf(a))
+                var winX: Any = b
+                if (maX > mbX) { winX = a }
+                this.stack.push(VmOps.toAny(VmOps.floatMantissaOf(winX) / VmOps.floatPow10(VmOps.floatDecimalsOf(winX))))
+            } else {
+                val av: Int = VmOps.intOf(a)
+                val bv: Int = VmOps.intOf(b)
+                this.stack.push(toAny(if (av > bv) av else bv))
+            }
             return
         } else if (funcName == "round") {
             val v: Any = this.stack.pop()
@@ -2476,18 +2565,17 @@ import aura.lang.compiler.serialize.AucLoader
             this.stack.push(toAny(if (iv < 0) -iv else iv))
             return
         } else if (funcName == "aura.lang.std.Math.min" || funcName == "Math.min") {
+            // [R223] 本块对 `Math.min/max` 是**死码**（全名经 qual24 剥落后在
+            // 上方 `funcName == "min"/"max"` 臂命中）；保留仅为兼容直呼全名的
+            // 旧路径，语义与上方一致（Int 装箱透传）。
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            val av: Int = VmOps.intOf(a)
-            val bv: Int = VmOps.intOf(b)
-            this.stack.push(toAny(if (av < bv) av else bv))
+            this.stack.push(VmOps.toAny(VmOps.intOf(if (VmOps.intOf(a) < VmOps.intOf(b)) a else b)))
             return
         } else if (funcName == "aura.lang.std.Math.max" || funcName == "Math.max") {
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
-            val av: Int = VmOps.intOf(a)
-            val bv: Int = VmOps.intOf(b)
-            this.stack.push(toAny(if (av > bv) av else bv))
+            this.stack.push(VmOps.toAny(VmOps.intOf(if (VmOps.intOf(a) > VmOps.intOf(b)) a else b)))
             return
         } else if (funcName == "aura.lang.std.Math.round" || funcName == "Math.round") {
             val v: Any = this.stack.pop()
@@ -3133,6 +3221,17 @@ import aura.lang.compiler.serialize.AucLoader
             this.running = false
             return
         }
+        // [R223] target **越界守卫**：`funcOffset` 的返回值在本布局下可能是
+        // 垃圾（实测 `newChannel` 解析出 140697851020152 = 栈地址；同族见
+        // 「大函数里取值点位被译成错的槽」）。旧径直接 `this.ip = target`
+        // 跳进垃圾执行 ⇒ main **静默截断**（exit 0、无报错、后续语句整段
+        // 不执行——11-imports/04-control-flow 的「少几行输出」即此）。
+        // 守卫后 = 响亮报错，宁可失败也不装作成功。
+        if (target < 0 || target >= this.mcN) {
+            this.error = "Unknown function: " + funcName + " (bad target=" + toStr(target) + ")"
+            this.running = false
+            return
+        }
 
         // 保存返回地址和当前帧（第 4 字段为调用者的闭包上下文，P1.3）
         this.callStack.push(this.ip, this.currentFrame, this.currentFunc, this.currentClosure)
@@ -3363,9 +3462,9 @@ import aura.lang.compiler.serialize.AucLoader
                 return
             }
             if (VmOps.strLenRaw(VmOps.toStrAny(obj)) == 0) {
-                this.stack.push(true)
+                this.stack.push(VmOps.vmBool(true))
             } else {
-                this.stack.push(false)
+                this.stack.push(VmOps.vmBool(false))
             }
             return
         }
@@ -4401,10 +4500,10 @@ import aura.lang.compiler.serialize.AucLoader
     private fun mutexTryLock(): Unit {
         val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
         if (Cpu.atomicAdd(addr, 1L) == 0L) {
-            this.stack.push(true)
+            this.stack.push(VmOps.vmBool(true))
         } else {
             Cpu.atomicAdd(addr, 0L - 1L)
-            this.stack.push(false)
+            this.stack.push(VmOps.vmBool(false))
         }
     }
 
