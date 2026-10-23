@@ -2203,7 +2203,11 @@ import aura.lang.compiler.serialize.AucLoader
             return
         }
         if (funcName == "__new_exception") {
-            val msg: String = this.collectArgs(argc)
+            // [R242] 种子端 `__new_exception(<类名>, <消息>)`：catch 到的 `e`
+            // 只是**消息**（07-exception-hierarchy `Caught Exception: basic
+            // test exception`）。旧径 collectArgs 把类名也拼进去 ⇒ 多出
+            // "Exception " 前缀（8 行失真）。这里跳过最底部那个实参（类名）。
+            val msg: String = this.collectArgsSkipBottom(argc)
             this.stack.push(msg)
             return
         }
@@ -2237,9 +2241,45 @@ import aura.lang.compiler.serialize.AucLoader
             return
         }
         if (funcName == "aura_isOfType") {
-            val tn: String = toStr(this.stack.pop())
+            // [R242] 两处失真：
+            //  ① 类型名是**字符串实参**，必须走 toStrAny——裸 `toStr` 在
+            //     Photon 运行时是纯整数打印机，字符串指针被打成指针十进制
+            //     （P347），比较恒假。
+            //  ② 结果必须压 vmBool 文本：裸 1 是奇数，被 intOf 当装箱值
+            //     拆箱成 0 ⇒ `x is String` 恒假、打印得 0（04-control-flow
+            //     §4.6 走 else 出 "Unknown"）。
+            val tn: String = VmOps.toStrAny(this.stack.pop())
             val v: Any = this.stack.pop()
-            if (tn == VmOps.typeName(v)) { this.stack.push(1) } else { this.stack.push(0) }
+            var isTy: Boolean = tn == VmOps.typeName(v)
+            // 浮点文本（宿主把 Float 存成十进制文本）不是 String：种子端
+            // 3.14 是 Float/Double，`is String` 为假（04-control-flow §4.6
+            // 的 val4 走 else → "Unknown"）。
+            if (isTy && tn == "String" && VmOps.isFloatText(v)) {
+                isTy = false
+            }
+            // 布尔文本同理：`true`/`false` 在宿主里就是字符串，但语义上是
+            // Boolean ⇒ `is String` 必须为假，否则 when 的 `is String` 分支
+            // 会先命中（04-control-flow §4.6 的 val3 出 "String"）。
+            if (isTy && tn == "String") {
+                val bt: String = VmOps.toStrAny(v)
+                if (bt == "true" || bt == "false") { isTy = false }
+            }
+            // Any 槽里的小整数可能**未装箱**（偶数）⇒ typeof 判成 String。
+            // 真正的字符串指针是大地址（堆/mmap），故「偶且 < 2^24」按小整数
+            // 处理，让 `is Int` 成立。
+            if (!isTy && tn == "Int" && v != null) {
+                if (!VmOps.isTaggedInt(v)) {
+                    val rawV: Long = VmOps.rawOf(v)
+                    if (rawV >= 0 && rawV < 16777216) { isTy = true }
+                }
+            }
+            // 宿主把 Boolean 表示成文本 "true"/"false"（typeof 只有
+            // Null/Int/String 三态），`x is Boolean` 需按该形态补判。
+            if (!isTy && tn == "Boolean") {
+                val sv: String = VmOps.toStrAny(v)
+                if (sv == "true" || sv == "false") { isTy = true }
+            }
+            this.stack.push(VmOps.vmBool(isTy))
             return
         }
         if (funcName == "arrayOf2D") {
@@ -3399,6 +3439,34 @@ import aura.lang.compiler.serialize.AucLoader
         return result
     }
 
+    /// [R242] 弹出 argc 个实参并以空格拼接，**跳过最底部那个**（异常类名）。
+    /// 保持「底 → 顶」顺序（`collectArgs` 同序），仅用于 `__new_exception`。
+        private fun collectArgsSkipBottom(argc: Int): String {
+        if (argc <= 1) {
+            if (argc == 1) { this.stack.pop() }
+            return ""
+        }
+        val tmp: List<String> = arrayListOf<String>()
+        var i: Int = 0
+        while (i < argc) {
+            tmp.add(VmOps.toStrAny(this.stack.pop()))
+            i = i + 1
+        }
+        // tmp[0] = 栈顶；tmp[argc-1] = 栈底（= 类名，丢弃）
+        var result: String = ""
+        var j: Int = argc - 2
+        while (j >= 0) {
+            val s: String = tmp[j]
+            if (result == "") {
+                result = s
+            } else {
+                result = s + " " + result
+            }
+            j = j - 1
+        }
+        return result
+    }
+
     // ═══════════════════════════════════════════════════════════
     //  对象与类
     // ═══════════════════════════════════════════════════════════
@@ -4059,11 +4127,14 @@ import aura.lang.compiler.serialize.AucLoader
         val v: Any = this.stack.pop()
         // 对象值：沿类继承链匹配（is-a 语义）
         val objCls: String = this.heapObjectClass(v)
+        // [R242] 结果必须压 **vmBool 文本**：裸 Boolean 入 Any 槽是奇数 1，
+        // 被 `intOf` 当装箱值拆箱成 0 ⇒ `x is String` 在 when 分支里恒假
+        //（04-control-flow §4.6 全走 else → "Unknown"），打印也得 0。
         if (objCls != "") {
-            this.stack.push(this.classIsA(objCls, typeName))
+            this.stack.push(VmOps.vmBool(this.classIsA(objCls, typeName)))
             return
         }
-        this.stack.push(VmOps.typeName(v) == typeName)
+        this.stack.push(VmOps.vmBool(VmOps.typeName(v) == typeName))
     }
 
     private fun checkCast(typeName: String): Unit {
@@ -4095,7 +4166,8 @@ import aura.lang.compiler.serialize.AucLoader
 
     private fun checkType(typeName: String): Unit {
         val v: Any = this.stack.pop()
-        this.stack.push(VmOps.typeName(v) == typeName)
+        // [R242] 同 instanceOf：压 vmBool 文本而非裸 Boolean
+        this.stack.push(VmOps.vmBool(VmOps.typeName(v) == typeName))
     }
 
     // ═══════════════════════════════════════════════════════════
