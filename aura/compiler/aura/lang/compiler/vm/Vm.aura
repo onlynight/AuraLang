@@ -821,11 +821,12 @@ import aura.lang.compiler.serialize.AucLoader
                 this.ldTraceCap = this.ldTraceCap - 1
                 println("[LD] ip=" + toStr(this.ip - 1) + " slot=" + toStr(slot) + " val=[" + VmOps.toStrAny(v) + "]")
             }
-            if (v == null) {
-                this.stack.push(toAny(0))
-            } else {
-                this.stack.push(v)
-            }
+            // [R250] 空槽 = 种子端的 Value::Null，**原样入栈**（旧径压 toAny(0)
+            // ⇒ `nullInt.toString()` 打成 "0"，与种子 "null" 不符；
+            // 06-null-safety 的 nullInt/nullBool/nullStr 三行同此）。
+            // **不要**写成 `push(if (v == null) ... )`：混合类型 if 表达式会被
+            // 推导成 Int，非空分支里的 String 指针会被截断成整数。
+            this.stack.push(v)
         } else if (op == 11) {
             val slot: Int = this.arg0IntOf()
             val sv: Any = this.stack.pop()
@@ -3575,6 +3576,18 @@ import aura.lang.compiler.serialize.AucLoader
     /// 翻译成这些名字（见 `AucLoaderUtils.fieldNameOf`）。
         private fun getField(fieldName: String): Unit {
         val obj: Any = this.stack.pop()
+        // [R250] 空接收者：`x?.field` 在 .auc 里没有显式空值分支，种子端
+        // GET_FIELD(null) = Value::Null。旧径继续走 length/isEmpty 分派 ⇒
+        // strLenRaw(toStrAny(null)) = len("null") = 4（实测
+        // `nullStr?.length` 打成 4、`?: 0` 也跟着变 4）。
+        // ⚠ 必须压**真正的 null**（不能用 "nul"+"l" 哨兵）：下游 Elvis
+        // `?: 0` 要靠 `v == null` 判定才取默认值。
+        var objNullG: Int = 0
+        if (obj == null) { objNullG = 1 }
+        if (objNullG == 1) {
+            this.stack.push(null)
+            return
+        }
         if (fieldName == "length" || fieldName == "size" || fieldName == "count") {
             // [R19] 路由至 strLenRaw(toStrAny(obj))——两个已证可靠原语的组合。
             // 旧径 strlen(obj)（prelu 全局 → text.length）的调用窗在宿主布局
@@ -4552,7 +4565,12 @@ import aura.lang.compiler.serialize.AucLoader
     private fun ptrIsNull(): Unit {
         val ptr: Any = this.stack.pop()
         val val = VmOps.addrOf(ptr)
-        this.stack.push(val == 0)
+        // [R250] 必须压 **"true"/"false" 文本**（VmOps.vmBool 同形）：裸
+        // Boolean true=1 是奇数，被当 Plan A 装箱值拆箱 ⇒ intOf(1)=0 ⇒
+        // JUMP_IF_FALSE 恒判假。`x?.y` 的空值短路（wire 63 → 内部 132）正
+        // 是走这里 ⇒ 短路失效，null 接收者照样调 `.length`（实测
+        // `nullStr?.length` 打成 4 = toStrAny(null)="null" 的长度）。
+        this.stack.push(VmOps.vmBool(val == 0))
     }
 
     private fun ptrToInt(): Unit {

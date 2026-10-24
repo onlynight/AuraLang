@@ -1005,8 +1005,12 @@ object VmOps {
         // R65：种子 VM 下 Boolean/Int 也不是 tagged（isTaggedInt 恒 false），
         // 但 `v as String` 对 int64 载荷会抛 "as cast failed"。走 typeof
         // 分支：Int/Boolean → 打十进制；String → 原样；其它 → "null"。
+        // [R250] **不能写字面量 "null"**：Photon 把该字面量按 null 值发射，
+        // 作为返回值一出函数就退化成空串（探针 p_stackrt：字面量 "null" 经
+        // 裸栈/返回值一往返变空，"nul"/"nullx"/运行时拼接的都正常）。
+        // 运行时拼出，且经 `Any` 装箱往返（toStrAny 的返回值到处被存进裸槽）。
         if (v == null) {
-            return "null"
+            return "nul" + "l"
         }
         if (isTaggedInt(v)) {
             // [R237] 负数：`toStr` 在 Photon 运行时走**无符号**十进制
