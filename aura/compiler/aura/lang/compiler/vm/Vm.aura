@@ -3214,6 +3214,28 @@ import aura.lang.compiler.serialize.AucLoader
             return
         }
 
+        // ── FFI 指针（R246）──
+        // `.auc` 里 intToPtr/ptrToInt/ptrIsNull 是**原生**（wire op 78
+        // CallNativeArgs → 内部 op 62 → 按名分派），旧径没有对应臂 ⇒ 落到
+        // 用户函数路径，三个调用全卡在同一个缺省出口 ⇒ 打印面恒为同一个
+        // 指针十进制（实测均为 140700036663512）。
+        else if (funcName == "intToPtr" || funcName == "ptrToInt") {
+            // 语义 = **恒等**：用装箱整数承载地址值即可两端同形——
+            // `ptrToInt(intToPtr(42))` 直接得到 42（与种子端一致，种子端
+            // Pointer 的打印面就是地址）。旧实现取 `addrOf`（Any 槽的堆地址）
+            // 才是错的那一族。
+            val pv: Any = this.stack.pop()
+            this.stack.push(pv)
+            return
+        } else if (funcName == "ptrIsNull") {
+            // 空指针经 PUSH_NULL / Null 常量加载后是装箱整数 0（裸 1 或 0），
+            // intToPtr(k) 是装箱 k ⇒ 按**地址值是否为 0**判定，绕开不可靠的
+            // `v == null`（R244 实测：`v == null` 在 Any 上布局敏感）。
+            val pv2: Any = this.stack.pop()
+            this.stack.push(VmOps.vmBool(VmOps.intOf(pv2) == 0))
+            return
+        }
+
         // ── Json ──
         else if (funcName == "Json.parse" || funcName == "aura.lang.std.Json.parse") {
             val text: Any = this.stack.pop()
