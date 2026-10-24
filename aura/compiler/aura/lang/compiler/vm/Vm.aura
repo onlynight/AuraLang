@@ -936,7 +936,11 @@ import aura.lang.compiler.serialize.AucLoader
             // 尾数 ⇒ 产出 "指针.14" 级垃圾串（13-stdlib 崩溃的垃圾指针源之一）。
             // `&&` 后：Float+Float 相加、String+Float 拼接（VmOps.add）。
             // [R248] 再把 Int+Float 补回浮点通道（见 `isFloatPair`）。
-            if (this.isFloatPair(a, b) == 1) {
+            // [R252] 含 Null 操作数先走种子语义（null = f64 0.0，结果浮点文本）
+            val nt20: String = VmOps.nullArithText(a, b, 0)
+            if (VmOps.strLenRaw(nt20) > 0) {
+                this.stack.push(nt20)
+            } else if (this.isFloatPair(a, b) == 1) {
                 val dA20: Int = VmOps.floatDecimalsOf(a)
                 val dB20: Int = VmOps.floatDecimalsOf(b)
                 var d20: Int = dA20
@@ -952,7 +956,11 @@ import aura.lang.compiler.serialize.AucLoader
             val a: Any = this.stack.pop()
             // [R198] 条件同 op==20：仅两侧皆浮点文本才走浮点减法，否则拼接/整数减。
             // [R248] 同 ADD，把 Int±Float 也纳入浮点通道。
-            if (this.isFloatPair(a, b) == 1) {
+            // [R252] 同 ADD：含 Null 先走种子语义
+            val nt21: String = VmOps.nullArithText(a, b, 1)
+            if (VmOps.strLenRaw(nt21) > 0) {
+                this.stack.push(nt21)
+            } else if (this.isFloatPair(a, b) == 1) {
                 val dA21: Int = VmOps.floatDecimalsOf(a)
                 val dB21: Int = VmOps.floatDecimalsOf(b)
                 var d21: Int = dA21
@@ -1070,7 +1078,13 @@ import aura.lang.compiler.serialize.AucLoader
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             // [R21] Float 文本分支 dispatch 层内联（同 op20/21 注释）
-            if (VmOps.isFloatText(a) || VmOps.isFloatText(b)) {
+            // [R252] 条件从 `||` 换成 isFloatPair：把 Int*Float 与 *null
+            // （90*null = 0.0，见 isFloatPair 注释）纳入浮点通道。
+            // [R252] 同 ADD：含 Null 先走种子语义
+            val nt22: String = VmOps.nullArithText(a, b, 2)
+            if (VmOps.strLenRaw(nt22) > 0) {
+                this.stack.push(nt22)
+            } else if (this.isFloatPair(a, b) == 1) {
                 val d22: Int = VmOps.floatDecimalsOf(a) + VmOps.floatDecimalsOf(b)
                 this.stack.push(VmOps.floatTextOf(VmOps.floatMantissaOf(a) * VmOps.floatMantissaOf(b), d22))
             } else {
