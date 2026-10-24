@@ -2865,9 +2865,15 @@ import aura.lang.compiler.serialize.AucLoader
         }
 
         // ── 文件 I/O ──
+        // [R255] ⚠ 不能把 `Stdio.fileExists` / `aura.lang.native.io.Stdio.fileExists`
+        // 放进本内建臂：`Stdio.fileExists` 是**有函数体**的 guest 函数，内建臂
+        // 会遮蔽它（实测 FE-BUILTIN 命中、guest 体从不执行）。而本巨函数内
+        // 把弹出的路径值转串（toStr 得指针十进制、toStrAny 得野指针）属
+        // P5-① 破损区 ⇒ 内建臂里做 fileExists 不可靠。故移除这两名，让 guest
+        // 体运行（其体内 stringToBuffer/FileOps.access 均为已通的 guest/原生）。
+        // 这里只保留 `IO.fileExists`/裸 `fileExists`（真 native 2 参：path,memTok）。
         else if (funcName == "fileExists" || funcName == "IO.fileExists"
-            || funcName == "aura.lang.std.IO.fileExists" || funcName == "Stdio.fileExists"
-            || funcName == "aura.lang.native.io.Stdio.fileExists") {
+            || funcName == "aura.lang.std.IO.fileExists") {
             // [R203] 11-imports §11.2 / 13-stdlib §13.12 挂点：宿主无此臂 ⇒
             // `Unknown function`（旧败因是崩，sqrt 修好后暴露）。
             // 运行时 `IO_fileExists(rcx=path)` 只读 rcx（emitIoFileExists 里

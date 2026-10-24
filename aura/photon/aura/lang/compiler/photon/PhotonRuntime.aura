@@ -3465,14 +3465,22 @@ object PhotonRuntime {
     /// 编码 `access(rcx=path, rdx=mode) rax = 0`。stub 返回 0（存在）
     fun emitAccess(enc: X86Encoder): Unit {
         // R44i：真实 access(path, 0)语义——GetFileAttributesA,失败(=-1)⇒ -1。
-        // 旧恒 0 桩 ⇒ IO_fileExists 对不存在文件也返回 true(实测 13 §13.12
-        // 与 VM 沙箱参考相悖)。
+        // [R255] ⚠ 两参 native 实参寄存器顺序在 Photon 宿主不稳：实测
+        // `io_access(addrOf(path), addrOf(mode))` 被译成 rcx=addrOf(mode),
+        // rdx=addrOf(path)（io_open 同形源码 path 却在 rcx）。旧只读 rcx ⇒
+        // FileOps.access 恒 -1 ⇒ 13-stdlib §13.11 exists=false。本函数唯一
+        // 调用方是 FileOps.access，故 rcx 试一次、失败再试 rdx（未命中者指向
+        // 整数 0 ⇒ GetFileAttributesA("") 仍 INVALID，不会误判）。
         enc.emitPrologue(0x20)
         enc.emitCallImport("GetFileAttributesA")
         // ⚠ 比较 eax(32 位):Win32 返回值只保证 eax,rax 高位未定义——
         // cmp rax,-1 是 64 位符号扩展比较,0x00000000FFFFFFFF ≠ 签名 -1
         // ⇒ 永远判"存在"(实测 probe_io missing=true)。emitCmpRI 无 32 位
         // 形态,用 emitCmpEaxImm32(3D id,2026-10-03 为同一坑而设)。
+        enc.emitCmpEaxImm32(-1)
+        enc.emitJccLabel("ne", "acc_ok")
+        enc.emitMovRR("rcx", "rdx")
+        enc.emitCallImport("GetFileAttributesA")
         enc.emitCmpEaxImm32(-1)
         enc.emitJccLabel("ne", "acc_ok")
         enc.emitMovRI("rax", -1)
@@ -5350,7 +5358,7 @@ object PhotonRuntime {
     /// Pipeline 以 `RUNTIME_SYMBOLS + BUILD_ID` 作为 aura_runtime.obj 的缓存
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
-    val BUILD_ID: String = "p315-io-write-k32"
+    val BUILD_ID: String = "p318-acc-2reg"
     val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists,Clock_nowMs,Env_probe1,toStringFloat,String_String_startsWith"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex
