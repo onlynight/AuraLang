@@ -933,9 +933,9 @@ import aura.lang.compiler.serialize.AucLoader
             // [R198] 浮点分支条件收紧为**两侧皆浮点文本**：旧 `||` 把
             // `"a=" + 3.14`（String+Float 应拼接）误当浮点加法，把标签串当
             // 尾数 ⇒ 产出 "指针.14" 级垃圾串（13-stdlib 崩溃的垃圾指针源之一）。
-            // `&&` 后：Float+Float 相加、String+Float 拼接（VmOps.add）；
-            // 代价 Int+Float 退化为拼接（不再产垃圾；原路径本就产垃圾指针）。
-            if (VmOps.isFloatText(a) && VmOps.isFloatText(b)) {
+            // `&&` 后：Float+Float 相加、String+Float 拼接（VmOps.add）。
+            // [R248] 再把 Int+Float 补回浮点通道（见 `isFloatPair`）。
+            if (this.isFloatPair(a, b) == 1) {
                 val dA20: Int = VmOps.floatDecimalsOf(a)
                 val dB20: Int = VmOps.floatDecimalsOf(b)
                 var d20: Int = dA20
@@ -950,7 +950,8 @@ import aura.lang.compiler.serialize.AucLoader
             val b: Any = this.stack.pop()
             val a: Any = this.stack.pop()
             // [R198] 条件同 op==20：仅两侧皆浮点文本才走浮点减法，否则拼接/整数减。
-            if (VmOps.isFloatText(a) && VmOps.isFloatText(b)) {
+            // [R248] 同 ADD，把 Int±Float 也纳入浮点通道。
+            if (this.isFloatPair(a, b) == 1) {
                 val dA21: Int = VmOps.floatDecimalsOf(a)
                 val dB21: Int = VmOps.floatDecimalsOf(b)
                 var d21: Int = dA21
@@ -1568,6 +1569,30 @@ import aura.lang.compiler.serialize.AucLoader
             this.running = false
         }
         }
+    }
+
+    /// [R248] 四则运算的**混合浮点**判定：a/b 中至少一个是浮点文本，另一个
+    /// 是浮点文本或**装箱整数**时，定点尾数运算成立（返回 1）。
+    ///
+    /// R198 把条件从 `||` 收紧成「两侧皆浮点文本」，为的是让
+    /// `"a=" + 3.14`（String+Float）走拼接而不是把标签串当尾数；代价是
+    /// Int+Float 退化成拼接（17-function-overload 的 Float 重载
+    /// `add(3, 1.5)` 打成 "31.5"）。这里把 Int 侧补回来，但**只认装箱整数**
+    /// ——普通字符串不是 tagged，标签串 + Float 仍然走拼接。
+    private fun isFloatPair(a: Any, b: Any): Int {
+        var fa: Int = 0
+        if (VmOps.isFloatText(a)) { fa = 1 }
+        var fb: Int = 0
+        if (VmOps.isFloatText(b)) { fb = 1 }
+        var ia: Int = 0
+        if (VmOps.isTaggedInt(a)) { ia = 1 }
+        var ib: Int = 0
+        if (VmOps.isTaggedInt(b)) { ib = 1 }
+        var ok: Int = 0
+        if (fa == 1 && fb == 1) { ok = 1 }
+        if (fa == 1 && ib == 1) { ok = 1 }
+        if (fb == 1 && ia == 1) { ok = 1 }
+        return ok
     }
 
     // ═══════════════════════════════════════════════════════════
