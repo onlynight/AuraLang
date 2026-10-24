@@ -1294,7 +1294,20 @@ import aura.lang.compiler.serialize.AucLoader
         } else if (op == 65) {
             this.returnFromFunc()
         } else if (op == 66) {
+            // [R249] RETURN_UNIT：被调函数**没有**在栈上留返回值，而
+            // `returnFromFunc` 的契约是「弹栈顶当返回值」——直接调用会弹到
+            // 调用者的残留值（03-functions 的 clamp 弹到装箱 0、08-concurrency
+            // 的 Channel recv 弹到 println 压的 "Unit" 串）。
+            //
+            // 种子端 Unit 的打印面就是 "null"，故显式压**字符串** "null" 再
+            // 走通用返回路径（弹回的正是它）。
+            // ⚠ 两道形态约束（探针 p_stackrt 实测）：
+            //   ① **不能写字面量 "null"**——Photon 把该字面量按 null 值发射，
+            //      经裸栈一往返就变空串（"nul"/"nullx"/运行时拼接的都正常）；
+            //   ② 也不能压真正的 `null`——Plan A 下经裸栈往返退化成整数 0 /
+            //      空串（R244 两版都只把 "Unit" 换成 0 或空）。
             this.returnValue = "Unit"
+            this.stack.push("nul" + "l")
             this.returnFromFunc()
         } else if (op == 211) {
             // P1.6：尾调用（帧复用）。文本：`CALL_TAIL name argc`；argc 省略时按函数表推导。
