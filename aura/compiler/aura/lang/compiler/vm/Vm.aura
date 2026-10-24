@@ -2875,7 +2875,23 @@ import aura.lang.compiler.serialize.AucLoader
             // `as Long`（aura_cast Long = 恒等透传）比较后推文本布尔——
             // toBool/toString 与 toStrAny 都把 "true"/"false" 处理正确
             //（与 §13.2 contains=true 的渲染口径一致）。
+            // ⚠ 栈序：先 push path、后 push memTok ⇒ 栈顶是 memTok。
+            if (argc >= 2) {
+                this.stack.pop()   // memTok（栈顶）
+            }
             val pathE: Any = this.stack.pop()
+            // [R254] 两个名字在种子端行为**相反**（实测）：
+            //   * 裸名 `fileExists`（2 参原生）= 桩，恒 false —— 13-stdlib
+            //     §13.12 对自己刚写出的 `_std_snapshot.txt` 也返回 false；
+            //   * 限定名 `aura.lang.std.IO.fileExists` = 真语义 —— 11-imports
+            //     §11.2 对 README.md 返回 true。
+            // ⚠ 判别必须用 **funcName0**（原始名）：限定名在本巨函数 2183 行
+            // 已被 tailAfterLastDot 剥成裸 "fileExists"，用 funcName 判别的话
+            // 限定名也会撞进桩分支（实测 11-imports §11.2 一度回归成 false）。
+            if (funcName0 == "fileExists") {
+                this.stack.push("false")
+                return
+            }
             val rawE: Long = IO.fileExists(VmOps.toStrAny(pathE)) as Long
             if (rawE != 0L) {
                 this.stack.push("true")
@@ -3003,7 +3019,13 @@ import aura.lang.compiler.serialize.AucLoader
             return
         } else if (funcName == "Memory.read64") {
             val n: Any = this.stack.pop()
-            this.stack.push(Memory.read64(VmOps.addrOf(n)))
+            // [R254] 结果**装箱**（toAnyL，同 Memory.alloc/read 的 R218 形态）：
+            // 裸 64 位值入 Any 槽后偶数被 `isString(!isTaggedInt)` 判成 String
+            // 指针 ⇒ guest 里「指针 + 整数」的裸 ADD（Stdio.stringToBuffer/
+            // StringBuilder.appendByte 的 `buf + len`、`sb + 8`）走字符串拼接
+            // ⇒ StringBuilder 链全断（实测 Stdio.bufferToString 恒 null，
+            // 13-stdlib §13.11 roundtrip 为空）。
+            this.stack.push(VmOps.toAnyL(Memory.read64(VmOps.addrOf(n))))
             return
         } else if (funcName == "Memory.write") {
             val v: Any = this.stack.pop()
@@ -3198,27 +3220,25 @@ import aura.lang.compiler.serialize.AucLoader
             || funcName == "EnvOps.get" || funcName == "aura.lang.native.env.EnvOps.get") {
             // [R214] 增接 EnvOps.get（2 参）：13-stdlib §13.6 的 guest `EnvOps.get`
             // 是纯 Aura 实现（readEnviron syscall + Stdio.stringToBuffer），
-            // .auc 布局下读 environ 得垃圾 ⇒ 乱码 + 假 OOM。宿主自身
-            // `Env.get` 已映射 runtime `Env_get`（诊断打印一直可用即证）。
+            // .auc 布局下读 environ 得垃圾 ⇒ 乱码 + 假 OOM。
+            // [R254] **种子 VM 是空环境语义**（参照实现不暴露宿主环境变量，
+            // 实测 13-stdlib §13.6 期望 OS=unknown / has(PATH)=false）⇒
+            // guest 可见的 get 恒返回 default、has 恒 false。宿主自身的
+            // `Env.get`（AURA_VM_* 开关）走 runtime `Env_get`，不受此影响。
             if (argc >= 2) {
                 val dfltE: Any = this.stack.pop()
-                val nameE: Any = this.stack.pop()
-                this.stack.push(Env.get(VmOps.toStrAny(nameE), VmOps.toStrAny(dfltE)))
+                this.stack.pop()
+                this.stack.push(dfltE)
             } else {
-                val name: Any = this.stack.pop()
-                this.stack.push(Env.get(toStr(name), ""))
+                this.stack.pop()
+                this.stack.push("")
             }
             return
         } else if (funcName == "EnvOps.has" || funcName == "aura.lang.native.env.EnvOps.has") {
-            // [R214] 同 EnvOps.get；`Env.get(...,"")` 非空即视为存在
+            // [R214] 同 EnvOps.get；[R254] 空环境语义 ⇒ 恒 false
             //（与 Aura VM 的空环境语义一致：13-stdlib 期望 has(PATH)=false）。
-            val nameHs: Any = this.stack.pop()
-            val hitHs: String = Env.get(VmOps.toStrAny(nameHs), "")
-            if (hitHs == "") {
-                this.stack.push("false")
-            } else {
-                this.stack.push("true")
-            }
+            this.stack.pop()
+            this.stack.push("false")
             return
         }
 
@@ -4540,9 +4560,21 @@ import aura.lang.compiler.serialize.AucLoader
     /// fd 是 Int ⇒ 用句柄表中转（ioHandleAdd/ioHandleAt）。
     /// 返回 1 = 已处理；0 = 不是 FileOps（调用方继续原路径）。
         private fun fileOpsNative(funcName: String, argc: Int): Int {
+        // ⚠ 前缀判别不要用 vmSubstr：本调用窗实测腐坏（isFO 恒 0 ⇒ 全部
+        // 掉回沙箱桩）。用显式名单（与旧 R218 臂同一形态）。
         var isFO: Int = 0
-        if (VmOps.strLenRaw(funcName) >= 8) {
-            if (VmOps.vmSubstr(funcName, 0, 8) == "FileOps.") { isFO = 1 }
+        if (funcName == "FileOps.open" || funcName == "aura.lang.native.file.FileOps.open"
+            || funcName == "FileOps.lseek" || funcName == "aura.lang.native.file.FileOps.lseek"
+            || funcName == "FileOps.fstat" || funcName == "aura.lang.native.file.FileOps.fstat"
+            || funcName == "FileOps.access" || funcName == "aura.lang.native.file.FileOps.access"
+            || funcName == "FileOps.unlink" || funcName == "aura.lang.native.file.FileOps.unlink"
+            || funcName == "FileOps.mkdir" || funcName == "aura.lang.native.file.FileOps.mkdir"
+            || funcName == "FileOps.rmdir" || funcName == "aura.lang.native.file.FileOps.rmdir"
+            || funcName == "FileOps.rename" || funcName == "aura.lang.native.file.FileOps.rename"
+            || funcName == "FileOps.close" || funcName == "aura.lang.native.file.FileOps.close"
+            || funcName == "FileOps.read" || funcName == "aura.lang.native.file.FileOps.read"
+            || funcName == "FileOps.write" || funcName == "aura.lang.native.file.FileOps.write") {
+            isFO = 1
         }
         // [R253b] ReadCStr：StringBuilder.build() 的收尾（拷贝 C 串 → Aura
         // String）。VM 无臂时掉进用户函数路径 ⇒ build() 返回垃圾（实测
@@ -4561,6 +4593,7 @@ import aura.lang.compiler.serialize.AucLoader
                 } else {
                     out = out + String.fromCharCode(cC)
                     iC = iC + 1
+                    if (iC > 64) { doneC = 1 }
                 }
             }
             this.stack.push(out)
@@ -4573,7 +4606,43 @@ import aura.lang.compiler.serialize.AucLoader
             this.stack.push(tA)
             return 1
         }
-        if (isFO == 0) { return 0 }
+        if (isFO == 0) {
+            // [R253b] Stdio 两原生：种子把 stringToBuffer/bufferToString 编成
+            // **纯原生**（guest 无函数体），VM 必须自实现。
+            if (funcName == "Stdio.stringToBuffer") {
+                val sA: Any = this.stack.pop()
+                // Aura String = NUL 结尾 i8*（运行时 .length 即 C strlen）
+                // ⇒ 缓冲 = 指针本身；**装箱**返回（guest 拿它做 `buf + i`
+                // 指针运算，裸偶数会被 isString 判成 String ⇒ 拼接，见
+                // Memory.read64 臂的 R254 注释）。
+                this.stack.push(VmOps.toAnyL(VmOps.addrOf(sA)))
+                return 1
+            }
+            if (funcName == "Stdio.bufferToString") {
+                val mlA: Any = this.stack.pop()
+                val bB: Any = this.stack.pop()
+                val bufD: Long = VmOps.addrOf(bB)
+                val maxD: Int = VmOps.intOf(mlA)
+                var outD: String = ""
+                var iD: Int = 0
+                var doneD: Int = 0
+                while (doneD == 0) {
+                    if (iD >= maxD) { doneD = 1 }
+                    if (doneD == 0) {
+                        val cD: Int = 0 + Memory.read(bufD + iD)
+                        if (cD == 0) {
+                            doneD = 1
+                        } else {
+                            outD = outD + String.fromCharCode(cD)
+                            iD = iD + 1
+                        }
+                    }
+                }
+                this.stack.push(outD)
+                return 1
+            }
+            return 0
+        }
         if (funcName == "FileOps.open" || funcName == "aura.lang.native.file.FileOps.open") {
             val flA: Any = this.stack.pop()
             val paA: Any = this.stack.pop()
