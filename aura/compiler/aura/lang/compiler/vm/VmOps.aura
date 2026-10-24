@@ -28,6 +28,42 @@ object VmOps {
     /// [R4] vmSubstr 定性探针计数
     var vmSubDiag: Int = 0
 
+    // [R253] io_open 句柄表：kernel32 HANDLE（指针尺寸）↔ guest 的 Int fd。
+    // open 把 HANDLE 存进表、返回表下标当 fd；read/write/close/lseek 用下标
+    // 换回 HANDLE。裸 Memory 缓冲（P392 形态）。
+    // ⚠ 放 VmOps 静态区而不是 Vm 字段：实测给 Vm 加 3 个字段就触发布局
+    // 轮盘（13-stdlib 全用例空输出）。
+    var ioHBuf: Long = 0
+    var ioHN: Int = 0
+    var ioHCap: Int = 0
+
+    /// 登记一个 HANDLE，返回表下标（即 guest 的 fd）。
+    /// ⚠ 循环体内不要 return（返回值 phi 家槽污染家族，见 refLocate）。
+    fun ioHandleAdd(h: Long): Int {
+        if (this.ioHN >= this.ioHCap) {
+            val nc: Int = this.ioHCap * 2 + 16
+            val nb: Long = Memory.alloc(nc * 8)
+            var j: Int = 0
+            while (j < this.ioHN) {
+                Memory.write64(nb + j * 8, Memory.read64(this.ioHBuf + j * 8))
+                j = j + 1
+            }
+            this.ioHBuf = nb
+            this.ioHCap = nc
+        }
+        Memory.write64(this.ioHBuf + this.ioHN * 8, h)
+        val idx: Int = this.ioHN
+        this.ioHN = this.ioHN + 1
+        return idx
+    }
+
+    /// 按下标取 HANDLE；越界返回 0。
+    fun ioHandleAt(idx: Int): Long {
+        if (idx < 0) { return 0 }
+        if (idx >= this.ioHN) { return 0 }
+        return Memory.read64(this.ioHBuf + idx * 8)
+    }
+
     // [R251] 对象引用注册表：按**创建序**记录已分配对象的键（ptrKeyOf 形态）。
     // 种子端 toStr(对象) 打印为 "<ref#N>"，N = 0 起的创建序——探针实证：
     // 单对象 → ref#0；先建 Resource 再建 Box → Box 是 ref#1；07 里

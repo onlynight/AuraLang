@@ -3439,38 +3439,26 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
-    /// 编码 `write(rcx=fd, rdx=buf, r8=count) rax = bytes or -1`。NtWriteFilex08）
+    /// 编码 `write(rcx=fd, rdx=buf, r8=count) rax = bytes or -1`。
+    /// kernel32 `WriteFile`（2026-10-24 换道，与 emitRead 完全同构）。
+    /// 旧 NtWriteFile 直编版实测恒 -1：栈参（IoStatusBlock/Buffer/Length/
+    /// ByteOffset/Key 共 5 个栈参）没有按 syscall 布局摆放。
     fun emitWrite(enc: X86Encoder): Unit {
-        enc.emitPrologue(0x60)
-        enc.emitStackStore(-0x20, "rbx")
-        enc.emitStackStore(-0x28, "rsi")
-        enc.emitStackStore(-0x10, "rcx")
-        enc.emitStackStore(-0x18, "rdx")
-        enc.emitStackStore(-0x30, "r8")
-        enc.emitLeaStack("rbx", -0x50)
-        enc.emitXorRR("rax", "rax")
-        enc.emitStoreMemDisp32("rbx", 0, "rax")
-        enc.emitStoreMemDisp32("rbx", 8, "rax")
-        enc.emitXorRR("rax", "rax")
-        enc.emitStackStore(-0x38, "rax")
-        enc.emitStackStore(-0x50, "rax")
-        enc.emitStackStore(-0x58, "rax")
-        enc.emitStackStore(-0x50, "rax")
-        enc.emitStackStore(-0x58, "rax")
-        enc.emitStackLoad("rcx", -0x10)
-        enc.emitStackLoad("rdx", -0x18)
-        enc.emitStackLoad("r8", -0x30)
-        enc.emitLeaStack("r9", -0x50)
-        SyscallEmitter.emitWindowsSyscall(enc, 0x08, "rcx", "rdx", "r8", "r9")
+        enc.emitPrologue(0x40)
+        enc.emitLeaStack("r9", -0x8)                   // lpNumberOfBytesWritten
+        enc.emitXorRR("eax", "eax")
+        enc.emitStoreMemDisp32("r9", 0, "rax")
+        enc.emitXorRR("eax", "eax")                    // lpOverlapped = 0
+        enc.emitStackStore(-0x20, "rax")               // arg5 @ [rsp+0x20]
+        enc.emitCallImport("WriteFile")
         enc.emitCmpRI("eax", 0)
-        enc.emitJccLabel("ne", "write_fail")
-        enc.emitStackLoad("rax", -0x48)
+        enc.emitJccLabel("eq", "write_fail")
+        // 实际写入字节数在 [rbp-0x8]（同 emitRead 的 lpNumberOfBytesRead）
+        enc.emitStackLoad("rax", -0x8)
         enc.emitJmpLabel("write_done")
         enc.emitLabel("write_fail")
         enc.emitMovRI("eax", -1)
         enc.emitLabel("write_done")
-        enc.emitStackLoad("rsi", -0x28)
-        enc.emitStackLoad("rbx", -0x20)
         enc.emitEpilogue()
     }
 
@@ -5362,7 +5350,7 @@ object PhotonRuntime {
     /// Pipeline 以 `RUNTIME_SYMBOLS + BUILD_ID` 作为 aura_runtime.obj 的缓存
     /// 键，否则发射器改动会被陈旧缓存吞掉（实测 VEH 崩溃转储加进发射器后
     /// 产物一直是 06:32 的旧 obj，2026-10-06）。
-    val BUILD_ID: String = "p315-string-startswith"
+    val BUILD_ID: String = "p315-io-write-k32"
     val RUNTIME_SYMBOLS: String = "println,print,puts,toStr,strcat,toInt,toFloat,toString,strlen,charCodeAt,exit,Memory_write,Memory_read,Memory_write16,Memory_read16,Memory_write32,Memory_read32,Memory_write64,Memory_read64,Memory_alloc,Memory_free,Memory_atomicAdd,Memory_mmap,Memory_munmap,Memory_arcIncrement,Memory_arcDecrement,io_open,io_close,io_read,io_write,io_access,Collections.hashMapPut,env_get,Env_get,__obj_slot_get,__obj_slot_set,Memory_copy,Memory_mprotect,ProcessOps_execve,ProcessOps_fork,ProcessOps_wait4,String_fromCharCode,String_substring,ProcessOps_aura_process_argCount,ProcessOps_aura_process_args,Cpu_rdtsc,Cpu_memFence,Cpu_cpuid,Cpu_atomicAdd,FileOps_lseek,veh_install,canary_report,aura_typeof,aura_is_tagged_int,Clock_clockGettime,ThreadOps_create,IO_readFile,IO_writeFile,ThreadOps_join,ThreadOps_sleepMs,ThreadOps_currentId,ThreadOps_cores,__heap_oom,Heap_init,Heap_mmap,min,max,or,and,JitExec_callI64,JitExec_call0,JitExec_allocRW,JitExec_allocRWX,JitExec_protect,refToStr,String_contains,String_toUpperCase,Path_join,Path_basename,Env_has,FileUtils_writeText,FileUtils_readText,FileUtils_exists,Clock_nowMs,Env_probe1,toStringFloat,String_String_startsWith"
 
     /// 将所有运行时函数编码到目标文件中，返COFF hex

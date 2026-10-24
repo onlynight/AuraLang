@@ -1299,6 +1299,11 @@ import aura.lang.compiler.serialize.AucLoader
                 println("[62] fname=[" + fname + "] argc=" + toStr(argc2)
                     + " fn=[" + this.currentFunc + "]")
             }
+            // [R253] FileOps.* 前置拦截走真文件 I/O（独立小方法——写进
+            // callOrBuiltin 会触发布局轮盘，见 fileOpsNative 注释）。
+            if (this.fileOpsNative(fname, argc2) == 1) {
+                return
+            }
             this.callOrBuiltin(fname, argc2)
         } else if (op == 63) {
             val idx: Int = VmOps.toI32(this.argStrOf(0))
@@ -2905,14 +2910,10 @@ import aura.lang.compiler.serialize.AucLoader
             || funcName == "FileOps.close" || funcName == "aura.lang.native.file.FileOps.close"
             || funcName == "FileOps.read" || funcName == "aura.lang.native.file.FileOps.read"
             || funcName == "FileOps.write" || funcName == "aura.lang.native.file.FileOps.write") {
-            // [R218] `FileOps.*` 是 `@native(SYS_*)` 的 **Linux syscall 封装**，
-            // 宿主（Windows、无 syscall 后端）无法兑现。按本项目既有的
-            // 「VM 沙箱语义」统一失败：open/lseek/fstat/access/unlink/mkdir/
-            // rmdir/rename → -1，close/read/write → 0。
-            // 不接会产生**假 OOM**：`File.readText` 的 `lseek(SEEK_END)` 得 0
-            // 与 `read` 得 0 交替 ⇒ guest 的错误分支不进、堆被填满
-            //（13-stdlib §13.11，实测 exit=70 且全程无输出）。
-            // 接住后 guest 走自带错误分支：写失败打消息 / 读空串 / exists=false。
+            // [R218→R253] FileOps.* 已改走 `fileOpsNative`（真文件 I/O），
+            // 在 op 62 臂里**前置拦截**——不进本巨函数：R253 实测把真 I/O
+            // 写在这里会触发布局轮盘（13-stdlib 全用例空输出）。此处的
+            // 沙箱桩仅作兜底（正常到不了）。
             var foN: Int = argc
             while (foN > 0) {
                 this.stack.pop()
@@ -4514,6 +4515,119 @@ import aura.lang.compiler.serialize.AucLoader
 
     /// 装箱分配（P1.1 类型感知；24 字节头：tag@0 / rc@8 / value@16）。
     ///
+    // [R253] 句柄表实现在 VmOps（静态槽）：⚠ 实测给 Vm 加 3 个字段就会
+    // 触发布局轮盘（13-stdlib 全用例空输出），字段一律不加。
+        private fun ioHandleAdd(h: Long): Int {
+        return VmOps.ioHandleAdd(h)
+    }
+
+        private fun ioHandleAt(idx: Int): Long {
+        return VmOps.ioHandleAt(idx)
+    }
+
+    /// [R253] FileOps.* 真文件 I/O（op 62 臂**前置拦截**，不进 callOrBuiltin）。
+    ///
+    /// 运行时自带 kernel32 真实现——io_open(path,flags)→handle、io_close(fd)、
+    /// io_read(fd,buf,cnt)、io_write(fd,buf,cnt)（PhotonRuntime.emitOpen/
+    /// emitClose/emitRead/emitWrite，2026-10-03 换道 kernel32 CreateFileA/
+    /// ReadFile/WriteFile）、FileOps_lseek(fd,off,whence)（readText 的
+    /// SEEK_END/SEEK_SET 探测模式）、io_access(path,mode)（POSIX 语义）。
+    /// 旧 R218 沙箱桩（open 恒 -1）是「宿主无法兑现」时代的判断，已过时
+    /// —— 13-stdlib §13.11 的 roundtrip 即此。
+    ///
+    /// ⚠ 必须放在独立小方法：R253 实测把真 I/O 写进 callOrBuiltin 会触发
+    /// 布局轮盘（13-stdlib 全用例空输出）。HANDLE 是指针尺寸而 guest 的
+    /// fd 是 Int ⇒ 用句柄表中转（ioHandleAdd/ioHandleAt）。
+    /// 返回 1 = 已处理；0 = 不是 FileOps（调用方继续原路径）。
+        private fun fileOpsNative(funcName: String, argc: Int): Int {
+        var isFO: Int = 0
+        if (VmOps.strLenRaw(funcName) >= 8) {
+            if (VmOps.vmSubstr(funcName, 0, 8) == "FileOps.") { isFO = 1 }
+        }
+        // [R253b] ReadCStr：StringBuilder.build() 的收尾（拷贝 C 串 → Aura
+        // String）。VM 无臂时掉进用户函数路径 ⇒ build() 返回垃圾（实测
+        // 13-stdlib roundtrip 打成 null）。逐字符 fromCharCode 拼接 = R67
+        // 已证形态（与种子 VM 的独立拷贝语义一致）。
+        if (funcName == "ReadCStr") {
+            val bA: Any = this.stack.pop()
+            val bufC: Long = VmOps.addrOf(bA)
+            var out: String = ""
+            var iC: Int = 0
+            var doneC: Int = 0
+            while (doneC == 0) {
+                val cC: Int = Memory.read(bufC + iC)
+                if (cC == 0) {
+                    doneC = 1
+                } else {
+                    out = out + String.fromCharCode(cC)
+                    iC = iC + 1
+                }
+            }
+            this.stack.push(out)
+            return 1
+        }
+        // CString/CStr（prelu 包装 Builtin.cstr）：guest 的 String 本就是
+        // C 兼容指针，恒等透传（种子端同形）。
+        if (funcName == "CString" || funcName == "CStr") {
+            val tA: Any = this.stack.pop()
+            this.stack.push(tA)
+            return 1
+        }
+        if (isFO == 0) { return 0 }
+        if (funcName == "FileOps.open" || funcName == "aura.lang.native.file.FileOps.open") {
+            val flA: Any = this.stack.pop()
+            val paA: Any = this.stack.pop()
+            val hA: Long = io_open(VmOps.addrOf(paA), VmOps.addrOf(flA))
+            this.stack.push(VmOps.toAny(this.ioHandleAdd(hA)))
+            return 1
+        }
+        if (funcName == "FileOps.close" || funcName == "aura.lang.native.file.FileOps.close") {
+            val fdC: Any = this.stack.pop()
+            io_close(this.ioHandleAt(VmOps.intOf(fdC)))
+            this.stack.push(VmOps.toAny(0))
+            return 1
+        }
+        if (funcName == "FileOps.read" || funcName == "aura.lang.native.file.FileOps.read") {
+            val cnR: Any = this.stack.pop()
+            val bfR: Any = this.stack.pop()
+            val fdR: Any = this.stack.pop()
+            val nR: Long = io_read(this.ioHandleAt(VmOps.intOf(fdR)), VmOps.addrOf(bfR), VmOps.addrOf(cnR))
+            this.stack.push(VmOps.toAnyL(nR))
+            return 1
+        }
+        if (funcName == "FileOps.write" || funcName == "aura.lang.native.file.FileOps.write") {
+            val cnW: Any = this.stack.pop()
+            val bfW: Any = this.stack.pop()
+            val fdW: Any = this.stack.pop()
+            val nW: Long = io_write(this.ioHandleAt(VmOps.intOf(fdW)), VmOps.addrOf(bfW), VmOps.addrOf(cnW))
+            this.stack.push(VmOps.toAnyL(nW))
+            return 1
+        }
+        if (funcName == "FileOps.lseek" || funcName == "aura.lang.native.file.FileOps.lseek") {
+            val whL: Any = this.stack.pop()
+            val ofL: Any = this.stack.pop()
+            val fdL: Any = this.stack.pop()
+            val rL: Long = FileOps_lseek(this.ioHandleAt(VmOps.intOf(fdL)), VmOps.addrOf(ofL), VmOps.addrOf(whL))
+            this.stack.push(VmOps.toAnyL(rL))
+            return 1
+        }
+        if (funcName == "FileOps.access" || funcName == "aura.lang.native.file.FileOps.access") {
+            val mdA: Any = this.stack.pop()
+            val paB: Any = this.stack.pop()
+            val rA: Long = io_access(VmOps.addrOf(paB), VmOps.addrOf(mdA))
+            this.stack.push(VmOps.toAnyL(rA))
+            return 1
+        }
+        // fstat/unlink/mkdir/rmdir/rename：沙箱桩（测试未触达）
+        var foN: Int = argc
+        while (foN > 0) {
+            this.stack.pop()
+            foN = foN - 1
+        }
+        this.stack.push(VmOps.toAny(0 - 1))
+        return 1
+    }
+
     /// 数值装箱值直接写 value 槽；非数值（字符串等句柄值）写裸内存会截断，
     /// 存入 `boxValues` 侧表（键 = objPtr 的 toStrAny 形态）。
         private fun boxAlloc(): Unit {
