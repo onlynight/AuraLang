@@ -201,6 +201,10 @@ pub static EMBEDDED_THREAD_AUC: &[u8] = core_auc!("aura/lang/concurrent/Thread.a
 /// 嵌入的 Future（纯 Aura，结果槽 + 状态机）
 pub static EMBEDDED_FUTURE_AUC: &[u8] = core_auc!("aura/lang/concurrent/Future.auc");
 
+/// 嵌入的 Promise（纯 Aura，可外部写入的异步结果占位符；
+/// 与 Future 共享 24 字节内存布局，无 native 依赖）
+pub static EMBEDDED_PROMISE_AUC: &[u8] = core_auc!("aura/lang/concurrent/Promise.auc");
+
 /// 标准库包前缀：并发设施
 pub const PKG_CONCURRENT: &str = "aura.lang.concurrent";
 
@@ -273,6 +277,7 @@ pub static EMBEDDED_STDLIB_MODULES: &[(&str, &str, &[u8])] = &[
     ("Semaphore", PKG_CONCURRENT, EMBEDDED_SEMAPHORE_AUC),
     ("Thread", PKG_CONCURRENT, EMBEDDED_THREAD_AUC),
     ("Future", PKG_CONCURRENT, EMBEDDED_FUTURE_AUC),
+    ("Promise", PKG_CONCURRENT, EMBEDDED_PROMISE_AUC),
     // ── native 辅助模块（纯 Aura，为 std/ 包提供底层支持）──
     ("MathOps", PKG_NATIVE_MATH, EMBEDDED_MATH_OPS_AUC),
     ("Stdio", PKG_NATIVE_IO, EMBEDDED_STDIO_AUC),

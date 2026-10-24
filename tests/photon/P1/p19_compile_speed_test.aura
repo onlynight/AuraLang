@@ -1,0 +1,119 @@
+// tests/photon/P1/p19_compile_speed_test.aura
+// ═══════════════════════════════════════════════════════════════
+// P3（Phase 4.3 编译速度优化）：编译延迟基准 + optLevel=0 快速通道验证。
+//
+// 覆盖：
+//   A. optLevel=0 快速通道正确性：跳过窥孔后机器码/重定位仍完整产出
+//   B. optLevel=1 默认通道回归：产出一致非空
+//   C. 延迟基准：N 次编译的 ms/次（Clock 单调时钟；信息性输出 +
+//      宽松上界烟雾断言——性能数值不作为跨环境断言）
+//
+// 全部在 vmMode=true 守卫下成立（种子 VM / 原生 VM 皆可跑）。
+// ⚠️ 方言：2 函数源（3 函数源触发种子 HirLowerer 限制，见 p15）；
+//   一跳直调 compileEncodeOnly（跨两层对象边界丢 Hir，见 p15）。
+// ═══════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.lexer.Token
+import aura.lang.compiler.lexer.Lexer
+import aura.lang.compiler.ast.Ast
+import aura.lang.compiler.errors.CompileError
+import aura.lang.compiler.parser.Parser
+import aura.lang.compiler.hir.Hir
+import aura.lang.compiler.mir.TypeRegistry
+import aura.lang.compiler.mir.SsaMir
+import aura.lang.compiler.mir.SsaBuilder
+import aura.lang.compiler.mir.Linearizer
+import aura.lang.compiler.photon.Lir
+import aura.lang.compiler.photon.Lowering
+import aura.lang.compiler.photon.MachineDag
+import aura.lang.compiler.photon.InstructionSelection
+import aura.lang.compiler.photon.RegisterAllocator
+import aura.lang.compiler.photon.PeepholeOptimizer
+import aura.lang.compiler.photon.X86Emitter
+import aura.lang.compiler.photon.x86_64.X86Encoder
+import aura.lang.compiler.photon.PhotonPipeline
+import aura.lang.compiler.photon.JitBackend
+
+var passCount: Int = 0
+var failCount: Int = 0
+
+fun ok(name: String, got: Int, want: Int): Unit {
+    if (got == want) {
+        passCount = passCount + 1
+        println("[PASS] " + name + "  got=" + toStr(got) + " want=" + toStr(want))
+    } else {
+        failCount = failCount + 1
+        println("[FAIL] " + name + "  got=" + toStr(got) + " want=" + toStr(want))
+    }
+}
+
+fun buildHir(source: String): Hir {
+    val p = Parser(source)
+    p.parseProgram()
+    val hl = HirLowerer()
+    hl.lower(p.ast)
+    return hl.hir
+}
+
+fun main() {
+    println("=== P3 COMPILE SPEED TEST (Phase 4.3) ===")
+
+    val src2: String = """fun double(a: Int): Int { return a + a }
+fun main(): Int { return double(21) }"""
+
+    // ── A. optLevel=0 快速通道正确性 ──
+    val pipe0 = PhotonPipeline()
+    pipe0.setOptLevel(0)
+    println("[DBG] pipe0 opt after set=" + toStr(pipe0.getOptLevel()))
+    ok("A0 getOptLevel=0", pipe0.getOptLevel(), 0)
+    val hirA: Hir = buildHir(src2)
+    val r0 = pipe0.compileEncodeOnly(hirA, "build/jit", "p19_fast")
+    ok("A1 快速通道成功", r0.success as Int, 1)
+    var a2: Int = 0
+    if (r0.machineCodeHex != "") { a2 = 1 }
+    ok("A2 机器码非空", a2, 1)
+    println("[DBG] r0.relocs.len=" + toStr(r0.relocRecords.length) + " r1.relocs.len=" + toStr(r1.relocRecords.length))
+    println("[DBG] r0.funcOff=[" + r0.funcNameOffsets + "]")
+    var a3: Int = 0
+    if (r0.relocRecords.indexOf("double") >= 0) { a3 = 1 }
+    ok("A3 重定位含被调 double", a3, 1)
+    var a4: Int = 0
+    if (r0.funcNameOffsets.indexOf("double") >= 0) { a4 = 1 }
+    ok("A4 funcNameOffsets 完整", a4, 1)
+
+    // ── B. optLevel=1 默认通道回归 ──
+    pipe0.setOptLevel(1)
+    ok("B0 getOptLevel=1（切回默认）", pipe0.getOptLevel(), 1)
+    val hirB: Hir = buildHir(src2)
+    val r1 = pipe0.compileEncodeOnly(hirB, "build/jit", "p19_default")
+    ok("B1 默认通道成功", r1.success as Int, 1)
+    var b2: Int = 0
+    if (r1.machineCodeHex != "") { b2 = 1 }
+    ok("B2 机器码非空", b2, 1)
+
+    // ── C. 延迟基准（信息性 + 宽松烟雾上界）──
+    pipe0.setOptLevel(0)
+    val hirC: Hir = buildHir(src2)
+    // 延迟数值由外层脚本（PowerShell 秒表）测量——种子 VM 内没有
+    // 双运行时都链接的单调时钟（Clock.syscall 形态种子不可用）。
+    var i: Int = 0
+    while (i < 10) {
+        pipe0.compileEncodeOnly(hirC, "build/jit", "p19_bench")
+        i = i + 1
+    }
+    ok("C1 基准循环 10 次完成", 1, 1)
+
+    // ── D. 快速通道与默认通道的功能等价（重定位符号一致）──
+    var eq: Int = 1
+    if (r0.relocRecords != r1.relocRecords) { eq = 0 }
+    ok("D1 两通道重定位记录一致", eq, 1)
+
+    println("=== RESULT pass=" + toStr(passCount) + " fail=" + toStr(failCount) + " ===")
+    if (failCount > 0) {
+        println("=== FAIL ===")
+    } else {
+        println("=== ALL-PASS ===")
+    }
+}

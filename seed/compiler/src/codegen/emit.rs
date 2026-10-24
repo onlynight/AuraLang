@@ -172,6 +172,32 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
             });
         }
     }
+    // ProcessNative @native 函数：HIR 降级时应已注册到 `natives`，
+    // 但当前因 `@native` 注解在普通 `object` 中的注册路径存在缺陷，
+    // 这些调用被 MIR 发射为 `Call`（而非 `CallNative`），导致 emit 阶段
+    // 在 `native_index` 中找不到。在此补齐以确保字节码发射不中断。
+    for (name, argc) in [
+        ("ProcessNative.exitGroup", 1u16),
+        ("ProcessNative.openFile", 2),
+        ("ProcessNative.closeFile", 1),
+        ("ProcessNative.readSyscall", 3),
+        ("ProcessNative.killSyscall", 2),
+        ("ProcessNative.wait4", 4),
+        ("ProcessNative.execve", 3),
+        ("ProcessNative.getpid", 0),
+        ("ProcessNative.fork", 0),
+    ] {
+        if !natives.iter().any(|n| n.name == name) {
+            natives.push(BytecodeNative {
+                name: name.to_string(),
+                param_count: argc,
+                ffi_abi: FfiAbi::None,
+                ffi_lib: None,
+                param_types: Vec::new(),
+                ret_type: TYPE_ID_VOID,
+            });
+        }
+    }
     // ── 与 MIR 的原生分类保持一致 ──
     //
     // MIR 侧（`MirContext::register_builtin_native_names`）现在以**运行期
@@ -563,6 +589,10 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         LoadConst { .. } => 6,
         LoadLocal { .. } => 6,
         StoreLocal { .. } => 6,
+        // P3.2：LoadGlobal = 指令（3） + StoreVar(dst)（3） = 6；
+        //       StoreGlobal = LoadVar(src)（3） + 指令（3） = 6。
+        LoadGlobal { .. } => 6,
+        StoreGlobal { .. } => 6,
         // BinOp：LoadVar(a) + LoadVar(b) + 算术(1) + StoreVar(dst) = 10；`To`/`Is`/`As` 仅 LoadVar(b)+StoreVar = 6
         BinOp { op, .. } => {
             if matches!(
@@ -607,6 +637,12 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         ListPush { .. } => 7,
         // ListLen：LoadVar(obj) + ListLen(1) + StoreVar(3) = 7
         ListLen { .. } => 7,
+        // ListIsEmpty：LoadVar(obj) + ListIsEmpty(1) + StoreVar(3) = 7
+        ListIsEmpty { .. } => 7,
+        // ListContains / ListIndexOf：LoadVar(item) + LoadVar(obj) + op(1) + StoreVar(3) = 10
+        ListContains { .. } => 10,
+        ListIndexOf { .. } => 10,
+        ListRemoveAt { .. } => 10,
         // Retain：LoadVar(src) + Retain(1) = 4
         Retain { .. } => 4,
         // Release：LoadVar(src) + Release(1) = 4
@@ -752,20 +788,36 @@ fn emit_instr(
             // 这里退化为硬错误：打印未解析符号并调用一个必然越界的索引，
             // 让 VM 立即报「无效函数索引」而不是静默递归。
             // 优先按 arity 精确匹配（区分重载），失败再回退到纯名称。
+            // 如果 fn_index 找不到，尝试 native_index（@native 注解的 object 方法）
             let idx = match fn_index
                 .get(&format!("{}#{}", func, args.len()))
                 .or_else(|| fn_index.get(func.as_str()))
             {
-                Some(i) => *i,
-                None => {
-                    eprintln!(
-                        "[bytecode] error: 未解析的函数调用 '{}'（既非用户函数、也非原生函数）",
-                        func
-                    );
-                    u16::MAX
+                Some(i) => {
+                    OpCode::Call(*i).write(code);
+                    if let Some(d) = dst {
+                        OpCode::StoreVar(*d as u16).write(code);
+                    }
+                    return;
                 }
+                None => {}
             };
-            OpCode::Call(idx).write(code);
+            // 尝试 native_index（@native 注解的 object 方法被降级为 Call 而非 CallNative）
+            if let Some(native_idx) = native_index.get(func.as_str()) {
+                for a in args {
+                    OpCode::LoadVar(*a as u16).write(code);
+                }
+                OpCode::CallNativeArgs(*native_idx, args.len() as u16).write(code);
+                if let Some(d) = dst {
+                    OpCode::StoreVar(*d as u16).write(code);
+                }
+                return;
+            }
+            eprintln!(
+                "[bytecode] error: 未解析的函数调用 '{}'（既非用户函数、也非原生函数）",
+                func
+            );
+            OpCode::Call(u16::MAX).write(code);
             if let Some(d) = dst {
                 OpCode::StoreVar(*d as u16).write(code);
             }
@@ -929,6 +981,31 @@ fn emit_instr(
             OpCode::ListLen.write(code);
             OpCode::StoreVar(*dst as u16).write(code);
         }
+        ListIsEmpty { dst, obj } => {
+            OpCode::LoadVar(*obj as u16).write(code);
+            OpCode::ListIsEmpty.write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        // 栈布局与 ListPush 一致：元素先压、列表引用后压（interp 先弹 obj 再弹 item）
+        ListContains { dst, obj, item } => {
+            OpCode::LoadVar(*item as u16).write(code);
+            OpCode::LoadVar(*obj as u16).write(code);
+            OpCode::ListContains.write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        ListIndexOf { dst, obj, item } => {
+            OpCode::LoadVar(*item as u16).write(code);
+            OpCode::LoadVar(*obj as u16).write(code);
+            OpCode::ListIndexOf.write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        // 栈布局：下标先压、列表引用后压（interp 先弹 obj 再弹 idx）
+        ListRemoveAt { dst, obj, idx } => {
+            OpCode::LoadVar(*idx as u16).write(code);
+            OpCode::LoadVar(*obj as u16).write(code);
+            OpCode::ListRemoveAt.write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
         Retain { src } => {
             OpCode::LoadVar(*src as u16).write(code);
             OpCode::Retain.write(code);
@@ -1006,6 +1083,18 @@ fn emit_instr(
             let idx = fn_index.get(func.as_str()).copied().unwrap_or(0);
             OpCode::MakeFnRef(idx).write(code);
             OpCode::StoreVar(*dst as u16).write(code);
+        }
+        // P3.2：模块级全局量读写。
+        //
+        // `LoadGlobal` 直接压栈（无需 LoadVar）；`StoreGlobal` 与 `StoreLocal`
+        // 栈序一致：先压源值再执行 store（store 弹栈）。
+        LoadGlobal { dst, slot } => {
+            OpCode::LoadGlobal(*slot as u16).write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        StoreGlobal { slot, src } => {
+            OpCode::LoadVar(*src as u16).write(code);
+            OpCode::StoreGlobal(*slot as u16).write(code);
         }
     }
 }

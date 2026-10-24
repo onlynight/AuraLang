@@ -1,0 +1,20 @@
+// build/bench/bench_fib.aura
+// Photon HAT AOT vs VM 基准：递归 Fibonacci（调用/分支/算术密集）
+//
+//   Photon AOT: build/bench/bench_fib.exe   （Photon HAT 管线 → 机器码）
+//   VM 模式   : aura run build/bench/bench_fib.aura（字节码解释执行）
+
+import aura.lang.std.String
+
+fun fib(n: Int): Int {
+    if (n <= 1) {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fun main() {
+    val n: Int = 28
+    val r: Int = fib(n)
+    println("fib(" + toStr(n) + ") = " + toStr(r))
+}

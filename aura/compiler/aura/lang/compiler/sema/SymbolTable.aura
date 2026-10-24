@@ -333,7 +333,8 @@ class SymbolTable {
                 if (params != "") {
                     paramCount = 1
                     var j: Int = 0
-                    while (j < params.length) {
+                    val paramsLen: Int = params.length
+                    while (j < paramsLen) {
                         if (params.charCodeAt(j) == 44) { // ','
                             paramCount = paramCount + 1
                         }

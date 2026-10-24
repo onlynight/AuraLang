@@ -112,7 +112,8 @@ class LirValue {
         }
         var current: String = ""
         var i: Int = 0
-        while (i < text.length) {
+        val textLen: Int = text.length
+        while (i < textLen) {
             var c: String = text.substring(i, i + 1)
             if (c == ",") {
                 result.add(MachineDagUtils.strToInt(current))
@@ -256,6 +257,20 @@ class LirProgram {
     /// 类型注册表。
     var types: TypeRegistry = TypeRegistry()
 
+    /// ⚠️ P228：phi 入边的**前驱块旁路表**（`phiVid|p1:vid1,p2:vid2,...` 以 ';' 连接）。
+    /// MIR phi args 自 P228 起是 `pred:vid` 对（SsaBuilder 携带前驱块 ID），
+    /// LIR args 只保留裸 vid（parseArgs 兼容），pred 对在这里旁路给 ISel
+    /// 做**精确配边**（取代定义块/传递闭包/尾兜底启发式链）。
+    var phiPredMap: String = ""
+
+    /// [R131] `phiPredMap` 的记录列表形态（**现行写入通道**）。
+    ///
+    /// ⚠️ 旧写入 `phiPredMap = phiPredMap + ";" + rec` 每条记录整串拷贝：
+    /// map 最终 ~200KB × 1.3 万条 ⇒ ~1.3GB 滞留拷贝（自举实测，后端峰值主体）。
+    /// 记录现在进本列表；唯一读者 `InstructionSelection.ensurePhiMap` 直接从
+    /// 列表建索引，`phiPredMap` 字段保留但恒为 ""（格式文档见其注释）。
+    var phiPredRecs: List<String> = arrayListOf<String>()
+
     /// 值节点表（List<LirValue>）。
     var values: List<LirValue> = arrayListOf<LirValue>()
 
@@ -279,6 +294,7 @@ class LirProgram {
 
     init() {
         this.types = TypeRegistry()
+        this.phiPredRecs = arrayListOf<String>()
         this.values = arrayListOf<LirValue>()
         this.blocks = arrayListOf<LirBlock>()
         this.functions = arrayListOf<LirFunction>()

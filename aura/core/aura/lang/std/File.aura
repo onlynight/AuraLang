@@ -2,6 +2,7 @@
 package aura.lang.std
 
 import aura.lang.native.memory.Allocator
+import aura.lang.native.Memory
 import aura.lang.native.file.FileOps
 import aura.lang.native.io.Stdio
 
@@ -74,19 +75,47 @@ class File {
     }
 
     /// 覆写整个文件。
+    ///
+    /// ⚠️ 2026-10-06 根修：**分块写**。旧实现一次性
+    /// `stringToBuffer(content)` —— 内容 7.8MB 且前端刚吃掉大量内存时该
+    /// 分配会失败（返回 0），旧代码**静默 return** ⇒ 文件保持陈旧内容但
+    /// mtime 已更新 ⇒ 下游读到旧文件毫无察觉（实测 Photon 驱动的 .hat
+    /// 自 P124 起从未真正落盘，后端一直在编译陈旧文件，runner 通道被卡
+    /// 一整轮）。分块 64KB：峰值内存有界，任何一步失败都**响亮报错**并
+    /// 以非零语义收尾（println —— 本类的调用方是驱动/脚本，stdout 可见）。
+    /// 注意：分块按 UTF-16 码元切，多字节字符跨块边界的场景 .hat（纯
+    /// ASCII IR 文本）不会出现；若日后写二进制/文本混合内容需按码点对齐。
     fun writeText(content: String): Unit {
         val fd: Int = FileOps.open(pathBuf, 1 | 0x40 | 0x200)  // O_WRONLY|O_CREAT|O_TRUNC
-        if (fd < 0) { return }
-
-        val buf: Long = Stdio.stringToBuffer(content)
-        if (buf == 0) {
-            FileOps.close(fd)
+        if (fd < 0) {
+            println("[File.writeText] open failed: " + this.pathStr)
             return
         }
 
-        val len: Long = Stdio.strlen(buf)
-        FileOps.write(fd, buf, len)
-        Allocator.free(buf)
+        val total: Int = content.length
+        val CHUNK: Int = 65536
+        var off: Int = 0
+        while (off < total) {
+            var end: Int = off + CHUNK
+            if (end > total) { end = total }
+            val slice: String = content.substring(off, end)
+            val buf: Long = Stdio.stringToBuffer(slice)
+            if (buf == 0) {
+                FileOps.close(fd)
+                println("[File.writeText] alloc failed at " + toStr(off) + "/" + toStr(total)
+                        + ": " + this.pathStr)
+                return
+            }
+            val n: Long = FileOps.write(fd, buf, Stdio.strlen(buf))
+            Allocator.free(buf)
+            if (n <= 0) {
+                FileOps.close(fd)
+                println("[File.writeText] write failed at " + toStr(off) + "/" + toStr(total)
+                        + ": " + this.pathStr)
+                return
+            }
+            off = end
+        }
         FileOps.close(fd)
     }
 

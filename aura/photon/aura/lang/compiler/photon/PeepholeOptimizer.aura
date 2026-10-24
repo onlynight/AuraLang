@@ -77,7 +77,7 @@ class PeepholeOptimizer {
                 val src2: Int = next.nodeAt(0)
                 if (dst1 >= 0 && src2 == dst1) {
                     // 合并：mov r3, r2
-                    next.nodes = toStr(src1)
+                    next.setNodes(toStr(src1))
                     this.optimized = this.optimized + 1
                     changed = true
                 }
@@ -98,7 +98,7 @@ class PeepholeOptimizer {
                 val dst: Int = instr.nodeAt(0)
                 if (dst >= 0 && instr.output == dst) {
                     instr.template = "nop"
-                    instr.nodes = ""
+                    instr.setNodes("")
                     instr.output = -1
                     this.optimized = this.optimized + 1
                     changed = true
@@ -122,7 +122,7 @@ class PeepholeOptimizer {
                 if (instr.output < 0 || this.isUnused(instr.output)) {
                     // 移除指令（标记）
                     instr.template = "nop"
-                    instr.nodes = ""
+                    instr.setNodes("")
                     instr.output = -1
                     this.optimized = this.optimized + 1
                     changed = true
@@ -150,7 +150,7 @@ class PeepholeOptimizer {
                     // 合并：使用相同输出
                     next.output = instr.output
                     next.template = "nop"
-                    next.nodes = ""
+                    next.setNodes("")
                     this.optimized = this.optimized + 1
                     changed = true
                     break
@@ -172,21 +172,21 @@ class PeepholeOptimizer {
             // add with 0
             if (instr.template == "add %dst, %src, @imm" && instr.mem == "0") {
                 instr.template = "nop"
-                instr.nodes = ""
+                instr.setNodes("")
                 this.optimized = this.optimized + 1
                 changed = true
             }
             // imul with 1
             if (instr.template == "imul %dst, %src, @imm" && instr.mem == "1") {
                 instr.template = "nop"
-                instr.nodes = ""
+                instr.setNodes("")
                 this.optimized = this.optimized + 1
                 changed = true
             }
             // sub with 0
             if (instr.template == "sub %dst, %src, @imm" && instr.mem == "0") {
                 instr.template = "nop"
-                instr.nodes = ""
+                instr.setNodes("")
                 this.optimized = this.optimized + 1
                 changed = true
             }
@@ -248,21 +248,31 @@ class PeepholeOptimizer {
             if (instr.template == "nop") { i = i + 1; continue }
             var k: Int = 0
             while (k < copyMap.size) {
-                val parts: List<String> = this.splitStr(copyMap[k], "|")
-                val src: Int = this.strToInt(parts[0])
-                val dst: Int = this.strToInt(parts[1])
-                // 检查指令是否使用了 src
+                // [MEM-FIX] 2026-10-10：旧实现对**每个 copyMap 条目**做
+                // 「splitStr 整个 nodes 串 → 逐元素替换 → joinList 重建」——
+                // O(对数 × 节点数²) 的反复分裂/重连，splitStr/joinList/
+                // digitChar 的 6 个 concat 调用点 = OOM 归因表 413MB×3936 次
+                // ×6 RA ≈ 2.4GB 驻留的真身。改为：nodes 只分裂一次，每节点
+                // 按 copyMap 顺序做链式替换（语义与逐对全量扫描等价），最后
+                // joinList 重建一次。
                 val nodes: List<String> = this.splitStr(instr.nodes, ",")
                 var j: Int = 0
                 while (j < nodes.size) {
-                    if (this.strToInt(nodes[j]) == src) {
-                        // 替换为 dst
-                        nodes[j] = toStr(dst)
-                        changed = true
+                    var v: Int = this.strToInt(nodes[j])
+                    var kk: Int = 0
+                    while (kk < copyMap.size) {
+                        val parts: List<String> = this.splitStr(copyMap[kk], "|")
+                        if (this.strToInt(parts[0]) == v) {
+                            v = this.strToInt(parts[1])
+                        }
+                        kk = kk + 1
                     }
+                    val nv: String = toStr(v)
+                    if (nv != nodes[j]) { changed = true }
+                    nodes[j] = nv
                     j = j + 1
                 }
-                instr.nodes = this.joinList(nodes, ",")
+                instr.setNodes(this.joinList(nodes, ","))
                 k = k + 1
             }
             i = i + 1
@@ -283,9 +293,9 @@ class PeepholeOptimizer {
             if (instr.template == "mov %dst, [mem]" && next.template == "mov [mem], %src"
                 && instr.output >= 0 && next.nodeAt(0) == instr.output) {
                 instr.template = "nop"
-                instr.nodes = ""
+                instr.setNodes("")
                 next.template = "nop"
-                next.nodes = ""
+                next.setNodes("")
                 this.optimized = this.optimized + 2
                 changed = true
             }
@@ -323,7 +333,7 @@ class PeepholeOptimizer {
             // add r1, r2, 0
             if (instr.template == "add %dst, %src, @imm" && instr.mem == "0") {
                 instr.template = "nop"
-                instr.nodes = ""
+                instr.setNodes("")
                 this.optimized = this.optimized + 1
                 changed = true
             }
@@ -346,7 +356,7 @@ class PeepholeOptimizer {
                 && next.template == "cmp %src, @imm" && instr.mem == next.mem) {
                 // 合并：cmp; jcc target; jcc target
                 next.template = "jcc @target"
-                next.nodes = ""
+                next.setNodes("")
                 next.mem = mid.cond
                 this.optimized = this.optimized + 1
                 changed = true
@@ -463,15 +473,36 @@ class PeepholeOptimizer {
     }
 
     /// 连接列表。
+    ///
+    /// ⚠️ 2026-10-09（内存回合）：旧实现 `result = result + sep/list[i]`
+    /// 线性累加——每元素整段拷贝已累积结果，O(元素数²)，AOT 无 GC 全部
+    /// 驻留（OOM 归因表 411MB×3926 次 ×6 相邻 RA ≈ 2.4GB 的主力）。改为
+    /// List 累积 + 两两归并（O(总长·log 片段数)，与 X86Emitter.joinPairwise
+    /// 同一手法）。
     private fun joinList(list: List<String>, sep: String): String {
-        var result: String = ""
+        val parts: List<String> = arrayListOf<String>()
         var i: Int = 0
         while (i < list.size) {
-            if (result != "") { result = result + sep }
-            result = result + list[i]
+            if (i > 0) { parts.add(sep) }
+            parts.add(list[i])
             i = i + 1
         }
-        return result
+        var cur: List<String> = parts
+        while (cur.size > 1) {
+            val next: List<String> = arrayListOf<String>()
+            var j: Int = 0
+            while (j < cur.size) {
+                if (j + 1 < cur.size) {
+                    next.add(cur[j] + cur[j + 1])
+                } else {
+                    next.add(cur[j])
+                }
+                j = j + 2
+            }
+            cur = next
+        }
+        if (cur.size == 0) { return "" }
+        return cur[0]
     }
 
     /// 获取已应用的优化数量。

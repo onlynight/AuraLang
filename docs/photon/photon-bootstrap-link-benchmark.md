@@ -1,0 +1,4930 @@
+# Photon 自举链接修复 + 三模式基准记录（2026-10-02）
+
+> 关联：`docs/vm_pure_aura/00-VM纯Aura化技术方案与达成路径.md`（P4 记录）、`docs/photon/HANDOFF.md`
+
+## 一、Photon 编译 Aura 自举（Main.aura，111 模块）——链接失败的修复
+
+链路：`源码 → 合并 HIR（155,887 节点）→ SSA MIR → .hat（7.9MB）→ LIR → DAG → X86 → COFF（2.17MB）→ lld-link`。
+前端+后端全通（3m15s，峰值 WS ≈5.4GB）；链接失败根因与修复：
+
+| # | 根因 | 修复 | 效果 |
+|---|---|---|---|
+| 1 | **可达性与发射名字映射不一致**：`computeReachable` 收集的是 ISA 映射**前**的裸被调名（`textOf`/`keys`/`getSize`…），而 `emitCall` 经 `mapStdlibFuncName` 按接收者类型映射后发射（`Ast_textOf`/`HashMap_keys`/`ArrayList_getSize`…）→ 定义被判不可达 → 死代码消除剪掉 → `undefined symbol`（首轮 20 个中 10 个属此类） | `InstructionSelection.computeReachable` 收集 Call 时**同步入队映射后的名字**（同 emitCall 的映射函数与 recvTy 推导） | 10 个 Ast/Hir 工具符号 + `HashMap_keys` 全部解决 |
+| 2 | **runtime obj 文件存在性缓存**（2026-09-29 引入）：`RUNTIME_SYMBOLS` 变更后旧 `aura_runtime.obj` 被继续链接 → 新增 runtime 符号全部 undefined | `PhotonPipeline` 两处构建点加 **sidecar 版本校验**（`aura_runtime.obj.syms` 记录构建时符号表，不一致即重建）；手工删除一次陈旧 obj | `String_fromCharCode`/`ProcessOps_aura_process_argCount/args` 三个新 runtime 符号生效 |
+| 3 | `__list_remove_at` 在 AOT 链路无实现（HIR 重路由存在、C 运行时与 emit 降级缺失） | ① `aura_std_cffi.c` 新增 `aura_lang_std_Collections_listRemoveAt`；② `emit.rs` 新增 `__list_remove_at` 降级分支（接收者类实例指针取 0 号字段；下标经 `coerce_int_width` 拆箱——直接 zext 会产生 `ptr`/`i64` 类型失配）；③ `aot/runtime.rs` 登记运行时函数声明 | 驱动自身 AOT 构建恢复可用 |
+
+**修复后状态**：未定义符号 20 → **14**（全部为同一类：**多候选歧义裸名**）。
+
+**选项 2 实施（接收者类型传播）的关键发现与修复**：
+
+1. **前端接收者类型传播已实现**（Hir.aura）：lowerTypeDecl/lowerValDecl/lowerVarDecl/
+   lowerFunction 登记类方法表（typeMethods）、类字段表（typeMemberTys）、局部表
+   （localVarTys）+ cleanTy 修饰符剥离（解析器把 `#public|` 前缀写进 ty 列，类类型
+   只剩 `#public|` 空——不剥离一切类型逻辑失效）+ 构造器调用类型推断 + lowerCall
+   接收者类型限定（Ident/This/一级 Member 三形态）。
+2. **曾有 5 处「每模块清空 typeMethods」的 bug**（lower()/lowerTopLevel 的预登记
+   遍历各带清空）——模块间 import 有先后序，后降级模块清空先降级模块的登记。
+   已改为累进式（localVarTys 仍按函数清空）。
+3. **AOT 参数/成员链路修复**：参数类型兜底 i32→i8*（三处）；`emit_member_access`
+   对 List/Map 接口接收者的 size/length/isEmpty 路径（曾实装后回滚——与模糊字段
+   扫描缺陷叠加会段错误，见专项说明）。
+
+**当前精确状态**（薄宿主 `auc_vm_runner.aura` 实测）：`vm.loadAucAndRun(...)` 的
+接收者类型解析成功（`localTy=[VmRunner]` ✓），但 typeMethods 的**预登记在 AOT
+宿主下执行会段错误**（HirLowerer 的 this 指针在跨方法调用后损坏——与
+auc_vm_runner 静默失败同族），故限定校验 `known=false`，仍发裸名。最小复现
+（单文件单类单方法）在同驱动下**端到端成功**（`x=1` 正确输出）——证明限定机制
+本身正确，段错误是 AOT 宿主对「多模块 + 大类体」编译产物的值模型缺陷。
+
+**结论**：剩余 14 符号 + Aura VM 原生载体，统一阻塞于 **AOT 后端局部指针截断**
+单一根因。前端机制全部就绪，AOT 专项（emit.rs 局部槽类型保持）完成后自动收口。
+
+**AOT 值模型专项技术方案**（2026-10-02 修订）：
+
+emit.rs 的核心缺陷是 `resolve_member_field_owner` 的**模糊字段扫描**——当接收者
+类型是 List/接口（HirType::Named("List<String>") 等）时，emit 成员访问被误降为
+**不相关类的字段读取**（bitcast → VmFrameStack → 读 sp/cap 偏移）。
+
+修复需分三步：
+
+1. **模糊扫描排除方法名**（已实施）：`resolve_member_field_owner` 的兜底扫描
+   不再匹配 size/length/isEmpty/contains 等方法名（METHOD_ONLY_NAMES 排除表），
+   防止误配到无关类的同名字段。已验证不引发段错误。
+
+2. **成员访问内建路由**（需实施）：emit_member_access 在 owner=None 时，对
+   `size`/`length`/`isEmpty` 路由到 `Collections.count(i8* obj_ir)`——obj_ir
+   是 List 句柄（AuraDynList*），count 读 `l->len` 即得正确值。此修复曾在
+   前一轮实施并验证 IR 正确（Collections.count 出现在 .ll 中），但因与
+   Vm.aura 优化改动叠加导致段错误而被回滚。单独实施（Vm.aura 保持 HEAD）
+   需重新验证。
+
+3. **局部槽类型保持**（需实施）：`val mod: AucModule = loadModule(...)` 的
+   局部槽 alloca 类型必须为 `%struct.AucModule*`（当前可能因类型解析失败
+   落入 i32 兜底导致指针截断）。修复方法：emit_function 的局部声明使用
+   `llvm_type_checked`（而非 `llvm_type`），确保未知 struct 类型退化为
+   i8* 而非 i32。
+
+## 二、三模式基准（2026-10-02，同机，5 轮取中位）
+
+基准源：`build/bench/bench_fib.aura`（fib 递归）、`bench_loop.aura`（5000×5000 嵌套循环）；
+脚本：`scripts/bench-photon-vs-vm.ps1`。
+
+| 基准 | Photon HAT AOT | Rust VM（种子字节码解释） | Aura VM（纯 Aura 实现，种子宿主元循环） |
+| --- | --- | --- | --- |
+| fib(30)（≈160 万次调用） | **10 ms** | 2,129 ms（212.9×） | >600s 未完成 |
+| 嵌套循环 2500 万次迭代 | **30 ms** | 18,437 ms（614.6×） | 远超 1 小时（按 fib 比率外推） |
+| fib(20) | 26 ms/轮（含 ~25ms 进程启动） | ≈110 ms/轮 | >580s 未完成 |
+| **fib(15)** | **≈21 ms/轮**（含启动） | **≈133 ms/轮** | **>300s 未完成**（300s 超时截断） |
+
+> Aura VM 元循环通道在 fib(15)（约 2 千次调用、6 万条指令）上即超 300 秒——
+> 单条 Aura VM 指令的元循环代价 ≈ 5ms（种子 VM 解释 Vm.aura 的分派链 + 字符串
+> 分配 + O(n) 常量/函数表扫描的叠加）。**AOT 原生载体**（`auc_vm_runner.exe`）
+> 是正解：本轮已把装载链改为字段传递（绕开 List 参数损坏），`opCodes` 成功构建
+> （9001 条），但执行期仍失败 —— 根因收窄为 **AOT 后端的局部结构体指针损坏**
+> （`val mod = loadModule(...)` 的局部指针被截断，从它读取的一切字段都是垃圾；
+> 与参数 i32 兜底同族，本轮已修参数侧，局部侧待专项）。
+
+输出逐字节一致（`fib(30)=832040`、`loop acc=124950000000`）✓。
+
+## 三、Aura VM / Rust VM 性能分析与优化（本轮已实施）
+
+### Aura VM（`Vm.aura`）——「为什么慢」的三个实锤热点与修复
+
+1. **常量加载 O(|常量池|) 全池扫描**（头号热点）：`getConst` 每次都 `getFieldAt`
+   逐字符扫描整份常量池字符串找第 idx 行。循环体里的每个 `CONST_INT 2` 都是一次全池扫描。
+   **修复**：加载期 split 一次建 `constLines` 行缓存，`getConst` O(1) 取行（越界回退旧扫描）。
+2. **每指令 `toI32` 现场解析参数字符串**：`LOAD_LOCAL/STORE_LOCAL/DECL_LOCAL/JUMP/JUMP_IF_*`
+   每条都解析槽号/行号字符串（分配+解析×每指令）。**修复**：加载期预解析 `arg0Ints`，
+   分派臂 O(1) 取用（`arg0Fast`，缓存未覆盖时回退解析）。
+3. **每指令一次字符串比较 + opName 字符串传参**：兜底空文本检查与未知指令诊断把字符串
+   拉进热路径。**修复**：空文本行在加载期已编号为 OP_NOP（两检查等价），删除比较；
+   `dispatch` 签名去 opName，仅在未知指令异常分支按需取。
+
+正确性验证：`vm_p2_tests`/`phase5_vm_tests`/`diff-test 6/6` 全绿（种子宿主与元循环宿主下
+行为一致，helloworld 端到端正常）。
+
+### Rust VM（`seed/compiler/src/vm/interp.rs`）——分析与微优化（保留）
+
+- 每指令 `OnceLock::get_or_init` 原子读（看门狗配置）→ 改为 `Vm::new` 读一次的普通字段；
+- `pop()` 成功路径也读 `frames[top].ip`（仅下溢错误需要）→ 移入错误分支；
+- `bin_op`/`LoadVar`/`LoadConst` 单借用化减少带边界检查的重复索引。
+- **实测影响 ≈0**（fib 2105→2129ms、loop 18681→18437ms，均在噪声内）——瓶颈不在这些
+  微观开销，而在架构：`Value` 枚举 56 字节（Map 变体撑大，栈压弹即 56 字节搬移）、
+  逐指令函数调用 + 多重边界检查、无内联缓存/超级指令、`Rc<str>` 引用计数原子操作。
+  **结论**：Rust VM 要再上一个台阶需要结构改造（Value 装箱瘦身、超级指令、
+  字节码预解码为裸指针循环），收益上限约 3-5×；与 Photon AOT 的 200-600× 差距
+  是解释执行与原生代码的架构差，靠解释器优化无法弥合。
+
+### Aura VM 的 AOT 载体（已知边界 → 根因收窄至单一 emit 缺陷）
+
+优化后的 `Vm.aura` 在 **种子宿主与元循环宿主下验证正确**，但 AOT 原生载体
+（`auc_vm_runner.exe`）静默失败/段错误。经多轮二分（arg0Ints 禁用、constLines 禁用、
+装载链字段化改造均复现/部分缓解），**根因收窄至 AOT 后端的「局部指针截断」缺陷**：
+
+- `val mod: AucModule = loadModule(...)` 这类**局部结构体指针**在跨方法调用后截断，
+  从它读取的一切字段都是垃圾（实测 `pendingNames.size()` = -1884394416，且同一
+  值的重复读数不稳定）；
+- Photon 驱动自身的 HirLowerer 前端（同为 AOT 宿主代码）新增的成员登记
+  预遍历也在此崩溃（`this` 指针损坏 → 写实例字段即段错误）；
+- 本轮已修其**参数侧**（参数类型兜底 i32→i8*，三处）与 i8 存储宽度、listRemoveAt
+  全链；**局部侧**（返回值/局部槽的类型保持）是最后一块，修复后同时解锁：
+  ① 自举链接剩余 14 符号的前端预登记（接收者类型传播已实现、空表时安全降级）；
+  ② Aura VM 的 AOT 原生载体（装载链已打通至 opCodes 构建 ✓）。
+
+**最终基准（修复后，5 轮中位）**：Photon AOT fib(30)=11ms / loop=33ms；
+Rust VM 2285ms / 20628ms（208× / 625×）。
+
+**堆 arena 溢出（2026-10-02 重大发现）**：Photon 运行时的 `heapArena` 仅 1MB
+（`dataSymbolName = "heapArena:1048576"`），AucLoader 装载 26KB `.auc` 需要
+分配 9001+ 子串 + 列表结构 ≈ 数百 KB——加上 Vm.aura 本身的 HashMap/VmStack
+分配，总需求轻则超过 1MB，重则触发 **bump 指针回绕到 0**（`cmp rax, 1048000;
+jg → 新 base 归零重分配`）→ 新分配覆盖旧对象 → 所有句柄指向被踩内存。
+**修复**：扩容至 8MB（`heapArena:8388608`），溢出检查常量同步更新。
+修复后薄宿主 `auc_vm_runner.exe` **首次链接成功**（`===RESULT===success`）。
+
+**运行时仍静默**：链接成功但 Vm.aura/AucLoader 的执行路径需要 Photon 运行时
+尚不完整的 std 支持（HashMap 操作、字符串子串边界等）——这是 **Photon 后端
+成熟度问题**，与 AOT emit 缺陷是不同的修复轨道。薄宿主链接成功是重要里程碑：
+Photon 编译的 Aura VM 首次通过了编译+链接，运行时补齐后即可参与三方基准。
+
+**Vm.aura 优化回退说明**：本轮为 AOT 原生载体做的 Vm.aura 优化（constLines O(1)、
+arg0Ints 预解析、loadPredecodedFromFields 字段化改造等）在种子 VM 路径引发回归
+（vm_p2 FAIL 13 项、phase5 FAIL 9 项），已全部回退到 HEAD 恢复全绿。这些优化
+逻辑本身正确（孤立验证通过），但与种子 VM 的 List/字段/参数处理存在未预见的
+交互，需以「每步改动 + 即时全量回归」的方式逐步重新引入。
+
+**参数兜底 i32 回滚说明**：emit.rs 参数类型兜底 i32→i8* 在 AOT 路径修复了
+List 参数截断，但在 **VM 解释路径**引发回归（vm_p2 FAIL 13 / phase5 FAIL 9）。
+已回滚为 i32 恢复全绿。
+
+**根因分析**：i8* 兜底引发了 AOT 编译的 runner 段错误（Vm.aura 原始代码 +
+i8* 参数 = 新的越界模式）。这不是参数兜底本身的问题，而是 AOT emit 的
+**值模型系统缺陷**——IR 级证据：`.size()` 零参方法调用被降为 Member →
+模糊字段扫描误配 `VmFrameStack.field_1(sp)` → 读偏移垃圾装箱。修复需要
+在 emit.rs 的成员解析层**统一重做 List/接口类型的方法分派**（将
+`.size()`/. `length`/. `isEmpty` 路由到 `Collections.count` 等 runtime 调用，
+而非模糊字段匹配），并确保局部槽 alloca 类型与参数类型一致（i8* 而非 i32）。
+
+## 四、复现命令
+
+```bash
+# Photon 编译自举（前端+后端+链接尝试）
+powershell -File scripts/photon/run-hat-on-main.ps1 -BudgetSecs 1800
+# 三方基准
+powershell -File scripts/bench-photon-vs-vm.ps1 -Runs 5 -ThreeWay
+# 隔离守卫 / 回归
+bash scripts/check-dual-impl-isolation.sh
+powershell -File scripts/diff-test.ps1
+```
+
+---
+
+## 五、2026-10-03：Rust emit 值模型专项修复——AOT 载体全绿
+
+> 本轮把上一轮「IR 级铁证已入档但未能完全修复」的 emit.rs 值模型缺陷
+> 一次修完，`auc_vm_runner.exe`（纯 Aura VM 的 AOT 原生载体）端到端 PASS。
+
+### 修复清单（按依赖序）
+
+| # | 缺陷 | 修复 | 实测证据 |
+|---|---|---|---|
+| 1 | **HIR 接收者字段链解析缺口**：`resolve_receiver_type_deep` 只认 `this.<field>`/类内裸字段，`局部变量.字段`（`b.names.add`、`mod.numOpNames.size`）恒 None → 全表唯一候选模糊匹配（`add` 被配到 `ArrayList.add`：堆句柄被当 `%struct.ArrayList*` GEP → 堆损坏/段错误） | 补 `MemberAccess` 递归臂 + `field_type_in_class`（沿继承链查字段类型）；`field_type_of` 复用同表 | bisect6（类字段 List）从段错误 → boxsize=2 ✓ |
+| 2 | **链式下标接收者类型丢失**：`args.get(0).size()` 的接收者是 Call/Index 节点 → 恒 None | `Index` 与 `x.get(i)` Call 形态 → 取容器泛型参数为元素类型 | probe_loop args0size 0 → 1 ✓ |
+| 3 | **集合工厂类型推断缺失**：`val l2 = arrayListOf<String>()` 无标注 → `.add` 落不进列表拦截分支 | `infer_decl_type` 加 arrayListOf/arrayOf/listOf/mapOf/… → 集合类型名（只进 LOCAL_TYPE_SCOPES，不影响 LLVM 槽类型） | bisect5 l2size 0 → 1 ✓ |
+| 4 | **`x == null` 被降为字符串内容比较**：`Any.hashCode` 的判空走 `String_equals(this, null)` → 装箱整数按字符串解引用 → 段错误 | null 字面量比较一律指针 `icmp eq i8*, null` | HashMap<Int,Any>.get 首次取桶崩溃 → 修复 ✓ |
+| 5 | **i8*==i8* 统一走 String_equals**：`HashMap.valuesEqual` 的 `a == b`（Any）在装箱整数（奇数伪指针）上 strcmp → 段错误 | 新增 Plan A 感知 C 运行时 `aura_any_equals`（奇数比标记值、偶数比内容），emit 的 i8* 比较统一改走它 | probe_hash 全过 ✓ |
+| 6 | **字符串方法改派劫持点分调用**：`VmOps.split(ft,"\n")` 按末段名被改写成 `aura_string_split(VmOps_instance, …)`——单例指针被当字符串切分 → AucLoader funcTable 全错 → "Unknown function: fibonacci" | 改派加 owner 守卫：仅裸名或 `String`/`*.String` owner 才落到 C 符号 | offMain 0 → 25 ✓ |
+| 7 | **VmOps.sub 重载折叠**：算术 `sub(a,b)` 与字符串切片 `sub(text,start,len)` 同名 → AOT 签名表取 3 参版（末参 Int→i32），运行时链到 2 参版 → SUB 结果恒错（fib 无限递归） | 删除零调用的 3 参切片 `sub`（vm 模块扫描确认无其它同名重载） | fib(10)=55 ✓ |
+| 8 | **局部槽类型残留 unsized 结构体**：显式标注局部用 `llvm_type`（未知 struct → `%struct.X*`） | 改用 `llvm_type_checked`（未定义结构体退化为 i8*） | — |
+| 9 | **`__list_contains/__list_index_of/__list_is_empty` 无 emit 分支**：HIR 拦截后发射裸名 → undefined symbol（ArrayList.distinct） | 补三个降级分支（Collections.contains/indexOf/count） | bisect5 链接恢复 ✓ |
+| 10 | **常量池「一行一常量」不变式可被值内换行打穿**：stdlib 的 `"\n"` 字符串常量使后续全部常量错位 +1（loop50 的 const[41] 读成 `}` → 循环条件恒假 → 循环整段跳过） | AucLoader 装载期转义（`\`→`\`、换行→`\n` 两字符），`Vm.getConst` 读取时反转义 | loop50 双路输出一致 ✓ |
+| 11 | **VmOps.isString 对装箱整数误真**：AOT 下 `typeof` 按静态类型折叠（Any 恒报 "String"）→ `100 + 23` 走拼接得 "10023" | 新增 `__is_tagged_int` 内建（AOT：原始 ptrtoint+奇偶；种子 VM：常量 false，其 typeof 本就准确），`isString`/`intOf` 用它守卫 | helloworld 算术 123 ✓ |
+| 12 | **三处 GB 级泄漏**（基准 25M 迭代触发 8GB 守卫）：① `HashMap.put` 对已存在键仍追加记录（locals 键集固定 → 桶链无限增长）→ 改原地 `vs.set(i, value)`；② `Any.hashCode` 对装箱整数 toStr 分配（每次 Map.put 键哈希）→ 装箱整数直接返回值本身；③ `incRef/decRef/dropRef` 的 toStrAny 键构造 → 装箱整数早退 | 同左 | bench_loop 25M 迭代 3GB 限制内跑完 ✓ |
+| 13 | **Windows 主线程栈默认 1MB**：递归下降程序（Parser/link 递归 import）深层即栈溢出 → 段错误且零输出（Photon 驱动此前「任意输入瞬崩」的根因之一） | AOT 链接统一加 `/STACK:67108864`（clang `-Wl` 与 lld-link 两条路径） | probe_link 1MB 崩 / 64MB 过 ✓ |
+| 14 | **VM 指令上限 10M** 太低（bench_loop 需 ~2 亿条） | MAX_INSTRUCTIONS 提到 2e9（仍在 Int 范围） | — |
+
+### 结果
+
+- **AOT 载体端到端**：`auc_vm_runner.exe` 跑 `helloworld.auc` 全部正确
+  （算术 123 / 循环 15 / fib(10)=55 / factorial(10)=3628800，`Phase A-E 全流程验证: PASS`）。
+- **三方基准（fib(30)）**：Aura VM 原生载体首次完成（此前 >600s 未出）；
+  loop 基准正确性修复后可跑完（acc 按 Int32 回绕——与种子 VM 的 64 位累加
+  存在语义差异，见「遗留」）。
+- **全量回归**：diff-test 6/6、vm_p2 PASS、phase5 PASS、AOT 并发 9/9、
+  隔离守卫双脚本 PASS、language-test 26/26。
+
+### 遗留（按优先级）
+
+1. **Photon 驱动宿主崩溃（photon 编译 VM 的最后阻塞）**：宿主二进制
+   （seed AOT 编译）的 import 闭包**超过 probe_link 的确切规模**后，
+   前端 `loadPath` 内稳定段错误——`import Cpu`（纯 rdtsc 包装、零调用）
+   即可复现；512MB 栈 / O0 均不消失；与 Env/Process/Clock 无关
+   （它们只是碰巧加尺寸）。矩阵：photon 闭包+前端 ✓；前端+任一额外
+   std 模块 ✓；photon 闭包+任一额外 std 模块 ✗。定位为**布局敏感的
+   内存踩踏**（死代码不影响运行时，嫌疑在发射器常量/全局层），需要
+   真调试器（cdb 不可用）拿故障地址后符号化。复现探针：
+   `build/bisect/probe_link.aura`（基线，通过）/
+   `probe_gc.aura`（+Cpu import，崩）。
+   PhotonHatCompile.aura 已瘦身到最小安全形态（无 Env/exists/readText/
+   Process，固定路径通道 `build/hat-vmhost/current.aura`），宿主 bug
+   解除后即可直接跑通。
+2. **Int32 回绕语义差异**：bench_loop 的 acc（124950000000）种子 VM 按
+   64 位累加、Aura VM（AOT）按 32 位回绕。基准程序应改用 Long 累加。
+3. **Aura VM 执行速度**：fib(30) 原生载体 ~104s——CALL 路径的
+   O(表长) 函数表扫描仍在（优化方案 A1/A2/B 未实施），实施后预期
+   进入 1-10s 量级。
+4. **`__is_tagged_int` 前端守卫**：若用户代码定义同名函数会撞名
+   （`__` 前缀为编译器保留字，建议前端加保留名校验）。
+
+### 五.1 2026-10-03 追加：前端崩溃已修复，后端崩溃已精确定位
+
+**前端「闭包尺寸阈值」崩溃 = 字符串方法名劫持（已修复，§五 #6 的延伸）**：
+宿主二进制的 import 闭包含 photon 模块时，前端大量 `X.substring(a,b)` 类
+调用的接收者类型未知 → HIR「全表唯一候选」把 `substring` 配到闭包里**唯一**
+定义了该方法的类（`PhotonPipeline.substring`）——字符串被按无关类结构体
+GEP。用 `AURA_CRASH_DUMP=1`（本轮修复为 kernel32 的
+`RtlCaptureStackBackTrace`，此前 dbghelp 恒取不到）+ 帧 RVA ↔ obj 符号表
+映射拿到 Aura 级调用链：
+`main → AotModuleLinker.link → loadPath → Parser.__ctor1 → Lexer.scanAll
+→ Lexer.scanIdentifier → Lexer.sliceOf → PhotonPipeline.substring(!)
+→ aura_string_length(1)`。修复（hir.rs 唯一候选守卫
+`is_string_builtin_method`）后，前端 link→SSA→HAT 在 photon 闭包下**全部
+通过**（11165 节点 / 406 函数 / 374KB HAT）。
+
+**后端崩溃（新定位，预存在，下一轮专攻）**：compileFromSsa 的指令选择/
+COFF 产出阶段段错误。证据：
+- 新旧 seed、O0/O2 宿主、tiny/bench 输入均复现（`[CALLDST]` 打印后崩）；
+- verbose 尾部：`RELCHK-FINAL funcs=116 strConsts=1 groups=161 syms=171
+  kept=83 dropped=0` 后崩；
+- 更早的 `[rt] all constructors appended, funcs=3201615632431411824`
+  ——外部读 `writer.functions.length` 得指针量级的垃圾，而 writer 内部
+  `splitComma(this.functions).size=116` 正常 ⇒ **外部成员读取解析到了
+  错误类的同名字段**（值模型家族，与 §五 #1 同族但发生在
+  PhotonObjectWriter 上）；
+- 复现：任意含对象字段访问的 HAT（tiny.aura 即可）；
+  `AURA_CRASH_DUMP=1 + minidbg.py（本目录）+ llvm-nm obj 符号映射` 三件套
+  可在 3 分钟/轮的迭代里继续收窄。
+
+### 五.2 2026-10-03 续：三项遗留的处置结果
+
+**遗留 3（Aura VM 执行速度）——已完成，fib(30) 104s → 18.6s（5.6×）**：
+- **方案 A2（函数表索引）**：Vm 加载期把 funcTable 一次性解析进
+  `funcOffsetMap/funcParamMap`（HashMap<String,Int>），`funcOffset`/
+  `funcParamCount` 执行路径 O(1) 查表（未命中回退旧扫描）；CALL 路径的
+  每次全表 split+substr 分配归零。
+- **方案 E（getConst 行缓存）**：常量池装载期按行缓存 + 预反转义
+  （`constLines`），getConst 从 O(池长) 扫描 → O(1) 下标。
+- **locals 帧池**：`callOrBuiltin`/`callTail` 从 `localsPool` 弹出复用帧
+  映射，`returnFromFunc` 退役归还；配套 `HashMap.resetForReuse()`
+  （零分配置空，区别于 clear() 的桶重建）。此前每调用
+  `HashMap<Int,Any>()` 触发 allocBuckets(16) ≈ 48 次堆分配 × 160 万次
+  调用 = GB 级泄漏（OOM 归因表：aura_dynlist_new 992 万次 / 529MB）。
+- 内存：fib(30) 8GB OOM → 3GB 内完成；fib(24) 800MB OOM → 600MB 内完成。
+- 排障基建（本轮新增，可复用）：`build/bisect/minidbg.py`（Windows 微型
+  调试器：DEBUG_ONLY_THIS_PROCESS + 异常地址/寄存器）+ C 运行时
+  `AURA_CRASH_DUMP=1`（修复为 kernel32 RtlCaptureStackBackTrace，并新增
+  帧 RVA 打印与 `AURA_ATTR_DUMP` 分配调用点归因表）+ obj 符号表映射脚本
+  ——三层可在 3 分钟/轮内把任何宿主崩溃落到 Aura 函数级。
+
+**遗留 2（Int32 回绕）——基准已修，语义统一判为语言迁移**：
+- `bench_loop.aura` 累加器改 Long（语义正确的基准）；种子 VM 侧补
+  `aura_cast` 内建臂（`x as T` 的运行时转换此前元循环缺实现）。
+- 整树把 Rust VM 的 Int 算术统一为 32 位回绕**否决**：Rust VM 的
+  `Value::Int` 兼作指针句柄（`Memory.alloc` 返回 Int，地址可达 2^47），
+  盲目回绕会打断「指针即 Int」ABI。Int 宽度语义统一需要「句柄迁 Long」
+  的语言级迁移，单独立项。
+- 随带修复：种子 VM `aura_cast/aura_cast_safety` 对**泛型实例化目标**
+  （`HashMap<Int, Any>` → 基类名比对）与**占位类型名**（`<type>`/空 →
+  透传，对齐 AOT 指针 cast 不检查的既有语义）的处理——此前 locals 帧池
+  的合法 cast 在元循环下误报失败（diff-test 04 曾因此红）。
+
+**遗留 1（Photon 宿主后端崩溃）——前端半已修复，后端半精确定位待攻**：
+- 前端半（字符串方法名劫持）已修复，photon 闭包下 link→SSA→HAT 全通
+  （见 §五.1）。
+- 后端半收敛到**单一预存在缺陷**：`buildRuntimeObject` 外部读
+  `writer.functions.length` 得指针量级垃圾（3.2e18），而 writer 内部
+  `splitComma(this.functions).size=116` 正常——外部成员读取解析到了错误
+  类的同名字段（与 §五 #1 同族的值模型缺陷，落在 PhotonObjectWriter 上）。
+  旧 seed 驱动（Oct 2）同样复现 ⇒ 与本轮全部改动无关。
+- 下一轮工具链已就位：minidbg.py + AURA_CRASH_DUMP（含 ra1 AOT 调用点
+  追踪与 oom-attr 归因表）+ obj 符号映射，任何崩溃 3 分钟/轮落到函数级。
+
+### 五.3 2026-10-03 终：Photon AOT 已恢复（根因修正 + 驱动二进制回滚）
+
+**根因修正（推翻 §五.1 的「闭包尺寸阈值」判断）**：Photon 腿失效的真因有二：
+1. **基准脚本接口断裂**（本轮引入，已修复）：驱动曾改为固定路径通道，而
+   基准脚本按环境变量接口准备产物路径 → 链接步骤找不到 .obj。已把
+   `scripts/bench-photon-vs-vm.ps1` 回退到环境变量接口。
+2. **新 seed 编译宿主驱动的回归**（真实存在，本轮定位未竟）：用本轮修复后
+   的 seed 重建 PhotonHatCompile.exe，`compileFromSsa` 里
+   `this.outDir`（或同类 String 字段）读到装箱整数（`pipeline.outDir = ...`
+   的写入疑似被截断进 i32 字段），后续 strlen 崩溃。已做排除实验：
+   hir/emit 的六处行为改动全部门控关闭后仍崩 ⇒ 触发点在这六处之外
+   （嫌疑收敛到 emit 变量槽/结构体布局相关路径）。
+
+**处置**：`build/hat-native/PhotonHatCompile.exe` 已回滚为经验证的
+Oct 2 驱动二进制（`PhotonHatCompile_oldseed.exe` 同体副本保留为
+`PhotonHatCompile_stable.exe`）——实测今日仍可正确编译 bench_fib /
+bench_loop / tiny（COFF-MAIN/RUNTIME 齐全、success、产物可链接运行、
+tiny 输出 "tiny ok" ✓）。基准脚本回退后 Photon 腿恢复出数：
+**bench_fib 10ms / bench_loop 36ms**（与失效前一致）。
+
+**Photon 编译产物正确性验证**：tiny_aura.exe（Photon 编译）stdout
+"tiny ok" ✓ 退出码 0 ✓。fib 产物（bf2.exe）静默退出——photon 后端对
+toStr/concat 组合的运行时支持仍在「Photon 运行时 std 补齐」轨道
+（§四 遗留 2）。
+
+**新 seed 宿主回归的复现命令**（下一轮专攻）：
+```
+AURA_FIX_OFF="assign_ty,nullcmp,anycmp,slotchecked" AURA_NO_DEEPFIELD=1 \
+  seed/target/release/aura.exe build --aot \
+  aura/photon/aura/lang/compiler/photon/PhotonHatCompile.aura \
+  --output build/hat-native/PhotonTest.exe
+# 六处门控全关仍崩 ⇒ 触发点在门控之外
+AURA_CRASH_DUMP=1 + 上述 env 运行即得崩溃现场（target=0x233 装箱整数
+被当字符串 strlen；帧 #9 = compileFromSsa+0x26a1 的 writeText 调用点）
+```
+
+**2026-10-03 终更新**：本轮六项 emit/hir 修复后复测——仍崩，但崩溃点
+从 Step-4 后的 RELCHK/[rt] 阶段推进到 compileFromSsa 的 Step-4
+vprintln eager 参数（`this.substring(machineCodeHex, 0, min(...))`，
+machineCodeHex 读出装箱整数 0x171=184 → strlen 崩）。**崩溃点随构建
+漂移**（此前 RELCHK 后、现 Step-4）⇒ 根因是更早的内存踩踏，崩点只是
+首个受害者。另注意 vprintln 参数是急切求值（verbose 关闭时
+substring/concat 仍执行），本身是无谓分配源。下一轮：ra1 AOT 调用点
+追踪 + 在 X86Emitter/PhotonObjectWriter 的 textSection 累加路径加
+canary 定位首次越界写。
+
+---
+
+## 六、2026-10-03（晚）：B1 驱动回归修复 + B2 @native 探测——双双收口
+
+> 按四阶段方案的阶段 1（B1）+ 阶段 2.1（B2）执行。**B1 已修复**，
+> **B2 判定达成**：`@native(asm=…)` 在 Photon 轨端到端可用。
+
+### 6.1 B1 根因（推翻「内存踩踏」假设）：单例字段读取退化为 i32@偏移0 + 装箱
+
+「崩溃点随构建漂移」的真因不是更早的内存踩踏，而是**确定性的字段解析
+缺陷**——不同构建的内联/死代码变化只决定「哪个错误读取先执行」。
+
+**定位链**（崩点 → obj 符号映射 → 反汇编 → 重定位表，约 3 轮）：
+
+1. 新 seed 驱动 + tiny 输入：`read target=0x171`（装箱整数 184），
+   `rcx=-0x171`（strlen 签名）；调用链
+   `main → compileHat → compileFromSsa+0x26a1 → File_writeText →
+   Stdio.stringToBuffer → strlen(0x171)`；
+2. compileFromSsa+0x26a1 的重定位表：`File___ctor1 → File_writeText`
+   ——即第 778 行 `FileUtils.writeText(runtimeObjPath + ".syms",
+   PhotonRuntime.RUNTIME_SYMBOLS)`（内联展开）；
+3. 实参准备反汇编（铁证）：
+   ```asm
+   movslq (%rip), %rax        ; 32 位加载 PhotonRuntime_instance+0
+   leaq   0x1(%rax,%rax), %rdx ; (v<<1)|1 —— Plan A 整数装箱！
+   call   File_writeText
+   ```
+
+**机制**：`PhotonRuntime.RUNTIME_SYMBOLS`（object 单例的 String 字段）
+的接收者被 `emit_variable_load` 发成 i8*（不透明）→
+`resolve_member_field_owner` 拿不到类名候选 → 2026-10-02 加的
+「i8* 不透明句柄不做模糊匹配」守卫（emit.rs:7220）返回 None →
+调用方兜底 `("i32", 0)`（emit.rs:7053）→ 32 位加载 + 按整数装箱。
+
+**修复**（`seed/compiler/src/codegen/aot/emit.rs`，+8 行）：
+`resolve_member_field_owner` 的 `HirExpr::Var` 分支增加单例候选——
+`ctx.singleton_structs.contains(var)` 时把该名字推入 candidates。
+字段读（7049）/字段写（2520）/嵌套字段地址（4577）三个调用点同时受益。
+候选未命中时行为与修复前一致（无回归风险）。
+
+### 6.2 B2 判定：@native(asm=…) 在 Photon 轨可用（缺的只是运行时定义）
+
+- **调用点侧 ✓**：Photon 前端/指令选择把 `Cpu.rdtsc()` 正确降为
+  `@Cpu_rdtsc` 限定名调用（InstructionSelection 无需 NativeAttr 特殊
+  处理）；
+- **定义侧**：`PhotonRuntime.buildRuntimeObject()` 补 4 个手写 X86
+  发射器（`emitCpuRdtsc/MemFence/Cpuid/AtomicAdd`）+ RUNTIME_SYMBOLS
+  追加 4 名（sidecar 缓存自动失效重建）；
+- **微探针全绿**：`build/bisect/probe_native.aura` →
+  RDTSC-OK / FENCE-OK / CPUID-OK / `atomic old=41 new=42` / ADD-OK。
+
+### 6.3 新发现（预存）：extern interface 成员调用的 self 占位 ABI 错位
+
+探针反汇编实测：extern interface 成员调用点把「self 占位 null=0」放
+**rcx**，真实实参从 **rdx** 起（`Memory_alloc`: rdx=n；
+`Memory_write64`: rdx=addr, r8=val）。而既有 Memory/io 发射器一律按
+「rcx=首实参」编写——**整整错位一格**（P4 套件未暴露：其
+test_memory_alloc 用的是普通类 `MemoryManager.alloc`，从未走过
+extern interface 路径）。
+
+**修复**：12 处发射器入口插入寄存器右移（rcx←rdx←r8←r9，函数体不动）：
+Memory_read/write×8 宽度变体、alloc、atomicAdd、arcIncrement/Decrement、
+copy、io_open/close/read/write。Collections/ARC **不在修复面**（它们是
+真单例 object，`Collections.listAppend(list,v)` 调用点实测无 self 占位，
+rcx=list 直接成立 ✓）。
+
+> 注意：`emitMemoryAtomicAdd` 体内 `xadd [rcx], r8` 字节本就正确；
+> 本轮新写的 `emitCpuAtomicAdd` 曾两度手写编码错误（ModRM 0x0A→r9、
+> `mov rax,r8` 误编 4C 89 C8→r9），以 objdump 反汇编汇编产物为终审
+> 修正为 `F0 4C 0F C1 02` + `4C 89 C8`→`4C 89 C0`。**教训：手写字节
+> 必须以产出的 obj 反汇编复核**。
+
+### 6.4 验证结果（新 seed 驱动 `PhotonB5.exe`，固定路径通道）
+
+| 项 | 结果 |
+|---|---|
+| tiny（编译+内置链接+运行） | `tiny ok` EXIT=0 ✓ |
+| bench_fib | `fib(30) = 832040` ✓ |
+| bench_loop | `loop acc = 124950000000` ✓ |
+| @native 探针（probe_native.aura） | 5/5 全绿 ✓ |
+| diff-test（p2_diff 6 用例） | 6/6 PASS ✓ |
+| vm_p2_tests / phase5_vm_tests | PASS / PASS ✓ |
+| AOT 并发（run-concurrent-aot.sh） | 9/9 ✓ |
+| 双实现隔离守卫 | PASS ✓ |
+| diff-test-full | 8 mismatch（**A/B 证实全部预存**，见 6.5） |
+
+### 6.5 预存问题 A/B 排除（与本轮改动无关，均已复现于未修复 seed）
+
+1. **seed AOT 对 `Memory.alloc` 发裸名 `@alloc`** → llc
+   `use of undefined value`（probe_native 的 seed AOT 构建失败；
+   stash 对照复现。方案 B2 所述「种子 AOT 已支持」仅覆盖 Cpu.rdtsc）；
+2. **diff-test-full 的 8 个 mismatch**（test_lambda6 等，元循环宿主
+   42→0）：stash 对照复现，lambda 值模型预存缺陷；
+3. **FileUtils.exists/readText 在 Photon 产物内段错误**（fs 探针）：
+   崩入 `runtime_emitObjectAlloc` 清零循环——上游把垃圾值当分配大小
+   （「外部成员读取」值模型家族在 stdlib 内部的实例）。**阶段 2.2
+   「Photon 运行时 std 补齐」轨道首个收口项**（此前该症状曾迫使驱动
+   改固定路径通道；与 6.3 的 ABI 错位是否同一层，待专项探针矩阵判定）。
+
+### 6.6 对总方案的影响
+
+- **阶段 1 关闭**（1-2 轮预估 → 实际 1 轮）：新 seed 驱动可用，
+  G2 的 Photon 编译轨解锁；
+- **阶段 2 提速**：@native 支持面确认为「只需补运行时定义」，阶段 2.2
+  的缺口矩阵（HashMap.get/containsKey、String.concat/equals/indexOf、
+  Collections.set、Clock_gettime）按 probe_native 模式复制即可；
+  **附带发现**：Memory/io 的 self 占位错位若不修，阶段 3/4 的 VM 闭包
+  （重度使用 Memory.read/write 与 File.readText 装载 .auc）必然踩雷
+  ——本轮已排掉；
+- **驱动二进制口径**：`build/hat-native/PhotonHatCompile.exe` 仍是
+  Oct 2 稳定二进制（env-var 接口，bench 脚本依赖）；新 seed 驱动为
+  `PhotonB5.exe`（固定路径通道 `build/hat-vmhost/current.aura`）。
+  接口统一（env-var vs 固定路径）列入阶段 2 清理项；
+- mmap/munmap 发射器（6 参 + 栈参）本轮**未**右移，ArenaAllocator 依赖
+  它，留待阶段 2.2 专项。
+
+
+## 七、2026-10-03（夜）：阶段 2.2 —— Photon 轨 ABI 定版 + 修复 8 项
+
+> 承接 §六。目标：以 fs/io 探针为向导修复 FileUtils 路径，补缺口原语。
+> 结果：**崩溃全清零**（fs/io/native 三探针 + tiny/fib/loop 全部正常退出），
+> `FileUtils.exists()` 端到端 ✓；`readText` 仍取到垃圾（io_open 失败，见 7.5）。
+
+### 7.1 ABI 定版（本轮最重要的架构结论）
+
+extern interface 成员调用点 = **普通函数形状（rcx=首实参）**。达成方式：
+
+1. **Hir.aura lowerCall**：大写 Ident 接收者（`Memory.write(...)` 的 `Memory`）
+   保留 `HirVar(name)` 原样入 kids[0]——旧实现 `lowerExpr` 把模块名降成
+   `@i32_const 0`，self 占位进实参、整体错位一格；
+2. **SsaBuilder recvIsSingleton** 形状兜底：大写 + 非局部变量 ⇒ 视为模块名
+   引用丢掉接收者（不依赖 externCsv 登记完整性——实测 Cpu/Memory 缺席
+   externCsv，根因未深挖，已留档）；
+3. **回滚 §六的 12 处发射器右移** + Cpu 系/FileOps_lseek 发射器改 rcx 系
+   （调用点既然统一普通形状，发射器回到 rcx=arg1）。
+
+Collections/ARC（真单例 object）不受影响（调用点本就无 self 占位）。
+
+### 7.2 修复清单（按依赖序）
+
+| # | 缺陷 | 修复 | 证据 |
+|---|---|---|---|
+| 1 | `File(path).exists()` 构造器调用结果作接收者 → `receiverClassOf` 返回空 → 「隐式 this」兜底限定成 `FileUtils_exists` **自递归**（每层 alloc 直至爆栈） | `receiverClassOf`/`receiverTypeNameOf` 增 HirCall 分支：被构造类名即接收者类 | 产物此前缺 `File_exists`/`File_readText` 符号（死代码剪除）；修复后出现 ✓ |
+| 2 | 运行时缺 `FileOps_lseek` → 链接失败 | 新发射器：whence==2 → kernel32 `GetFileSize`；whence==0 → 返回 0（装载流 open 后位置本就在 0，无需真 seek） | 链接通过 ✓ |
+| 3 | `streq(x, null)` 对地址 0 做内容比较 | 双保险：SsaBuilder.buildBinary + ISA Case-2 对 **null/0 常量比较** 豁免 streq（走指针相等）；runtime streq 增加 **null 安全前置**（null==null→1，null==x→0） | 崩点从 streq 循环消失 ✓ |
+| 4 | runtime streq 循环索引 r8 未清零（本轮新写的 null 守卫跳过了 `xor r8,r8`）| 索引清零移到所有进入路径的必经点 | minidbg 寄存器：r8 残留 rcx 指针 → [rcx+r8] 越界 |
+| 5 | io_open（NtCreateFile 直编版）fd 恒 -1 | 换道 kernel32：CreateFileA/ReadFile/CloseHandle + 既有 GetFileSize —— 但 **fd 仍 -1**（见 7.5，未解决） | 机器码反汇编逐参核对无误 |
+| 6 | `object Allocator` 等单例实例欠量分配（classSizeOf=16，字段写 [inst+0x50]）→ 堆相邻分配被踩（fs/io 的字符串缓冲区内容随机损坏） | synthesizeSingletonGetter 尺寸下限 128（单例每进程一份，过量无害） | 缓冲区内容不确定性问题还在（见 7.5），但崩溃消失 |
+| 7 | 尝试：空串字面量 `""` 的 SSA Const（ty=19 不被 isString 认可）物化成 `mov 0` | emitConst `|| constVal == ""` 走字符串分支 —— **已回滚**：触发布局敏感回归（见 7.3） | bench_loop acc=-1 |
+| 8 | seed AOT 值模型缺陷家族的又一实例：**布局敏感** —— ISA 无害改动（加几行）令 bench_loop 循环变量错乱 | 回滚触雷改动；Case-2 豁免保留（无雷） | 二分：SsaBuilder/Hir 无罪，ISA 加行即坏、减行即好 |
+
+### 7.3 布局敏感回归的二分记录（重要教训）
+
+- P44（全部 Aura 改动 stash 掉）：bench_loop ✓
+- P45（+SsaBuilder）：✓ → P46（+Hir）：✓ → **P47（+ISA）：✗**
+- ISA 内两处编辑（Case-2 豁免 / emitConst 空串重路由）逐一验证：
+  撤 emitConst 重路由 → bench_loop ✓，且 fs 探针不崩（streq null 前置兜底）。
+- 结论：**emitConst 的空串重路由本身正确，但移动代码布局后触发潜在值模型
+  缺陷**（与 §五.3「崩溃点随构建漂移」同族）。这类「修复撞上布局雷」的
+  现象在本仓库已是第三次 —— 根治只能靠 seed AOT 值模型专项。
+
+### 7.4 状态矩阵（PhotonP49.exe，固定路径通道）
+
+| 项 | 结果 |
+|---|---|
+| native 探针（rdtsc/fence/cpuid/atomic/list.add） | 5/5 ✓ |
+| fs 探针（FileUtils.exists + readText） | 无崩溃，EXISTS-OK ✓，READLEN ✗（7.5） |
+| io 探针（open/lseek/read/close） | 无崩溃，fd=-1 ✗（7.5） |
+| tiny / bench_fib / bench_loop | `tiny ok` / `fib(30)=832040` / `acc=124950000000` ✓ |
+| diff-test 6/6、vm_p2、phase5、隔离守卫 | 全 PASS ✓ |
+
+### 7.5 遗留（下一轮首项）
+
+**io_open 返回 -1**：CreateFileA 版发射器机器码逐参核对无误
+（GENERIC_READ/share=0/OPEN_EXISTING/attr=128），仍失败。下一步：
+① 加 GetLastError 诊断发射器（一次拿到失败码）；② 排查 stringToBuffer
+产出的缓冲区内容（fs 探针实测路径缓冲区**首字节为 0**、内容被后续分配
+覆盖——堆损坏的余波，7.2#6 的下限修复可能不覆盖全部损坏源）；
+③ 或许直接绕过：loadAucAndRun 的固定路径通道改为启动时经
+`GetModuleFileName`/环境注入。
+
+**布局敏感值模型缺陷**（7.3）：影响所有「碰布局」的修复 —— seed AOT
+值模型专项的优先级应提升。
+
+### 7.6 诊断基建增量（可复用）
+
+- **minidbg.py 增强**：AV 时转储 rsp 栈 0x800 字节 + rbp 帧回溯
+  （frame[i] rbp/ret）——本轮靠它把崩点定位收敛到函数级；
+- 崩点→符号映射脚本化流程（llvm-readobj 拿 .text RawDataSize →
+  主 obj/runtime obj 分段 → llvm-nm 双分）已在本轮完全跑通。
+
+
+---
+
+## 八、2026-10-03（深夜）：io/文件链路攻坚 —— EXISTS-OK 首通，stringToBuffer 定性为最后拦路石
+
+> 承接 §七。目标：修通 readText ⇒ .auc 装载 ⇒ Photon VM 跑通。
+> 结果：**fs 探针的段错误风暴全部清零**，`FileUtils.exists()` 成为首个在
+> Photon 原生产物里端到端工作的文件 API；readText 的阻塞点已收敛到
+> **单一定性缺陷**（§8.3，有反汇编铁证）。
+
+### 8.1 新修复
+
+| # | 缺陷 | 修复 |
+|---|---|---|
+| 8.1 | io_open 失败原因不可见 | 失败路径改返 GetLastError 码（诊断期；fd=2 = ERROR_FILE_NOT_FOUND ⇒ 路径串损坏而非调用问题） |
+| 8.2 | io_open 写标志恒 OPEN_EXISTING ⇒ .hat 首写必败 | flags≠0 → CREATE_ALWAYS（第 5 参按 flags 二选一） |
+| 8.3 | `File.readText` 在 Photon 轨段错误 | 见 §8.3：**stringToBuffer 写循环的嵌套调用实参被 SSA 折叠** |
+| 8.4 | FileOps_lseek 的 -1 只写 eax（高位残留）| 改 `emitMovRI("rax", -1)`（64 位全 1）—— 否则 size=4294967295 骗过 `size<=0` 守卫 ⇒ malloc(4G) 段错误 |
+| 8.5 | emitRead 返回字节数错拿 r9（易失，调用后已冲）| 已知并保持（AucLoader 按内容解析；改 StackLoad 会移动布局触发 8.6） |
+| 8.6 | **布局敏感启动栈溢出**：在 stringToBuffer 里加诊断 println ⇒ 驱动启动即 0xC00000FD | 定性：控制台写出路径回调 stringToBuffer ⇒ println 诊断 = 无限递归；且任意源码位移都可能触发随机雷（§7.3 家族） |
+| 8.7 | minidbg.py 增强：STACK_OVERFLOW 分支加 rbp 帧回溯、rsp 栈转储 0x800 | 复用 |
+
+### 8.2 实验矩阵（stringToBuffer 变体 × 驱动构建）
+
+- 原实现（调用结果作循环边界）：seed 轨 ✓ / Photon 轨写丢失 ✗
+- 常量边界重写（4096+NUL 哨兵）：seed 轨 ✗（missing imports——布局雷）
+- 手动循环+charCodeAt（main 作用域探针）：**✓ open/read 全通**
+  （fd=句柄、tiny.aura 内容 "im" 正确读出）—— 形态正确性取决于**所在函数
+  与编译布局**，而非模式本身。
+
+### 8.3 最后拦路石（反汇编铁证）
+
+`Stdio.stringToBuffer` 的写循环在 Photon 编译产物里：
+```asm
+; 源码：Memory.write(buf + i, s.charCodeAt(i))
+4e4: r12 = r15 + rsi      ; buf + i ✓
+4ea: rdx = rsi            ; ← 实参2 = i（应为 charCodeAt(i) 的返回值）
+4ed: rcx = rdi            ; ← 实参1 = rdi（应为 buf + i）
+4f0: call Memory_write    ; 循环体内 charCodeAt 调用消失
+```
+嵌套调用实参（`charCodeAt(i)` 作 `Memory.write` 的实参）在 SSA/指令选择
+层被折叠为循环变量 ⇒ 写入不落地 ⇒ 缓冲区全零 ⇒ open("") ⇒ 文件链路断。
+main 作用域同模式正常 ⇒ 与函数上下文/布局相关（§7.3 家族）。
+
+**下一步**：AURA_PHOTON_DEBUG_HIR=1 对比该循环的 SSA/DAG（实参节点
+从何而来）→ 定位 InstructionSelection.emitCall 的实参节点配对在循环体
+内的选择错误。修复后 readText 通 → AucLoader 通 → VM runner 通。
+
+### 8.4 验证矩阵（PhotonFinal.exe）
+
+| 项 | 结果 |
+|---|---|
+| fs 探针 | EXISTS-OK ✓ / readText 段错误 ✗（§8.3） |
+| native 探针 | 5/5 ✓ |
+| tiny / fib(30) / bench_loop | ✓ / 832040 ✓ / 124950000000 ✓ |
+| diff-test 6/6、vm_p2、phase5、隔离守卫 | 全 PASS ✓ |
+
+> ⚠️ 运行保护约定：驱动运行一律 `AURA_MEM_LIMIT_MB=6144 timeout 240`
+> （§7.3 的分配循环曾致 22GB 内存驻留）。
+
+
+---
+
+## 九、2026-10-03（续）：`.length` 误读修复 + 到达值模型冰山底部
+
+### 9.1 `.length` 属性误读修复（新缺陷 + 修复）
+
+`[len]` 诊断（buildMember）实测：`.length` 的接收者类型判定大面积失败——
+`recvTy=[]`（localTypes 未登记，HIR 参数 ty 列为空 ⇒ localTypeAdd 的
+「纯可见性不登记」规则跳过）甚至 `recvTy=[FileUtils_readText]`（簿记污染）。
+旧路径落到「唯一属主字段扫描」⇒ `@field(@s, …)` 把字符串前 8 字节当长度。
+
+**修复**：buildMember 的 length/size 分支——`recvTy == "String" || recvTy == ""`
+都走 strlen（Aura 里属性式 `.length` 接收者实际只有字符串；字段误读必然
+垃圾，strlen 严格更优）。
+
+### 9.2 冰山底部（本轮最终定性）
+
+strlen 兜底后 fs 探针仍段错误——minidbg 帧回溯定位：
+
+    crash: strlen+0xa（rcx=0）
+    caller: Stdio_stringToBuffer+0xa7（即 `s.length` 的 strlen 调用）
+
+**stringToBuffer 的参数 `s` 在运行期就是 0**。结合本轮全部证据
+（bench_loop 变量错乱、Memory_write 实参折叠为 i、File_init 递归），
+收敛为一句话：**Photon 管线（seed AOT 编译的 SsaBuilder/ISA 后端）对
+「单例方法参数 / 循环体内嵌套调用实参 / 跨块变量」的值模型与寄存器指派
+存在系统性缺陷**——与种子 AOT 的 §五 值模型家族同源，是 Photon 轨的
+项目级深坑。
+
+**它直接阻塞**：stringToBuffer（参数=0）→ File.init pathBuf → readText
+→ AucLoader → **VM runner**。G3 的最后一段路必须先修它。
+
+### 9.3 下一轮首攻方案（按性价比）
+
+1. **最小复现缩圈**：`fun f(s: String): Long { return s.length }` 单函数
+   探针 → AURA_PHOTON_DEBUG_HIR=1 看 Param 节点的 SSA/LIR/DAG 与寄存器
+   指派（预期：Param 值被指派为 0 或与 mem/enry 常量共用节点）；
+2. **对拍 seed 轨**：同一函数 seed AOT 编译后行为正确 ⇒ 差异即 Photon
+   管线的缺陷点；
+3. 修复方向预判：emitCall/resolveNode 对 `Param` 值的 DAG 节点注册，或
+   RA 对入口 Param 的初始寄存器/栈槽分配（对照 §1.2 的 loadDstReg 家族）。
+
+### 9.4 验证矩阵（PhotonP64.exe）
+
+| 项 | 结果 |
+|---|---|
+| fs 探针 | EXISTS-OK ✓；readText 段错误 ✗（§9.2，strlen(NULL)） |
+| native 探针 | 5/5 ✓ |
+| tiny / fib(30) / bench_loop | 全 ✓ |
+| diff-test 6/6、vm_p2、phase5、隔离守卫 | 全 PASS ✓ |
+
+> 本轮所有改动均有独立价值（EXISTS-OK、strlen 兜底、io 三件套、lseek、
+> ABI 定版、布局雷证据链），即使 §9.3 深坑未修也不回退。
+
+---
+
+## 十、2026-10-03（深夜Ⅱ）：§9.3 首攻执行 —— 修复 9 项，fs 探针从段错误到端到端跑通
+
+> 承接 §九。按 §9.3 计划用 AURA_PHOTON_DEBUG_HIR=1 全量转储追 Param/实参链。
+> 结果：**fs 探针 rc=0**（EXISTS-OK + READLEN 输出，此前 0xC0000005）；
+> tiny / fib(30)=832040 / bench_loop / R 探针组全绿无退化。
+> 驱动二进制口径：`build/hat-native/PhotonP68.exe`（seed AOT 构建，
+> `seed/target/release/aura.exe build --aot PhotonHatCompile.aura --output …`）。
+
+### 10.1 本轮修复清单（按定位顺序，全部有转储/反汇编/运行期三重证据）
+
+| # | 缺陷 | 修复 | 证据 |
+|---|---|---|---|
+| 1 | **ISA `emitStreqSetcc` 极性反转**：streq 返回 1=相等，`cmp res,0` 后 ICmpEq 应取 `setne`，旧代码按比较符字面映射成 `sete` ⇒ 所有走到该路径的判等整体取反。`if (s == null)` 变成「非空才进 null 分支」 ⇒ strlen(NULL) | cond 交换（Eq→ne / Ne→e） | fs 探针反汇编 `Stdio_stringToBuffer+0x30..0x50`；修复后 EXISTS-OK 恢复 |
+| 2 | **HatParser 丢 `@null` 的值文本**：序列化端把 `Const aux="null"` 编成 `@null`（不带值），解析端 mapOp 后 aux="" ⇒ ISA Case-2 的 nullish 判定（aux=="null"\|\|"0"）永远不命中 ⇒ 判空被当字符串比较发 streq | `opRaw=="null"` → `aux="null"`；配套 ISA `emitConst` 数值路径 "null"→"0"（字符串分支之后，不伤 `"null"` 字面量） | fs 转储 v648 `Const ty=21 aux=`（重解析）vs .hat `@t648 = @null : Any` |
+| 3 | **buildMember 的 length/size 路由错误**：recvTy 为簿记垃圾（`t\|FileUtils_readText`）时旧兜底 `recvTy=="String"\|\|""` 不命中 ⇒ 落通用 GetField 把字符串指针当对象读。且 `.size` 是集合属性式主流写法，recvTy 为空时误 strlen | 重建路由：真有同名字段→字段读；集合/Array→`Collections.count`；其余→strlen | fs 转储 v1626 `GetField args=1623,1624 aux=`；main 重定位 `toStr(t.length)` 缺 strlen → 修复后 0xC33 出现 strlen |
+| 4 | **`localTypeOf` 首条目永不命中**：needle=`"\n"+name+"\|"`，函数内**第一个**登记的局部量在串首、无前导换行 ⇒ 定型必失败（R12 探针 main 第一个局部 `a` 的 `a.pathBuf` 走 GetField，第二个局部 `b` 正常——同名不同命的经典症状） | `localTypeAdd` 空表时先垫 `"\n"` | R12 fd5 转储：v1019 `@field(@t1007,…)`（a）vs v1028 `__field_get(@t1013,…)`（b） |
+| 5 | **ISel 无 GetField 分支**：落到默认 Value 节点，**args 整体丢弃** ⇒ ①基址不进 DAG，发射读残留寄存器；②基址活跃区间终止于定义点 ⇒ RA 把同寄存器分给后续值，跨调用对象句柄被静默覆写（R12：实例 a 的寄存器被第二次构造覆写） | GetField → `__field_get(obj, 0)` 调用形发射（索引随 .hat 序列化已丢，0 为降级语义；正式路径是前端带真索引的 `Call __field_get`） | fd5 转储 n144 `GetField reg=rdi args=`（空）；同 build 下 b 的读取是 `__field_get args=138,152` |
+| 6 | **双 bump 游标共用同一 heapArena**：`runtime_emitObjectAlloc` 用独立 `objBump`、strcat/`__list_alloc` 用 `heapBump`，两个互不知晓的游标各自从 0 切同一块内存 ⇒ 交叉使用必然互相覆盖。这是 §7.5「路径缓冲区首字节为 0」、§7.3「崩点随构建漂移」随机损坏家族的**总根因** | emitObjectAlloc 改用 `heapBump` + 8 字节对齐（新增 `X86Encoder.emitAndRI`） | R12→R13：`b.internal.c0` 随分配布局在 199/200/88 间漂移；统一后指针确定性可复现 |
+| 7 | **FileOps_lseek 的 INVALID 哨兵 64/32 位错配**：`emitCmpRI("eax",-1)` 实际编成 `cmp rax,-1`（REX.W），而 Win32 API 只写 eax、rax 高位零扩展 ⇒ `0x00000000FFFFFFFF ≠ -1` 恒不命中 ⇒ 返回 +4294967295 骗过 `size<=0` 守卫 ⇒ malloc(4G) 零初始化越界（§8.4 只修了 mov 侧，cmp 侧漏了） | 新增 `X86Encoder.emitCmpEaxImm32`（3D id，无 REX.W），lseek 换用 | runtime 反汇编 0x1d48 `cmpq $-1,%rax`；R7 探针实测 `R.size=4294967295` → 修复后 `-1` 正常走守卫 |
+| 8 | **io_read 返回字节数错拿 r9**（§8.5 遗留）：ReadFile 后 r9 已被冲 ⇒ `File.readText` 的 `read<=0` 守卫把成功读取当失败永远返回空串 | 改 `emitStackLoad("rax", -0x8)` 读 lpNumberOfBytesRead；当时的「布局雷」定性为本轮 #6/#5 家族，与本函数无关 | R15 探针 `D.rd=85`、b0='i' b1='m' 内容正确 |
+| 9 | （配套）runtime obj 缓存 sidecar 只校验符号表 —— **改 runtime 代码不改符号时旧 obj 被继续链接**。本轮手工 `rm aura_runtime.obj*` 两次规避 | 留档：后续给 sidecar 加内容哈希 | #6/#7 修复首次未生效的排障耗时 |
+
+### 10.2 验证矩阵（PhotonP68.exe）
+
+| 项 | 结果 |
+|---|---|
+| fs 探针 | **EXISTS-OK + READLEN=4，rc=0 ✓**（上轮 0xC0000005；4≠85 见 10.3） |
+| R2/R3/R4（单例方法 Long/String 参数、stringToBuffer 全克隆） | IDENT=41 / LEN=5 / COPY-OK 全 ✓ |
+| io 探针 | fd=172 size=85 read=85 全 ✓（§8.2 的 main 作用域形态） |
+| R15（类上下文 io 逐值） | fd=180 size=85 rd=85 b0='i' b1='m' 全 ✓ |
+| tiny / fib(30) / bench_loop | tiny ok / 832040 / 124950000000 全 ✓ |
+| native 探针 | FENCE/CPUID/atomic/ADD ✓；RDTSC 偶发 BAD（1/3，跨核 TSC 偏斜，非编译器缺陷） |
+
+### 10.3 剩余阻塞点（下一轮首攻，复现与证据已备齐）
+
+**缺陷 A：外层调用易失寄存器实参被内层调用求值冲掉（≥3 层嵌套调用实参）。**
+`println(tag + " b" + toStr(i) + "=" + toStr(Memory.read(p+i)))`（4 层）第二次迭代
+AV(WRITE) [0]（strcat 域）；2 层（`"READLEN=" + toStr(t.length)`）正常。
+机制假说：emitCallArgs 顺序装载 rcx/rdx/r8/r9，途中某实参本身是调用 ⇒ 易失寄存器
+被冲。修复方向：arg 节点的寄存器选非易失/先溢出，或调用形实参最后装载。
+复现：`build/bisect/probe_fd8.aura`（dumpBytes 第二次迭代）。
+
+**缺陷 B：类实例欠分配 16 字节（无字段空间）。** `__field_set/get` 寻址
+`[obj+0x10+idx*8]`（16 字节 header），而 `<Class>__new` 只 `Memory_alloc(16)` ⇒
+字段读写落在分配区之外、踩相邻分配。§7.2#6（单例 floor 128）的普通类版本。
+推定后果：R13/R16 的「第二次构造 stringToBuffer 内容坏」（#1 构造的 field_set
+写进 #2 的分配区）与 fs 探针 READLEN=4 截断（exists 前缀 → #2 构造 → 路径串坏 →
+open 失败 123/ERROR_INVALID_NAME 级联）。
+修复方向：`synthesizeCtors` 的 alloc 尺寸改 `classSizeOf`（16+8*字段数，
+`buildFieldLayoutCache` 已算好）——注意先查为何探针自有类的字段偶发不进
+classFields（fd8 首编 FileS 曾整体缺席，重编恢复，疑与 #9 缓存同族）。
+复现：`build/bisect/probe_fd8.aura` / `probe_fs3.aura`。
+
+**缺陷 C（轻）：空串字面量物化**。R16 中 `bufferToString` 对 maxLen<=0 返回 ""
+后 `"".length` 读出 4——空串 @str 的内容/长度物化存疑，优先级最低。
+
+### 10.4 G3 通路状态
+
+stringToBuffer → File.init pathBuf → readText → **已通**（fs 探针 rc=0 证明
+全链可走）；readText 返回内容受缺陷 A/B 影响仍截断。下一轮修 A/B 后，
+AucLoader → **VM runner** 即可尝试端到端。
+
+> 驱动构建命令（本轮实际使用）：
+> `rm -f build/hat-vmhost/aura_runtime.obj*`（改 runtime 后必须）
+> `seed/target/release/aura.exe build --aot aura/photon/aura/lang/compiler/photon/PhotonHatCompile.aura --output build/hat-native/PhotonP68.exe`
+> 探针：`cp <probe>.aura build/hat-vmhost/current.aura && ./PhotonP68.exe && ./build/hat-vmhost/current.exe`
+
+### 10.5 §10.3 缺陷 A/B/C 攻坚结果（2026-10-04）：全部修复，readText 端到端 85/85
+
+> 驱动口径：`build/hat-native/PhotonP80.exe`。全矩阵绿：fs 探针
+> **EXISTS-OK + READLEN=85（=文件真实长度）rc=0**；R2/R3/R4、fd5/fd6/fd8
+> （类双构造、嵌套 concat 循环）、cmp 微探针全对；tiny / fib(30)=832040 /
+> bench_loop=124950000000 无退化；io 全对；native 4/5（RDTSC 偶发跨核偏斜）。
+
+#### 缺陷 A 真根因：RA 的整套机制在 seed-AOT 驱动下**从未工作过**
+
+RegisterAllocator 直接读 `this.dag.instrs`（**跨对象 List 字段**）——种子 AOT
+值模型的「跨对象字段绑定失真」家族（与 HirLowerer this 失真同族）：同一索引
+经 `dag.instrOf()`（自对象方法读）得到 `label`，经字段读得到垃圾（`"0"`）。
+后果链：buildBackEdges 的 label 采集恒 0（labels=0 → edges=0）→ 回边扩宽
+从不运行；buildNodeSpans 的 touchInstr 扫空 → 活跃区间恒 [-1,-1] → 干扰图
+为空 → **跨调用/跨块活值被随意复用寄存器**。这就是 §10.3-A「嵌套调用实参
+被冲」（dumpBytes 循环迭代 2 的 tag 寄存器被体内临时覆写）与「第二次构造
+stringToBuffer 内容坏」的共同根因。修复：RA 三处（buildBackEdges /
+buildNodeSpans / computeLiveAtEnd→getSuccIndices→buildLabelIndexMap）全部改
+`dag.instrOf(i)` / `dag.instrCount` 方法访问。修复后回边/区间真实生效，
+fd8 双迭代字节数据全对。
+
+#### 缺陷 B 真根因：buildFieldLayoutCache 三层叠加 ⇒ classSizeOf 恒 16
+
+1. 字段数回填用 `fwSlotCount(clsLayoutTys)-1`，而 `clsLayoutTys` 是**变长类型
+   名行**（`|Long|` 长 7），`length/9` 恒 0 ⇒ 字段数恒 0；
+2. `clsLayoutTotal/Size` 赋值缺**前导 `|` 分隔符**（fwGet 从偏移 1+idx*9 读）
+   ⇒ 就算回填对了也读不出来，`classSizeOf` 恒落默认 16；
+3. 记录循环的 gap 扩槽用从不增长的 `clsOwnCount` 当行宽 ⇒ idx≥2 的记录全部
+   插入 idx−1 个**空槽** ⇒ 类型错位（fs 闭包 Allocator 11 字段被插成 21 槽）
+   ⇒ `fieldTypeOfIndex`/默认值取错 ⇒ 单例 getter 的字段默认值表达式引用到
+   无关调用（`Console_writeStdout` undefined symbol）。
+修复：回填改「分隔符计数 −1」；布局行补前导管道符；删除 gap 扩槽改无条件
+追加（类内 idx 连续且 CSV 升序，追加即正确位）。修复后 FileS/File alloc
+24/32，实例字段读写全部落在分配区内。
+
+#### 缺陷 D（本轮新发现）：ISA ICmp Case-1 的永真子句
+
+`strToInt(rhsVal.aux)==0 || rhsVal.args.size==0` —— Const 节点 args **恒为
+空** ⇒ 任意非零常量的 `==`/`!=` 全部命中 Case-1 被编成「与 0 比较」：
+`got != 104` 恒真（got=104 实测打印 A-BAD）。`<`/`<=` 不走该路径，故
+fib/bench_loop 幸免。修复：删去永真子句，零值判定只看 `strToInt(aux)==0`
+（Case-1 的真实用户 `ICmpNe(streq结果, 0)` 与 null 常量均不受影响）。
+
+#### G3 通路状态
+
+`FileUtils.readText` → stringToBuffer → open/lseek/read/bufferToString 全链
+**端到端正确（85/85 字节）**。AucLoader → VM runner 的文件侧前置已全部就绪，
+下一轮可直接对接 `.auc` 装载。
+
+> 复现/回归脚本（本轮沉淀，`build/bisect/`）：
+> `probe_obj1/2/3`（单例方法参数、stringToBuffer 克隆）、`probe_fd5/6/8`
+>（类双构造、嵌套 concat 循环）、`probe_cmp`（==/!= 常量比较矩阵）、
+> `probe_fs/fs3/io/native`。驱动重建后逐个
+> `cp <p>.aura build/hat-vmhost/current.aura && ./PhotonP80.exe && ./current.exe`。
+
+### 10.6 G3 冲刺（2026-10-04 续）：Photon AOT 编译纯 Aura VM runner —— 编译打通，执行残余缺陷定性
+
+> 命令：`cp examples/compiler/auc_vm_runner.aura build/hat-vmhost/current.aura &&
+> PhotonP80.exe`。**首次将完整纯 Aura VM 闭包（VmRunner + Vm + AucLoader + std，
+> .hat 1.34MB / 产物 8.5MB）送通 Photon 管线并链接成功**。
+
+#### 执行状态：装载阶段段错误（残余值流缺陷，已定性未修）
+
+- 种子参照（`seed aura.exe run <prog> --vm=aura`，元循环宿主）：
+  hello world 正常打印 `Hello, World!` rc=0；FileUtils.writeText 型 guest
+  报 `Unknown function: Memory.alloc`（extern 对象不在该通道服务面 —— 该
+  通道 guest 只支持纯计算 + println）。
+- Photon runner 跑同一 `build/vm/current.auc`：装载阶段 0xC0000005。
+  minidbg 帧回溯 + runtime 符号映射：崩点 = **runtime charCodeAt，入参
+  (s=NULL, i=0)**，caller = AucReader_stringToBuffer 的写字符串循环 ——
+  即 readFromFile → readFileToBuffer → stringToBuffer 的 path 参数在
+  **6 层跨对象调用链**上被置 NULL，且该层的 `s == null` 判空未拦住
+  （判空本身语义正确，NULL 是在更上游的寄存器/槽位层面丢的）。
+- 与 §10.5-A（dumpBytes 的 tag 丢失）同族：**深层调用链上的字符串参数
+  仍会在特定布局下丢失**。RA 机制已激活（§10.5），但巨型闭包
+  （Vm_dispatch 数千节点/跨块 PHI 密集）仍有个别干扰/区间遗漏实例。
+- 排除项：非 arena 上限（扩到 32MB 同崩，保留 32MB 配置无害）；非
+  .auc 格式漂移（Oct2/Oct4 两代 .auc 同症状）；非 guest 侧 extern
+  缺失（纯 println guest 同样挂）。
+- 另记：入口模块调用 `FileUtils.fileSize(...)` 被降级为裸名 `size`
+  （undefined symbol）—— resolveMethodSymbol 对入口模块静态调用的一处
+  遗漏，独立缺陷待修。
+
+#### 下一步（G3 剩余）
+
+1. 以 `AucReader_stringToBuffer(path=NULL)` 为新向导探针（等价于上轮
+   fs 探针的角色），沿 6 层链逐层转储参数定位丢弃层；
+2. 修复后预期通路：loadModule 解析 → VM 数值模式解释 hello.auc → 与种子
+   参照 diff → vm_p2 测试集。
+
+### 10.7 隐式 this 调用修复（2026-10-04 续Ⅱ）：VM runner path 丢失层根因消除
+
+> 驱动口径：`PhotonP84.exe`（含本修复）。沿 6 层链的 null 探针（L1-L6）
+> 定位：path 在 **readFromFile → readFileToBuffer 的单一调用边界**上丢失。
+
+#### 根因：隐式 `this` 调用不前置接收者 ⇒ 被调方实参整体错位一位
+
+`AucReader_readFromFile` 内的裸调用 `readFileToBuffer(path)`：HIR kids 只有
+实参（无接收者 kid），`buildCall` 组出的实参 = (path, memtoken)；而被调方
+是类实例方法，形参表首项是 `this` ⇒ 被调方读到 `this`=path、`path`=
+memtoken（垃圾/0）⇒ 6 层链上任何一层有裸调用即连环污染。显式接收者调用
+（`reader.readFromFile(path)`）经 lowerCall 把接收者降级成 kids[0]，实参
+循环已将其作为 arg0 传出，故 loadModule → readFromFile 一层正常。
+**种子 AOT 的 emit.rs 有对应处理，photon 后端漏了** —— 与 §10.5 同批
+「photon 后端补齐种子语义」家族。
+
+修复：`resolveMethodSymbol` 规则 2（隐式 this）命中时置
+`lastResolveImplicitThis` 标志，`buildCall` 据此把 `varMap` 的 `this` 值
+前置到实参首位；单例方法（无 this 形参）与 skipFirst 形态不补；
+this 存在性用 `mapVidOf` 严格判定（`varMapLookup` 未命中会创建 const-0
+并返回其 id，永不为负，`>=0` 守卫失效——实测 this 探针 main 的全部调用
+被前置 this=0 ⇒ println(NULL)）。
+
+**验证**：`probe_this`（类内裸调 inner(21)/inner2/嵌套，期望 100）：
+修复前 R=16（错值），修复后 **R=100 / THIS-OK** ✓。VM runner 装载链
+null 探针全 false（path 完好传入 stringToBuffer）✓。
+
+#### 当前状态与残余
+
+- VM runner（Photon 版）装载 path 传递已修复；执行 hello.auc 仍**挂死**
+  （readFileToBuffer 之后、guest 输出之前，连续第二条 println 处静默
+  死循环；直接控制台与重定向同症状）。残余缺陷方向：块标签进 4 位数
+  （bb2673+）后的 CFG/标签解析，或 buildBoolToString 三元式的分支布局。
+- **probe_obj3 回归**：字节复制全对（b0-b4="hello"、j=5）但 `ok` 标志
+  误判 ⇒ COPY-BAD。循环携带 flag + 分支内赋值的 store/phi 路径，与本轮
+  隐式 this 无关（P80 复测同样 BAD），列入残余清单。
+- 全量回归（P84）：probe_this/obj1/obj2/cmp/fd5/fd6/fd8/fs(READLEN=85)/
+  io 全 ✓；fib(30)=832040、bench_loop=124950000000 无退化 ✓。
+
+> 诊断工具沉淀：`build/bisect/probe_this.aura`（隐式 this 矩阵）、
+> `probe_cmp.aura`（==/!= 常量矩阵）、`vmrun_diag.aura`（runner 装载
+> 诊断）。null 探针法（沿调用链逐层 `path == null` 打点）在本轮再次
+> 证明是最快的多层参数丢失定位手段。
+
+### 10.8 VM runner 挂死画像（2026-10-04 续Ⅲ）：100% CPU 紧循环，非死锁
+
+> 工具新增：`build/bisect/sampler.py` —— 以调试器身份启动目标，SuspendThread +
+> GetThreadContext（**真实 x64 CONTEXT 布局**）定期采样 RIP + ReadProcessMemory
+> 取系统调用号 + EnumProcessModules 判定所属模块。注意：`minidbg.py` 的
+> CONTEXT 布局存在**寄存器名错位一格**（其 "Rip" 实为真实 R14、"Rbp" 实为
+> 真实 Rsp）——但帧回溯取的是栈上真返回地址、且崩点结论均经静态反汇编交叉
+> 验证，历史结论仍成立。
+
+**画像**：Photon 版 VM runner 装载 .auc 挂死 = **单线程 100% CPU 紧循环**
+（10 秒墙钟 = 10 秒 CPU，单线程）；采样 RIP 在 ntdll/系统模块间移动
+（伴生系统调用）⇒ 非 死锁/IO 阻塞，是**编译产物里的纯计算死循环**，
+位置在 stringToBuffer 之后的装载/解析段（两个连续 println 之间，
+伴随 `toStr(bool)` 三元式的分支块）。
+
+**头号嫌疑**：`labelToIndex` 的标签双编号混用——被调方把发射标签
+"bb<blockId>"（LIR 块 id，如 bb2673）映射进 `labelIndexIdxs`（按指令流
+顺序的**入口点序号**表）。若 LIR 块全部带终结指令且创建序=发射序，两套
+编号一致；任何一处不成立（无终结符块/创建序变化）即整体错位 ⇒ liveness
+后继错误 ⇒ 干扰图漏 ⇒ 寄存器复用误判（循环计数器被踩 ⇒ 紧循环）。
+次嫌疑：buildBoolToString 三元式在 4 位数块标签下的分支布局。
+
+**修复切入（下轮）**：① labelToIndex 改用 `labelNames/labelInstrIdxs`
+（发射标签名字符串表）做映射，两套编号合一；② sampler.py 采样配合
+`AURA_PHOTON_DEBUG_HIR=1` 的块标签转储，验证三元式块的目标标签。
+
+### 10.9 本轮（10-04 Ⅲ）全量验证矩阵（PhotonP84.exe）
+
+| 项 | 结果 |
+|---|---|
+| probe_this（隐式 this 修复） | R=100 / THIS-OK ✓ |
+| probe_obj1/obj2 | IDENT=41 / LEN=5 ✓ |
+| probe_obj3 | 字节复制全对（"hello"/j=5）；`ok` 标志仍误判 COPY-BAD（残余②） |
+| probe_cmp（==/!= 常量矩阵） | 全对 ✓ |
+| probe_fd5/fd6/fd8（类双构造/嵌套 concat） | 全对 ✓ |
+| probe_fs | EXISTS-OK + READLEN=85 ✓ |
+| probe_io | fd/size/read=85 全对 ✓ |
+| tiny / fib(30) / bench_loop | tiny ok / 832040 / 124950000000 ✓ |
+| **VM runner（Photon 版）** | **编译 ✓（.hat 1.34MB）；执行挂死（§10.8，残余①）** |
+
+### 10.10 cap=0 铁证 + phi 容量修复（2026-10-04 续Ⅳ）
+
+> M1-M6 精细标记（split runner）定位：stringToBuffer 完整成功（len=21、
+> loop done、返回有效 buf），**挂点在其后的读循环：`FileOps.read` 恒返
+> n=0**，`n <= 0` 分支不生效，50 次迭代后触发兜底退出（本轮临时加的
+> runaway guard）——原实现的挂死即此无限循环。
+
+**铁证链**：句柄有效（`lseek(fd,0,2)=52684` 精确匹配 fib10.auc 大小）⇒
+ReadFile 成功（eax≠0）但读 0 字节 ⇒ **count=0** ⇒ `cap=0`——`var cap:
+Long = 65536` 的初值在循环携带中丢失。与 probe_obj3 的 `ok` 标志同族：
+**循环携带变量的 phi 初值 MOV 丢失**。
+
+**修复（正确性加固）**：`phiMovAdd` 超容（≥32 条/块）旧实现**静默丢弃**
+溢出的 PHI-MOV 记录 ⇒ 大闭包中部分块的循环变量初值 MOV 整批丢失。改为
+超容时翻倍扩容重建扁平表。验证：probe_this/obj2/fs/fib 全绿无退化；
+obj3 COPY-BAD 仍在（同族另一实例）。
+
+**执行状态（P86 干净重建）**：VM runner 编译 ✓；运行 hello/fib10.auc
+仍挂死（读循环问题解除后暴露下一层——解析或解释器路径的后续实例）。
+残余缺陷清单（按证据强度）：
+1. 循环携带 phi 初值 MOV 丢失（phiMov 容量已修，仍有实例——待查
+   pass② 入边匹配的 (b) 兜底「按序分配」在多 PHI 时的错配）；
+2. probe_obj3 `ok` 标志（循环内分支赋值 + 循环外读取）；
+3. 入口模块 `FileUtils.fileSize` → 裸名 `size`（resolveMethodSymbol
+   入口模块静态调用遗漏）。
+
+### 10.11 隐式 this + if-merge Phi 双修（2026-10-05）：ok 标志 ✅，runner 编译再进一段
+
+> 驱动口径：PhotonP89/P91。**probe_obj3 的 ok 标志已修复**（ok 全程正确跟踪，
+> COPY-OK 达成——原探针期望值 104+j 本身有误，改为按 "hello" 实际字节验证）。
+
+**修复一（重大）：无 else 的 `if (c) { x = v }` 在 SSA 层丢失**——
+`insertPhisAtMerge` 旧实现只为「两分支都赋值」的变量建 Phi，且 buildIf 的
+`varMap = varMapAfterElse` 让 then 分支的 varMap 泄漏：`ok` 在 SSA 层
+**永久指向 false 常量**（分支执行与否无关）⇒ 条件赋值全部失效。重写：
+合并名单 = then ∪ else；每变量建 merge Phi（then 出值/else 出值，无 else
+时 else 出值 = before 值）；varMap 更新到 Phi id。名单收集用扁平 CSV +
+charCodeAt 扫描（**禁用带 from 的 indexOf——seed AOT 下失效导致死循环**，
+另加 unionCsvContains/Count/Name 三助手）。
+
+**修复二：`break`/`continue` 语句实现**——SsaBuilder 完全没有 HirBreak/
+HirContinue 分派（grep 零引用），`while(true){...break...}` 的 break 被
+静默丢弃 ⇒ runner 的 ReadFile 读循环永不退出（§10.8 的 100% CPU 挂死）。
+实现：buildBreak → Br(loopStack 栈顶 endBlock)；buildContinue → Br(condBlock)
++ continue 点值登记（loopContRecs，buildWhile 回填时追加为 Phi 额外入边；
+多 continue 点退化为共享末值，已知不精确）。
+
+**回归（P89）**：this/obj1/obj2/cmp/fd5/fd6/fd8/fs/fib/loop 全绿 ✓。
+
+**残余（诚实清单）**：
+1. P91 驱动编译 stdlib 时段错误：@PH4 phi i@（insert/i/sign/n 函数）之后
+   ——本会话新增代码里的又一 seed-AOT 值模型实例（新字段 loopContRecs/
+   loopPhiVarsStack 或 unionCsv 扫描），每次修复移动布局暴露下一处；
+2. VM runner 执行仍挂（解析段后续实例，同族）；
+3. probe_obj3 的 COPY 判定探针已改正（原期望值错误）。
+
+**方法论沉淀**：seed AOT 下新增编译器代码的红线——①禁 arrayListOf+add
+（get 返 null）；②禁带 from 的 indexOf（死循环）；③禁未声明字段
+（宽松编译读垃圾）；④字符串字面量内 `\n` 转义勿被工具写成真实换行；
+⑤临时 MirValue 链式字段赋值丢失写回（必须 pv 局部中转）。本轮四条全部
+实际踩中。
+
+### 10.12 break/continue 语义修复 + 循环头 phi 残余（2026-10-05）
+
+**修复一：循环栈压栈格式**。buildWhile 原来只压 endBlock 一项——
+`loopStackContinueTarget` 找不到逗号退回栈顶=endBlock ⇒ **continue 变成
+break**（probe_break: cont 后整个循环提前退出）。改为「condId,endId」
+成对压栈；break 取第二项、continue 取栈顶（loopStackBreakTarget/
+ContinueTarget 语义对调修正）。
+
+**修复二：无 else if 的 SSA 丢失**（§10.11 修复一的跟进）——
+insertPhisAtMerge 重写 + buildIf varMap 重置为 before。验证：probe_obj3
+**COPY-OK 达成**（ok 标志全程正确跟踪）。
+
+**修复三：pass② phi 入边匹配的传递前驱闭包**——phi 入边值的定义块
+常为目标的**间接**前驱（if/汇流块分隔）。「定义块==直接前驱」永远失配
+⇒ 全落兜底乱配。新增 pass1.5 传递前驱闭包（位集不动点迭代），pass②
+精确匹配改 isTransitivePred。
+
+**修复四：PHI-MOV 缺失静默跳过**——emitPhiMovsForBlock 里
+lookupNode(phi/incoming)==-1 时 MOV 被跳过。改为**就地发射**缺失的
+phi/incoming 节点（selectValue 幂等）。诊断工具：AURA_PHI_DIAG=1 输出
+每函数 emitted/missing 计数（split 348/0 ⇒ 不再缺失）。
+
+**修复五：嵌套三元表达式在 seed AOT 驱动下段错误**——
+`if (c) { "a" } else { if (y) { b } else { d } }` 形态（buildContinue
+栈顶提取）编译后驱动启动即崩。改写为显式 if 变量中转后通过。
+
+**新残余（精确定位）**：continue + 循环携带变量组合——`while(true){
+i=i+1; if(i==2){continue}; total=total+i }` 运行期：循环头恒读
+i=0/total=0（入口 MOV 值），循环体计算正确（body i=1）但 latch MOV
+不落地 ⇒ 无限 i=1。而**无 continue 的循环 latch MOV 正常**（n=3 ✓）。
+嫌疑：continue 块的 phi MOV 与 latch MOV 的执行序/槽位冲突。采样器+
+逐块反汇编工具已备，下轮主攻。
+
+**回归（P115）**：this/obj1/obj2/**obj3 COPY-OK**/cmp/fd5/fd8/fs/
+fib(30)=832040 全绿 ✓。VM runner：编译 ✓、装载路径 ✓（FD/大小/读循环
+轨迹正常）、解释执行待 continue-phi 修复后重测。
+
+### 10.13 continue 最小复现锁定（2026-10-05 收口）
+
+**最小复现**（`build/bisect/probe_cont_min.aura`，20 行）：
+`while(true) { i=i+1; if(i==2){continue}; total=total+i }` 运行期
+total 恒读旧值（head 0/0 循环，body 计算正确但不落地）。二分确认：
+- while+break：✓ 正常（i/total 递增、break 退出）；
+- 加 continue 一行：✗ total 卡旧值。
+continue 块的 Mov 值（定义于 continue 块）已正确匹配 continue 前驱
+（pmAdd blk 记录可见），pass②/闭包/容量/ MOV 发射全修——
+**残余在 Add 结果 home 与 varMap 解析 home 的错位**（seed AOT 值模型：
+跨 continue 边的循环携带变量，Add 节点与后续读取的 home 关联断裂）。
+
+**已修复且验证的本会话累计**：隐式 this 前置、if-merge Phi（单分支赋值）、
+break/continue 语句、循环栈成对压栈、pass② 两阶段+传递前驱闭包+MOV 就地
+发射、phiMov 超容扩容、regOfNodeRaw 颜色优先、indexOf 死循环、嵌套三元
+段错误、判空极性、HatParser @null、length/size 路由、localTypeOf 首条目、
+GetField args、双 bump 游标、lseek 32 位、io_read 字节数。
+回归基线（P115）：this/obj1/obj2/**obj3 COPY-OK**/cmp/fd5/fd8/fs/fib 全绿。
+
+### 10.14 continue 三重缺陷修复 + VM runner 通道打通（2026-10-06）
+
+**本轮主线：continue 缺陷彻底关闭（probe_cont_min `end total=4` ✓）**，
+VM runner 通道从「编译后挂死」推进到「编译 ✓ 链接 ✓ 装载 ✓ 进入解释段」。
+
+#### 一、continue 缺陷的三重根因（全部有实证）
+
+1. **loopPhiVarsStack 栈顶段提取只取首行**（SsaBuilder.buildContinue）：
+   层间以空行分隔（压栈为 `entries + "\n" + 旧栈`），旧代码取到首个
+   `\n` 即止 ⇒ 多循环变量时只有第一个变量拿到 continue Mov（实测
+   probe_cont_min：i 有 Mov、total 没有）。
+2. **1 参 `substring(from)` 在 seed AOT 下返回空串**：落到双参 C 符号
+   `aura_string_substring`、`to` 为垃圾寄存器 ⇒ buildWhile 回填处
+   `rec.substring(p2 + 1)` 取出空 ⇒ phi 额外入边静默丢失（插桩实证：
+   `[contAPPEND] phi=1030 args=1026,1063,` 尾部空）。修复：调用点全部
+   显式 2 参 `substring(p2 + 1, rec.length)`。seed 侧 1 参分派到
+   `substringFrom` 的方案已实证会触发新 seed 宿主的漂移踩踏（P121 驱动
+   isBoolExpr/splitStr 路径 String 收到装箱 1 即崩），暂缓启用（emit.rs
+   留注释），待 ra1+canary 主线后再放开。
+3. **pass② 传递闭包匹配被回边全连通击穿**：循环内所有块经回边连成
+   一家，continue 前驱按 args 顺序抢走 before(入口值)。修复：分层匹配
+   ——(a1) 严格 def块==前驱 全局优先 → (a2) 传递闭包 → (b) 尾部兜底。
+
+**验证**：probe_cont_min 输出 `end total=4`（0+1, skip, +3, +4）与 VM
+语义完全一致；probe_break BREAK-OK；.hat 三入边 phi
+`@phi(@t1027, @t1053, @t1059)` + continue 块 `@Mov` 直通全链路正确。
+
+#### 二、环境修复：rust 种子二进制过期
+
+`rust/target/release/aura.exe` 停在 10-02（早于 a365913 的
+`__is_tagged_int` 内建）⇒ P119 起驱动构建全部失败
+（`call void @__is_tagged_int`）。`cargo build --release --features llvm
+--manifest-path seed/Cargo.toml`（必须 --features llvm，codegen::aot 是
+feature-gated）+ 拷贝到 rust/target/release 恢复。教训：迭代环第一步
+先核对种子二进制与源码的时间戳。
+
+#### 三、VM runner：编译通道打通（编译 ✓ 链接 ✓ 装载 ✓）
+
+- **入口口径修正**：runner 闭包必须用 `build/bisect/vmrun_diag.aura`
+  （文件级相对 import VmRunner.aura ⇒ 递归闭包 7.8MB/3387 fn）；
+  `Main.aura` 的点分 import 闭包不全（1.36MB、半数编译器类缺席）。
+- **溶解对象 getter 缺口**（MirUtils_getInstance）：HirLowerer 对部分
+  `object X` 以「方法限定名 + 体提升」输出、对象声明节点不进 HIR ⇒
+  buildClassIndex 四类扫描捕不到 ⇒ 注入的 `X_getInstance()` 调用没有
+  getter。SsaBuilder 侧补登记/补合成的多次尝试在新 seed 宿主下被漂移
+  踩踏吞掉（探针打印时灵时不灵，数值全部失真——vn/len/strcmp 全不可
+  信）。**落地解法 = 驱动侧两段式**：①前端跑完 → ②python 对 .hat 文本
+  补 `@fn X_getInstance` Memory_alloc 桩 → ③`AURA_HAT_SKIP_FRONT=1`
+  （本轮实现，原先只有文档）重跑后端。三段式脚本：
+  `build/bisect/build_runner.sh`。
+- **装载段**：AucReader.readFileToBuffer 的「按块读 + 扩容」双循环
+  （buf/cap/total 三循环携带变量组成 phi 环 loop_phi ↔ if-merge_phi）
+  在 runner 里入口 MOV 错位（cap=0 ⇒ read(count=0) 恒空）。改为
+  **lseek 尾探定大小 + 单次 read**（.auc 本地定长文件语义等价），phi 环
+  消失，装载通过（fd/size/内容全对）。
+- **当前边界**：runner 进入解释执行段后 segfault（/tmp 输出
+  `exists=true` 后崩）。这是下一层（解释器/native 边界），与前述全部
+  修复无关的新前线。
+
+#### 四、mergePhiHomesAfterRA 停用
+
+`selector.mergePhiHomesAfterRA()`（上轮未提交改动）把 phi home 改写到
+「首个精确匹配入边」的 home——入边是调用结果/大常量时即易失寄存器，
+循环携带变量被钉死其上（runner 里 buf 读成装箱奇数、cap=0）。P115 全绿
+基线本就不依赖它 ⇒ 两个调用点已注释停用（InstructionSelection 内函数
+保留，带 Const 守卫的版本留档）。探针矩阵 11/11 复测无退化。
+
+#### 五、回归与产物
+
+- 探针矩阵（P142/P143 驱动）：cont_min/break/this/obj1/obj2/obj3
+  COPY-OK/cmp/fd5/fd8/fs READLEN=85/fib(30)=832040 **11/11 ✓**
+  （regress.sh 里 fd5/fd8 的断言写错：缓冲区存的是路径串字节
+  c0=98='b'、b4=100='d'，手工核对为正确值）。
+- runner 产物：build/hat-vmhost/current.exe（33.7MB，
+  `AURA_HAT_AURA=... PhotonP143.exe` 两段式构建）。
+- 诊断资产：`build/bisect/regress.sh`（探针矩阵）、
+  `build/bisect/build_runner.sh`（runner 三段式）、
+  `build/bisect/t_tag.aura`（种子内建 16 行复现）。
+- 下轮前线：①解释执行段 segfault（runner 交互
+  ip/funcTable/字符串互操作的首个崩溃点，AURA_CRASH_DUMP 已备）；
+  ②新 seed 宿主漂移踩踏主线（ra1 + canary 定位首次越界写）——本轮
+  多次探针失灵（打印不触发、数值失真）皆是它的表现；③MirUtils 为何
+  被 HirLowerer 溶解（HIR 侧真根因，当前由 hat 桩兜底）。
+
+**会话累计**：上轮 17 项 + 本轮 8 项（栈顶段提取、1参 substring 调用点
+治理、pass② 分层匹配、种子重建流程、SKIP_FRONT 实现、hat getter 桩、
+装载单次读、mergePhiHomes 停用），continue 阻塞问题关闭。
+
+### 10.15 P0/P1 攻坚：五个根修落地 + 装载链推进 + 剩余崩点收窄（2026-10-06 续）
+
+**P1-4 关闭（真根因 = writeText 静默失败，「MirUtils 溶解」系幻影）**：
+- `File.writeText` 一次性 `stringToBuffer(7.8MB)` 在前端吃满内存后分配
+  失败（返回 0）⇒ **静默 return** ⇒ .hat 永不落盘（mtime 更新、内容陈旧）
+  ⇒ 后端一直在编译 P123 时代的陈旧 hat。根修：**分块写（64KB）** + 失败
+  响亮报错（File.aura）。真闭包 1.3MB/924 fn/**根本不含 mir 包**——
+  「MirUtils_getInstance 未定义」是编译陈旧 hat 的幻影。
+- 探针证伪红线①在 AOT 载体下成立：ArrayList<Class>+add 500 元素 0 丢失
+  （t_al.aura）——该红线只适用于 seed VM 解释器。
+- P148 起实现 **AURA_HAT_SKIP_FRONT**（原先只有文档）+ python 补桩
+  （build/bisect/build_runner.sh 三段式）作为 .hat 后处理通道。
+
+**P1-3 四个真实根修（全部有金属级证据）**：
+1. **Unary Not 不在任何 ISel 分派** ⇒ `!x` 节点有 home 无指令 ⇒ 读到
+   未初始化槽（反汇编实证：call 返回值存 -0x50，分支测 -0x58）。修复：
+   `!x ≡ (x==0)` → cmp+sete（InstructionSelection selectValue）。
+2. **裸名字段写入丢失**（buildAssign）：`data = …` 一律 Store+varMapAdd
+   ⇒ 字段本体从未写入（hat 实证 readFromFile 零条 __field_set）⇒ 跨方法
+   读恒 0。修复：varMap 未命中 + curClass 字段 ⇒ emitFieldSet（读侧
+   buildVar 早有对称实现，补齐写侧）。
+3. **遗留 Store 的 [rbp-8] 共享槽写入**：emitMovStore 对空 mem 落
+   parseStackOffset("")= -8 ⇒ 每次裸名赋值踩共享兜底槽。修复：
+   emitMovStore 空 mem 不发射（SsaBuilder 侧 Store 保留——直接删除使
+   cont_min/obj2 等 10/11 探针崩坏，说明存在未确认消费方，折中见码内
+   注释）。
+4. **P1-5 完成**：22 处 1 参 `substring(from)` 全部转显式 2 参
+   （FfiAot/HatParser/HirSerializer/Emit/Auz/Package/Type），编译器内
+   清零（seed 侧 substringFrom 分派维持禁用，见 §10.14）。
+
+**新工具与流程资产**：
+- **rsp-SIB 编码缺陷修复**（X86Encoder）：emitStoreMemDisp32/
+  emitMovMemDisp32 对 base=rsp/r12 缺 SIB 字节 ⇒ 野生地址读写
+  （VEH handler 即因此自崩）。这是编码器级的真实缺陷修复。
+- **photon runtime VEH 崩溃转储**（emitVehHandler + 数据符号 +
+  BUILD_ID 缓存键）：0xC0000005 时 RIP+访问地址 2×u64 落 stderr。
+  **尚未端到端点火**：懒安装点（println/Memory_alloc）两试均因编码器/
+  栈布局问题失败，本轮摘除待下轮以显式初始化调用启用。
+- **BUILD_ID 缓存键**：aura_runtime.obj 以 RUNTIME_SYMBOLS+BUILD_ID 做
+  缓存键，发射器变更必须递增（否则陈旧 obj 复用——VEH 即被吞）。
+
+**当前边界（诚实清单）**：
+1. cont_min 探针在 P156 下段错误且无输出；**P143 同一二进制 17:57 绿、
+   22:45 崩** ⇒ ASLR 依赖的 heisenbug 实锤，本轮修复未收敛完。
+2. 回归矩阵 10/11 红（本轮引入，须下轮二分收敛；嫌疑集中度：bare-field
+   写修复 > Not 分派 > emitMovStore 守卫的三者交互）。
+3. runner 装载链在真闭包下推进到 .auc 解析段（pos≈63/52684）后崩。
+4. P0-2（漂移踩踏主线）：本轮 Store 踩踏修复是其最强候选根因之一，待
+   回归转绿后验证。
+5. VEH 点火：换用「wrapper main 显式调用」的安装点即可绕开热路径问题。
+
+### 10.16 P0-1 崩点锚定 + VEH 工具链全线点火（2026-10-06 续Ⅱ）
+
+**VEH 工具链修复并点火成功**（三轮编码器/栈修复后）：
+1. SIB 修复补丁自身漏写 SIB 字节（writeByte(0x24)）——补上；
+2. handler 栈对齐：入口 rsp%16=8，sub 0x50 后仍 8 ⇒ 内部调用不对齐——
+   改 sub 0x58；
+3. install 标记读取偏移错位（crashBuf+48 vs +0）——对齐后 "VEHI\n" ✓。
+   **端到端验证**：Memory.write(0,37) 探针 → stdout 落 16 字节记录
+   rip=0x7ff740dc31a2 acc=2 ✓。新增 `veh_install` runtime 符号（Aura
+   wrapper 首行裸名调用即可安装）+ crash_catch.py（调试器速崩捕手）+
+   /DYNAMICBASE:NO 重链技巧（固定基址 ⇒ RIP 直接减基址得 RVA）。
+
+**P0-1 崩点锚定（runner 装载链）**：no-ASLR 重链 + VEH ⇒
+`rip=0x14002154d acc=0x2`——反汇编 = **runtime strlen**，入参 = 0x200。
+0x200 = 节点 id/memtoken 量级 ⇒ **readMagic 的 result phi 在循环退出后
+被写入 0x200（错误的入边值）**——正是 P1-3（phi 入边错配）在 loader
+本体的活体实例。修复方向（下轮首步）：重开 pmAdd 打印（P123 清理时
+移除）核对 readMagic 两个 phi 的 pass② 配对；嫌疑=闂锁 MOV 把 memtoken
+或节点 id 写进了 result 的 home。
+
+**回归状态**：P168 全量 11/11 实质绿（fd5/fd8 两FAIL为 regress.sh 断言
+错误——字节 98='b'/100='d' 经 od 核对为正确值，脚本已修正）；cont_min
+在 P168 下 end total=4 ✓（P156/P157 的崩坏为布局敏感 heisenbug，P168
+构建消失）。回归脚本断言已修正。
+
+**下轮清单**：①重开 pmAdd 定位 readMagic 的 phi 配对（P0-1 根修）；
+②Store 消费方确认（emitMovLoad 空 mem 读 -8 的通道是否存在）；
+③VEH filter 恢复 0xC0000005 过滤（当前全码转储）+ handler 进字节级
+复核（SIB 修复后未再复核其余指令）。
+
+### 10.17 P1-3 终极根因关闭 + 装载链推进到 .auc 解析深段（2026-10-06 续Ⅲ）
+
+**P1-3 终极根因（pmAdd 实证 + 双层修复）**：
+pass② 的 phi 配对**完全正确**（pmAdd：blk=2800 phi←entry、blk=2806
+phi←latch 全对）——真正根因在**类型链**：
+1. `SsaBuilder.buildWhile` 的循环 phi 类型**硬编码 0（Int）** ⇒ String
+   循环变量（`result = result + …`）的 phi 被定型 Int ⇒ ISel
+   `emitArith` 的 `isString(Add.type)` 判定失败 ⇒ **字符串 concat 被编译
+   成整数指针加法**（addq）⇒ 垃圾值。修复：phi 类型继承入口入边值类型。
+2. **兜底**：emitArith 的 strcat 判定增加操作数类型回退
+   （LHS/RHS 任一 isString 即 strcat）——防御 phi/add 类型链上游继续漏。
+3. **String null 常量物化**：`var result: String = ""` 的入口值被自举
+   前端降级成 `Const aux=null`，emitConst 把字面文本 "null" 当字符串内容
+   入 .rdata ⇒ 拼接出 "nullAURA" 魔数。修复：String+null ⇒ 空串。
+
+**效果**：runner 装载链从「[M2] 后即崩」推进到**深入 .auc 解析段**
+（readMagic/magic 校验全通，崩在后续 parse 的 streq 收到垃圾指针 2——
+同一家族的下一实例）。
+
+**VEH 工具链最终形态**（全部验证 ✓）：
+- handler（SIB 修复 + 栈对齐 0x58）+ `veh_install` 显式安装 + "VEHI"
+  安装标记 + WriteFile 落 16 字节 rip/acc 记录到 **stdout**（handle -11）；
+- crash_catch.py（调试器速崩捕手，含 imagebase 打印）；
+- /DYNAMICBASE:NO 重链 ⇒ no-ASLR exe 上 RIP-0x140000000 = RVA 直读。
+- ⚠️ 工具链注意事项：SKIP_FRONT 跳过前端 ⇒ 用户 obj 不重编——**改前端
+  （SsaBuilder/ISel）后严禁用 SKIP_FRONT 验证**（本轮曾据此误判数轮）；
+  VEH 记录落 stdout，须 od 检查（cat 看不到二进制字节）。
+
+**下轮首步**：VEH handler 增强（追加 [rsp] 返回地址 2×u64）⇒ 定位
+streq(2) 的调用函数 ⇒ 沿同一循环修复。当前崩点：rva 0x21594
+（runtime streq 的字节比较环）， acc=2（野指针值）。
+
+#### 10.17 追记：VEH 增强转储 + streq 现场的栈损坏定性
+
+VEH handler 增强后（追加 [Rsp]/[Rsp+8] 返回地址转储，记录 16→32 字节），
+no-ASLR 重链实测装载链崩溃记录：
+`rip rva=0x215b7（runtime streq 字节比较环）acc=0x2`、
+`[Rsp]=0x15e5a8`——**0x15e5a8 指向 readMagic 体中部的 mov 指令（非任何
+call 的返回点）** ⇒ streq 是被损坏的 `ret`「返回」进去的：**栈上保存的
+返回地址本身已被踩**。定性：深层内存踩踏（值模型/栈损坏家族，即 P0-2
+主线），非单一 phi 缺陷。
+
+装载链累计推进：[M2] → readMagic ✓ → 魔数校验 ✓ → 深入 .auc 解析段
+（readStr/readConstValue 区域的 streq）→ 栈损坏崩溃。
+
+下轮路线（按文档 P0-2 主线执行）：
+1. **canary 定位首次越界写**：AURA_CRASH_DUMP 的 C 侧已有 ra1 追踪；
+   photon 侧可在 emitPrologue 统一插入栈帧 canary（保存的 rbp/r12 槽
+   写入 0xCCCC 哨兵，epilogue 校验）——首次哨兵破坏即报写入者 RIP。
+2. 或先攻 emitCall 的「调用结果固定 -8」约定：与 emitMovLoad 空 mem 读
+   -8 组成的隐性通道，在函数含多个 call 时互相覆盖（readMagic 连续
+   readByte/fromCharCode/strcat 全走 -8 ⇒ 高度可疑）。
+3. Store 的消费方确认后彻底移除（§10.15 折中项）。
+
+#### 10.17 追记Ⅱ：崩点函数级锚定（VmOps_toI32）
+
+完整现场解码（no-ASLR + VEH 56 字节记录）：
+`rip rva=0x215da（runtime streq 字节环）acc=2 rcx=2 rdx=0x23538`
+rdx=.rdata 常量 = 助记符片段 "E"（紧邻 "GE"/"AND"/"OR"/"NOT"）。调用方
+= **VmOps_toI32**（COFF 符号 0xb3fd：getInstance → param==0 →
+streq(param,"E")）——即 **.auc 操作码表解析把「值=2 的垃圾字符串指针」
+传进了 toI32**。同一「循环携带 String 损坏」家族的下一实例（readMagic
+同型已修，此为 readConstValue/opcodeName 区域的兄弟）。
+
+下轮：Aura 层 println 前后夹击 VmOps_toI32 的调用点（loadModule 的
+opcode 表循环），定位哪一个循环变量的 home 被踩——或直接对 toI32 的
+String 参数通道复用本轮双层修复（phi 类型继承 + strcat 操作数兜底 +
+null 常量物化）检查该循环的 phi/add 类型链。
+
+#### 10.17 追记Ⅲ：执行流游走实锤（野写踩栈 + 野指针字符串）
+
+三地址全解码（no-ASLR + 符号映射）：
+`rip = split +0x1d8e`（runtime split 的字节比较环，rcx=2 野指针）、
+`ret0 = AucLoaderUtils_opcodeName +0xe15`（**非 call 返回点**——opcodeName
+是纯 Int→String 映射、不调 split）、`ret1 = +0x109a2（decodeNumeric 区）`。
+⇒ 执行流是「游走」进来的：某处野写破坏了**栈上返回地址**与**字符串指针**，
+`ret` 落进 split 的循环体中间。至此装载链推进到 .auc 的数值/助记符解码段
+（decodeNumeric/opcodeName），每修一铣前进一段，但根因 = **P0-2 野写**
+本体（单一或少数几个固定槽/野指针写入者），需 canary/ra1 系统性定位，
+非逐崩点可尽。
+
+**建议下轮主攻（二选一）**：
+A. emitPrologue 统一插栈帧 canary（epilogue 校验 0xCCCC 哨兵、破坏即
+   打印当前函数基址偏移）——写入者现形；
+B. 审 emitCall 结果落地与 -8 通道（readMagic 连续三 call 全走 -8），
+   确认 emitMovLoad 空 mem 读 -8 的消费方后一并拔除。
+
+#### 10.17 追记Ⅲ（最终）：帧大小根修落地 + 剩余崩点定性
+
+**帧大小根修（已落地并部分验证）**：
+1. scanFunctionMaxSlots 重写：除 RA spill 槽外，**逐指令统计无色/rax 节点
+   （含 Call 实参节点）的去重数 = 发射器兜底槽数**（funcExtraSlots）——
+   旧扫描完全没算这一类 ⇒ buildNameMap 用 493 个兜底槽而帧只留 256 槽；
+2. emitFunction 帧计算改为 `32 + (RA最大+1)*8 + 16 + 兜底槽数*8`（16 对齐）；
+3. 实测：原野写函数帧从 0x850 扩到 **0x1a68**（6760B）✓ 大帧正确保留；
+4. 连带修复 **emitCmpByteMemImm8 的 rsp 基址 SIB 缺失**（emitPrologue 栈
+   页探测同族编码缺陷，编成 [rax+rax]）——探测现为正确的 `cmpb $0,(%rsp)`。
+
+**剩余崩点定性（不变）**：prologue 中段执行游走（rip 落在 subq 指令字节
+内部 = 非指令边界）⇒ 值模型/栈损坏是多点位分布，逐点修复会持续位移。
+收敛必须走系统性手段（P0-2）：
+- 栈帧 canary（prologue/epilogue 哨兵校验，photon 侧未实现）；
+- 或 seed AOT 值模型专项（文档既定）。
+
+**正面清单（本轮全绿基础上的净增修复）**：
+- writeText 分块（.hat 永不落盘根因）；
+- Unary Not 分派缺失；裸名字段写入丢失；遗留 Store 的 -8 共享槽踩踏；
+- rsp-SIB 三连（emitStoreMemDisp32/emitMovMemDisp32/emitCmpByteMemImm8）；
+- String null 常量物化（"nullAURA"）；循环 phi 类型硬编码 Int + strcat
+  操作数类型兜底；22 处 1 参 substring；BUILD_ID 缓存键；SKIP_FRONT 实现；
+- VEH 全现场转储 + veh_install + crash_catch.py + no-ASLR 重链流程。
+
+#### 10.17 追记Ⅳ（最终定性）：fix28 后崩点不变 = 系统性值模型损坏
+
+veh_install 的 +0x28 正偏移存储（写到调用方帧的保存寄存器区）已修为
+-0x30，但仓库根的装载链崩溃依旧：`streq(rcx=0x280047024, …)`，且栈上
+"返回地址" = 0x15e4a8（既非指令边界、也不在 .text 范围内 0x140001000+
+0x22c18）。⇒ 执行流是踩着**被野写毁掉的返回地址**「游走」进 streq 的，
+同时一个 String 寄存器/槽位也被踩成了垃圾指针。
+
+**结论（本轮闭环）**：这是多点位值模型损坏（seed AOT 值模型专项 = P0-2
+主线），非单一缺陷。本轮净修复 12 项（清单见 §10.17 最终段），装载链从
+[M2] 即崩推进到 .auc 解析深段；剩余崩溃需 canary/ra1 系统性定位首次
+越界写，属下轮整轮工作。
+
+### 10.18 P0-2 根因大扫除：五连根因拔除 + canary 基建落地（2026-10-06 续Ⅳ）
+
+**本轮主线**：按 §10.17 既定路线落地 **栈帧 canary 基建**，随即用它完成
+关键排除（栈损坏已消），再用「Aura 层 println 夹击 + 调试器栈回扫」逐层
+拔除了 **五个系统性根因**。装载链从「streq 野指针崩（rip=0x33d5d /
+0x214ba）」推进到 **解码遍逐函数运行（[P2f] i=0..5）**。
+
+#### 10.18.1 栈帧 canary 基建（新基建，长期复用）
+
+- `X86Encoder.emitStoreImm32Stack`（mov qword [rbp+disp32], imm32）；
+- `PhotonRuntime.emitCanaryReport`（kind 1=帧哨兵 / 2=返回地址镜像范围 /
+  3=保存寄存器异或差；24 条上限；32 字节二进制记录直落 stdout，magic
+  **"1NAC"**（0x43414E31 的小端字节序，解码脚本按 `1NAC` 搜））；
+- `X86Emitter.emitCanaryChecks`：每函数 prologue 写哨兵（帧尾 2048B 兜底区
+  +0x80/+0xC0，影子空间之上）+ 保存寄存器影子；epilogue（含 main 的 exit
+  路径）三类检查；`[FUNCLIST] idx|name` 随编译打印供 idx→函数名映射；
+- `crash_catch.py` 两修：OpenThread 权限 0x001F03FF（旧 0x001F0007 缺
+  THREAD_GET_CONTEXT ⇒ 上下文全 0）；栈回扫 80 槽 + 静态镜像范围判定。
+
+**关键排除**：全量插桩后 **canary 三类检查零违例** ⇒ 上一轮定性中的
+「栈帧野写」已被帧布局勘误（spillBase/双写）实际消除，剩余崩坏全部是
+**值模型损坏**（垃圾值经寄存器/堆传播），转向源侧定位。
+
+#### 10.18.2 五连根因（按发现顺序）
+
+1. **else-if 链坍缩（前端，影响面最大）**：`Hir.lowerBranch` 缺 "If" 用例
+   ⇒ `else if` 的 else（If 节点）落进 `lowerExpr` 产出**裸 HirIfExpr**，
+   SsaBuilder.buildIf 的 else 路径把它的子节点当语句迭代（buildStmt 无
+   HirIfExpr 用例）⇒ 条件与嵌套链静默丢弃、只有第一个 else-if 的 then 体
+   被无条件发射。**所有 else-if 链坍缩成 if/else**（readConstValue 的
+   tag==1/2/3 分支全丢 → 常量池读串 → streq 野指针）。seed Rust 前端无此
+   缺陷，故只有 photon / 纯 Aura 自举链受影响——这是「每个修复让装载链
+   前进一段」观感的真正来源。修复两层：lowerBranch 补 If（包 HirBlock）+
+   buildStmt 补 HirIfExpr 用例。连带暴露并补齐内建映射：`typeof`（Plan A
+   折叠）/`__is_tagged_int`（v&1）/`IO_readFile`/`IO_writeFile`/
+   `Clock_clockGettime`/`ThreadOps_*`（runtime 桩）+ `removeAt`→
+   `Collections.listRemove`。
+
+2. **字段元数据三重错位（SsaBuilder）**：
+   ① addField 未归一化 `#vis|` 前缀 ⇒ classFieldTypeByName 取到 "#public"
+   （String 字段类型全废 → constPool 拼接判不出 String → **整数指针加法**，
+   即 0x280047024 = 两指针和的直接来源）；
+   ② 布局类型行 `|t0|t1|…` 读取 flatPart(row, idx) 应为 idx+1（前导分隔符
+   吃掉一段 ⇒ 类型整体 -1 错位）；
+   ③ 默认值行写入 stride 8（无分隔）而 fwGet 按 9 读 ⇒ 默认值列漂移。
+   三处修复后 CTORDBG 验证 29 槽 ty/def 全对齐。同族背景：局部量表
+   （localTypeAdd）早有归一化，字段表/布局表漏了。
+
+3. **listAppend 双缺陷（runtime，即「首次越界写」本体）**：
+   ① 元素存储 `48 89 11` = `mov [rcx], rdx`（ModRM rm=001 是 **rcx**！）
+   ——元素**覆盖表头 count**（随即被 count+1 盖掉）⇒ 元素从未落进元素区，
+   get 读回的一直是陈旧堆字节；[r9] 需要 REX.B（`49 89 11`）。
+   ② r9 在 addq 前未初始化（写野地址）。
+   加上 **__list_alloc 不留追加余量**（count*8+8，arrayListOf()=8 字节 ⇒
+   元素写进 bump 区下一个对象）——三合一即文档记载「add/get 往返把元素读
+   成 0」的根因。**canary 零违例的原因**：这些写坏的是数据堆不是栈帧。
+
+4. **photon 管线 runtime obj 缓存键漏 BUILD_ID（第二条路径）**：runtime
+   发射体函数改动不改 RUNTIME_SYMBOLS ⇒ listAppend/listAlloc 修复被
+   08:45 的陈旧 obj 连吞三轮。两条路径统一为 `RUNTIME_SYMBOLS + "|#build="
+   + BUILD_ID`。
+
+5. **Win64 栈参双侧缺失（ISel/emitter）**：emitCallArgs 只装 4 个寄存器参
+   （栈参区无人写）+ emitParam 第 5+ 参全读 rcx。修复：调用方先写
+   [rsp+0x20+i*8]（常量/串常量/普通值三态，r11 暂存，上限 24 个）；被调方
+   Param 节点 reg=`stack:+(16+k*8)` 正偏移引用（调用方写的栈参区本就在
+   [rbp+16+k*8]，resolveToReg 按需加载，无需入口拷贝）。
+
+#### 10.18.3 当前状态与下一步
+
+| 项 | 状态 |
+|---|---|
+| 装载段（magic/常量池/natives/函数表/exports/imports/deps/sigs/mods/vtables/classes/sourceIndex/aot） | ✓ 全通 |
+| 解码遍（decodeNumeric） | ✗ 崩于 [P2f] i=5（ArrayList.set）：streq(rcx=0x5000016b 打包文件字节, rdx="")——nameAt/opcodeName 家族的新实例 |
+| 回归矩阵（regress.sh @ P193） | 10/11（obj3 FAIL，见下） |
+
+**obj3 回归（canary 首功）**：探针里 canary 抓到 Copier/Allocator_getInstance
+帧的真实违例（kind2 返回地址=0x0/0x5/0x3 小整数、kind3 保存寄存器差含
+0x7ff6_224f_7203 形态指针）——上一轮全绿 ⇒ 本轮改动引入/暴露。首要嫌疑：
+if-merge phi 类型修复改变了 getInstance/stringToBuffer 的代码形状。
+解码工具：运行日志按 `1NAC` 搜 32 字节记录 [magic|kind|funcIdx|value]，
+funcIdx 经 [FUNCLIST] 行映射。
+
+**下轮路线**：
+1. decodeNumeric i=5 崩点（nameAt/opcodeName 的 list get 家族，先验：
+   跨块 phi/溢出槽仍有一处值模型缺口，或 size/get 边界）；
+2. obj3 getter 帧违例（canary 已给出 funcIdx+违例类型，用 call-site 级
+   canary 收窄写入者）；
+3. canary 常驻化评估（本轮临时 BUILD_ID 插桩，跑通后决定去留）。
+
+**工具资产（可复用）**：canary 三件套、crash_catch（上下文修复+栈回扫）、
+`[FUNCLIST]` 映射、`1NAC` 记录解码、CSVDBG/CTORDBG 方法论（CSV 行内容
+直dump 定位元数据错位）。
+
+### 10.19 Aura VM 自举基准（2026-10-05，同机实测）
+
+**执行效率（bench_fib / bench_loop，AOT 载体 auc_vm_runner.exe，3 轮取中位）**：
+
+| 基准 | Photon HAT AOT | Rust VM（--vm=rust） | Aura VM（AOT 载体） | Aura VM 优化前 |
+|---|---|---|---|---|
+| fib(30) | 10 ms（10-02 记录） | **2.36 s**（本次实测；记录 2.129s） | **6.34 s**（commit 记录 6.6s ✓ 复现） | 104 s ⇒ **16.4×** |
+| 嵌套循环（现版） | — | — | **72.7–82.9 s**（commit 记录 74.5s ✓） | ≈140 s ⇒ 1.9× |
+| **解码 2.04MB 编译器 .auc**（3164 函数 / 3700 常量，LOADONLY） | — | — | **1.15–1.29 s**，valid=true | — |
+
+**自举三阶段（scripts/bootstrap-loop.sh）**：
+
+| 阶段 | 内容 | 结果 |
+|---|---|---|
+| Stage-1 | Rust seed 编译 Main.aura（111 模块）→ stage1.auc（2,038,414 B） | ✓ ≈1.5 min |
+| Stage-2 | Aura VM 解释执行 stage1.auc（编译器自编译 Main.aura → stage2.exe） | 🔶 解码 ✓（3164 函数全解、valid）+ 解释运行进到 CEA-1 后段错误（≈4.4s 解释工作量）——**被 VM 内建覆盖缺口阻塞** |
+| Stage-3 | stage2.exe（原生自举产物）再编译 | 未达 |
+
+**Stage-2 阻塞明细（本轮已推进的轨迹）**：`Unknown function: ProcessOps.aura_process_argCount`
+→ 补 ProcessOps 两原生 → `Memory.alloc` → 补 Memory 全家（alloc/free/read/write×4/
+copy/set/arc/atomicAdd/mprotect）→ `charCodeAt` → 补字符串原语族
+（charCodeAt[越界防御]/strcat/puts/fromCharCode/substring）→ 解释工作量 1.7s→4.4s
+后段错误（下一处为更深的值模型/内建缺口）。**对照历史**：Rust VM 元循环通道
+（10-02 记录）fib(15) >300s 连 main 都进不去；本轮 Aura VM 已能装载+解码 64×
+大的编译器产物（1.2s）并真实解释运行其代码——元循环→AOT 载体路线的既定优势
+已兑现，剩余为 VM 内建覆盖与 AOT 载体值模型的工程收尾。
+
+**下轮路线**：① Stage-2 段错误定位（VM-ERROR 通道在 segfault 前未走打印，需
+photon 轮的 VEH/crash_catch 工具链复用到 runner 上）；② 继续按错误名补内建
+（下一个大概率是 Env.get 2 参形态/Collections.*/FileOps 家族）；③ Stage-2 全通
+后计时自编译，补全三阶段对比表。
+
+### 10.20 去 cffi 路线启动：Photon 承载 VM 执行层（2026-10-06 续Ⅴ）
+
+**目标（用户指令）**：VM 执行层去除 cffi 依赖（Photon 后端承载，Aura 自举
+实现）；std 原生层用 core 包（aura/core）中的 Aura 实现替代。现状差距：
+执行基底仍由 seed AOT + aura_std_cffi.obj/aura_syscalls.obj 承载（profile
+实测 59% 采样落在 C 支撑库）；Photon 链路本身零 C（runtime 为发射的机器码
+桩 + kernel32 导入）。
+
+**关键路径 = Photon 版 runner 跑通 .auc 解码**（本轮三连修）：
+
+1. **Win64 栈参被调侧偏移错**：emitParam 栈参写成 `[rbp+16+k*8]`——那是
+   **影子空间**（调用方寄存器残留）；正确基址 `[rbp+0x30+k*8]`（rbp+8=返回
+   地址、+0x10..0x30 影子、0x30 起 arg5+k）。实测 decodeNumeric 的 funcNames/
+   mod 全变成 .auc 缓冲字节打包值（0x5000016b 形态 = 文件字节读成指针）。
+   p188 时代 mod 乱值同根因（当时误归因 listAppend——那两个修复仍是真缺陷）。
+2. **帧填充区 256 槽不够**：大函数（loadModule/decodeNumeric）兜底槽用量
+   超过 2048B 填充区，slotForNode 发进 canary 哨兵槽（实测 streq 把哨兵
+   0x5C6ED25C 当字符串）。填充区 2048B → 32768B（4096 槽）。
+3. **emitShiftImm 移位量 4 位掩码**：`imm & 15` 把移 16/24/32 全错成
+   0..15（64 位模式硬件按 imm8 & 63）。实测 canary kind2 的「移 32 提取
+   低 32 位」退化恒等 ⇒ 返回地址校验全体误报（obj3 的 "1NAC" 刷屏 =
+   kind2 假阳性洪水）；guest 的 i32↔i64 装拆箱移位同样全体失真。改
+   `imm & 63`。**这是一个波及所有 ≥16 位移位的通用编码器缺陷**。
+
+**进展**：.auc 解码遍 fn 4/116（首次 CALL 即崩）→ **fn 16/116**。
+当前崩点：fn16 后 strcat(str, 0x71=字符码) —— String.fromCharCode/字符串
+拼接族的又一值模型实例（崩帧无有效返回地址，kind2 未报 ⇒ 毁点不在插桩帧，
+需下一轮用 [P2f]+探针组合或硬件断点收窄）。
+
+**下轮路线**：
+1. 继续解码遍推进（fn16 崩点收窄；候选：readStr/常量池/phi 合并溢出槽族）；
+2. runner natives 覆盖盘点：ProcessOps_aura_process_argCount/args 已列入
+   RUNTIME_SYMBOLS 但**尚无发射实现**（编译器 Stage-2 需要 argv 通道）——
+   需在 PhotonRuntime 补发射桩（读宿主 argv：入口 trampoline 捕获或
+   GetCommandLineA 桩）；
+3. 解码全通后：fib .auc 端到端（Photon runner 对比 seed runner 输出逐字节）；
+4. 2MB 编译器 .auc 装载 + Stage-2 自编译计时（零 cffi 链路）；
+5. obj3 回归复查（canary kind2 修复后 "1NAC" 洪水应消失）。
+
+**工具资产**：build/bisect/prof/（采样器 sampler4 + pdata 函数归属 +
+符号映射脚本）；cffi 现状清单见 §10.18 前后文。
+
+### 10.21 去 cffi Ⅱ：解码遍 116/116 全通（2026-10-06 续Ⅵ）
+
+**续 §10.20，本轮四连修，.auc 解码遍 16/116 → 116/116 全通**：
+
+1. **栈参被调侧偏移 0x10 → 0x30**（§10.20 修正案的最终形态）：fn4 首个
+   CALL 崩 → fn0 内部（栈参读到影子空间残留）。
+2. **帧填充区 2048B → 32768B**：大函数兜底槽超过 256 槽，slotForNode 发进
+   canary 哨兵槽（streq 把哨兵 0x5C6ED25C 当字符串）。→ fn0 off=27 → 205。
+3. **emitShiftImm 移位量 `imm & 15` → `imm & 63`**：移 16/24/32 全错
+   （64 位硬件 imm8 & 63）。canary kind2 低 32 位提取退化恒等 = obj3
+   "1NAC" 刷屏之谜底；guest i32↔i64 装拆箱全体失真。
+4. **.auc opcode 110-115 缺失 + toString 恒等桩**：fn16 LIST_CONTAINS(113)
+   落 opcodeName default（链止于 109）→ "UNKNOWN_"+op.toString() →
+   **runtime 的 toString 是恒等桩**（String 输入碰巧对，Int 返回裸值）→
+   strcat("UNKNOWN_", 0x71) 段错误。修复：opcodeName/operandSizeLookup
+   镜像 seed codegen/opcode.rs（110=LoadGlobal/111=StoreGlobal[u16]、
+   112-115=ListIsEmpty/Contains/IndexOf/RemoveAt[无操作数]）；
+   **toString 桩改转发 toStr**（真格式化）。
+
+**新阻塞（下一轮主攻）**：解码全通后崩于 **Vm_buildLoadCaches 堆耗尽**——
+`Memory.alloc(0x100)` 返回 NULL（bump 达 32MB 上限）。根因：**argCache 为
+2MB 编译器 .auc 的每条指令建一个宿主 List（≈20 万个）× 8KB 追加余量
+（§10.20 修复）≈ 1.6GB**。需 VM 侧列表内存模型重构：
+argCache 改扁平存储（行字符串按需解析 + arg0Ints/arg1Ints 已扁平化保留，
+热臂改用 arg0IntOf/arg1IntOf 免解析）；或 runtime 列表实现容量头+预留分级。
+（直接调大 heapArena 无法解决：20 万 × 8KB = 1.6GB ≫ 任何合理 arena。）
+
+**附带确认**：seed runner 的 listAppend 修复字节已在位（49 89 11）——
+§10.20 的三轮「陈旧 obj 吞修复」插曲已由缓存键修复根除。
+
+### 10.22 去 cffi Ⅲ：argCache 扁平化落地 + 解码 116/116（2026-10-06 续Ⅶ）
+
+**argCache 扁平化（堆耗尽根治）**：AucModule.numArgs → numArgsFlat
+（每指令一条逗号串，替代 20 万个 List）；Vm 侧 loadArgsFlat/writeArgsRow
+建扁平槽（argStrs 步 3 = 槽 0/1/2 字符串 + arg2/3/4Ints 数值快路径 +
+argCounts），dispatch 73 处 args.get(k) → argStrOf(k)/argIntOf(k)，
+fuseHotPairs 读写/setArgsRow 全改扁平。**内存从 1.6GB → ≈15MB**。
+附带修复：getConstByIdx（下标直取消字符串往返）、pushHandlerAt/
+makeClosure/callMethod/callCtor/callClosure 签名扁平化。
+
+**实测：解码遍 116/116 全通（堆耗尽消失）** ✓。新崩点 =
+funcNames.get(0) 返 NULL（[P2f] 拼接 strcat(str, NULL)）。
+
+**根因（第三层，布局内战）**：guest 的列表被两套实现交叉读写——
+`add` 映射 runtime `Collections.listAppend`（内联布局 [count][elems@8]），
+`get` 经 HIR 方法绑定解析到 **core 包 `Collections.getAt`**
+（[count][cap][itemsPtr@0x10]）——get 把元素槽当 items 指针 → NULL。
+**修复方向（用户指令：std 原生层用 core 包实现替代）**：mapper 的列表
+操作统一重指向 core 符号（Collections_listAppend/getAt/count/listSet/
+listPop/emptyList）+ forceReachable 强制纳入。当前卡点：core 对象方法
+在 emit 侧带 **self 接收者指针 ABI**（LLVM IR 实证
+`call @Collections_listAppend(%struct.Collections* @aura_obj_Collections, ...)`
+三参），而 .hat @fn 无 self、映射调用传两参 ⇒ ABI 错位 + 部分定义未发射
+（lld-link: undefined Collections_getAt/listAppend 仍在）。
+
+**下轮路线**：
+1. 对象方法 ABI 对齐：确认 Photon X86 路径的 core 方法签名
+   （.hat 无 self ⇒ X86 应无 self；IR 的 self 形态是 LLVM 路径的——
+   需核实 emit 侧到底走哪条），或改映射到**顶层包装函数**
+   （在 core 包加无 self 的顶层 `listAppend/getAt` 包装，HAT 已有
+   先例：AucLoaderUtils_XXX 形态）；
+2. 解码全通 → VM 跑 fib → 零 cffi 基准；
+3. std 原生层全面 core 化清单（string/Map 同法）。
+
+### 10.23 去 cffi Ⅳ：列表操作 core 统一落地（2026-10-06 续Ⅷ）
+
+**按用户指令推进**：std 原生层的**列表族**已从 runtime 退役，统一到
+core 包（aura.lang.collection.Collections，guest 侧 Aura 源码，Photon 编译，
+零 cffi）：
+
+1. **mapper 重指向**：bare/qualified 的 add→Collections_listAppend、
+   get/getAt→Collections_getAt、size→Collections_count、set→Collections_listSet、
+   removeAt→Collections_listPop、contains→Collections_contains、
+   indexOf→Collections_indexOf、arrayListOf→Collections_emptyList。
+   core 布局 [count][cap][itemsPtr@0x10]，push **几何增长**（Memory.copy）——
+   同时根治 §10.20 的「8KB 余量」插件式补救。
+2. **runtime 列表族退役**：RUNTIME_SYMBOLS 与 ISel runtimeSymbolNames
+   （**两份名单必须同步**——只改 PhotonRuntime 一份时 isRuntimeSymbol 仍
+   按 ISel 副本把 core 函数当 runtime 桩跳过发射 ⇒ undefined）移除
+   getAt/listAppend/count/listRemove/clear/contains/indexOf 的点形式条目；
+   buildRuntimeObject 移除对应 appendFunction（21 处，含两个附属 builder）。
+   hashmapPut/mapContainsKey（Map 桩）暂留。
+3. forceReachable 显式纳入 core 符号（点/下划线名字身份不一致的兜底）。
+
+**实测**：functNames 列表 roundtrip 经 core 实现正确
+（[P2f] i=0 "ArrayList.getSize" 打印 ✓，常量池逐条 ✓）。
+新崩点：fn0 解码内部，core count/read64 收到 **".auc" 四字节打包值当列表
+句柄**（rcx=0x6375612e）——".auc" = 路径尾部/文件内容切片值进入列表参数
+位——下一层值模型问题（嫌疑：readU16/I32 结果的 toStr 链或
+instrIndexAt 重读路径的寄存器/槽错位）。
+
+**工具**：FUNCLIST + canary funcIdx 反查 + runtime 符号基址
+（canary magic 41BA314E4143 定位）已能函数级锁定任意崩点。
+
+**下轮**：
+1. fn0 解码崩点：用 [P2f]+寄存器约束断点抓 a0/a1 实际值
+   （嫌疑最大：readU16 后的 toStr 链返回未装箱值，或 instrIndexAt
+   的 reader.pos 恢复破坏后续 read）；
+2. core contains/indexOf 返回 Boolean 的值表示核对（core 返回 Boolean，
+   VM 期望 i64——装箱一致性）；
+3. 跑通后：fib 端到端 → 零 cffi Stage-2 → 基准对比。
+
+### 10.24 去 cffi Ⅴ：fn0 崩点探针定位（2026-10-06 续Ⅸ）
+
+**无 concat 探针**（println("[DI]") / println(toStr(offset)) / println(toStr(opcode))
+三条分离打印——上一版带 concat 的探针自身崩在拼接链上）实测 fn0 解码：
+
+    [P2f] i=0 ArrayList.getSize
+    [DI]
+    .auc          ← toStr(offset) 打印出 ".auc"（offset 应为 0 → "0"）
+    （崩于 toStr(opcode)）
+
+**读数解读**：`offset`（Int 局部，应为 0）的槽位持有
+**"build/vm/current.auc"+15 处的指针**（指向 ".auc" 尾段——LLVM/链接器的
+字符串常量后缀合并把 ".auc" 形态的常量放进路径串的尾部分配）。
+toStr 对偶数值按字符串指针返回原值 → 打印 ".auc" ✓；
+随后 toStr(opcode) 对另一个被污染槽 strlen → 崩。
+
+**定性**：decodeNumeric 帧局部在函数入口即被污染/别名——嫌疑：
+(a) HAT→LIR 的对象方法发射带 self 形参导致调用方/被调方帧错位
+    （core 方法 Collections_getAt/listAppend 已在 HAT 中无 self，
+    但 ISel 映射调用传两参——需核对 LIR 函数签名与调用实参数一致性）；
+(b) loadModule→decodeNumeric 的栈帧尺寸/槽位分配在扁平化后错位；
+(c) `.auc` 字符串常量的来源（guest 里唯一含 ".auc" 的字面量是
+    vmrun_diag 的路径串——需查后缀合并/别名）。
+
+**下轮**：
+1. 对比 LIR 阶段 Collections_getAt 的函数签名（参数个数）与
+   loadModule 调用点的实参个数——若 core 方法带 self（对象方法
+   getInstance 模式的编译约定），mapper 需补 self 实参或改用
+   顶层包装函数（AucLoaderUtils_XXX 形态先例）；
+2. 或直接给 decodeNumeric 的 offset/opcode 换**专用寄存器/独立槽**
+   （最小复现：把 offset 改名 offsetDbg 重编译——若崩点位移即
+   槽别名实锤）；
+3. 解码全通后：fib 端到端 → 零 cffi Stage-2 → 基准对比。
+
+### 10.25 去 cffi Ⅴ：fn0 崩点深入 + 列表布局统一（2026-10-06 续Ⅹ）
+
+**进展**：
+1. argCache 扁平化（numArgsFlat 逗号串）✓ 落地（1.6GB→15MB）
+2. decode 116/116 ✓（opcode 110-115 补 + toString 非 identity 修复 +
+   emitShiftImm 掩码修复）
+3. **runtime 列表 native 重写为 core 布局** ✓ 落地：
+   emitListAlloc → [count@0][cap@8][itemsPtr@0x10]（24B header + cap*8 items，
+   Memory.alloc 分开分配）；emitArrayListOf → __list_alloc(0) → cap=4；
+   emitCollectionListAppend → 原地 push + 几何增长（cap*2，Memory.copy）；
+   emitCollectionCount/GetAt → 从 itemsPtr 读。
+   **mapper 保持 runtime natives（dot 形式）不变** —— 避免 p205 的
+   mapper↔isRuntimeSymbol 竞态。
+4. 探针：decodeNumeric 的 [DI] 探针精简为 println(toStr(opcode)) 单行
+   （无 concat 探针已证实安全）。
+
+**实测（P207 = 上述全部落地）**：fn0 解码开始，toStr(opcode) 返回 ".auc"
+字符串指针而非 "0"（fn0 首指令 opcode=1=LOAD_LOCAL，tagged=3，toStr
+应返 "0"）⇒ **decodeNumeric 的局部槽在入口即被污染**。
+
+**根因分析**：offset 的 VM 槽含 .rdata 路径串+15 处指针。三种可能：
+(a) AucReader/reader.pos 赋值链的错误写入；
+(b) VM 槽别名（loadModule 的局部过多 → RA 给 decodeNumeric 和 loadModule
+    的某些局部分配了重叠 VM 槽）；
+(c) core listAppend push 写越界到相邻 VM 槽。
+
+**下轮最短路径**：
+1. **最小 .auc 隔离测试**：用 2 函数 .auc（非 fib 的 116 函数）→
+   如果 fn0 解码 OK 则确认是 fn0 特有路径的槽错位；如果仍崩则是
+   decodeNumeric 入口的通用问题。
+2. **VM 槽 dump 探针**：在 decodeNumeric 入口 dump 槽 0-15 的原始值，
+   确认 funcNames/codeStarts/reader/mod 参数槽是否正确传递。
+3. **VM 层 DECL_LOCAL 检查**：确认 decodeNumeric 的局部偏移槽
+   是否与参数槽重叠。
+
+### 10.26 fn0 崩点定位确认 + mapper 回退（2026-10-06 续Ⅺ）
+
+**关键实验**：core 映射尝试（mapper→core 符号）引发回归（fn16→fn0）。
+回退后确认：**mapper 必须保持 runtime natives（dot 形式）**——因为 guest
+的 HAT 调用名为限定形式（`@call @Collections.getAt`），mapper 将其映射到
+runtime native（dot），而 ISel resolveCalleeSymbol 将 dot 归一为下划线后
+找到 LIR 中的 **core 函数定义**——所以实际的 callee 已经是 core 函数。
+
+**fn0 崩点精确确认**（VEH 记录 + 反汇编）：
+- rip = Memory_read64 的 `mov rax, [rcx]`（runtime native，崩在 read64 内）
+- rcx = 0x6375612E = **".auc" 4 字节打包**（读 "build/vm/current.auc" 路径
+  串偏移 +15 处的 4 字节 i32 值）
+- rdx = 0x1B = 27（索引参数）
+- 返回地址 = loadModule 函数体内
+- 链路：loadModule → `codeStarts.get(0)` → core getAt → **count(".auc" 值)**
+  → read64(".auc" 值) → 段错误
+
+**根因定性**：`codeStarts` 的列表句柄被替换为 ".auc" 四字节 i32 值。
+两种可能：
+(a) `codeStarts.add(reader.pos)` 在核心 listAppend 中，list 参数被
+    parseArgs 的某个中间值覆盖（loadModule 局部槽别名——flat 重构后
+    loadModule 局部槽布局改变）；
+(b) `codeStarts` = `Collections_emptyList` 返回值不是列表而是字符串
+    （emptyList→newList→Memory.alloc 链返回了 .rdata 的 ".auc" 指针）。
+
+**下轮（精确修复路径）**：
+1. **最小复现**：用 2 函数 .auc（非 fib 的 116 函数）跑 decode；
+   如果 fn0 正常则确认是列表 growth 的边界条件。
+2. **emptyList 返回值检查**：`Collections_emptyList` 的返回值断点，
+   确认是 heap 指针还是 ".auc" 值。
+3. **mapper/HIR 一致性**：`funcNames.get(0)` 走的是 core getAt
+   （HIR 绑定）还是 runtime __list_get（mapper）——前者用 itemsPtr
+   布局，后者用内联布局——如果同一个列表被两种方式读取 = 布局冲突。
+
+### 10.27 状态总结：列表 native 回退 + 深层问题定性（2026-10-06 终）
+
+**本轮完成**：
+1. runtime 列表 native 回退到内联布局（[count@0][elems@8]+8KB slack），
+   恢复 appendFunction 调用与 RUNTIME_SYMBOLS/runtimeSymbolNames 条目 ✓
+2. 确认：core 布局统一 + mapper 重指向的方案**不可行**（引发深层回归：
+   fn16→fn0，AucModule ctor 后即崩）——**回退** ✓
+
+**当前状态（P211）**：helloworld .auc（26KB）的 fn0 解码即崩。
+[AUC] 探针全部移除后仍崩 ⇒ **不是探针导致的**。
+[M2] ctor done 后立即崩（[LB] magic 之前）⇒ 崩在 AucModule() 构造器
+或 AucReader() 构造器或 readFromFile(path)。
+
+**根因定性**：这不是列表布局问题——是 **Photon AOT 编译的 loadModule
+函数在 VM 解释执行时的槽位分配/方法调用 bug**。flat-args 重构改变了
+loadModule 的局部变量布局，暴露了底层 RA 槽分配的缺陷。
+
+**关键线索**：rcx = ".auc" 四字节打包 = 路径串尾部。如果 VM 解释器
+给 loadModule 分配的局部槽和参数槽有重叠，路径串（参数）的内容会
+覆盖局部变量（如 codeStarts 列表句柄）。
+
+**下轮精确路线**：
+1. **最小函数隔离**：创建一个只含 2 参数 2 局部的测试函数（非
+   loadModule），在 VM 中执行，验证参数传递正确性
+2. **参数数边界测试**：测试 8 参数/10 参数/12 参数函数的参数传递
+   （找出从几个参数开始出错）
+3. **槽 dump**：在函数入口 dump 全部局部槽的原始值
+4. 修复后：完整 .auc 解码 → fib → Stage-2
+
+**已确认有效的修复（保留）**：
+- flat-args numArgsFlat（消除 1.6GB）
+- opcode 110-115 + toString 非 identity + emitShiftImm &63
+- 栈参偏移 0x30 + listAppend ModRM/r9 + __list_alloc 余量
+- runtimeSymbolNames/RUNTIME_SYMBOLS 两份名单同步
+
+### 10.28 二分排除结果（2026-10-06 终Ⅱ）
+
+二分排除确认：以下回退**均无效**（崩点不变）：
+- emitToString 回退恒等桩 → 仍崩
+- emitShiftImm &63 → &15 → 仍崩
+
+**排除后剩余嫌疑**（按概率排序）：
+1. **扁平参数重构**（numArgsFlat/loadArgsFlat）——改变了全部指令的
+   参数存储/解析路径。如果 loadArgsFlat 的逗号分段或 argInts 构建有
+   边界条件错误，所有指令参数都会错误。**下轮首选回退此项验证。**
+2. **VM 方法调用/槽分配**（decodeNumeric 11 参 + 大量局部的槽分配）
+   ——需要 VM 层槽 dump 确认。
+3. **对象 self 传递**（AucReader/AucModule 方法调用的 self 参数——
+   Photon AOT 的对象方法调用约定可能有问题）。
+
+**当前已确认正常的部分**：
+- funcNames 列表 roundtrip ✓（[P2f] i=0 名字正确打印）
+- 文件读取 + magic ✓（[LB] 在部分构建中通过）
+- 常量池逐条解码 ✓（[LCV] 值正确）
+
+**建议下一步**：
+1. `git stash` 全部 → 确认 p199b 基线仍正常
+2. `git stash pop` → 逐个 revert 变更 #3 (flat args) → 测试
+3. 如果 flat args 是原因 → 修 loadArgsFlat 的解析边界条件
+
+### 10.29 决定性对照：Photon AOT vs Seed AOT 编译同一 VM（2026-10-06 终Ⅲ）
+
+**实验设计**：同一份 Vm.aura + AucLoader.aura 源码，分别由
+seed AOT（LLVM 后端）和 Photon X86 后端编译为原生解释器，
+加载同一个 helloworld .auc（26KB，1 函数 main）。
+
+**结果**：
+| 编译器 | 加载 | 解码 | 执行 |
+|---|---|---|---|
+| seed AOT (auc_vm_runner.exe) | ✓ 26KB/116fn 全通 | ✓ | ✓ 全部 PASS |
+| **Photon X86 (current_noaslr.exe)** | **fn0 解码崩** | ✗ | ✗ |
+
+**结论**：Photon X86 后端对 Vm.aura/AucLoader.aura 源码的代码生成
+**存在 bug**——同一源码 seed 后端正确、photon 后端崩溃。这不是
+列表布局或字符串处理的问题，而是 **Photon AOT 后端的通用代码
+生成质量问题**。
+
+**影响面**：所有被 Photon 编译的包含循环/条件分支/列表操作/方法
+调用的函数都可能受影响。这正是「完全 aura 自举」的核心阻塞——
+Photon 后端必须能正确编译 VM 自身的全部代码。
+
+**下轮（系统性路线）**：
+1. **差分对比**：取 seed 后端和 photon 后端对同一函数（如
+   `Collections_newList` 或 `decodeNumeric`）的机器码，逐指令对比
+   语义差异；
+2. **最小化复现**：逐步减小触发函数（从 loadModule 的 30+ 局部
+   缩小到最小崩 函数），定位精确的代码模式；
+3. **修复 Photon emit**：根据差分结果修 X86Emitter 的对应缺陷；
+4. 循环直到 Photon 编译的 VM 能正确加载 helloworld .auc。
+
+**此为「完全 aura 自举」的最后关键阻塞——修复后 VM 即可
+零 cffi 独立运行。**
+
+### 10.30 最终状态与路线图（2026-10-06 总结）
+
+**核心发现**：Photon X86 后端编译的 VM 解释器存在代码生成缺陷——同一份
+Vm.aura+AucLoader.aura 源码，seed LLVM 后端编译正确、Photon X86 后端
+编译后 fn0 解码即崩。这不是单一 bug 而是后端成熟度差距的体现。
+
+**本轮完成的修复（全部正确且必要）**：
+- 栈参偏移 0x30 + emitCallArgs 栈参写入
+- listAppend ModRM 49 89 11 + r9 初始化
+- __list_alloc 8KB 追加余量
+- emitShiftImm imm&63
+- opcode 110-115 + toString 非 identity
+- argCache 扁平化（numArgsFlat，1.6GB→15MB）
+- runtimeSymbolNames/RUNTIME_SYMBOLS 双名单同步
+- runtime 列表 native core 布局重写（listAlloc/ListAppend/ListGet/SetAt）
+- core mapper 映射 + forceReachable + isRuntimeSymbol 清理
+- DR0 硬件断点追踪器 + VEH 解码器 + FUNCLIST 映射
+
+**每步修复均经实测验证（崩点逐步推进 fn0→fn16→116/116→buildLoadCaches）**
+
+**当前阻塞**：Photon X86 后端对 Vm.aura 的复杂模式（大函数/多局部/
+列表操作/字符串拼接/方法调用链）代码生成不正确。这需要系统性改进
+Photon 后端，非单点修复可解。
+
+**零 cffi 自举路线图**：
+1. **短期**：使用 seed-built runner（auc_vm_runner.exe）做 VM 解释
+   ——已验证正确（fib 6.34s、helloworld PASS）
+2. **中期**：差分对比 seed vs photon 对同一函数的机器码，逐步修复
+   Photon emit 缺陷（从简单函数开始，逐步覆盖复杂模式）
+3. **长期**：Photon 后端成熟后，用 Photon 编译 VM 解释器自身 →
+   零 cffi 零 LLVM 完全自举
+
+**已验证工作正常的部分**：
+- seed AOT 编译的 VM 解释器：fib 6.34s、loop 72s、helloworld PASS ✓
+- Photon 编译的简单程序（hello world、算术运算）：✓
+- Photon 编译的编译器（不含 VM 解释器）：简单函数 ✓
+- 零 cffi：runtime 无 cffi（列表/string 操作由 Photon 发射的代码实现）✓
+
+### 10.31 P221-P226：值模型四连根因 + 栈参 ABI 结构性修复（2026-10-06 续Ⅺ）
+
+**方法论**：值模型探针（P221/P222：toStr(0)/toStr(-1)/列表 get/add）+ gdb
+批量批处理回溯（`-batch -x cmdbreak`，rbp 链走栈 + 断点抓参数）+ 反汇编
+核对被调方/调用方两侧槽位。**VEH 记录的 rip/rcx 不可靠**（多次指向指令
+中间/字符串常量区），gdb 才是本节的裁决工具。
+
+#### 根因 ①：一元负号整链丢失（P222 探针锁定）
+
+`toStr(-1)`→`1`、`return -v`（v=7）→`7`、`0-1`→`-18446744073709551615`。
+
+* **HatParser 正常**（.hat 里 `@i32_const 1` + `@neg`）；
+* **SsaBuilder/Lowering 正常**（MIR `Neg` 原样透传）；
+* **ISel 无 `Neg` 分派** → 落默认 Value 节点且 args 整体丢弃 → home 槽
+  永不被写，读者拿到残渣（与历史 `Not`/`GetField` 同族）。
+* **修复**：ISel 加 `Neg` 分派 = `xor dst,dst` + `sub dst,src`（pattern 13+3）。
+  ⚠️ 不能用「DAG 内现造 Const 0 + mov」：该 Const 节点无自有物化指令
+ （emitConst 的常量才有 pattern-6 mov 跟随），RA 会把它涂进残渣寄存器
+ （实测反汇编 `mov %rsi,%rdi`）。
+* 反汇编验证：`negProbe` 现为 `xor %rsi,%rsi; sub %rbx,%rsi` ✓。
+
+#### 根因 ②：runtime toStr 负数分支寄存器误用
+
+绝对值恒 `0-1=-1`：`emitMovRI32("eax",1)` 把标志值 1 写进 **rax**——恰好
+覆盖 886 行刚载入的输入——随后 `sub rdx,rax` 算的是 `-1` 而非 `-input`。
+无符号除 10 → `-18446744073709551615`。修复：标志改用 rdx。
+
+#### 根因 ③：列表家族 runtime 桩压制 guest 真实现
+
+* runtime 的 `Collections.getAt` 是**恒返回空串的桩**（`Env.get` 历史落点），
+  `emitCollectionsGetAt` 只有两行 `lea rax,@str.0; ret`；
+* isRuntimeSymbol 名单含 list 家族 9 项 ⇒ guest 的 core 真实现被
+  `!isRuntimeSymbol` 跳过发射 ⇒ `tl.get(0)` 返回空串。
+* **修复**：名单两侧同时摘除 7 项（count/listAppend/getAt/indexOf/contains/
+  listRemove/mapContainsKey），guest core 实现（core 布局）接管；
+  guest 没有的 clear/hashMapPut 留 runtime（注册名**统一下划线形态**，
+  与 ISel 映射/`resolveCalleeSymbol` 出口 dotToUnderscore 归一配套）。
+* 顺带：`emitCollectionClear` 函数体曾被误删（4 处调用点仍在）⇒ seed AOT
+  链接 `undefined symbol`，photon 驱动无法重建——已补回（core 布局 count=0）。
+
+#### 根因 ④：栈参 ABI 基址随序言 push 数漂移（「崩点随构建漂移」总根源）
+
+`emitParam` 第 5+ 参读偏移按「当时构建的实际 push 数」手工校准（0x10 影子
+空间 → 0x30），但序言 push 数 = 实际用到的 callee-saved 数（RA 着色决定），
+**逐构建漂移**。decodeNumeric（11 参）两 push 时 constTags 读到
+`tagged(1)=3` ⇒ `constMnemonic→count(3)→Memory.read64(3)` 必崩；
+历史上 `0x5000016b 打包值`（funcNames/mod 读到 .auc 缓冲字节）同根。
+
+* **修复（结构性）**：X86Emitter 序言固定 push 全部 7 个 callee-saved
+ （rbx,rsi,rdi,r12,r13,r14,r15）+ push rbp = 8 push ⇒ rbp = 入口rsp−0x40；
+  emitParam 基址 **0x68**（= 0x40 帧 + 0x08 ret + 0x20 影子空间），
+  `[rbp + 0x68 + (idx-4)*8)`，与调用方 `[rsp+0x20+i*8]` 写入严格对称。
+  代价：每函数多 6 对 push/pop，换取消除整类漂移。
+* 附带：canary 诊断（32KB 帧填充 + 哨兵 + canary_report）整体退役——
+  使命完成（定位本节四根因），自身实测有伪崩（const 循环访问 0x2），
+  且 32KB/函数是深调用链的巨额栈浪费。
+
+#### 实测进度（P226）
+
+* P222/P223 值模型探针**全绿**：-1/-2/-100/变量负值/0-1/-v/-1==nx 全部正确，
+  列表 add/get/count 正确；
+* minimal.auc（tiny4=println("hi")）：const 池解码 ✓、进入函数解码阶段
+ （此前 const 循环即崩）；
+* **未完**：解码深处仍有 NULL 字符串句柄崩（strlen(0)，gdb 实证 rax=0，
+  多点漂移）。下轮继续：gdb 断点法逐函数核对 decodeNumeric 链其余 ≥5 参
+ 调用点（decodeInstr 7 参等）+ readStr 的 null 返回路径。
+* **工具教训**：llvm-nm 的符号跨度不可靠（跨函数合并），帧回溯一律用
+  gdb rbp 链 + 断点抓参，反汇编验证字节级匹配后才定论。
+
+
+### 10.32 P227-P228：空串物化 + strcat NULL 安全 + phi 前驱贯穿（2026-10-06 续XII）
+
+**进展**：
+1. **空串物化修复**（emitConst）：`""` 字面量此前走数值路径（strToInt("")=0）
+   ⇒ 物化为 NULL。2026-10-03 曾刻意为之（布局敏感），streq 打 null 兜底——
+   但其他空串用法全是雷：实测 decodeNumeric 的 `var a1: String = ""` →
+   `strcat(s1, NULL)` → strlen(0)。现 `isString(ty) || constVal0 == ""` 一律
+   物化为真实 @str.N（1 字节 NUL）。
+2. **strcat NULL 安全（防御性）**：s1/s2 为 0 时按空串处理。它把 phi 缺陷的
+   崩溃变成**可观测的错误串**——正是这一步让 phi 缺陷现形。
+3. **phi 前驱贯穿基础设施**（格式层就位，激活待下轮）：
+   * SsaBuilder 四处 makePhi 产出 `前驱块:值` 对（buildIfExpr/buildBoolToString/
+     buildIf（签名加 thenBlock/elseBlock）/buildWhile（entryBlock + 回填补 latch））；
+   * HatSerializer.serializePhi 输出 `@phi(bb3=@t12, ...)`；
+   * HatParser.resolveOperand 识别 `bbN=@tM`（**暂解析为裸 vid**，见下）；
+   * Lowering phi 分支剥对 + 旁路记 `LirProgram.phiPredMap`；
+   * ISel (a0) 精确配边**已写但禁用**（P228 实测 pmAdd 出现垃圾入边 vid +
+     驱动 segfault，二分定位为 front 直通管线缺同款旁路表：SsaBuilder→LIR→
+     ISel 不经 HatParser/Lowering，`pred:vid` 原样进 LirValue.args ⇒
+     strToInt 跨冒号拼数字 ⇒ 入边全错）。
+
+**实测（[d] 探针，null-safe strcat 使其可见）**：tiny4 的 main 三条指令，
+`name` 的值逐迭代串块：迭代 2 `n=[(乱码@]`（应为 STORE_LOCAL）、迭代 3
+`n=[CALL_NATIVE_ARGS]`（应为 LOAD_LOCAL）——**多分支汇合的 phi 值错乱**
+（emitPhi「取第一个入边值」/ phi-mov 配边启发式在 20+ 分支派发上失效）。
+这是当前解码链的最后一个已知阻塞。
+
+**下轮（优先级序）**：
+1. **激活 phi 精确配边**：给 front 直通管线接 phiPredMap（Lowering 在两条
+   管线都跑，需查 front 的 MIR→LIR 为何未走 Lowering.Phi 分支）；恢复
+   HatParser 的 `lbl + ":" + rhs`；重新启用 ISel (a0)，二分 pmAdd 垃圾源。
+2. [d] 探针全绿后：撤探针 → minimal.auc 全解码 → helloworld → fib 端到端。
+3. phi 正确性回归集：probe_break/probe_cont_min/bench_loop + 自举全量。
+
+**工具教训**：llvm-nm 符号跨度跨函数合并，帧回溯一律 gdb rbp 链 + 断点抓参；
+Aura 的 AOT 下 `s.charCodeAt(i)` 判 ':'/'=' 等可打印字符时直接写数字字面量
+（58/61），不要用 `':'`（seed AOT 对单字符字面量比较曾误判）。
+
+
+### 10.33 P229：phi 精确配边激活成功——解码链首次完整走通（2026-10-06 续XIII）
+
+**三处修正后 (a0) 精确配边全链生效**（back log [a0] 命中 1702 次，pmAdd
+入边值全部纯净）：
+1. **lowerFunction 178 行 Phi 拦截点补剥对**（P228 的剥对误改在
+   lowerValue:214——phi 在进入 lowerValue 前就被 `v.op == "Phi"` 拦截，
+   那条分支是死路径。这就是 P228「pmAdd 垃圾 vid + 驱动 segfault」的根因：
+   `strToInt("2455:13635")` 跳过非数字累加 → 245513635）；
+2. **HatParser 标签→本管线块 id 翻译**：HAT 标签 `bb2988` 里的数字是前端
+   MIR 块 id，HatParser 的块 id 是预登记顺序号（declareBlock 顺序 addBlock）
+   ——必须经 blockMap（findBlockByName）翻译，否则 (a0) 与 predFlat 永远
+   失配、静默落入启发式兜底；
+3. LIR 块 id == MIR 块 id（lowerFunction 直接用 v.block），配对比较有效。
+
+**实测（minimal.auc = tiny4）**：
+* `AURA_VM_LOADONLY=1` → **`valid=true numeric=true err=[] funcs=1
+  consts=1`** ——装载+解码链路**首次完整走通**（此前 const 循环即崩）。
+* 遗留 ①：`name` 局部在多分支派发汇合处的值仍串块（[d] 探针可见，精确
+  配边生效后依旧）——嫌疑转向 phi home 的 RA 着色/常量物化层（边 MOV
+  写入了正确值但消费者读到错值），或 const 轮转覆写家族；
+* 遗留 ②：装载完成后（loadPredecoded/run 段）仍有崩，待 ① 解决后定位。
+
+**下轮**：
+1. gdb 断点抓 name phi 的边 MOV 写入值 vs 消费者读取值（二分「写错」
+   vs「读错」）；
+2. 若读错：查 phi 节点 home 的 RA 区间/干扰（Value/Phi 节点无自写指令，
+   RA 依赖 touchNode 登记边 MOV 触及）；
+3. [d] 全绿后撤探针 → minimal.auc 端到端 → helloworld → fib → 基准。
+
+
+### 10.34 P230：name 串值二分定位——phi 层实锤（2026-10-06 续XIV）
+
+**二分探针**（同一行打 `n=[name 经 phi]` 与 `direct=[opcodeName 直连]`）：
+```
+[d]0 n=[LOAD_CONST_I]     direct=[CONST_INT]    ← 迭代1 两边都对
+[d]2 n=[]                 direct=[STORE_LOCAL]  ← 迭代2 phi 值为空
+[d]1 n=[CALL_NATIVE_ARGS] direct=[LOAD_LOCAL]   ← 迭代3 phi 值泄漏它分支值
+```
+* **常量物化层排除**（direct 全对 ⇒ @str.N/lea/重定位链健康）；
+* **phi 层实锤**：迭代 1 正确、后续迭代错——嫌疑精确指向 **phi home 的
+  RA 着色/活跃区间**：phi 节点（kind=Value op=Phi）无自写指令，其唯一
+  写入是 pred 块末的边 MOV（pattern 7）。RA 的 touchNode 对「跨块 MOV
+  定义 + merge 块消费」的区间/干扰若失真（MOV 所在 pred 块里该寄存器
+  已被其他活值占用而干扰图不可见），即出现「边 MOV 写对了、消费者读到
+  被覆盖后的残值」——与观测吻合（迭代 1 对：首次 MOV 后未被覆盖；
+  后续迭代：pred 块内其他值把 home 覆写）。
+
+**下轮（RA 专项）**：
+1. gdb 断点：边 MOV 指令处打印写入值/地址 vs 消费者读取处——确认
+   「写对读错」（RA 覆写）vs「写错」（MOV 参数错）；
+2. 若 RA 覆写：查 buildIntervalInterference 对「Phi 节点 + 跨块边 MOV」
+   的区间合成（phi 的 def 应视为**所有 pred 块 MOV 点的并集**，live 一直到
+   merge 块最后一次消费）；或对 Phi 节点强制**溢出到栈槽**（绕开寄存器
+   着色，先保正确再谈优化）；
+3. 备选绕过：把 decodeNumeric 的 if-else 派发链提为独立函数（分支内
+   直接 ret，无 merge phi）。
+
+**状态**：LOADONLY valid=true（解码结构完整）；name 值错乱只影响
+numOpNames 助记符正确性（执行期 opcode 数值化）。
+
+### 10.35 P231：phi 强制溢出栈槽实验——机制成立，布局敏感拦路（2026-10-06 续XV）
+
+**实验**：RA Step2 对 `op == "Phi"` 跳过着色（强制走 slotForNode 专属栈槽；
+emitMovRR 的 isStackRef 分支真实写槽、消费者读同槽——读写家一致，机制
+成立）。同时补 scanFunctionMaxSlots 的 **instr.output 扫描**（phi 只作为
+边 MOV 的 output 出现，旧扫描漏计 ⇒ 槽号超出帧预算写红区）。
+
+**结果**：结构上成立，但**布局位移重新激活 readFromFile 段的「布局敏感」
+潜伏缺陷**（stringToBuffer 的 path 串变 NULL → strlen(0)，与 2026-10-03
+bench_loop p43-p47、emitConst 空串注释同族）——该家族尚未根治前，任何
+改变代码布局的修复都可能「按下葫芦浮起瓢」。
+
+**处置**：还原 phi 着色（回到 P229 最佳状态：LOADONLY valid=true numeric=
+true），实验记录在案。**「布局敏感」家族升级为独立专项**——它已是
+本轮三个修复（栈参 0x68、空串物化、phi 栈槽）的共同拦路虎。
+
+**布局敏感家族症状清单**（供专项归因）：
+1. bench_loop 循环变量随布局漂移（p43-p47 二分未果）；
+2. emitConst 空串分支曾致随机错乱（2026-10-03 注）；
+3. P231 readFromFile path 串 NULL（stringToBuffer 入参）；
+4. 崩点随构建漂移（栈参 ABI 时代，已根治）。
+共同点：**值在「物化点」与「消费点」之间被第三方写入覆写**——嫌疑集中
+在 slotForNode 兜底槽的**生命周期**（无色节点槽在发射期惰性分配，跨
+pred/merge 块的值其槽可能被中间块的其他惰性分配复用）。专项方向：
+给「跨调用/跨块存活的值」一个**持久槽**（RA 溢出区而非发射期兜底区）。
+
+**下轮**：布局敏感专项（slotForNode 槽生命周期）→ name phi 复验 →
+minimal.auc 端到端 → helloworld → fib。
+
+### 10.36 P232：文件链打通（fd=108 size=21532）+ io 栈参勘误（2026-10-06 续XVI）
+
+**重要勘误**：emitOpen/emitRead 的栈参槽 **−0x20/−0x18/−0x10 原本就是正确
+的**（arg5/6/7）。P232 曾按「rsp = rbp−0x48」误改成 −0x28/−0x20/−0x18——
+但 emitPrologue(0x40) **含 push rbp** ⇒ rbp = 入口rsp−8、rsp = rbp−0x40 ⇒
+arg5/6/7 = [rsp+0x20/28/30] = **rbp−0x20/−0x18/−0x10**。误改后 disposition
+落到 arg5 槽读到 0x80 ⇒ CreateFileA 报 ERROR 87（INVALID_PARAMETER），
+已回滚并加勘误注释。**教训：栈参槽算术必须先核对 prologue 的实际
+push 结构**（同 §10.31 的 emitParam 教训同源）。
+
+**工具突破**：PE 布局解析（.text RVA 0x1000 vsize 0x5c7ad / .rdata 0x5e000 /
+.data 0x60000 vsize 0x2002218=heapArena）+ exe 内**字节模式搜函数真身**
+（llvm-nm 只对 obj 有效；exe 无符号）。io_open 真实地址 0x14005d097，
+gdb 断点实证：rcx=path ✓ rdx=GENERIC_READ ✓ arg5/6/7=3/128/0 ✓。
+C 探针（clang 最小 CreateFileA 程序）证明同参数同 CWD 成功——
+排除环境因素。
+
+**实测进度（minimal.auc 端到端）**：
+* path 串四跳（driver→VmRunner→Vm→loadModule→readFromFile）全程 len=20 ✓
+* stringToBuffer：len=21 buf=有效堆指针 ✓；pathBuf 前 8 字节
+  `pb0=build/vm` ✓
+* **open：fd=108 ✓；lseek(END)：size=21532 ✓** ——文件读取链全通！
+* 剩余崩点移入**解码阶段**：strlen(rcx=0)（P227 修过的空串家族残留，
+  栈帧里可见 .auc 位置值 0x53ee 与 listAppend 函数指针）——即 [d] 探针
+  时代的 name/a0/a1 值错乱的同源问题。
+
+**下轮**：
+1. 解码阶段 strlen(NULL)：用 [stb]/[rfb] 同款值探针定位空串来源分支；
+2. 已知嫌疑：decodeNumeric 的 name/a0/a1 多分支 phi（P230 二分结论）；
+3. 探针（hop/stb/rfb/pb0）暂留——全链绿后一并撤除。
+
+### 10.37 P233：崩点锁入 decodeNumeric fn0——控制流「跳转」进 runtime strlen（2026-10-06 续XVII）
+
+**阶段探针推进度**（minimal.auc）：
+```
+consts done ✓ → natives done ✓ → tables done ✓ → decode begins ✓
+→ [lm] decode fn0 ✓ →（[pre-dn]/[dn] 探针不执行）崩
+```
+崩点收窄到 **decodeNumeric fn0 的派发/合并头部**（first dispatch merge）。
+
+**决定性观测**：崩点 = runtime `strlen(rcx=NULL)`（0x14005c36f，本构建
+runtime base=0x14005B9A0），但其 **[rsp] 存的是栈地址（0x403fb1c8）而非
+返回地址**——控制流是**跳转转入** strlen 的，不是 call 调用进入。
+[rbp+8] 出现过 listAppend 首字节地址（函数指针残留）。
+
+**主嫌疑**：guest 跳转标签补丁错位（resolveLabels/labelOffset 把某个
+循环回边/派发跳转的位移补到了 runtime strlen 区）——与「崩点随构建
+漂移」家族一致。次嫌疑：phi-mov 边 MOV 落块时机。
+
+**状态**：LOADONLY valid=true numeric=true 保持绿；全量跑在 decodeNumeric
+fn0 派发头崩。临时探针（hop/stb/rfb/pb0/[lm]/[pre-dn]/[dn]）已全部撤除，
+代码回到干净基线。
+
+**下轮（跳转补丁专项）**：
+1. 在 resolveLabels 里加**边界断言探针**：补丁前校验 target 落在本函数
+   [funcStart, funcEnd) 区间内，越界即打印 (jmpFieldOff, labelName,
+   target, funcBounds)——一次构建即可抓出全部错位跳转清单；
+2. 若确认跨函数错位：查 labelNames 表的清理时机（每函数发射后未清？）
+   或 labelOffset 的同名首/尾匹配策略；
+3. 修复后 [pre-dn] 式值探针复验 name/a0/a1（P230 的 phi 值错乱可能与
+   跳转错位同根——边 MOV 落在错函数体内等于没落）。
+
+### 10.38 P234：跳转错位假说证伪——strlen(NULL) 是合法调用（2026-10-06 续XVIII）
+
+**自我纠错两条**：
+1. §10.37 的「[rsp] 是栈地址 ⇒ 跳转转入」误读：strlen 序言后 [rsp] =
+   saved rbp（调用者的 rbp，栈地址属正常），[rbp+8] 才是返回地址——
+   strlen(rcx=NULL) 是**合法 call 进入**，控制流无辜；
+2. 曾给 resolveLabels 加越界断言探针，但引用了 X86Encoder **不存在**的
+   `functionOffsetsList` 字段（它在 PhotonObjectWriter）——seed 对未知
+   字段静默解析成 i32 ⇒ `.size` 生成 `Collections_count(i32)` ⇒ 链接
+   undefined symbol。已还原。**教训：跨类引用不存在的成员，seed 不报错**
+   （第三次踩「静默错解析」坑，前两次：栈参槽、functionOffsets）。
+
+**修正后的定位**：decodeNumeric fn0 派发头 strlen(NULL) = **合法调用、
+实参 NULL**——回到 P230 二分的老结论（name/a0/a1 多分支 phi 值错乱
+家族），加上解码链新证据：文件读取全通后，loadModule 尾段（函数表
+fill）与 decodeNumeric 的派发头都有 NULL 串流动。
+
+**基线保持**：LOADONLY valid=true numeric=true ✓；干净构建 P234。
+
+**下轮（收束点）**：
+1. P230 的 direct/n 双打探针复用（该探针已证明 opcodeName 直连正确）
+   ——**实用绕过**：decodeNumeric 的 `mod.numOpNames.add(name)` 改为
+   `add(opcodeName(opcode))`（0/26/27 三特例在分支内已单独 add），
+   绕开 name phi，先让端到端跑起来；
+2. name/a0/a1 phi 值错乱的根治（RA 跨块区间）继续作为 photon 成熟度
+   的独立工作线。
+
+### 10.39 P235：派发链 PushHandler 化完成——phi 绕过不是充分条件（2026-10-06 续XIX）
+
+**过程事故与教训**：第一次改写用 `readByte` 行做锚点，命中的是**文本模式
+解码函数**（instrText 家族，第一个匹配点）而非 decodeNumeric——改写产物
+破坏该函数 ⇒ front 解析失败 ⇒ **整个 AucLoader 模块的函数从 .hat 掉落**
+（decodeNumeric 调用悬空，链接 undefined symbol）。git stash 二分 + hat
+函数普查（967 @fn）+ 逐版本 hat 检查定位。**教训：脚本化大改写必须用
+函数内唯一锚（如 `var name: String = opcodeName`）二次断言目标身份**。
+
+**正确落地的 PushHandler 化**：decodeNumeric 全派发链（0/23-25/26/27/78/
+30/32-33/40/71/70-77/72/80-81/82/默认路径）每分支内联 numOpNames/
+numArgsFlat 追加后 continue——**name/a0/a1 的 merge phi 全部消灭**
+（.hat 保留 ✓ 2391 个 bb= phi ✓ LOADONLY valid=true ✓）。
+
+**结果**：全量跑仍在 B 后 strlen(NULL) 崩——**phi 绕过不是充分条件**：
+NULL 串另有源头（readStr 逐字符 strcat 链 / fromCharCode / 常量池循环
+的某处——fromCharCode 实现已复核正确）。P230 的「direct= 正确」只证明
+opcodeName 路径健康，不证明 name phi 是唯一污染源。
+
+**下轮**：
+1. 崩点回溯：strlen 叶子帧的调用者（[rbp+8]）在**当前构建**的精确解析
+   （PE .text RVA 0x1000 + obj 偏移，P232 工具法）；
+2. 嫌疑复排：readStr 的 `result + fromCharCode(c)` 循环（result 跨迭代
+   phi！与 name 同族——readStr 也该 PushHandler 化：改为先收集字节到
+   局部数组/固定容量缓冲再一次性构建）；
+3. readStr 稳定后：decode fn0 → 全解码 → 端到端。
+
+### 10.40 P236：opcode 名表 HashMap 化平——String.hashCode 无 this 展平缺陷实锤（2026-10-06 续XX）
+
+**根因实锤（gdb 断点 + 调用点反汇编）**：装载崩溃链 =
+`loadPredecoded → Opcodes.buildNameMap → HashMap.put → hashKey(key) →
+@hashCode(key) → **String.hashCode（前端展平成无 this 的裸 `@fn hashCode()`，
+接收者物化成 @i32_const 0）** → strlen(0)`。HAT 证据：两个无参
+`@fn hashCode()`（两个类的 override 展平后裸名冲突）+ 函数体
+`@call @strlen(@i32_const 0)`。
+
+**修复（真实落地）**：`Opcodes` 的 nameToCode HashMap → **平行列表
+（flatNames/flatCodes）+ 线性扫描**（装载期 ~125 项，性能无碍）。125 个
+put 全部转换。这是「前端 virtual 方法展平丢 this」缺陷的**首个工程绕过**。
+
+**结果**：LOADONLY 保持绿；全量跑的崩点**再次前移**——现在是
+`Vm_setArgsRow` 区的 `strlen(rcx=0x1)`（参数扁平槽的串处理读到非串值
+0x1）。同族问题（前端方法展平丢 this / phi 值错乱）的下一个调用点。
+
+**已确认的缺陷链（供前端专项）**：
+1. `override fun hashCode()` 等虚方法展平成裸名无参 @fn（丢接收者）
+2. 多个类的同名虚方法展平后裸名冲突（两个 `@fn hashCode()`）
+3. String phi 跨迭代值错乱（P230）
+**绕过清单（已落地）**：Opcodes 平行表 ✓、decodeNumeric PushHandler 化 ✓、
+readStr 递归化 ✓。
+
+**下轮**：对 Vm_setArgsRow/loadArgsFlat 区做同款去 HashMap/去 phi 改写；
+或直接攻前端虚方法展平（`Class_method` 命名 + @this 形参保留）。
+
+### 10.41 前端虚方法展平缺陷精确定位（下轮专项施工图）
+
+**定义侧**：`Hir.aura::lowerStmt` 的 Function 分支（~1174 行）——类体方法
+直接 `lowerFunction(ast, id)`，而 `lowerFunction` 取 `name = ast.textOf(id)`
+（**裸方法名**），既不限定 `Class_method` 也不注入接收者形参。
+HashMap_hashKey（带 @this）与 hashCode（裸名无 this）的差异来源待查：
+pre-registerTypeMembers（1854 行）登记 `Class.method`，调用侧
+lowerCall（2129/2141/2156/2191 行）按 `recvName + "_" + method` 限定——
+**调用侧有限定、定义侧无对应重命名** ⇒ `key.hashCode()`（key: Any）走到
+裸名分支 ⇒ 与无参裸定义「匹配」，接收者被物化成常量 0。
+
+**修复方向（下轮）**：
+1. 定义侧：lowerTypeDecl 的方法子节点降级时，HirFunction 名改为
+   `Class_method` 且 params 注入 `this: Class`（与 HashMap_hashKey 对齐）；
+   调用侧同名限定已存在，天然对齐；
+2. 兼容面：`@fn hashCode()`/`isEmpty()` 等裸名定义的既有调用点
+   （String 字面量 receiver 的 `.hashCode()`/`.isEmpty()` 派发）逐一核对；
+3. 回归面：HashMap/DebugHashMap 全链 + minimal.auc → helloworld。
+
+**当前绕过状态**：Opcodes 平行表已消最大的一个炸点；剩余崩点
+Vm_setArgsRow 区 strlen(0x1) 同属此家族（装载期还有别的 hashCode/
+虚方法调用点—— 每次绕过一个，崩点前移一次）。
+
+### 10.42 P237：接收者注入落地（值类白名单）——半程达成（2026-10-06 续XXI）
+
+**实现**（Hir.aura）：
+1. `pendingMethodSelf` 通道：lowerStmt Function 分支（类型体上下文）设置，
+   lowerFunction 消费——方法名限定 `Class_method` + params 顶部注入
+   `this: Class` + 登记 localVarTys（方法体 this.length/this.charCodeAt
+   派发依赖）；
+2. **作用域白名单** valueLikeTypes = String/Byte/Boolean/Double/Unit/Char/
+   Float/Int/Long/Short——`value`/`override` 修饰符在 AST 不保留（parser
+   跳过软关键字），无法按修饰符判定；常规类（HashMap/FileUtils/Collections
+   的裸名互调图）不能波及（首版全类注入实测断裂：exists/readLine/
+   Collections_Collections_count 等连环 undefined）；
+3. **暂排除 toUpperCase/toLowerCase**：其调用点（Vm_callOrBuiltin 的
+   `toStr(v).toUpperCase()` 表达式 receiver）经解析期 demotion 保持裸名，
+   限定定义会断链（实测 front 链接失败）；
+4. HashMap.aura hashKey：`val ks: String = key as String; ks.hashCode()`——
+   String 局部的 `.hashCode()` 限定到 String_hashCode ✓。
+
+**实测**：String_hashCode/String_isEmpty/String_toInt 等带 this 定义 ✓；
+裸 `@fn hashCode` 定义消失 ✓；LOADONLY valid=true ✓；front/back 双绿 ✓。
+全量跑仍在同族崩（另一个 NULL 串源——装载链还有未排查的虚方法/串循环
+调用点，逐个绕过的牧民式推进继续）。
+
+**遗留（下轮）**：
+1. 当前 strlen(NULL) 调用者定位（PE 字节模式法，§10.36 工具）；
+2. 调用侧 demotion 限定补齐（解析期 demoted 调用的 receiver 类型查表
+   限定）→ 移除 toUpperCase/LowerCase 排除；
+3. 端到端 minimal.auc → helloworld → fib。
+
+### 10.43 P238：崩点定格 numArgsFlat 列表堆覆写（2026-10-06 续XXII）
+
+**调用链实证**：`loadArgsFlat` 的 `ln.length` → `strlen(ln=0x1)`——
+`flat.get(i)`（numArgsFlat 的 getAt）返回了**整数 1** 而非字符串。
+loadArgsFlat 自身代码纯 charCodeAt/vmSubstr/add（无 strlen 触达）⇒
+**numArgsFlat 列表（句柄/items/count）在解码完成后、loadArgsFlat 消费前
+被第三方覆写**。
+
+**排除项**：PushHandler 化（分支内联 add 全为字符串字面量/局部串）✓、
+readStr 递归化 ✓、fromCharCode bump 算术（复核正确）✓、emitObjectAlloc
+边界算术（复核正确）✓。
+
+**嫌疑收窄（下轮实验设计）**：
+1. **窗口括号法**：decode 完成点 vs loadArgsFlat 入口各打
+   `size=`+`get(0)/get(1)/get(2)` 值探针——覆写发生在两探针之间；
+2. 若 decode 后即刻已坏 ⇒ 写手在 decode 循环内（const 池 escape 拼接 /
+   instrIndexAt / classNameAt 的某个野写）；
+3. 若 loadArgsFlat 前才坏 ⇒ 写手在 loadPredecoded 的前置段
+   （registerAucClasses / funcTable 解析）；
+4. 定位写手后预计为「某个 Long/Int 值写进了列表 items 区」——与
+   §10.35 布局敏感家族（值在物化点与消费点之间被覆写）同源。
+
+**本轮落地**：readStr 递归化（消 String phi）✓；decodeNumeric 派发链
+PushHandler 化 ✓；接收者注入 + Opcodes 平行表 ✓（前两轮）。LOADONLY
+valid=true 保持。
+
+### 10.44 P239：分配器状态在解码循环期间被破坏实锤（2026-10-06 续XXIII）
+
+**窗口括号法结果**：
+* `[winA]`（decode 完成）：numArgsFlat n=6 ✓ 但 **e0/e1/e2 全 = "6"**
+ （读到的像是列表自身 count/cap——items 指针自指或地址被重用）；
+* `[winB]`（loadArgsFlat 入口）：同 winA（一致，非传输期损坏）；
+* **`[winA3]` 新建列表自读（arrayListOf + add + get）直接段错误** ——
+  **分配器（heapBump 域）状态在解码循环期间已被破坏**，winA 时任何新
+  分配即崩。
+
+**已复核正确**：emitFromCharCode / emitStrcat / emitObjectAlloc 的
+heapBump 算术（逐条反汇编）。
+
+**下轮（heapBump 追踪）**：
+1. `aura_mem_used_mb()`（读 heapBump）在 decode 前后/每 N 条指令打点——
+   bump 值应单调递增；骤降/归零即抓到写手；
+2. 或 heapBump 槽的硬件断点（DR1，VEH 已有基建）；
+3. 写手锁定后预计为「某段代码把值写进了 heapBump 槽（.data+0x2000020）」
+   ——布局敏感家族的最深一层。
+
+**本轮落地**：窗口括号法实证 + readStr 递归化 + PushHandler 化维持。
+探针（winA/winB/winA3）暂留。
+
+### 10.45 P240：解码正确性里程碑——6 指令全对（2026-10-06 续XXIV）
+
+**决定性数据**（fresh front+back 后的全元素 dump）：
+```
+numArgsFlat = ["0","1","2","","4",""]     ✓
+numOpNames  = [LOAD_CONST_I, STORE_LOCAL, LOAD_LOCAL, RETAIN, LOAD_LOCAL, RETURN] ✓
+fresh=[AABB] ✓  heapBump=651747（单调合理）✓
+```
+tiny4 main 的 6 条指令（CONST 0 / STORE 1 / LOAD 2 / RETAIN / LOAD 4 / RETURN）
+**全部正确解码**——PushHandler 化 + readStr 递归化 + 接收者注入 + Opcodes
+平行表的组合修复**在解码路径上全部生效**。
+
+**重要教训**：P239 的「e0=[6] 元素全 6」是 **SKIP_FRONT 下的旧 hat 假象**
+（旧探针读旧内容）——「front+back 都重跑」必须是探针实验的纪律。
+
+**当前崩点**：winA 之后（loadModule 尾段 funcTable/exports 解析，或
+loadPredecoded/buildLoadCaches/run 准备段）。探针 winA/winA3/hb 已留。
+
+**下轮**：
+1. winC（loadPredecoded 入口）/ winD（run 入口）探针定位剩余崩点；
+2. 端到端 minimal.auc → helloworld → fib。
+
+### 10.46 P241：崩点锁入 loadPredecoded 段——winA 与 winB 之间（2026-10-06 续XXV）
+
+**窗口推进**：
+```
+winA（decode 完成）  numArgsFlat = ["0","1","2","","4",""] ✓ 正确
+winC（pre-loadPredecoded）✓
+winB（loadArgsFlat 前）n=6 e0=[6] e1=[6] ✗ 已损坏！
+```
+**numArgsFlat 在 loadModule 返回后、loadArgsFlat 消费前被覆写**——窗口 =
+registerAucClasses + loadPredecoded 的字段赋值/容器构造段
+（HashMap() 构造器 × 8、VmStack/VmFrameStack/VmStrStack/VmLocals 构造）。
+
+**已排除**：VmStack 系容器（arrayListOf 承载，无巨 alloc）；VmCollections
+的裸 Memory.alloc（cap*8 小尺寸）。
+
+**下轮**：
+1. 二分窗口：registerAucClasses 前后各一探针 → HashMap 构造器逐个插探针；
+2. 首选怀疑：HashMap() 构造器的桶数组分配（capacity/扩容算术）；
+3. 或 heapBump 值探针（aura_heapbump 已就位）在每个构造器后打点——
+   bump 回退即定位写手。
+
+**里程碑保持**：解码 6 指令全对（§10.45）；探针 winA/winA3/hb/winB/winC
+暂留。
+
+### 10.47 P242：渐进覆写模式实锤——分配器地址重用（bump 回退）（2026-10-06 续XXVI）
+
+**窗口二分**（minimal.auc，正确元素应为 ["0","1","2","","4",""]）：
+```
+winA   e=[0,1,2,'',4,''] ✓（decode 完成）
+winB2  e=[0,0,...]        ✗ e1 已变（registerAucClasses 之前的 loadModule 尾段）
+winC   e=[0,0,...]        （registerAucClasses 无辜）
+winB   e=[6,6,...]        （loadPredecoded 构造段进一步覆写）
+```
+**模式**：items 区被**渐进覆写**——先 [0,0,...]（疑似 parentIds 类注册表
+内容），后 [6,6,...]（疑似 6 元素列表内容）——**新列表分配到与
+numArgsFlat.items 相同的地址** ⇒ 分配器 bump 在两次分配之间**回退**。
+
+**排除**：emitObjectAlloc/emitStrcat/emitFromCharCode/__list_alloc 的
+bump 算术（逐条反汇编单调 ✓）。
+
+**下轮（抓回退现行）**：
+1. aura_heapbump 在 loadModule 尾段的每个 readStr/list 操作后打点——
+   bump 序列必须严格递增，回退点即写手；
+2. 头号嫌疑：某条分配路径读了**陈旧的 bump 副本**（寄存器缓存跨调用）
+   或 emitListAlloc 的 +8KB slack 与元素区错位；
+3. 抓到后修 bump 算术 ⇒ numArgsFlat 不再被覆写 ⇒ 端到端通路。
+
+### 10.48 P243：bump 回退证伪——相邻分配越界写字（单字符覆写）（2026-10-06 续XXVII）
+
+**heapBump 逐段打点**：hb7=650328 → hb8=650614 → hb2p=650756 →
+hbWinA=650960 → hb@winA=651811——**全程严格单调** ⇒ bump 回退假说证伪。
+
+**修正后的定位**：numArgsFlat.items 区被**相邻（下方）分配的越界写**
+侵入——观测到的损坏是**单字符级**（e1 的 '1' 被写成 '0'、winB 时的
+'6'）——即某段代码把字节写过了自己缓冲区的末尾，落在紧邻上方分配的
+numArgsFlat items 区。NUL 终止符越界（off-by-one）是首选形态。
+
+**嫌疑面（按分配时序）**：numArgsFlat.items 之前最后一个分配 = 解码期
+最后的串/列表操作——strcat 链（len1+len2+1 精确写 ✓ 复核）、
+fromCharCode（8 字节写 8 字节槽 ✓）、**escapeConstValue / readConstValue
+的常量池拼接**（尚未逐字复核）、instrIndexAt。
+
+**下轮**：
+1. winA 探针扩展：dump items 区前后 32 字节的 RAW 内容（需句柄——
+   经 __field_get 前端通路或临时 StrPrims extern 读 Long）；
+2. 或 escapeConstValue/readConstValue 加 NUL 越界探针；
+3. 修复后端到端。
+
+### 10.49 P244：helloworld 大规模解码验证——1194 条目全对（2026-10-06 续XXVIII）
+
+**用户指令全链执行**：photon 驱动重编（PhotonP238，seed 一次通过）→
+vmhost 重编（front/back 双绿）→ seed 生成 helloworld.auc（26288 字节、
+7 函数）→ photon vmhost 运行。
+
+**解码里程碑在大规模成立**：
+```
+n=1194 条 argStr 条目全部正确：
+e0=[0] e1=[1] e2=[2] e3=[println,1] e4=[4] ... e10=[println,1] ...
+heapBump 单调：hb7=756184 → hb8=757531 → hb2p=757751 → hbWinA=824762
+```
+println 调用（含参数个数）、局部声明、字面量——**helloworld 全程序
+7 个函数的解码完全正确**（P235-P237 修复组合在 26KB 规模验证通过）。
+
+**剩余拦截**（与 minimal.auc 同族同位）：
+* winB2：e0 0→1、winB：→4——loadPredecoded 段相邻分配越界写
+  （§10.43 定性的单字符/小值越界家族）未修复 ⇒ helloworld 未达
+  run 阶段；
+* 崩点仍在 loadPredecoded 容器构造段（winD 未达）。
+
+**下轮**：§10.43 的写手定位（escapeConstValue/readConstValue NUL 越界
+逐字复核 + loadPredecoded 容器构造段逐构造器 hb 打点）。
+修复后 helloworld 端到端即通。
+
+### 10.50 P245：探针自证清白——列表内容在 winA↔winB2 间真实变化（2026-10-06 续XXIX）
+
+**单行探针复核**（消除多段拼接疑虑）：
+```
+winB2-0/1/2 = [1] [1] [1]   （三行独立 println，索引无关同值）
+winB-0/1/2  = [8] [8] [8]
+```
+**HAT 逐行核查**：探针 = `__field_get(@mod, 20)` + `Collections.getAt(list, 0)` —
+field 20 = numArgsFlat ✓（AucModule 声明序第 20 个字段，构造器 29 个
+field_set 对齐 ✓）；getAt 为 guest core 真实现（read64(list)/read64(items+idx*8)）
+✓。**探针与读取路径全部无辜** ⇒ numArgsFlat 的 items 块内容在 winA 与
+winB2 之间**被真实改写**（bump 单调排除地址重用，§10.48）。
+
+**矛盾聚焦**：改写者必然「知道」numArgsFlat.items 的地址——非随机野写
+（单字符/单元素精准变化）——嫌疑：
+1. 某处仍持有**旧 grow 前的 items 指针**并往里写（listAppend grow 后
+   遗留的旧 dst——emitStrcat 的 r12/emitObjectAlloc 的 r12 未被后继
+   覆盖时的延迟写）；
+2. 或 decode 循环内某列表的 add 在 decode 后仍有**残留迭代**。
+
+**下轮**：
+1. 直接路径：AucModule 加 `var argsItemsDbg: Long` 字段，decode 完成时
+   `argsItemsDbg = <items 指针>`（需 List→Long 通路：新 extern
+   `HeapDiag.itemsOf(l: Long): Long` = read64(l+16)），winB2 处比对
+   items 指针是否漂移 + 旧地址内容 dump；
+2. 顺带排查 listAppend grow 的旧 items 泄漏写。
+
+### 10.51 P247：Memory_copy 8 倍过量复制修复（真 bug）——self-view 假说回归（2026-10-06 续XXX）
+
+**修复（真 bug）**：runtime `Memory_copy` 以**字节数当 QWORD 次数**——
+`copy(dst, src, n)` 循环 n 次 × 8 字节步进 = **8n 字节过量复制**。每次
+listAppend grow / 任何 Memory.copy 都把 dst 后 7n 字节的相邻堆块刷成
+源数据。已修为 qword 次数 = ceil(n/8)。
+
+**结果**：helloworld 仍在 winB 崩，但 [winB-0/1/2]=[8]×3——**8 = 列表
+grow 后的 capacity**——「items 指针 == 列表 header 地址」的 self-view
+形态回归（读 items[0] = header[0] = count…8）。newList 的 header alloc
+（24B）与 items alloc（cap×8）之间 bump 未推进/同址 ⇒ 分配器双调用
+同址——嫌疑集中在 emitObjectAlloc 的 align/推进算术对**连续两次紧邻
+调用**的处理。
+
+**下轮**：
+1. newList 两连 alloc 的地址追踪（HeapDiag 扩展 alloc2 探针或
+   aura_heapbump 在两次 alloc 间打点）；
+2. emitObjectAlloc 的 align 与 store 时序逐指令复核；
+3. 修复后端到端。
+
+### 10.52 P248：Memory_copy 归因实验——修复无罪，损坏为布局依赖（2026-10-06 续XXXI）
+
+**对照实验**：还原 Memory_copy 旧行为（8× 过量复制）后解码仍 n=8 ⇒
+P247 修复**无罪**。结合全轮证据，最终定性：
+
+**同一个底层值损坏缺陷，表现随 guest 布局漂移**：
+* P244 布局：helloworld 1194 条解码全对，崩点在 loadPredecoded；
+* P248 布局（加了 HeapDiag extern + win 探针）：解码仅 8 条即止
+  （reader.data/pos 值损坏家族——readByte 提前 -1 break）；
+* 旧布局：const 池即崩 / 派发头崩 / ……
+
+**已排除**：栈参 ABI（已修+勘误）、Memory_copy（无罪）、bump 回退
+（单调证伪）、emitObjectAlloc/strcat/fromCharCode 算术（逐条复核）、
+探针自身（单行化后仍现）。
+
+**残留头号嫌疑**：堆块的**延迟写**（某函数在返回后仍持有并写入
+陈旧 dst 寄存器/槽——emitStrcat 的 r12 写指针跨调用残留家族）或
+**AucReader 对象字段的值损坏**（与 mod.numArgsFlat 同族，P245 已证
+mod 字段内容真实变化）。
+
+**状态**：LOADONLY 绿；修复清单（栈参/负号/空串/Memory_copy/接收者
+注入/Opcodes 平行表/PushHandler 化/readStr 递归）全部保持；探针
+（winA/winA3/hb/winB2/winC/winB/HeapDiag）暂留供下轮继续。
+
+### 10.53 P250：解码量随布局连续变化——1194→8→49 实测（2026-10-06 续XXXII）
+
+**实验**：删除 winA 逐元素 dump 循环（helloworld 时 1600 次 println，
+海量临时串分配的布局扰动源）后重跑 helloworld：
+```
+P244 布局（无 dump 循环）：n=1194 ✓
+P248 布局（有 dump 循环）：n=8
+P250 布局（删 dump 循环）：n=49
+```
+**解码量随探针布局连续变化**——get(0) 的返回值恰为列表内其他元素
+（e1/e4/e9），即 **get 的 items 基址/索引随布局偏移**。
+
+**新定性**：这不是「列表被第三方覆写」，而是 **field 20 读到的列表
+对象本身随布局切换**（winA 读的 A 与 winB2 读的 B self-consistent：
+B 的 n=49 且 get(0)="1" 在 B 内自洽）——**同一个 field 20 槽在
+winA 与 winB2 读到不同的列表句柄**——两处读的是不同函数中的
+`mod.numArgsFlat`：winA 在 loadModule 内（mod=局部），winB2 在
+loadAucAndRun 内（mod=**返回值接收变量**）——**返回值传递链
+（emitRetValue rax → 调用方槽）存在句柄漂移**，与 P231 self-view
+实验的 RA home 冲突家族同源。
+
+**下轮（RA 返回值通路专项）**：
+1. HeapDiag 扩展 `itemsOf(l: Long): Long`（read64(l+16)），winA/winB2
+   各打 numArgsFlat 的 items 指针——量化句柄漂移；
+2. 查 loadModule 返回值：emitRetValue 的 rax → loadAucAndRun 接收槽
+   的 RA 区间是否被中间调用破坏（loadAucAndRun 前导的
+   mod.isValid()/Env.get 调用）；
+3. 或最务实：loadAucAndRun 改为从**堆槽**取 mod（loadModule 返回后
+   立即经显式局部中转，禁用寄存器直传——绕开 RA 返回值通路）。
+
+### 10.54 P252：元结论——逐点修复已到收益边界，需 RA/phi 根治（2026-10-06 续XXXIII）
+
+**实验**：decode 循环内加 `as Int` 可靠性对照探针——探针未执行，崩溃
+在新布局下**前移到 readStr 递归路径**（P236 的递归化改写在新布局下
+自身不稳定）。
+
+**元结论（本系列 20+ 提交的最终归纳）**：
+photon 后端存在**布局敏感的值损坏底层缺陷**（RA home 冲突 / phi 合并
+/ 跨块生命周期），表现为：任意代码/布局变化都会让「哪个构造坏」换位置
+（decode 量 1194→8→49、崩点在 readStr/decodeNumeric/loadPredecoded 间
+漂移）。已修复并验证的真实缺陷（栈参 ABI/负号/空串/Memory_copy 8×
+过量复制/接收者注入/Opcodes 平行表/PushHandler 化/readStr 递归化）
+全部保持有效——P244 布局下 helloworld 1194 条解码全对即为能力证明。
+
+**收益判定**：逐点修复（牧民式）已到收益边界——每修一个，另一个换位。
+**根治路径（下阶段主线）**：按 §10.41/§10.53 的 RA/phi 专项：
+1. phi 合并的精确语义（P228 基建已就位：pred:vid 贯穿 + (a0) 精确配边，
+   需修 front 管线同款旁路后启用）；
+2. RA 跨块生命周期（P231 强制溢出方向，待布局稳定后重启）；
+3. 返回值传递链（P250 句柄漂移）。
+
+**基线保持**：LOADONLY valid=true funcs=7 consts=54；全部修复保持；
+探针（winA 概要/winB2/winC/winB/[cl]）暂留。
+
+### 10.55 P253：Long↔Int 截断转换不可靠实锤——readU32Int 修复解码截断（2026-10-06 续XXXIV）
+
+**根因（第四个系统性 emit 缺陷）**：**Long↔Int 截断/扩展转换在 photon
+AOT 下不可信**——`codeLenL as Int`（及 readU32 内 `as Long` 扩展）产出
+垃圾 ⇒ codeLens 全变 1-3 ⇒ **每函数只解 1 条指令**（解码量 1194→8 的
+真身；此前随布局漂移的表象 = 转换的值依赖/布局依赖双重性）。
+
+**修复**：AucReader.readU32Int()（纯 Int 算术组合 4 字节，无任何
+Long↔Int 转换）；loadModule 的 codeLen/constsCount/nExports/
+expFuncIdx/nImports 五处全部改直出 Int。
+
+**实测（helloworld）**：
+```
+winA  n=1194 onN=1194 ✓（满量解码恢复）
+winB2 n=1194 onN=1194 on0=[LOAD_CONST_S] ✓✓（跨函数传递后仍 1194！）
+hb@winA=944379（解码分配量也随之正常）
+```
+**解码截断家族修复**——1194 在 loadModule→loadAucAndRun 间保持稳定。
+
+**剩余**：get(0) 的值漂移（winA"0"→winB2"1"→winC/winB"4"）与
+loadArgsFlat 的 strlen 崩——列表**元素内容**的跨函数漂移仍存在
+（句柄/条目分离的第二层），下轮继续。§10.55。
+
+### 10.56 P254：toStr 静态缓冲别名根治——跨函数数据流首次全程无损（2026-10-06 续XXXV）
+
+**第五个系统性缺陷确认并根治**：`toStr` 返回**静态 toStrBuffer 指针**
+——所有 toStr 结果互为别名（下次 toStr 覆盖上一次内容）。实测影响链：
+decodeNumeric 的 `add(toStr(idx))` 元素在消费时全变成最后一次 toStr
+的内容（§10.50 的 get(0) 漂移真身）；执行期 VM 栈上的 toStr 结果同理。
+
+**修复**：emitToStr 的返回路径改为——32 字节缓冲**拷贝到 heap 新块**
+（heapBump 分配 + 4 QWORD 拷贝）返回新指针（与 strcat 同堆约定）。
+过程事故：python 替换的 new 块误带完整函数收尾 ⇒ 重复 epilogue/`}`
+⇒ seed 解析反常（emitEnvOffsetProbe %self 未定义）——已删重复块
+（教训：脚本化替换的 new 必须与 old 的边界严格对齐）。
+
+**实测（helloworld，跨函数数据流首次全程无损）**：
+```
+winA  get(0)="0" n=1194 ✓
+winB2 get(0)="0" n=1194 on0=[LOAD_CONST_S] ✓（此前漂移 "1"）
+winC  get(0)="0" ✓
+winB  get(0)="0" ✓ get(2)="1" ✓（loadArgsFlat 输入正确）
+```
+
+**剩余**：loadArgsFlat 内部的下一个缺陷（vmSubstr 链 / argStrs add——
+输入已正确，崩在其处理段）。下轮 gdb 定位后收官端到端。§10.56。
+
+### 10.57 P255：崩点推进至 VM 准备构造段——indexOf(garbage-list)（2026-10-06 续XXXVI）
+
+**toStr 别名修复后的新崩点**（gdb 实证）：`Collections.indexOf(list, value)`
+的 `Memory.read64(items + i*8)`——**list 句柄为垃圾**。调用窗口 = winB
+（loadArgsFlat 前）之后的 **VM 准备构造段**：opCodes 构建（fromName 线性
+扫描 ✓ 无列表）、`globals/objectFields/objectClass/heapKinds/boxValues/
+closureCaptures = HashMap(...)` × 6 构造器、VmStack/VmFrameStack/VmStrStack
+构造。
+
+**输入已正确**（winB-0=[0] winB-2=[1] ✓ loadArgsFlat 输入无损）——
+本段崩溃与解码数据无关，是**容器构造自身**的缺陷（HashMap 构造器的
+桶初始化 / contains 误调用）。
+
+**下轮**：
+1. HashMap 构造器逐行复核（capacity/桶分配/hashKey 误调用）；
+2. 或直接在 6 个 HashMap 构造后插 winE 探针二分定位首个坏构造器；
+3. 修复后端到端。
+
+### 10.58 P256：崩点最终锁定 loadArgsFlat 内部——vmSubstr/substring 链（2026-10-06 续XXXVII）
+
+**winE 探针结果**：winE1（VmStack 构造后）**未达**——崩在
+`this.loadArgsFlat(args)` 内部（[winB-2] 为最后输出）。
+
+**loadArgsFlat 循环体**：charCodeAt 逗号扫描 + `VmOps.vmSubstr(ln, 0, c0)`
++ argStrs/argCounts/arg2-4Ints 的 add——**vmSubstr → text.substring(start, end)**
+——而值类 String 的 HAT 中**没有 `substring(start, end)` 定义**（只有
+substringAt/Before/After）——`substring` 的符号解析/实现为下轮首要疑点。
+
+**本轮累计状态**：toStr 别名根治后解码→装载输入全程正确
+（winB-0=[0] ✓ winB-2=[1] ✓ 1194 条稳定）；LOADONLY 绿；探针
+（winA 概要/winA3/hb/winB2-n/winC/winB 系/winE）暂留。
+
+**下轮**：
+1. 查 `substring(start, end)` 的符号解析（readU32Int 同款直查法）；
+2. 修复后端到端 minimal.auc → helloworld → fib。
+
+### 10.59 P257：崩点病理精化——count>0 而 itemsPtr=NULL 的列表（2026-10-06 续XXXIX）
+
+**gdb 双探针**：
+* indexOf 入口探针（首次调用）：list=NULL，value=0x140062aa7（字符串
+  指针）——**null 守卫正确返回 -1**（无辜）；
+* 崩溃帧：`read64(items + i*8)` 其中 **items=NULL、len>0**——存在一个
+  「header.count=8 但 header.itemsPtr=NULL」的列表。
+
+**来源锁定**：core `newList(cap)` 的**items 分配失败路径**会写出这种
+状态（`if (items == 0) { write64(l+16, 0) }`——count 已写 0 但后继
+grow 又写 count>0？或 32MB 边界/对齐导致 alloc 返回 0）。另：崩溃时
+value*8 已非 0（i 已推进），说明循环已迭代若干次。
+
+**下轮**：
+1. guest 全列表头体检：在 decode 完成点遍历
+   mod.numOpNames/numArgsFlat/consts 相关列表，打印
+   count/cap/itemsPtr 三元组——找出 count>0 && itemsPtr==0 的列表；
+2. 或 HeapDiag 扩展 `hdr3(l: Long)` 返回打包三元组；
+3. 修复（alloc 失败不该静默写 0 itemsPtr——应连同 count 写 0）后端到端。
+
+### 10.60 P263：loadArgsFlat 通过！崩点收窄至泛型特化 HashMap 构造器（2026-10-06 续XL）
+
+**探针梯进展**（helloworld，PhotonP254 构建）：
+```
+winA/winB（解码+装载输入）✓ 1194 条全对
+loadArgsFlat ✓（此前崩点已过！）
+winE1 stack ✓ winE2 globals(HashMap<String,Any>) ✓
+winE3 callStack ✓ winE4 frames ✓
+✗ 崩：aucArgBase/aucMode 赋值后、6 个泛型特化 HashMap 构造器中
+```
+**此前所有崩点（decode/constPool/loadArgsFlat）全部通过**——修复组合
+持续生效。
+
+**剩余崩点**：`HashMap<String, HashMap<String, Any>>` 等新泛型实例化的
+构造器（`HashMap<String, Any>` 已通过 ⇒ 基础构造器无辜，是**特化实例
+的代码生成**问题——每特化一份独立 ctor）。
+
+**下轮**：winE 细分探针（6 ctor 逐个）→ 定位具体特化 → 查该特化的
+构造器代码生成（新特化的 gens/范围）。
+
+### 10.61 P265：布局敏感恶性循环——探针自身改变布局致崩点前移（2026-10-06 续XLII）
+
+**实验**：winE4→winE5a 间加逐 field-set 探针 → 崩点**前移到 winE1 之前**
+（进程刚启动即段错误，探针输出全无）。加入诊断探针改变布局 → 激活
+更早的潜伏缺陷 → 诊断手段自我失效。
+
+**元结论定稿**：逐点修复（牧民式）对布局敏感家族**无效**——每改一处
+（包括加诊断）就改变布局使缺陷换位。**唯一出路是根治 RA/phi 底层**：
+1. phi 精确配边（pred:vid 基建已就位，front 管线旁路表待补）；
+2. RA 跨块生命周期（Phi 强制溢出 + output 扫描已回到树中 ✓）；
+3. 返回值传递链/长寿命值的 RA 区间保障。
+
+**当前有效资产**（全部保持）：
+* 六项系统性修复：栈参 ABI、负号、空串物化、Memory_copy 过量复制、
+  Long↔Int 转换、toStr 别名
+* 四项工程修复：接收者注入、Opcodes 平行表、PushHandler 化、readStr 递归化
+* Phi 强制溢出 + instr.output 扫描（P249 重启）
+* LOADONLY valid=true funcs=7 consts=54 ✓
+* helloworld 1194 条解码全对 ✓（P244 布局）
+
+**根治后的验收标准**：同一构建下 helloworld 端到端打印 Hello World
+（或至少不受探针增减影响）。
+
+### 10.62 总结：10 项系统性修复 + RA 根治为下阶段主线（2026-10-06 收官）
+
+**已修复并验证的 10 项系统性 emit 缺陷**：
+1. 栈参 ABI（结构性恒定：7 callee-saved + 0x68 基址）——「崩点漂移」总根源
+2. 负号 xor+sub（ISel Neg 分派 + toStr 负数标志寄存器修正）
+3. 空串物化（emitConst ""→@str.N 真实分配）
+4. Memory_copy 8× 过量复制（字节数误当 QWORD 次数）
+5. Long↔Int 截断转换（readU32Int 纯 Int 算术直出）
+6. **toStr 静态缓冲别名**（heap 32B 副本返回）
+7. 接收者注入（值类白名单 + HashMap hashKey 对齐）
+8. Opcodes 平行表（去 HashMap/hashKey 家族）
+9. decodeNumeric 派发链 PushHandler 化 + readStr 递归化
+10. emitCollectionClear/emitReadCStr 补回
+
+**能力验证**：P244 布局下 helloworld **1194 条/398 指令解码全对** ✓；
+LOADONLY valid=true funcs=7 consts=54 ✓（P267 布局 49 条因 phi 溢出
+回滚后回归布局敏感值）。
+
+**剩余核心问题**：RA 跨块生命周期——跨 pred/merge 块值（Phi/跨函数
+返回/长寿命局部）的寄存器/槽位分配在布局变化时不稳定。**根治需 RA
+重写**（正确的跨块 liveness + phi 语义 + 跨调用寄存器保障）——
+多日工程量，施工图 §10.41/§10.53/§10.61 就位。
+
+**P267 状态**：phi 溢出回滚后 n=49（布局敏感值），LOADONLY 功能正常。
+探针 winB 系仍留 Vm.aura（下轮清理）。
+
+### 10.63 P268：长寿命值强制溢出——解码恢复至 1189/1194（99.6%）（2026-10-06 续XLIII）
+
+**实现**：RA allocate 的 Step2 中，活跃区间 > 64 条指令的值强制溢出到
+专属栈槽（`this.spill(i)`），只有短寿命值才走寄存器着色。溢出值经
+slotForNode 专属槽读写（getSpillOffset 恢复），读写家一致。
+
+**实测（helloworld）**：
+```
+n=1189（P244 全对基准 = 1194，差 5 条 ≈ 99.6%）
+winB-0=[0] ✓ winB-2=[1] ✓
+```
+相比 P248（n=8）改善 **149×**。剩余 5 条差 + loadArgsFlat 崩为下轮目标。
+
+**关键认知**：布局敏感家族的根因 = **长寿命值（跨块/跨调用）的寄存器
+分配在控制流汇合处不可靠**——强制溢出消除寄存器冲突后，布局敏感性
+大幅降低（n 从 8→49→1189 的进步对应于逐步消除干扰源）。
+
+**下轮**：阈值调优（64→32 或 128）+ loadArgsFlat 崩点定位。
+
+### 10.63 P269 最终状态：最优组合确认 + RA 根治为唯一路径（2026-10-06 收官）
+
+**最优组合验证**：P244 布局 + 全部后续修复（Long↔Int/toStr/hashKey/
+readU32Int/Memory_copy 等）→ n=49（P269b）。不同 RA 布局的解码量：
+| 布局 | 强制溢出 | n |
+|------|---------|---|
+| P244（无） | 无 | 1194 ✓（当时最优） |
+| P249（phi 溢出） | phi only | 8 |
+| P268（长寿命>64） | 全部长寿命 | 1189（最稳定） |
+| P269（无+后续修复） | 无 | 49 |
+
+**结论**：解码量在 8-1194 间随布局连续变化——**每一个布局都有一个
+不同的「第一个被截断的解码循环」**。这不是一个 bug 而是一类 bug：
+RA 的干扰计算对**跨块值**在控制流汇合处不可靠。
+
+**已修复的 10 项系统性缺陷全部保持有效**——P244 的 1194 条全对证明
+了这些修复使解码基础设施达到正确状态。
+
+**下阶段（唯一路径）**：RA 根治 = 跨块 liveness + 完整 phi 语义 +
+跨调用寄存器保障。施工图 §10.41/§10.53/§10.61 就位。预计多日工程量。
+
+### 10.64 P270：根因完整闭环——argNoneMark(0x7fffffff) 被当作列表句柄（2026-10-06 续XLIV）
+
+**全栈槽模式（禁用 RA 着色）结果**：
+* **解码满量恢复 n=1194** ✓✓✓（首次在全栈槽模式下达成）
+* 崩点推进至 `Collections_listSet(rcx=0x7fffffff)`——**argNoneMark
+ (2147483647) 被当作列表句柄传给 listSet**
+
+**根因完整闭环**：`loadArgsFlat` 的 `argStrs`（List<String>）与
+`arg2Ints`（List<Int>）的 **Vm 对象字段句柄混叠**——某个 field_get/field_set
+的索引冲突使得读 argStrs 元素时实际读了 arg2Ints 的 argNoneMark 值。
+
+**这是一个可修复的 bug**（不是布局敏感不可知论）：
+1. 查 Vm 对象的 argStrs/arg2Ints/argCounts/argNoneMark 的字段索引；
+2. 找到混叠的两个字段（索引冲突或字段表序错位）；
+3. 修复后端到端即通。
+
+**全栈槽模式验证了 RA 无关性**——禁用着色后解码满量恢复证明此前
+解码截断确实是 RA 着色干扰所致。
+
+### 10.65 P271：argInt 缓存跳过 + substring 链为下轮首查（2026-10-06 续XLV）
+
+**本轮**：arg0Ints/arg1Ints 构建跳过（消除 argNoneMark Int 值写入列表的
+混叠风险）。需 front 重生成 .hat 后验证效果。
+
+**当前首要疑点**：`vmSubstr → text.substring(start, end)` 的符号解析——
+值类 String 无 `substring(start,end)` 定义，`substring` 的 demoted 裸名
+解析目标待查（readU32Int 同款直查法）。String_substring runtime 实现已
+复核正确（bump 分配 + NUL + 钳位）。
+
+**下阶段路线图**：
+1. substring 符号解析直查；
+2. argStrs/arg2Ints 字段索引冲突定位（Vm 对象 field 表审计）；
+3. toStr 别名 + argInt 跳过等修复的 .hat 重生成验证；
+4. 端到端 minimal.auc → helloworld → fib。
+
+**资产保持**：10 项系统性修复 + 接收者注入 + Opcodes 平行表 +
+PushHandler 化 + readStr 递归化 + argInt 缓存跳过 + 全栈槽模式 +
+返回值全局槽中转 + 窗口括号/PE 解析/gdb 断点法工具链。
+
+### 10.66 P272：崩点精确到 listSet(list=1)——Int 被当列表句柄（2026-10-06 续XLVI）
+
+**gdb 实证**：`Collections_listSet` 入口的 list handle = **1**（一个 Int
+值被当作列表指针传入）。`read64(list=1)` → 读取地址 1 → 段错误。
+
+**反汇编核对**：listSet 内 `read64(list)` = `len = read64(l)`（列表头
+count 读取）——rcx=1 即 list=1。调用方传入垃圾句柄。
+
+**根因定性**：某个调用方将 **Int 值 1** 传给了期望 **List 句柄** 的
+listSet——类型系统在 demoted 调用（receiver 降级为首实参）时**不做
+类型检查**，Int/Str/List 全是 64 位裸值。
+
+**下轮**：
+1. 在 listSet 入口断点抓调用者（[rsp] 返回地址 → obj 偏移 → 函数名）；
+2. 修复该调用方（类型修正或防御性检查）；
+3. 端到端。
+
+### 10.67 P273：listSet 调用链分析——opCodes 填充合法，垃圾调用在后（2026-10-06 续XLVII）
+
+**listSet 入口断点数据**：
+* 合法调用：list=0x14011b2e8/0x140174430，idx=0/1/2/0x33f...，
+  val=堆指针/0x1（opCodes Int 填充）——正常；
+* **崩点在后续某个 listSet(garbage-list)**——全部合法调用之后。
+
+**重要发现**：`val=0x1` 的 listSet 是 opCodes 的 Int 填充
+（`opCodes.add(Opcodes.fromName(...))`），list=0x140174430 = this.opCodes
+列表。这些调用是合法的——说明 fromName 线性扫描 + add 正常工作。
+
+**下轮**：在 gdb 中让 listSet 断点只捕获**非法调用**（list < 0x140000000
+即非堆/非镜像地址），一次性抓出垃圾调用的完整调用链。
+
+### 10.68 P273：终极定位——Collections_getInstance 破坏 callee-saved rbx（2026-10-06 续XLVIII）
+
+**gdb 条件断点结论**：listSet 从未被非法 list 调用（条件断点未触发）。
+崩点 = **listSet 内部的 rbx 被覆写**：
+```
+listSet 入口：rbx = list（有效指针）✓
+...call Collections_getInstance...
+read64(rbx) 时：rbx = 1（被覆写！）✗
+```
+rbx 是 Win64 callee-saved 寄存器，**被调函数必须保存/恢复**。
+`Collections_getInstance` 破坏了 rbx ⇒ 全栈槽模式下 callee-saved
+保障失效。
+
+**根因**：全栈槽模式（P270 禁用着色）下 `collectSavedRegs` 返回空集
+（无着色 = 无 callee-saved 使用），而 emitter 序言的 savedRegs 被固定
+为 7 个。如果 getInstance 的序言/尾声与实际 push 数不匹配（或固定
+7 push 的 savedRegs 与实际恢复列表不同步），callee-saved 就会被
+覆写。
+
+**修复路径**：查 X86Emitter 的 savedRegs 固定与 emitPrologue/epilogue
+的 push/pop 对称性——特别是 P270 禁用着色后 `collectSavedRegs` 的
+行为。
+
+### 10.69 P273 追加：rbx 覆写链定位——getInstance→Memory_alloc/obj_slot 路径（2026-10-06 续L）
+
+**精确链**：listSet 入口 rbx=list ✓ → `call Collections_getInstance` →
+getInstance 调用 `__obj_slot_get(40)` / `Memory_alloc(512)` /
+`__obj_slot_set(40, obj)` → **rbx 被覆写为 1** → `read64(rbx=1)` 崩。
+
+**下轮（寄存器审计）**：
+1. gdb 在 getInstance 返回后打印 rbx——确认覆写发生在此调用内；
+2. `__obj_slot_get`/`__obj_slot_set`/`Memory_alloc` 的 runtime 汇编
+   逐条审计 callee-saved push/pop 对称性；
+3. 修复（补 push/pop 或改用易失寄存器）后端到端。
+
+### 10.70 P274：rbx 覆写排除了 const 轮转与 obj_slot——待 gdb 逐指令断点（2026-10-06 续LI）
+
+**排除**：
+* constRegs 轮转：已确认为死代码（声明+初始化但从未用于分配）
+* __obj_slot_get/set：仅用 rax/rcx/rdx（易失）✓
+* Memory_alloc/emitObjectAlloc：用 r12/rsi（保存/恢复 ✓），不用 rbx
+
+**待查**：listSet 函数体内的 `mov rcx,rbx`（0x5bf5e）不是参数存栈
+（emitParam 的 pattern 7 应产生 `mov [rbp-N],rcx`），可能是其他路径
+的值移动。下轮 gdb 硬件断点（watch -l $rbx）精确捕获 rbx 覆写指令
+地址，再映射回 obj 偏移定位源码。
+
+**当前状态完整且可复现**：LOADONLY 绿 ✓ / 解码 n=1194 ✓（全栈槽）/
+崩在 listSet 内 rbx=1 的 read64 / 根因 = rbx 被覆写。
+
+### 10.69 追加 P274：rbx 从未被覆写——发射器 rcx 装载错误（2026-10-06 续LII）
+
+**四点探针**（listSet 内 A/B/C/D 全程）：
+```
+A[after param store] rbx=0x14011b2e8 ✓
+B[before getInstance] rbx=0x14011b2e8 ✓
+C[after getInstance]  rbx=0x14011b2e8 ✓
+D[before read64]      rbx=0x14011b2e8 ✓
+```
+**rbx 从未被覆写**——列表参数全程正确。但 read64 调用时 rcx=1 ——
+发射器在 read64 调用前**把错误值（1 而非 rbx 的列表指针）加载进 rcx**。
+
+**根因重新定性**：不是 callee-saved 破坏，而是**发射器在为 read64
+装载参数时选择了错误的数据源**（装载了 Int 值 1 而非列表指针）——
+这是 ISel/发射器的参数装载选择错误，与 phi/RA/布局的交互产生。
+
+**下轮**：读 indexOf 函数在崩点前的完整反汇编（HAT 对照），
+找出 rcx=1 从哪条 mov 指令来。
+
+### 10.71 P275-276：堆损坏级联三连根因——bump 回绕 + listGet 内联布局 + 竞技场 64MB（2026-10-06 续LIII）
+
+**方法升级**：本轮放弃盲扫，改用「死指令位 int3 探针补丁 + objdump 符号映射 +
+hardware-watchpoint（实测 Win gdb 静默失效，弃用）+ 原生驱动重链 noaslr」
+组合，五次逼近收敛。
+
+**勘误**：上一节「发射器 rcx 装载错误」的定性**不成立**。入口探针
+（cmp rcx,1 @listSet+0x27 位于 getInstance 之后，rcx 已被覆写为 0x140）
+与 rbx 探针（cmp rbx,1，**未触发**）联合证明：listSet 入口 rcx=rbx=合法
+列表；崩溃帧是**正常调用**（rbp 链/返回地址 setArgsRow+0x41a 完全吻合），
+`list=1` 是**字段槽内容已损坏**后的读取结果——见下。
+
+**根因一：bump 分配器溢出「回绕」（emitObjectAlloc/strcat/__list_alloc）**。
+溢出路径 `xor r12,r12; bump=size` → 分配从 heapArena+0 重叠继续，早期对象
+（Vm 实例 @arena offset ~121KB）被后续分配逐字节覆写。修复：溢出返回 NULL、
+游标不动（三处发射器，注释含实测链）。
+
+**根因二：`__list_get` 内联布局读 core 列表**（17 处 `.get` 绑定）。
+旧实现读 [list+8+idx*8]：对 core 布局 [len][cap][items]，idx=0 读到 cap、
+**idx=1 读到 items 指针**——指针作为「元素」流入 strlen/下标成为野读/野写
+喷泉。修复：emitListGet/emitListSetAt 改 core 布局（len 越界检查 + items
+间接寻址）。__list_alloc 在 vmhost 中 0 引用，修复无歧义安全。
+
+**根因三：竞技场 32MB 不足**。loadArgsFlat 搅动（海量小分配、无 free）把
+32MB 耗尽触发根因一。修复：heapArena 33554432→67108864（64MB），限界
+33546336→67100768（×3 变体 + ×6 处 cmp 常量）。BUILD_ID→
+p276-listget-core-layout（缓存键）。
+
+**实证链**（fixed_noaslr2.exe，崩点已从 read64(1) 推进至 push(list=0)）：
+- listSet 入口探针：合法调用全程 rcx=rbx=list ✓，崩溃调用 rcx=0x140（非 1）
+- setArgsRow+0x415 call listSet(list=rdi=[e660(this,21,21) 返回值])，
+  槽 21 = arg4Ints（字段序核实：18=argStrs…22=argCounts），内容 1=野写产物
+- loadArgsFlat 入口：flat count=0x473 ✓、argStrs 槽=合法句柄 ✓——
+  **但循环仍失控**（87317=0x15555 次迭代，argStrs len→262144）：
+  i/n 槽（-0xc8/-0xc0）静态审计干净（各 2-3 次访问、无别名），
+  崩点推进为 newList→NULL（native 堆耗尽）→push(list=0)→read64(0)
+
+**残余**（下轮首查）：n=1139 正确入槽后循环仍 8.7 万次——**运行期野生写
+仍在踩 i/n 栈槽**。野写引擎待定位：HAT 对照 loadArgsFlat 循环体（obj
+0x5f254 条件 / 0x5fccb 递增已静态审计干净），嫌疑集中于 charCodeAt/strlen
+族 native 对损坏句柄的越界读引发的连锁（push items 野写路径）。
+
+**工具资产**（复用）：死指令位 int3 探针法（7 字节 cmp/jne/CC 原位替换）、
+`build_fixed_from_driver.ps1`（===COFF-MAIN/RUNTIME=== 提取+链接）、
+lld-link @rsp 文件（Git Bash 路径变形规避）、/DYNAMICBASE:NO noaslr 链接。
+**教训**：① gdb watchpoint 在此环境静默失效；② printf %lx 截断高位，
+一律 x/gx；③ ASLR 每会话重设基址，跨会话 VA 不可比；④ seed VM 解释执行
+buildRuntimeObject 产物有微妙缺陷（import 调用 rax=0xC0000008），必须走
+seed AOT 原生驱动（PhotonP276.exe）。
+
+### 10.72 P277：野写引擎锁定——融合分支把列表句柄当行索引传参（2026-10-06 续LIV）
+
+**方法论修正**：上轮 ASLR 会话的跨会话 VA 全部作废（基址每 boot 重设）。
+本轮 /MAP 链接（delta=+0x1000 全表一致）+ fixed_noaslr noaslr 基址，
+全部地址 map 权威化。
+
+**勘误**：§10.71 残余的「loadArgsFlat 循环失控 / i,n 栈槽被野写」不成立——
+条件断点（n-slot≠0x473）全程未触发，loadArgsFlat 循环正常 1139 次退出。
+真正的失控循环在 **fuseHotPairs**。
+
+**精确病灶**（fixed_noaslr p277，map 权威地址）：
+- setArgsRow 入口断点（0x1400612a6，条件 rdx>1000）命中：
+  **rdx = 0x14016cdb0 = 一个 125 元素 core 布局列表对象**
+  {len=125, cap=128, items=0x14016d968}——**列表句柄被当作 `r: Int` 行索引
+  传入**；r8 = 0x140183e48 = {len=2, cap=4, items=...} = 真正的 `pair` ✓。
+- 调用点 ret=0x14005f37a（fuseHotPairs blob 内，NOP-fill 的
+  setArgsRow 调用）；rdx 装载自 -0x1730 槽。
+- 而 fuse 主循环头（0x14005aa23）的 r 槽 -0x148 全程 <100000（条件断点
+  未触发）——**融合分支读 `r` 用的槽 ≠ 循环头的 r 槽：发射器值选择
+  装载了持有列表句柄的槽**（「发射器参数装载选择错误」最终实锤，
+  与 Long↔Int 转换、toStr 别名同族）。
+- 源级重构绕避失败（kk/idx 改写后依旧）：RA 槽分配对同名变量的
+  影子槽选择错误，与源码形态无关。
+
+**崩溃级联全图**：融合分支 r=列表句柄 → setArgsRow → argStrs.set(句柄×3+k)
+→ listSet OOB → push 每调用 +1 → NOP-fill `kk < span` 与融合循环在堆耗尽前
+合计数百万次 → 列表 items 翻倍至 8M 元素 → 64MB arena 耗尽（heapBump
+=0x3ffe060 恰为限界）→ newList→NULL → push(list=0) → read64(0) 段错误。
+P274 的 read64(1) = 同一级联在 32MB arena+回绕时代的更早死亡点。
+
+**下轮首查**（单点修复，非盲扫）：HAT 对照 fuseHotPairs 融合分支
+（opCodes.set(r, fused) / setArgsRow(r, pair) 的 SSA 值 → 槽分配），
+找出「列表句柄槽」被选作 `r` 的值来源——ISel/RA 的 load-slot 选择。
+修复后 helloworld 端到端（前有 LOADONLY ✓ / 解码 1194 ✓ 双绿基线）。
+
+### 10.72 追加 P277：终极形态——栈衰竭 + 野转移，一切「参数错误」皆为幻象（2026-10-06 续LV）
+
+**决定性新证据**（p277 noaslr，huge-r 断点命中时）：
+- **[rsp] = 0**（返回地址槽为零——正常 call 不可能）
+- SIGSEGV 落在 setArgsRow **prologue push 序列中间**（入口+7 字节）
+  = **栈耗尽（guard page）特征**
+
+**终极定性**：崩溃形态 = **野返回链导致的栈衰竭**。某处返回地址被
+踩 → `ret` 落入函数入口/中部 → 逐层"递归"堆栈 → rsp 耗尽 → prologue
+push 触 guard page。此前所有「参数装载错误」观察（P274 的 rcx=1、
+§10.72 的 r=列表句柄）皆为**野转移 + 寄存器残留的幻象**：
+- rdx=0x14016cdb0 恒定 = 上一轮野转移路径的寄存器残留
+- 「5001+ 次调用」= 递归深度 5001+ 层
+- read64(1)/read64(0)/listSet(list=1) = 野转移落点的寄存器残留
+
+**真正的根（仍未定位）**：**向线程栈写入返回地址槽的野写**。
+排除项：arena 写（.data 区，与栈分离）；Memory.copy（堆→堆）；
+substring 越界（NULL 修复后安全）。嫌疑集中：某列表的 items 指针
+被栈地址污染后 push 写入 `[items+len*8]` 落栈——需找出「items 指针
+= 栈地址」的污染源。
+
+**下轮首查**：第一次野 ret 时刻（SIGILL@listAppend+0x60 或首个
+[rsp]=0 的帧）全栈 DIFF——在 loadArgsFlat 入口快照整帧，野 ret 时
+DIFF 找被改槽；或 VirtualProtect 栈底 guard page 抓首个越界写。
+**工具教训追加**：条件断点 `if $rdx>1000` 命中时的 SIGSEGV 标签 =
+prologue 栈耗尽，非断点异常；[rsp]=0 = 野转移铁证。
+
+### 10.73 P278-282：崩溃清零——vmhost 首次完整运行（exit=0），余 flat 截断一处（2026-10-06 续LVI）
+
+**里程碑**：photon 编译的 VM 宿主首次**完整运行不崩溃**：
+```
+[winC2] post-loadPredecoded ✓（decode 首次走完）
+[M3] loadAucAndRun returned ✓
+err=[Unknown function: p]  instrs=11  exit=0 ✓（优雅错误，非段错误）
+```
+
+**本段修复**：
+1. **fuseGuard**（Vm.aura fuseHotPairs）：迭代护栏 n*4+100。实测 fuse 主
+   循环曾在 r=55 卡死不推进（141,466 次 head 经过 r 恒 55），每圈 body
+   分配（fresh pair + toStr concat）耗尽 64MB arena → newList→NULL →
+   push(list=0) → read64(0)。护栏放弃剩余融合（纯优化，语义不变）。
+2. **提取工作流修复**：build_fixed_from_driver.ps1 的 log 指针 sed 链断裂，
+   p279 起一直提取陈旧 p278 日志——「重建后行为不变」的假象来源。
+   已指向 p282 并逐次核对。
+
+**新发现（本轮两个 photon 前端缺陷实证）**：
+1. **链式 field-get 接收者的方法解析发射裸名**：`mod.numArgsFlat.size()`
+   → `call size`（undefined symbol）。绕避：先落局部变量再调方法。
+2. **后端静默丢弃直线代码**：loadPredecoded 中 loadArgsFlat 之后的
+   println 探针（HAT 有 [FLAT0] ✓）在二进制中不存在（winB-2 在 ✓）——
+   探针块被 SSA/DAG 链路丢弃。这与 fuse r-advance 失效同族：
+   **photon 后端会丢语句**。
+
+**残余（唯一拦路）**：`Unknown function: p`——p282 loader（photon 编译
+的 AucLoader.decodeNumeric）解析 flat 仅 219 条（seed 正确值 1194），
+CALL 的 funcName 截断为 "p"。解码循环 `while (offset < codeLen && pos <
+endPos)` 提前终止 = 循环推进/终止缺陷家族第二例（与 fuse r 不推进同族，
+P235 的分支内联加固未根治）。object dump：崩点 accessor 读 0x140069a6a
+（.rdata 尾/.data 前的未映射缝隙）= 野句柄字段读的精确签名。
+
+**下轮首查**：decodeNumeric 的 offset 推进（`offset = offset + 1 +
+operandSize`，×20 内联分支）与 codeLen/endPos 终止值——同一发射器
+循环推进缺陷的第二实例，修一处验证一类。funcNames 的 readStr 截断
+（"p"）同一根因的第二表现。
+
+**状态**：LOADONLY ✓ / 解码 1194 ✓ / 宿主完整运行 exit=0 ✓ /
+余 loader flat 截断一处。
+
+### 10.74 P291：黄金捕获——vmSubstr 恒返 "p"，receiver 槽选择错误实锤（2026-10-06 续LVII）
+
+**黄金捕获**（P291，loadPredecoded 内三探针同回合全触发）：
+```
+loader flat:  entry 30=[9]  entry 31=[println,1]   ✓ 正确
+VM argStrs:   slot 30=[p]  slot 31=[p]              ✗ 全变 "p"
+```
+**loadArgsFlat 的 vmSubstr 对一切输入返回常量 "p"**（"9"→"p"，
+"println,1"→"p"——连首字符截断都不是！"p" = 内置表 "print" 首字符）。
+机理：vmSubstr 内 `text.substring(start, end)` 的 **receiver `text`
+从错误槽装载**（读到内置表 "print" 指针），substring(0,1) → "p"。
+这就是 P274 以来「发射器参数装载选择错误」的最终实锤形态。
+
+**本段另证**：
+- loadArgsFlat 循环干净（n-slot 全程 1139 ✓ 条件断点验证）——
+  §10.71 的「循环失控」勘误维持。
+- probe 丢失（FLAT0 不入二进制）为**布局相关**：P291 同代码探针全部
+  正常打印——「后端丢语句」亦是布局敏感，非无条件。
+- 顺序交换实验（registerAucClasses ↔ loadPredecoded）：损坏点随布局
+  前移（flat 1194→49）——覆写源与帧/ arena 布局相关，已回退原序。
+- FileUtils.writeText（photon 编译）恒失败（write failed at 0/N）——
+  诊断输出一律走 println。
+
+**当前状态**：LOADONLY ✓ / 解码 ✓ / 宿主完整运行 exit=0 ✓ /
+卡在 funcName="p"（vmSubstr receiver 槽选择）。
+
+**下轮首查**（单点）：vmSubstr 内 `text.substring(start, end)` 调用点
+的 text 装载指令（记下槽位）——对照 HAT 该处 SSA 值来源，找 RA 的
+receiver 槽分配错误。次选：String.substring 原生包装的 rcx 装载。
+
+### 10.75 P293-295：总根定位——SSA 跨块类型丢失，`count + 1` 编译成 strcat（2026-10-06 续LVIII）
+
+**终极 smokin gun**（map 权威地址，decodeNumeric 主循环尾部编译产物）：
+```
+mov -0x220(%rbp),%r10 → rcx    ; count
+mov -0x238(%rbp),%r10 → rdx    ; readByte 结果
+call strcat                     ; ← `count = count + 1` 编译成了字符串拼接！
+mov %rax,-0x1f8(%rbp)           ; count = strcat(count, byte串)
+```
+`var count: Int = 0` 在循环体块内 **丢失 Int 类型**（SSA 跨块类型合并
+缺陷 = P230/P235 已知的 phi 缺陷族）→ `+` 按 String 重载解析 → strcat。
+count 变 "1"/"11"/"111"… → decoded 恒 1（toI32 截断）→ 循环提前退出 →
+flat 截断（219/8/1194 随布局）→ argStrs 残缺 → "Unknown function: p"。
+fuse r 不推进、probe 丢失、布局敏感——全部同根：**类型丢失后按 String
+语义编译的每一条语句**。
+
+**同族实证（本轮）**：①链式 field-get 接收者 `.size()` → 裸名 "size"
+（方法解析丢接收者类型）；②vmSubstr 恒返 "p"（String.substring 的
+receiver/参数走错槽——类型驱动槽分配）。全部 = 类型丢失的不同表现。
+
+**修复目标收敛到一处**：SsaBuilder（HAT→SSA）的**变量类型跨块合并**——
+循环回边处变量类型应保持声明类型（Int），不得回落 String 默认。修一处，
+decodeNumeric/loadArgsFlat/fuseHotPairs 及全部未来循环一并治愈。
+
+**本段已修复并验证**：
+1. emitStringSubstring 三重缺陷：ss_ovf 标签缺失（溢出检查死）+ 拷贝
+   stride 8 + 漏加 start —— 全部重写为 strcat 同款连续字节拷贝。
+2. emitToFloat 补 tf_zero 标签。
+3. loadPredecoded 补 constPool/funcs 赋值（此前从未赋字段，buildLoadCaches
+   构建恒空）。
+4. 标签闭合审计脚本：PhotonRuntime 全发射器 0 缺失。
+
+### 10.76 P295：ISel 守卫落地；丢语句=布局敏感系统性缺陷，转入后端本体修复（2026-10-06 续LIX）
+
+**已落地**：ISel 的 Add 分派守卫——`任一操作数为整数 Const ⇒ 强制整数加`
+（InstructionSelection emitAdd：addIsStr 计算重写）。保护 `count + 1`
+类整数加不被类型污染推入 strcat；P228 的 String concat 修复不受影响
+（fromCharCode 等非 Const 操作数照常 strcat）。
+
+**P295 实测**：布局再次漂移，decodeNumeric 的 flat-add 丢失点移动，
+[winB] n=8 复现。**ISel 守卫不能治愈布局敏感丢失**——丢失发生在更
+基础的层（SSA→LIR→DAG→emit 链路按布局丢语句）。
+
+**系统性结论（本轮全部证据汇总）**：
+* 受害语句清单：fuse r-advance（r 卡 55）、loader decode flat-add
+  （8/219/1194 随布局）、decode count-increment（decoded=1）、
+  count+1 的 strcat 误分派、probe println 丢失（P291 全触发/P284 全丢）。
+* 共性：**全部是「存储/推进」类语句**，按函数布局有/无地消失。
+* 机制假说（待证）：语句在 SSA→LIR→DAG 降级或指令选择中被视为
+  死代码/被合并——「跨块 liveness 不可靠」的另一种表现（§10.63 同族）。
+
+**下轮路线**（后端本体）：
+1. 取 decodeNumeric 为标本：HAT 32 处 listAppend vs 编译产物 32 处
+   call（✓ 都在）——**丢失不在 ISel 发射，在运行期分支不可达**：
+   循环分派对 opcode 槽的比较链，部分 opcode 落入无名分支（跳过追加）。
+   ← 先 dump opcode 比较链 asm，对照 20 个分支的 cmp 立即数与
+   operandSizeLookup 表。
+2. 或上 AURA_PHOTON_STOP=A/B/C/D 阶段短路 + 每阶段 flat 计数，
+   二分定位丢语句的遍。
+3. RA 根治（跨块 liveness 含回边传播）仍是终极方案。
+
+**状态**：LOADONLY ✓ / 解码部分 ✓ / 宿主运行 exit=0 ✓（fuseGuard）/
+helloworld 打印被 flat 截断拦截（8~1194 随布局）。
+
+### 10.77 P296：解码循环 offset 推进丢操作数——嵌套 Basic @add 链降级丢失（2026-10-06 续LX）
+
+**指令级实锤**（decodeNumeric 主循环尾部，p294/p296 两个布局一致）：
+```asm
+mov $0x1 → -0x248              ; 常量 1
+mov -0x200(%rbp) → -0x250      ; offset
+add -0x248 + -0x250 → -0x250   ; offset = offset + 1   ← 只有 +1！
+```
+源码 `offset = offset + 1 + operandSize` 的 HAT：
+```
+@t17551 = @add(@codeLen, @t17550) : Basic
+@t17552 = @add(@t17549, @t17551) : Basic
+```
+**两层 @add 链，编译产物只保留第一层（offset+1），第二操作数
+@t17551（=codeLen+operandSize）被丢** → offset 每指令只 +1（应为
++1+operandSize）→ 解码循环迭代数≠指令数 → flat 截断（8/219/1194
+随布局）→ "Unknown function: p"。
+
+**系统性定性（终版）**：photon 后端（LIR→DAG 降级或 DAG 构建）对
+**嵌套 Basic 类型 @add 链**丢失操作数/整个加法节点。受害清单扩容：
+解码 offset 推进、fuse r 推进、count 计数（→strcat 型误分派，已由
+P295 ISel 守卫修复）、probe println。共性 = **Basic 类型加法链**；
+String 类型 @add（296 处）无一丢失。
+
+**已修复并保持**：substring 三缺陷重写（✓ argStrs=["println","1"] 正确）、
+ss_ovf/tf_zero 标签、constPool/funcs 赋值、ISel 整数 Const 守卫、
+fuseGuard、帧预算 4×（P296，未愈但防御性保留）。
+
+**下轮首查（真正的终局）**：LIR→DAG 降级器对嵌套 Basic @add 的处理——
+MachineDag 构建处（selectPattern/addNode）对 Value-引用-Value 链的
+节点注册；或 ISel emitAdd 对 Add-operand 的 resolveNode 递归展开。
+验证法：AURA_PHOTON_DEBUG_HIR 的 DAG dump 或最小 .aura 重构造
+（`var a = x + 1 + y` 三操作数链）对比 HAT/DAG/产物三层。
+
+### 10.78 会话收尾：四修复保持，spill-base 实验回退，交接清单（2026-10-06 续LXI）
+
+**保持的已验证修复**（P292 最小复现 x=66 ✓ + P292 宿主 argStrs 正确 ✓）：
+1. emitStringSubstring 重写（stride-8/漏 start/ss_ovf 缺失——vmSubstr 恒返
+   "p" 的根因）。
+2. emitToFloat 补 tf_zero。
+3. loadPredecoded 补 constPool/funcs 赋值（constLines/funcOffsetMap 空的
+   根因）。
+4. ISel Add 分派守卫（整数 Const 操作数强制整数加——decodeNumeric
+   count+1 → strcat 的根因）。
+5. fuseGuard（fuse 循环 r 卡死 → 64MB 耗尽崩溃）。
+6. 标签闭合审计脚本（ss_ovf/tf_zero 缺失模式，0 缺失保持）。
+
+**回退**：getSpillOffset 基址 32→80 实验（P297-298）——修复后 loadModule
+反而早期失败（err=[loadAucAndRun: ]）——**帧布局系统性缺陷随布局移动
+症状**：修一处他处现形，证实只有 RA/帧布局本体根治可解。已 git checkout
+回退，待 RA 专项统一处理。
+
+**交接清单（下轮按序）**：
+1. RA/帧布局根治：溢出槽与参数保存槽的基址重叠（getSpillOffset 32 +
+   n*8 与 prologue 参数槽 -0x30/-0x38/-0x40 冲突）+ funcExtraSlots 扫描
+   漏计（decodeNumeric 深槽写越界踩其他帧）——**需统一帧布局设计**
+   （参数槽/影子空间/RA 溢出/slotForNode/调用栈参五区隔离），并回归
+   Opcodes.buildNameMap + loader + fuse 三标本。
+2. 解码 flat-add 布局敏感丢失（8/219/1194）：opcode 分派链 asm 对照
+   operandSizeLookup 表（dump 已截断于 0x1400235b1，续 0x1400235b1 后）。
+3. 修复后回归：LOADONLY ✓ → helloworld 打印 → fib。
+
+**状态**：LOADONLY ✓ / 解码部分 ✓ / 宿主运行 exit=0 ✓（fuseGuard）/
+helloworld 被 loader flat 截断拦截（帧布局系统性缺陷）。
+
+### 10.79 P302：基址 144 + RA 权威槽数落地；腐坏随布局移动确认，转 RA 专项（2026-10-06 续LXII）
+
+**已落地**：getSpillOffset 基址 32→144（0x90，越过 11 参函数参数局部槽
+-0x30..-0x80）四点一致（getSpillOffset/computeFrameLayout/getFrameLayout/
+X86Emitter fsz）；X86Emitter 帧计算加 RA 权威溢出槽数下限
+（ms2 = max(扫描ms, allocator.getSpillSlots())，封扫描盲区）。
+
+**实测**：decoded 从 1 → 33（计数推进生效但值仍错）、flat 8 → 46、
+腐坏点再次移动（[AS] 转空、尾部 VEH 崩）——**确认腐坏随布局移动，
+逐点修症状不可收敛**。
+
+**终局结论**：拦截项 = photon 后端帧槽分配的布局敏感腐坏（溢出槽/
+参数局部/slotForNode 三区重叠 + 嵌套 Basic @add 链降级丢操作数）。
+修复 = RA/帧布局专项：五区隔离（参数局部/影子/RA 溢出/slotForNode/
+调用栈参）+ 嵌套加链 DAG 降级保真 + 跨块 liveness 含回边传播——
+即 §10.41/§10.53/§10.61 立项的 RA 工程，非会话级可完成。
+
+**累计已修（本两会话 10 提交）**：substring 发射器三缺陷重写、
+ss_ovf/tf_zero 标签、loadPredecoded constPool/funcs 赋值、ISel 整数
+Const 守卫、fuseGuard、解码探针、标签审计脚本、提取工作流。
+宿主状态：完整运行 exit=0 无段错误；helloworld 打印待 RA 专项后
+回归（LOADONLY ✓ / 解码探针全绿基线已备）。
+
+### 10.80 P310 基准：photon 原生编译正确性验证通过，进程启动受 64MB arena 提交拖累（2026-10-06 续LXIII）
+
+**新 photon 驱动**（PhotonP310，含本会话全部修复）安装为
+PhotonHatCompile.exe。端到端验证：
+- bench_fib10：photon 原生 `fib(10) = 55` ✓（3 次 0.53s ≈ 176ms/次）
+- bench_fib25：photon 原生 `fib(25) = 75025` ✓；seed VM 同 75025 ✓
+- 最小三操作数加链（11+22+33）：`x=66` ✓（P301 嵌套加链在该规模不触发）
+
+**性能实测注意**：photon 原生进程 ~0.45s/次，主体为 **64MB heapArena
+的 .data 提交开销**（加载期一次性提交），非计算耗时（fib25 原生计算
+应在 10ms 级）。后续优化方向：arena 缩容起步（如 8MB）+ 满载扩容，
+或 VirtualAlloc 惰性提交（MEM_RESERVE + 按需 MEM_COMMIT）。
+
+**bench 脚本缺陷记录**：scripts/bench-photon-vs-vm.ps1 的 env-var 模式
+（AURA_HAT_*）对新驱动无效（驱动为规避 Env.get 段错误已改固定路径
+约定）→ 脚本实际编译的是 current.aura（VM 宿主）而非 bench 程序，
+其 "Photon AOT" 列数字无效。已改用固定路径中继手动基准（本节数字）。
+
+**最终状态**：photon 工具链端到端可用（驱动→HAT→SSA→LIR→DAG→COFF
+→原生 exe，输出正确）；VM 宿主完整运行 exit=0 无段错误；helloworld
+打印仍被解码 flat 布局敏感截断拦截（§10.77），待 RA 专项。
+
+### 10.81 基准耗时对比（新驱动 P310，固定路径中继）：loop 240×、fib 2×（2026-10-06 续LXIV）
+
+**方法**：bench 源码经固定路径中继（current.aura）由 P310 驱动编译 →
+COFF 提取 → lld-link（/STACK:64MB）→ 原生 exe；与 `aura run`（seed VM
+解释执行）对比，各 2-3 次取代表值。
+
+| 基准 | photon 原生 | seed VM 解释 | 加速比 | 输出 |
+|------|------------|-------------|--------|------|
+| bench_loop（2500 万次迭代 Long 算术）| **0.131s**（热）| 31.2~31.8s | **≈240×** | acc=124950000000 一致 ✓ |
+| bench_fib28（62.8 万次递归调用）| 0.451s | 0.949s | ≈2.1× | fib=317811 一致 ✓ |
+| bench_fib25 | 正确 75025 ✓ | 正确 ✓ | — | 一致 ✓ |
+
+photon 原生进程启动 ~0.4s（64MB heapArena .data 一次性提交），扣除后
+loop 计算本体 ≈0.13s 内完成。**计算密集型负载原生码比 seed VM 解释快
+两个数量级**；递归调用密集场景约 2×（调用序列开销为下一优化点）。
+
+**勘误**：§10.80 前一轮 bench-photon-vs-vm.ps1 的 "Photon AOT" 列
+（3874/4116ms）实为驱动固定路径模式下编译的 VM 宿主运行耗时，非 bench
+程序，数字作废。脚本 env-var 模式对驱动无效（Env.get 段错误规避，
+固定路径约定），待 RA 专项后统一修脚本或驱动加安全 env 通道。
+
+**状态**：photon 原生编译→运行链路性能与正确性双确认；VM 宿主运行
+exit=0；helloworld 打印仍待 RA 专项（§10.79）。
+
+### 10.82 对比实测：photon 编译 VM vs seed 编译 VM 运行同一 current.auc（2026-10-06 续LXV）
+
+| | photon 编译 VM（P310 驱动） | seed 编译 VM（auc_vm_runner） |
+|---|---|---|
+| 装载 current.auc | ✓ | ✓ |
+| 解码 1194 条 | ✗ 截断 46 条 | ✓ 全量 |
+| 执行 | ✗ 11 条后 Unknown function: p | ✓ Phase A-E 全流程验证: PASS |
+| 耗时 | 0.684s（含崩溃） | **0.041s** |
+
+**差距定性**：seed VM 41ms 完成全部装载+解码+执行；photon VM 因解码
+flat 截断（帧槽分配布局敏感腐坏）在 loadArgsFlat 崩溃。两份宿主由
+**同一份 Vm.aura/AucLoader.aura 源码**编译——差距全部来自 photon 后端
+的帧槽分配/值选择缺陷（§10.75-§10.77 已指令级定性）。
+
+**剩余修复**（已立项，RA/帧布局五区隔离专项）：溢出槽基址与参数保存
+槽重叠（getSpillOffset 32 基址 vs prologue -0x30/-0x38/-0x48）、
+funcExtraSlots 传递闭包扫描（P301 已重写）覆盖完整性、嵌套 Basic @add
+链 DAG 降级保真。修复后以本节双列对比表回归验收。
+
+### 10.83 P310 终局铁证：AucReader 对象被路径字符串覆写（2026-10-06 续LXV）
+
+**决定性 dump**（decodeNumeric 入口，reader = 参数 1）：
+```
+reader = 0x14006ab37
+[reader+0x00] = 0x6c697562  = "buil"
+[reader+0x08] = 0x7275632f  = "/cur"
+[reader+0x10] = 0x6375612e  = ".eua"（即 "build/vm/current.auc" 分段）
+```
+**AucReader 对象的 data/dataLen/pos 字段被路径字符串字节覆盖**——
+decode 循环按 [data+pos] 读"opcode"读出的是路径字符（'b'=0x62、'/'=0x2f…
+均非合法 opcode → 分派全 fall-through → flat 几乎不增长；偶合字符
+（数字段）碰中合法 opcode → 少量条目混入 → 解码 8~1194 随布局）。
+
+**覆写源**：stringToBuffer(path)/readFromFile 的缓冲分配地址与
+AucReader 对象地址冲突（分配器返回了同一地址，或寻址计算错位）。
+此前所有观测（count=strcat、opcode 不识别、flat 截断、mod 字段读 0、
+"Unknown function: p"）全部 = 这一覆写的下游表现。
+
+**下轮首查（真正的最后一修）**：stringToBuffer + readFileToBuffer 的
+分配地址 vs AucReader() 构造地址——gdb 在 AucReader 构造返回时打印
+对象地址，在 stringToBuffer 返回时打印缓冲地址，两者若相等即实证；
+修复 = 分配器寻址（Allocator.malloc 与 emitObjectAlloc 游标的一致性）
+或 AucReader 对象改入 RA 溢出区。修复后跑 LOADONLY → 解码 1194 →
+Phase A-E PASS → helloworld 全链回归。
+
+### 10.84 会话终态：六修复落地，flat 8→49（+512%），余量实验证实敏感不可增量修（2026-10-06 续LXV）
+
+**最终基线**（P313 驱动，全部修复生效，2048B margin 回退验证）：
+```
+[winB] n=49                                        ← flat 从 8 → 49（+512%）
+[FLAT0] [3]=[println,1] ✓                          ← substring 修复生效
+[FLAT30] [30]=[48] [31]=[3] [32]=[2]               ← 解码推进至 instr ~10
+[AS] [30]=[4] [31]=[] [32]=[]                      ← vmSubstr 修复后残留截断
+exit=0（无段错误）✓
+```
+
+**margin 实验**：2048→65536 反而更早崩（帧尺寸敏感极端化）——已回退。
+
+**已修复清单（全部有指令级/探针级证据）**：
+1. emitStringSubstring stride-8 + 漏 start + ss_ovf 缺失（三合一）
+2. emitToFloat tf_zero 标签缺失
+3. loadPredecoded 漏赋 constPool/funcs
+4. ISel Add 分派守卫（整数 Const 强制整数加）
+5. fuseGuard（fuse 循环 r 卡死护栏）
+6. 帧预算扫描传递闭包重写（walkExtraNodes）
+7. 提取工作流 ps1 修复（陈旧日志指向）
+
+**未修（RA 五区隔离专项 §10.41/§10.53/§10.61）**：
+- decodeNumeric 循环 `offset` 推进丢嵌套 @add 第二操作数
+  （offset 只 +1 丢 +operandSize → 解码循环 800 次→49 次退出）
+- `count = count + 1` 增量在 11 参大函数中部分失效（decoded 恒 33）
+- loadArgsFlat vmSubstr 对 flat 越界索引段错误（flat 不完整所致）
+
+**下会话路线**：RA/帧布局五区隔离 → 上述三项自然消除 → 解码 1194 →
+Phase A-E PASS → helloworld 打印 → fib 回归。
+
+### 10.85 会话 II 终态：解码 ✓ (1194)、argStrs ✓、buildLoadCaches 内 Memory_read64(0) 崩（2026-10-06 续LXVI）
+
+**进展**（spill-base 144 + 传递闭包 + mmap 文件缓冲 + ISel 守卫 + substring 修复全生效）：
+```
+[winB] n=1194 ✓                                   ← 解码全量恢复！
+[FLAT0] [3]=[println,1] ✓                         ← 内容正确
+[AS] [30]=[println] [31]=[1] [32]=[] ✓            ← argStrs 正确！
+[winC2] 未到达 → SIGSEGV @ Memory_read64(rcx=0)    ← buildLoadCaches 内部
+```
+
+**崩点**：buildLoadCaches 内 Memory_read64(0) — HashMap/常量解析读空指针。
+decodeNumeric 的 count 变量在此布局下仍读出指针值（decoded=140697495771035），
+说明 **帧槽腐坏随基址/布局调整而移动**（base 32→144 修复了参数保存槽冲突
+但引入了新的重叠模式）。
+
+**根因定级**：photon 后端帧槽分配器对大函数（11+ 参数、千级 LIR 值）的
+槽位分配存在系统性重叠——每次修改基址/预算只是移动重叠位置。**修复 =
+RA/帧布局五区隔离重设计**（参数局部区 / RA 溢出区 / slotForNode 区 /
+调用栈参区 / 安全边际 五区互不重叠，帧大小 = 五区之和 + 对齐），
+已完整立项 §10.41/§10.53/§10.61。
+
+**本两会话累计**：17 提交。崩溃清零（段错误→完整运行）；解码 0→1194 ✓；
+argStrs 0→正确 ✓；六项发射器/后端缺陷修复（substring stride-8、
+ss_ovf/tf_zero 标签、constPool 漏赋值、ISel strcat 误分派守卫、
+fuseGuard、传递闭包帧预算扫描重写）；bench 4 项全通过（loop 240×、
+fib28 2.1×、fib10/fib25 输出一致）；标签闭合审计 0 缺失。
+
+**下会话**：RA 五区隔离重设计（RegisterAllocator computeFrameLayout +
+X86Emitter prologue + getSpillOffset 统一）→ buildLoadCaches 通过 →
+VM run → helloworld 打印 → 基准回归。
+
+### 10.86 重大突破：photon 编译 VM 完整执行 Phase A-G 全流程！（2026-10-06 续LXVII）
+
+**里程碑**（mmap 文件缓冲 + substring 重写 + ISel 守卫 + fuseGuard +
+spill-base 144 + constPool 赋值 + 传递闭包扫描 全部生效）：
+
+photon 编译的 VM 宿主**首次完整执行 .auc 程序 Phase A-G 全流程**：
+```
+✓ Phase A: 基本打印
+✓ Phase B: 变量和算术（name=, count=, count+8=）
+✓ Phase C: [3] 算术运算（+,-,*,/,%）→ 100, 23
+✓ Phase D: [4] 字符串拼接 → Compiler, Hello, !
+✓ Phase E: [5] 条件语句 → true/false 四种比较
+✓ Phase F: [6] 循环语句 → 0, 1, 1+2+3+4+5=
+✓ Phase G: [7] 函数定义与调用 → add(3,5), fibonacci(10), factorial(10)
+→ 最终输出框 ═══ 出现（程序到达结论段）
+→ SIGSEGV（结尾腐坏）
+```
+
+**已知残余**：LOAD_LOCAL/LOAD_GLOBAL 读取返回空值（name=, count= 等
+变量值为空），函数调用返回值也为空。这些是 VmLocals/栈操作在 photon
+编译下的帧槽腐坏表现。最终 SIGSEGV = 程序尾部遇到空值边界条件。
+
+**修复根因链（本轮确认）**：.auc 文件缓冲区（Allocator.malloc 分配在
+arena 内）被后续 arena 分配覆写（arena bump 游标回绕到早期地址）→
+reader 对象也被覆写（data/dataLen/pos = 路径字符串 "buil","/cur",".eua"）
+→ 解码读路径字符而非 .auc 字节 → 99% opcode 不识别 → flat 截断。
+修复 = .auc 缓冲区改用 Memory.mmap 独立映射（绕过 arena）。
+
+**下会话**：修复 VmLocals putSlot/getSlot 或 LOAD_LOCAL/STORE_LOCAL
+的帧槽腐坏 → 变量值正确 → 程序完整 PASS → 基准对比。
+
+### 10.87 会话 III：五项根因修复落地——解码全对（1194）、opCodes 正确、VM 启动执行；余项收敛到执行期实参解析（2026-10-06 续LXVIII）
+
+**里程碑**：photon 编译 VM 的**装载链全绿**——decodeNumeric 全函数解码完毕（7/7 函数，flat 1194 全对）、opCodes 数值化正确（LOAD_CONST_S=7/STORE_LOCAL=11/LOAD_LOCAL=10 逐项验证）、constLines 54 条正确（const[10]="42"）、funcTable 起始行正确、VM 进入执行循环。
+
+**本段五项根因修复（全部有指令级/探针级实证）**：
+
+1. **帧预算 ID 区间上界（P321，§10.41/§10.53/§10.61 五区隔离的实现）**：
+   X86Emitter 帧大小不再是「扫描计数+256 盲区+2048」——扫描与发射两套遍历的
+   集合漂移即写穿帧底。改为数学封闭上界：`frame = 144 + ID区间×8 + 2048`，
+   兜底槽序号 ≤ 区间宽度（每节点一槽、按 id 记忆），**不可能越界**。
+   [FSOVR] 越界金丝雀全构建 0 触发；[FSZ] 306 函数帧尺寸全部落界内。
+   附带 /STACK:16MB 链接保险（PhotonPipeline 两条链接路径）。
+
+2. **SsaBuilder buildIf varMap 回滚（P326）**：then 分支以 continue/break/return
+   终结时，else 分支的 varMap 必须回滚到 if 之前——旧行为让 else 继承 then 的
+   varMap ⇒ 支配关系违规（else 臂读兄弟臂的值）。实测 decodeNumeric 的
+   count/offset 在修复前每轮回滚（[LP] 探针：cnt 0→6 后弹回 1）、修复后
+   循环变量全程单调递进。
+
+3. **ISel phi (b) 强制兜底删除（P330）**：phi 入参数 ≠ 实际前驱数时（SSA
+   continue 边丢失/陈旧 latch 标签，常态），旧兜底把**不相干路径的剩余值**从
+   尾部强行配给未匹配前驱 → 每轮把陈旧值写回循环 phi 家槽。正确语义：未匹配
+   前驱 = 该路径未赋值 ⇒ **不发 MOV**（家槽现内容 = 上一轮值，恰为所求）。
+   附 [phi-nomov] 有界诊断。
+
+4. **`.get(i)` → `[i]` 下标形式（P341）**：photon 编译下 `.get` 的调用窗口内
+   实参槽被相邻值覆写（布局敏感）。Opcodes.fromName 换 `[i]` 后 opCodes
+   立即全对（16/0/10 → 7/11/10）；VmLocals getSlot/putSlot、Vm.argStrOf/
+   argCountOf/arg2-4IntOf/getConstByIdx 同步换下标。**RA 注释早已记载
+   （`list.get(i)` 未链接/不可靠，`[i]` 才是受支持路径）——本次以实验坐实。**
+
+5. **装载路径多操作数拼接链摊平（P340）+ realDecoded（P331）+ buildLoadCaches
+   恢复（P333/334）**：
+   - constPool/funcTable/numArgsFlat 的 `a + sep + b` 链在 photon 下偶发丢第二
+     操作数（§10.77 家族）→ 全部摊平为双操作数语句；
+   - decoded 返回值不可靠（循环 phi 家槽污染，恒 1/2）→ funcTable 起始行改用
+     **flat 实际增量**（numOpNames.size 差值，与 [winB] 1194 逐位一致）；
+   - buildLoadCaches 恢复启用：funcOffsetMap/funcParamMap 换**平行 List** 线性
+     扫描（HashMap 在 photon 下读空崩溃，§10.85 同族）；funcTable 手工扫描
+     循环暂跳过（photon 下崩，[BLC-ft] 前崩），CALL 走 findFuncOffset 现场解析。
+   - X86Emitter：__field_get/__field_set 内联为 `mov rax,[rcx+rdx*8+16]` +
+     null 守卫（P345，指令序列与 PhotonRuntime 逐条一致）。
+
+**本段定位过程的关键实证**（工具链沉淀）：
+- [FSZ]/[FSOVR]：帧尺寸与越界金丝雀（本次起常驻，行为无副作用）。
+- [LP] 循环探针：decodeNumeric 内 opcode/operandSize/offset/pos 逐轮实测——
+  定位 count/offset 回滚的精确形态（每逢 op=54/os==0 臂后回滚）。
+- [DC]/[DC2]/fld 三读实验：证明 decoded=3 是**返回值本身**（phi 问题）而非
+  返回值传递腐坏（帧槽问题）——一次实验分流两个假设。
+- 反汇编双槽穷举（-0x138/-0x140/-0x1a0/-0x2b8/-0x2d0 全读写点）：排除槽碰撞，
+  锁定 phi 语义层。
+
+**未修（下会话首查，已指令级收敛）**：
+1. **执行期 println 实参 stale**：VM 运行后前 10 条 println 打印**同一**指针值
+   （0x7FF6...，.rdata 地址）——push/pop 链或 println 实参装载把 10 个不同
+   const 收敛到同一槽。已排除：帧越界（FSOVR 0）、`-8` 共享槽（0 触发）、
+   __field_get/set 调用窗（内联后症状不变）。**下轮首查：gdb 断 VmStack_push/
+   VmStack_pop，看 sp/cap 字段读写与 d[sp] 落点**——若 sp 恒 0 即 push 的
+   field 链坏；若 sp 正常则 pop→println 的实参解析坏。
+2. **err/instrs/exit 尾部读取腐坏**：VmRunner 的 `vm.getError()` 等返回
+   指针值（err=[281397070078208]）——getError 字符串拼接链或字段读同族。
+3. **getFieldAt 兜底扫描**仍漏换行（[LC] 探针显示多行块）——仅诊断路径使用
+   （真实常量走 constLines ✓），但 [LC] 探针输出误导，排查时须区分。
+4. **constLines 个别条目仍黏连**（n=54 ✓ 但 [10] 后段含后续条目文本——分割
+   位置个别漂移，toI32 取前导数字不受影响，字符串常量内容受影响）。
+
+**状态**：LOADONLY ✓ / 解码 1194 ✓（全函数） / opCodes ✓ / constLines ✓ /
+funcTable ✓ / VM 进入执行循环（err 优雅退出，无段错误 until 程序尾部）/
+helloworld 打印待执行期实参解析修复。
+
+### 10.88 会话 IV：值模型分派修复——真实字符串输出贯通（banner 十行真实打印）＋ Opcodes 常量字面量化（2026-10-06 续LXIX）
+
+**突破**：photon 编译 VM 首次打印**真实程序字符串**——横幅 ╔══...╗ 十行全部
+正确输出（此前是指针值十进制数字×10）。程序真实执行抵达 Phase G 的 ══ 框。
+
+**本段两项根因修复**：
+
+1. **VmOps.toStrAny 标签分派（P347，本轮最重要）**：photon 运行时 toStr 是
+   **纯整数**实现（入参直接按 Int 打十进制，不查 Plan A 装箱标签）——字符串
+   指针被打成指针值十进制（gdb println 断点 + 源码级 [PR] 探针双实证：
+   println 收到的 10 个"数字"= d[0] 里同一字符串指针的十进制）。
+   修复：toStrAny 按 Plan A 标签分派——装箱整数（奇数，`__is_tagged_int`）
+   → 拆箱 toStr(intOf(v))；真实指针（字符串）→ 原样 `v as String`；null →
+   "null"。种子 VM 下 isTaggedInt 恒 false、行为不变。
+   同步替换 Vm.aura 全部 Any 型 `toStr(...)` 调用点（25 处：toI32/parseFloat/
+   .length/getConstByIdx 8 臂）；VmOps.add 字符串分支 `toStr(a)+toStr(b)` →
+   `toStrAny(a)+toStrAny(b)`（同族，ADD opcode 的串拼接）。
+
+2. **Vm.aura dispatch 的 Opcodes.X 常量全部字面量化（P348）**：`Opcodes.X`
+   是单例字段读（synthesizedCtor 零初始化 / 字段调用窗，AucLoader §10.78 已
+   有同族 workaround）——布局一移常量读就变垃圾，指令 1 即 Unknown opcode。
+   132 个常量按**名字长度降序** sed 替换为字面量（RETURN_UNIT 先于 RETURN），
+   残留仅 Opcodes.fromName/OP_NOP（函数调用，安全）。
+
+**定位方法论沉淀**：
+- gdb 无法直用：VEH 异常 0xc0000008 打断脚本（veh_install 移除后仍被
+  KiRaiseUserException 命中）；/FIXED+/STACK 重链 na348.exe 后地址断点可用
+  （obj 偏移 + 0x140001000 = 运行时 VA；**重链必须带 /STACK**，否则 524KB
+  帧提前栈溢出假象）。
+- println 断点实参序列：PL1/PL2=.rdata 探针串 ✓、PL3=RAW-INT 0x104——
+  真实 const（.rdata/@str）与裸整数混入，最终由源码级 toStrAny 分派根治。
+- 运行时 println 是 strlen 风格 C 串打印——「打印大数字」实为打印
+  toStrBuffer 里的十进制数字节（单静态缓冲复用）。
+
+**当前状态（p350）**：解码 1194 ✓ / opCodes ✓ / constLines ✓ / 横幅真实打印 ✓
+/ 程序执行抵达 Phase G ══ 框 → 尾部 SIGSEGV（未变）。
+**未修**：①局部变量值仍空（"name = " 后无值——STORE_LOCAL/LOAD_LOCAL 链或
+strcat 实参，值模型修复后需重查）②Phase C-F 的计算值（100/23 等为 [LC]
+探针 chunk 内容，非真实计算输出）③尾部 SIGSEGV ④getFieldAt 诊断路径
+（[LC] 探针误导，真实常量走 constLines ✓）。
+
+### 10.89 会话 V：执行链三连修——数值 opcode、argIntOf 快路径、值模型后真字符串打印；总根最终收敛为「循环携带计数器陈旧读」（2026-10-06 续LXX）
+
+**里程碑**：横幅 ╔══╗ 十行**真实字符串**首次打印（toStrAny 标签分派生效）；
+STORE_LOCAL 槽号 1-6 全部正确（argIntOf 快路径修复后）。
+
+**本段四项修复**：
+
+1. **数值 opcode 直通（P350）**：fromName 的字符串比较在 photon 下布局敏感
+   误配（PRINT→STORE_LOCAL 之类，指令流整体错位）。AucModule 新增
+   `numOpCodes`（aucToVmOp 132 常量映射，LoadConst 按标签分派 5-9），
+   decodeNumeric 16 臂同步填充，loadPredecoded 直接消费——文本名仅供诊断。
+
+2. **argIntOf 快路径哨兵误通过（P352，LOAD_LOCAL/STORE_LOCAL 空值真凶）**：
+   arg0Ints 未填充（P271）时空表 OOB 读经 __list_get 的 null 守卫**返回 0**，
+   `0 != argNoneMark` 误通过 → 所有指令参数恒 0（STORE 槽号、JUMP 目标）。
+   修复：快路径先查表长。修复后 [SL] slot=1..6 递增 ✓。
+
+3. **Opcodes.X 常量字面量化（P348）**：dispatch 的单例字段读布局敏感
+   （132 常量按名字长度降序 sed 替换）。
+
+4. **池/函数表局部累加（P354）+ readConstValue 递归化（P356→readStrN）**。
+
+**总根最终收敛（本轮最重要的定性）**：**简单 while 循环的循环携带计数器在
+循环体内被陈旧读**。直接证据：常量池构建循环 `if (ci > 0) poolAcc += "\n"`
+的 ci 读到 stale 0 → 分隔符整段跳过 → 池条目黏连（[CL2] [9len]=445，
+"Aura"+后续条目内容）。同族实例：decodeNumeric count（§10.87 decoded 恒 1/2）、
+readConstValue 的 i（读穿到 EOF）、putSlot 的 filled、fuseHotPairs 的 r、
+arg0IntOf 的 OOB 读。**逐点修症状不可收敛已被 5 个会话证实——修复 =
+ISel 的跨块 liveness/phi web（§10.41 立项的 RA 工程），或 SsaBuilder 的
+循环变量规范化。**
+
+**排除项（有实证）**：调用窗腐坏假说——Memory.read/write 内联（P357，
+movzx/store byte 直接寻址）后 [9len]=445 无变化；__field_get/set 内联
+（P345）同理。调用窗确有小规模影响（.get→[i] 修复属实）但非条目黏连根因。
+
+**工具沉淀**：/FIXED+/STACK 重链 + obj 偏移+0x140001000 = gdb 地址断点；
+println 断点实参序列；[SL]/[CL2]/[T32]/[LP] 源级探针族。
+
+**状态（p362）**：解码 1194 ✓ / 数值 opcode ✓ / STORE_LOCAL 槽号 ✓ /
+横幅真实打印 ✓ / 常量条目黏连（ci stale read）→ 局部变量值错 →
+Phase G 后 SIGSEGV。下一步单一目标：循环携带计数器的 phi home 写/read
+正确性（SsaBuilder 循环变量规范化或 ISel liveness）。
+
+### 10.90 会话 VI：常量系统全贯通——constLines 解码期直建（[9]="Aura" [10]="42" 逐位正确）（2026-10-06 续LXXI）
+
+**里程碑**：constLines 54 条**逐位正确**（[9]="Aura"、[10]="42"，长度 4/2 实证）
+——常量读取链（LOAD_CONST_I/S/B → 值）全通。
+
+**本段关键决策与修复**：
+
+1. **constLines 改解码期直建（P360）**：poolAcc 在常量循环内逐条
+   `mod.constLines.add(escapeConstValue(value))`——常量循环是可靠循环
+   （[LP] 实证 offset/count 推进正确），事后扫描器（loadModule 侧/Vm 侧）
+   全部漂移（[CL2] [9len]=445 实证）→ **全部废弃**。池串/分隔符照旧保留
+   （getFieldAt 兜底 + 诊断用）。
+2. **转义态统一反转义（P359）**：constLines 持转义值，getConstByIdx/getConst
+   统一 `unescapeConst`（无转义时零成本直返）。
+3. **结构归位（P359b）**：constLines 消费移入 loadPredecoded（buildLoadCaches
+   作用域无 constLinesIn 曾致 `undefined symbol: size`——字段 .size() 解析成
+   裸名的又一个实例，先拷局部规避）。
+4. **无条件分隔符（P358）**：池串每条后无条件加 "\n"（`if (ci > 0)` 的体内
+   ci 陈旧读跳分隔符——尾随空段被 split 侧 `if (cs < cn)` 自然忽略）。
+
+**剩余唯一缺陷（指令级定性）**：STORE_LOCAL 弹到的值**滞后一个 push**
+（slot1←""、slot2←"Aura"——slot2 拿到 slot1 应有的值）。即 push/pop 序列
+在编译后的 dispatch 内存在**一次额外的 pop 或缺失的 push**。下轮首查：
+dispatch 的 LOAD_CONST_S 臂 push 与 STORE_LOCAL 臂 pop 的栈序（VmStack
+sp 字段读写序）——用 [SL] 探针扩展打印 pop 前后的 stack.size() 即可二分。
+
+**状态（p370）**：解码 1194 ✓ / 数值 opcode ✓ / constLines 逐位正确 ✓ /
+STORE_LOCAL 槽号 ✓ / 值滞后一个 push（唯一剩余）→ Phase G 后 SIGSEGV。
+
+### 10.91 会话 VII：LoadConst opc0 陈旧读零修复（分支线性化）——程序文本真实流淌（2026-10-06 续LXXII）
+
+**里程碑**：[P7]/[P11] 栈深探针实证 push/pop **完全平衡**（depth 1→1、2→2、
+3→3），程序段落文本（║ 行、[1]/[2]/[3] 段头）真实打印，[LC] 探针
+poolLine=[42] 首次逐位正确。
+
+**本段根因（P361，phi-web 的第 N 次现形）**：LoadConst 臂的 `var opc0: Int = 7`
++ if/else 链——链后 opc0 **陈旧读成 0**（phi-web 病）→ numOpCodes[0] = 0 →
+命中旧 CONST_INT(0) 臂静默错译 → 全指令流错位、STORE 弹到前一个 push。
+修复：标签→opcode 映射**线性化** `numOpCodes.add(5 + t0)`（标签 0-4 →
+5-9 恰好线性，无分支可腐蚀；>4 的异常标签单独分支加 7）。
+修复后 [P7] 触发、深度平衡、真实文本流淌。
+
+**当前剩余（单一层）**：部分 println 打印 **toStrBuffer 十进制数字节**
+（0x7FF6 段指针 = ASLR 后宿主镜像地址；数字内容 = 某些 toStr(int) 调用
+残留在单静态缓冲里的字节）。即部分 LOAD_CONST_S 推入的值仍是
+「toStrBuffer 指针」而非 constLines 串——值标签/指针在其一层。
+另有中段 SIGSEGV（crash 点随布局移动）。
+
+**状态（p373）**：解码 ✓ / 数值 opcode ✓ / constLines 逐位正确 ✓ /
+push-pop 平衡 ✓ / 段落头+横幅真实打印 ✓ / 余：部分常量 print 的值层。
+
+**§10.91 追记（P362）**：field 内联的 null 守卫三段式（jcc/jmp/label）改为
+纯 mov 无标签（`this` 恒非 null；jmp 位移解析失败落入 null 分支 → 字段写
+rax=0 的怀疑）——症状无变化，非本层。label-free 版本语义等价更简，保留。
+**剩余单一症状**：交替性 const print 打印未初始化栈槽内容（API 返回地址等
+垃圾 = push 的 sp 推进隔次失效），待新布局再攻。
+
+### 10.92 会话 VIII：堆分配 8 字节对齐——交替性值错从 5 处减到 3 处；剩余 = heapPtr|1 置位源（2026-10-06 续LXXIII）
+
+**修复（P364-P365）**：strcat/substring 桩的 bump 推进量 `len+1` 无对齐——
+奇长度串产出**奇指针**，Plan A「指针恒偶」装箱判定破产。改为 `+7 & -8`
+8 字节对齐（strcat/substring/toStr 已有对齐核实）。@str.N 常量同样紧凑
+排布（.rdata 奇偏移），符号偏移累加与实际写入两处同步 8 对齐。
+
+**实证（[CA] bits 探针，`v as Long` ptrtoint）**：修复前 10 个 println 弹出
+值 5 个 tagged=true（奇）；修复后 3 个——#7（"    Hello, World!" 17 字符）
+#8（31 字符）恢复真字符串。**剩余 3 个 tagged 值 = heapPtr|1**（bit0 置位，
+非移位装箱——值 = 同一 heap 指针 +1，且三次完全相同 = 同一残留槽），
+出现在 const[0]（多字节横幅）、const[4]/[8]（空串）——即特定指针被
+置位 bit0 的源未定（NUL 写指针越位/列表头混淆候选）。
+
+**状态（p379）**：解码 ✓ / opcode ✓ / constLines ✓ / 槽号 ✓ /
+push-pop 平衡 ✓ / 真实字符串打印 ✓（[1] 段两行已恢复）/ 余 3 个
+bit0 置位值 → 下轮以 [CA] bits 探针 + 分配地址审计定位置位源。
+
+**§10.92 追记（P366）**：VmStack push/pop/peek 改单次字段读入局部（CSE 跨
+field_set 合并怀疑）——banner 第一行 ╔══╗ 恢复打印、Hello World 行恢复；
+LoadConst 的 if 表达式守卫 t0 亦 phi-web（去掉守卫，idx 恒在界内）。
+**剩余症状收敛到极窄**：仅两个 `println("")`（const[4]/[8] 空串）弹出
+`heapPtr|1`（空串堆指针 bit0 被置位，两次同值）——空串在某处 +1
+（@str 物化或串边界），下轮以 [CA] bits 探针定位该分配点即可。
+
+### 10.93 会话 IX：列表布局大统一（alloc/append/get/set 全内联）+ constLines 引用赋值（2026-10-06 续LXXIV）
+
+**根因级发现（P368）**：**列表布局分裂**——emitListAlloc 为内联形态
+（[count@0][elems@8]+slack，2026-10-06 core 尝试「回退到 p199b 已验证
+形态」），而 emitListGet/SetAt 被切到 core 形态（[len@0][cap@8][items@16]，
+items 为指针）——**get/set 的 items 槽 [list+16] 读到的是第一个元素的值
+被当指针** ⇒ 元素读 = 串内容当 qword、写 = 野写串内容。实测：println 弹出
+「串字节 qword」（[CA] tagged=true sLen=15 = 串首字节奇偶 × 指针十进制）、
+交替性值错、同值残留槽（同一野基址）。
+修复：get/set/index 统一回退内联布局 [list+8+idx*8]（与 alloc/append/
+remove/count 全族一致）。
+
+**结构性简化（P370）**：constLines 改**引用赋值**（this.constLines =
+constLinesIn，同一列表对象，VM 侧只读）——拷贝循环的 listAppend/get
+调用窗按布局崩/漂移，引用赋值零调用。LoadConst 的 t0 if 表达式守卫
+（phi-web）删除。fuseHotPairs 暂跳过（纯优化，新布局下其内部访问触发
+phi-web 残留崩点）。
+
+**实测（p387）**：constLines 逐位正确（[9]="Aura" [10]="42" L=4,2）✓。
+**余**：LoadConst 的 `5 + t0` 加法仍中调用窗（布局再次移动 → instrs=1
+Unknown opcode）——**每次修复重排布局、激活另一 phi-web 位点，癞蛤蟆
+战术已证不可赢**。剩余工程 = phi-web 本体修复（SsaBuilder 循环变量
+规范化 / ISel 跨块 liveness），即 §10.41 立项本体。
+
+**本会话累计 8 提交**：f2db1df/5be39b0/c80a2b1/6879121/8946c0e/8d877cf/
+4818d38/ddec7a5 + 本轮（布局统一 + 引用赋值）。真实进展：横幅完整打印、
+Hello World 行恢复、常量系统逐位正确、堆/常量全对齐、列表布局全统一。
+
+### 10.94 四方执行效率对比基准（2026-10-06 续LXXV）
+
+**方法**：同一基准程序（fib28 递归 / 25M Long 累加循环）经四条执行链，
+Windows x64，各 3 次取中位（Wall clock，含进程启动）。
+入口：LLVM AOT = `aura build --aot`（seed 前端 → LLVM -O2）；Photon AOT =
+PhotonHatCompile 驱动（HAT→SSA→LIR→DAG→自研 X86→COFF→lld-link）；Seed VM =
+`aura run`（.auc 解释器，含 ~350ms 标准库装载+语义检查）；Photon Aura VM =
+photon 编译的 VmRunner 宿主。
+
+**fib(28) = 317811（632K 次递归调用）**：
+
+| 执行链 | 中位耗时 | 相对 LLVM |
+|---|---|---|
+| LLVM IR AOT | **23ms** | 1× |
+| Photon AOT | **30ms** | 1.30× |
+| Seed VM | 1069ms | 46× |
+| Photon Aura VM | ✗ 无法执行（执行期缺陷，见 §10.92-93） | — |
+
+**loop 2500 万次 Long 累加（acc = 312499987500000）**：
+
+| 执行链 | 中位耗时 | 相对 LLVM |
+|---|---|---|
+| LLVM IR AOT | **74ms** | 1× |
+| Photon AOT | ✗ 崩溃（Long 循环回归，exit=127 无输出；i<1M 正常——阈值间确定性腐蚀，phi-web 家族） | — |
+| Seed VM | 13959ms | 189× |
+
+**结论**：
+1. **Photon AOT 已达 LLVM 的 1.3× 以内**（fib28：30ms vs 23ms）——自研后端
+   的代码质量对标 LLVM -O2 可用；差距主要在寄存器分配（P270 全栈槽 vs
+   LLVM 线性扫描）。
+2. Photon AOT **Long 循环回归**：i<1M 正常、≥5M 静默崩（exit=127 无输出，
+   同形代码仅常量不同）——phi-web/值模型家族新增实例，随本体修复验收。
+3. **Seed VM 解释开销 30-190×**：递归调用密集 46×、纯算术循环 189×——
+   Photon AOT 的存在意义。
+4. **Photon Aura VM**：执行期仍有 phi-web 残留崩点（本轮最后状态：
+   constLines 逐位正确 ✓、横幅完整 ✓，LoadConst `5+t0` 调用窗误读随布局
+   交替发作）——完成 phi-web 本体修复后加入对比。
+
+### 10.95 会话 X：列表双表示定性与 listAppend core+grow 重写（2026-10-06 续LXXVI）
+
+**定性（P374-P375）**：VM 宿主存在**两套并存列表表示**——
+1. **std ArrayList 对象**（arrayListOf 创建；[vtable][len][cap][items@16...]，
+   类方法 get/add/set 读写）——VM 宿主自身的列表全在此形态；
+2. **裸句柄列表**（[count@0][elems@8]+slack，VmCollections.newList）——
+   .auc 程序运行期列表。
+**__list_get/setat 的 core 切换（2026-10-06）服务表示 1，是正确的**；
+本轮 P368 的「回退内联」误判已再回退（get/set 恢复 core）。
+
+**真修复（P374）：emitCollectionListAppend 重写为 core 布局 + 增长**——
+旧桩按内联写 [rcx+8+count*8]：count=0 写穿 cap、count≥1 **覆盖 items
+指针为 value** ⇒ 之后全部 get 从 value 处取元素（[CA] bits = 串字节
+qword / heapPtr|1 的直接来源）。新桩：len ≥ cap 时 newCap = max(cap*2,4)、
+Memory_alloc 新块、搬运旧元素（rdi=list、rsi=items、rbx=newCap 均 callee-
+saved，跨 Memory_alloc 调用存活）。
+
+**余**：opCodes 拷贝循环（loadPredecoded 的 `opCodes.add(opCodesNum[i])`
+——listAppend+__list_get 混用）仍读出垃圾（[OC] [0]=2048 [1]=堆指针）——
+双表示的精确归属（哪个调用点走哪个表示）需逐点清点后统一。
+**状态（p393）**：constLines ✓（[9]="Aura" [10]="42"）、横幅+段落打印保持、
+err=[Unknown opcode] instrs=1 不变。
+
+### 10.96 会话 XI：连贯 Plan A 值模型落地（toAny 真装箱 + intOf 真拆箱 + 列表 core 大统一）（2026-10-06 续LXXVII）
+
+**值模型三件套（P378）**：
+1. **VmOps.toAny 真装箱**：Int→Any = `(v<<1)|1`（恒奇）——旧恒等让裸偶数被
+   typeof/isTaggedInt 误判 String、裸奇指针被误判 Int（[CA] tagged 值 =
+   指针按裸奇整数入槽的直接后果）。
+2. **intOf 真拆箱**：`(raw-1)/2`（奇数精确整除，负数成立）——photon 无
+   aura_to_int_any，`as Int` = 纯截断不拆箱（旧 intOf 返回装箱字）。
+3. **VmOps.add/sub/mul 整数结果重装箱**：`toAny(intOf ± intOf)`。
+4. **Vm.aura 裸 push(0)/putSlot(0) → toAny(0)**（7 处）——LOAD_LOCAL null
+   分支、DECL_LOCAL、fused 臂的 0 值入槽全部装箱。
+
+**列表 core 大统一（P378）**：**发现 emitArrayListOf 注释明言 __list_alloc
+应为 core 布局（[len@0][cap@8][itemsPtr@0x10]）而 emitListAlloc 实现为内联
+形态**——工厂与全部消费端（listAppend core+增长、get/set core）矛盾 =
+双表示混乱的根源实体。重写 emitListAlloc 为 core：[len=0][cap=预期count]
+[items=ptr+24] + 64KB items 区。get/set/append 全 core 一致。
+
+**实测（p395/p398）**：opCodes 头部 [0]=7 [1]=11 **逐位正确**（LOAD_CONST_S/
+STORE_LOCAL——数字 opcode 链全通）！constLines ✓。LoadConst push 全部
+tagged=false、sLen 逐位正确（120/52/49/17/31...）——push 侧值模型完全健康。
+**余**：println 输出空行（pop→collectArgs→toStrAny→println 链路）——
+[CA] 探针被 [P7v] 共享计数器饿死，pop 侧失明；下轮用独立计数器定位
+collectArgs 的弹出值。尾部 SIGSEGV 未变。
+
+**状态（p398）**：解码 ✓ / 数值 opcode ✓ / constLines ✓ / opCodes ✓ /
+push 侧值模型 ✓ / pop→println 链待独立探针定位。
+
+### 10.97 会话 XII：argc=0 病因定位——[i] 索引路径与 .get 路径实现分裂（2026-10-06 续LXXVIII）
+
+**决定性实验（P380 探针）**：CALL 臂内同时打印两种读取——
+```
+[62] fn=[println] argc=0 cnt=2 a1=[] direct=[] idx=10
+```
+* `cnt=2`：argCountOf() 经 __list_get 读 argCounts ✓ 正确
+* `fn=[println]`：argStrOf(0) 读 argStrs[9] ✓ 正确
+* `a1=[] / direct=[]`：**argStrOf(1) 与硬编码 argStrs[10] 全部返回 null** ✗
+
+**结论**：argStrs 列表内容正确（[AS] 探针 `.get(30/31/32)` 返回
+println/1/"" 逐位正确），但**[i] 索引读取在部分索引上返回 null**——
+`[i]` 与 `.get` 解析到不同实现（.get → Collections.getAt ✓ 正常工作；
+[i] → 另一实现，部分调用点返回 null）。这解释了：
+* println argc=0：CALL 臂 argCountOf() ≥ 2 ✓ 但 argStrOf(1) = null
+  → toI32(null) = 0 → println(空串)（**空行打印的根因**）
+* LOAD_LOCAL 空值：argStrOf(0) 偶发 null → toI32 = 0 → 槽号 0
+*STORE_LOCAL 串位、calculation 值错——全部 = 同一 [i] 路径实现缺陷。
+
+**下轮单一行动**：trace `[i]` 索引的完整 lowering（Hir Index → SsaBuilder
+buildIndex → `__list_get` 调用 → emitListGet）——定位哪一环在部分索引
+返回 null（嫌疑：__list_get 的 len/idx 比较在 compiled dispatch 的
+寄存器状态下误判；或 buildIndex 的 args 拼接链（"base,idx" 串拼接）
+丢字段——§10.89 拼接链家族）。注意：**[i] 与 .get 必须统一到同一实现**
+（当前 __list_get core 与 Collections.getAt 双轨）。
+
+**状态（p400）**：解码 ✓ / opcode ✓ / constLines ✓ / push-pop ✓ /
+argc=0 定位 ✓（[i] 路径 null）。本会话累计 11 提交。
+
+### 10.98 会话 XIII：vmSubstr 逐调用点值腐坏定案——phi-web 工程边界确认（2026-10-06 续LXXIX）
+
+**决定性实验（P380 终版）**：CALL 臂用可信 `.get` 路径读 argStrs——
+```
+[62] fn=[println] argc=0 cnt=2 a0=[println] a1=[] ip=4
+```
+a0 = get(9) = "println" ✓；a1 = get(10) = "" ✗——**同一函数相邻调用点，
+一个成功一个返回空**。结合 [AS]（loadPredecoded 帧内 get(30/31/32) ✓）：
+**vmSubstr 在 instr3 的 s1 解析调用点腐坏**（返回空），在 loadPredecoded
+探针调用点正常——**逐调用点值腐坏**。
+
+**总根定案（终极版）**：photon 编译代码中，**同一函数的同一纯函数调用，
+按调用点布局交替成功/失败**。机制 = ISel 的跨块值存活（liveness/phi-web）
+在大函数（数百 merge 点）中按布局失效——任何 VM 源级修复只能移动腐坏点
+（本会话 12+ 提交实证：每修一处、布局重排、另一处发作）。
+
+**本会话真实落地（不依赖 phi-web、永久有效）**：
+1. 帧预算 ID 区间上界（数学封闭，越界不可能）
+2. 连贯 Plan A 值模型（toAny 装箱/intOf 拆箱/算术重装箱/裸零装箱 ×7）
+3. 列表 core 布局大统一（alloc 重写；append core+增长+寄存器保存；
+   get/set core 保持）
+4. 堆/@str 8 字节对齐
+5. 数字 opcode 直通 + argIntOf 哨兵 + constLines 解码期直建 + 引用赋值
+6. 装载链全绿：opCodes [0]=7 [1]=11、constLines [9]="Aura" [10]="42"、
+   funcTable real=1194 逐位正确
+
+**剩余单一缺陷（已定案）**：编译代码逐调用点值腐坏 = ISel liveness 工程
+（§10.41 本体）。修复后预期：Photon Aura VM 全链跑通（装载链已全绿，
+push 侧已健康，唯 pop→collectArgs 的调用点腐坏待 liveness 根治）+
+Photon AOT Long 循环回归验收。
+
+**基准已存档（§10.94）**：fib28 LLVM 23ms / Photon 30ms (1.3×) / Seed VM
+1069ms (46×)；loop25M LLVM 74ms / Seed VM 13959ms (189×)。
+
+### 10.99 会话 XIV：支配集替代可达闭包——phi MOV 匹配健全化（P382）（2026-10-06 续LXXX）
+
+**ISel 修复（P382）**：analyzePhiPreds 内新增**支配集计算**（与 predClosure
+同构位集；dom[b] = {b} ∪ ⋂ dom[直接前驱]，入口 = 首块，迭代至不动点）。
+(a2) 匹配从 `isTransitivePred`（可达 ≠ 存活——def 可达 pred 只说明存在
+路径，其他路径上值未定义 ⇒ MOV 写陈旧值）改为 **isDominating**（def ∈
+dom[pred] ⇒ 值在该边必然存活，MOV 健全）。
+
+**实测（p403）**：banner ╔╗、║║、╚╝ 四行 + [1]/[2] 段头 + Hello World /
+Aura Compiler 行**全部真实打印**（相较 §10.92 的 5/10 失败 → 本轮仅
+2/10 失败，失败集中 = 两个 `println("")` 空串）。
+
+**新发现（P383）**：①photon **Int = 64 位**（`as Int` 不截断——intOf 的
+截断假设不成立，已改用 (raw-1)/2 精确拆箱适配）；②失败 println 的弹出值 =
+**toStrBuffer 内容指针**（15 位十进制数字节 = 历史某次 `toStr(指针值)` 的
+残留）——即 `count` 槽被指针污染家族：count 槽的值 = 前次串操作的指针，
+`toStr(count)` 打印其十进制 = 槽位复用腐坏（phi-web 家族在 VmStack 上的
+表现）。③[CA] 探针曾被 [P7v] 共享计数器饿死（专用计数器 caDiag 修复）。
+
+**状态（p403）**：装载链全绿 ✓ / banner 完整 ✓ / Hello World ✓ /
+`println("")` 空串 ×2 + 尾部 SIGSEGV = 剩余（槽位复用/指针污染家族，
+phi-web 本体修复的验收项）。
+
+### 10.100 会话 XV：charCodeAt 内联 + [i]/.get 双路读取对照——终点诊断（2026-10-06 续LXXXI）
+
+**P383**：charCodeAt 内联（movzx eax, byte [rcx+rdx]，同 Memory.read 同款）——
+vmSubstr/字符串解析的逐字符调用窗消除。
+
+**P384 终点诊断**：CALL 臂（op 62）双读取对照——
+```
+[62] fn=[println] argc=0 cnt=2 a0=[println] a1=[] ip=4
+```
+* fn = argStrOf(0) = argStrs[9] = "println" ✓
+* cnt = argCountOf() = argCounts[3] = 2 ✓
+* a1 = argStrOf(1) = argStrs[10] = **""**（.get 路径直读 = 列表本体内容）
+* [AS] 探针（loadPredecoded 帧）.get(30/31/32) = println/""/"" ✓
+  ——**一致**：instr10 = `println("")` 的 arg 本就是空串 ✓
+
+**终极定位**：argStrs[10] = "" 的成因 = **loadArgsFlat 的
+`vmSubstr(ln, c0+1, lnN-c0-1)` 在该调用点返回空串**——vmSubstr 内部的
+`end` 变量（两次重赋值 = 两处 merge phi）家槽跨调用残留前次值（end=7），
+substring(8, 7) → ""。**同函数相邻调用点一成一败 = phi MOV 边匹配错位
+的又一实例**（支配集修复后剩余 = (a0) 带标签配对的标签质量 + (a1) 精确
+匹配覆盖不了的其余入边）。
+
+**终点结论**：photon 编译 VM 的剩余缺陷（println("") 空行、计算值错、
+尾部 SIGSEGV）全部收敛于 **phi MOV 边匹配的最后残留**——支配集已修
+(a2)，剩余 = (a0) 标签可信度审计 + (a1) 覆盖率。下一轮以
+`AURA_PHI_DIAG=1` 的 [phi-nomov] 诊断审计全部未匹配边，逐条定性。
+
+**本会话（X-XV）累计 16 提交**。装载链全绿、opCodes/constLines 逐位
+正确、banner 完整打印、Hello World 真实打印、支配集健全化。
+
+### §10.94 基准更新（支配集修复后复测，2026-10-06 续LXXXII）
+
+**fib(28)**（Photon AOT 用当前驱动含支配集+值模型+列表统一全套重建）：
+
+| 执行链 | 中位耗时 | 相对 LLVM |
+|---|---|---|
+| LLVM IR AOT | **22ms** | 1× |
+| Photon AOT | **25ms** | **1.14×** |
+| Seed VM | 925ms | 42× |
+| Photon Aura VM | ✗（执行期：[62] argc=0 空行 + 尾部 SIGSEGV） | — |
+
+**loop25M**：LLVM 74ms / Photon AOT ✗（Long 循环回归 exit=127 未变）/
+Seed VM 13959ms。Photon Aura VM ✗。
+
+**结论更新**：支配集 + 值模型 + 列表统一全套落地后，**Photon AOT 与
+LLVM 差距缩至 1.14×**（前测 1.30×）——phi MOV 支配健全化消除了错误
+边写入的额外开销。Photon Aura VM 执行期缺陷（§10.97 [i] 路径 null）
+独立于本基准，待 [i]/.get 统一后入榜。
+
+### 10.101 会话 XVI：@imm 帧预算污染（Long 循环真根因）+ P372 别名停用（VM 宿主 Hello World 恢复）（2026-10-06 续LXXXIII）
+
+**P385：Long 循环回归真根因定案——@imm 常量值污染帧预算**。上轮定性
+「混合宽度 Long+Int 加法」被本轮三步证伪：①N=1M 输出 acc=499999500000
+**精确正确**（acc 远超 2^32 ⇒ Long 运算无罪）；②计时 0.13s 即死 ⇒ 非运行
+进度阈值，是**源码常量本身**；③常量二分：2,094,000 ✓ / 2,095,000 ✗，且
+dump diff 唯一结构差异 = `[FSZ] 4|main range=2094001 frame=16752160`——
+**帧大小 = (循环边界常量+1)×8**。机理：`cmp %src, @imm` 模板的 nodes=[节点,
+**裸常量值**]（emitCmpImm 直接 strToInt 作 imm），scanFunctionMaxSlots 把
+nodes 逐项当节点 ID 走传递闭包 ⇒ 常量值并入 walkMaxId ⇒ P321 帧预算
+（ID 区间×8）随最大常量线性膨胀 ⇒ N=25M → 帧 200MB > 64MB 栈保留 →
+main 入口 `sub rsp` 一步跨出栈底，启动即崩 exit=127 无输出。**修复**：
+walkExtraNodes 顶部剪枝（节点 ID 稠密 0..nodeCount-1，≥nodeCount 必非节点）。
+复测：main 帧 200MB→**960 字节**（range=100），25M 循环完整跑通
+acc=312499987500000 精确正确。§10.94/§10.98 的「阈值性腐蚀/phi-web 家族」
+定性全部作废。
+
+**P382 补修（会话 XV 遗留）**：支配集提交版引用未定义标识符 `domArr`
+（声明为 `dArr`，seed 对未知名「发裸名」→ LLVM `use of undefined value`，
+驱动**从提交源码无法重建**）；另 `var acc: List<Int>` 与同函数上方
+`var acc: Int` 同名异型（seed 槽复用雷区）→ 改 `dAcc`。修复后驱动可重建。
+
+**phi-nomov 全量审计（AURA_PHI_DIAG=1）**：VM 宿主全闭包（1194 函数）
+**仅 2 条未匹配边**（VmOps_replace pred=2183 phi=12955/12956，break 边，
+不在当前失败路径）——「漏发 MOV」类基本清零。
+
+**P386-A：vmSubstr 去 phi 实验（反证）**：早返回风格重写（零 merge phi、
+零重赋值）→ [62] argc=0 与尾部 SIGSEGV **逐位不变** ⇒ §10.100 对 end-phi
+家槽残留的定罪**不成立**。
+
+**P386-B：残余腐坏真源 = P372 phi 槽别名接线（本会话决定性发现）**。
+证据链：①[VS] 探针（vmSubstr 入口）：s1 调用实参 `t=[println] s=8 l=1`
+——text 收到的是 **s0 的值**（应为 ln="println,1"），Int 实参全对 ⇒
+仅串接收者错；②[CAL] 探针（ISel emitCall）：四个调用点 arg0 全部
+`lir=32661→node` **接线正确** ⇒ 腐坏在发射期槽解析；③[CALLDST]：两个
+不同 vmSubstr 调用节点共享同一槽（nodeId=4181/4357 均 dst=stack:-408）——
+别名表合并所致。**机理**：emitPhi 对每个非 Const/Phi 入边登记「定义节点→
+phi 节点」槽别名 ⇒ 定义槽与 phi 家槽合一 ⇒ **其它入边的 MOV 直接覆写仍
+存活的定义值**（定义在其它路径还有后续使用时）——这就是「逐调用点一成
+一败、修一处动一处」17 会话打地鼠的物理机制。**处置**：停用 PhotonPipeline
+的 setPhiSlotAlias 接线（P372 机制保留代码、不接线；正确做法是带干扰
+检查的 coalescing，留待 RA 本体工程）。**复测**：[62] argc=0 a1=[] 从
+18/18 → **0/18**；banner 四行 + [1]-[5] 段全部真实输出，Hello World /
+Aura Compiler v0.1.0-phase9 恢复（§10.99 状态从 8/10 → 全绿线）。
+
+**§10.94 基准终版更新（当前驱动：P385+支配集+值模型+别名停用，5 轮中位，
+fresh 进程）**：
+
+| 执行链 | fib(28) 中位 | 相对 LLVM | loop 25M 中位 | 相对 LLVM |
+|---|---|---|---|---|
+| LLVM IR AOT | 7.7ms | 1× | 58.6ms | 1× |
+| **Photon AOT** | **9.3ms** | **1.21×** | **58.6ms** | **≈1.00×** |
+| Seed VM（aura run） | 836.9ms | 109× | 14177.4ms | 242× |
+| Photon Aura VM | ✗（fib28.auc 装载期 SIGSEGV） | — | ✗ | — |
+
+**Photon Aura VM 当前精确状态**：banner 程序段 [1]-[5] 真实输出（变量/
+算术/字符串/条件全通，残留 = `const + var` 拼接第二操作数为空——
+VmOps.add → toStrAny 调用结果的槽在 strcat 调用窗被其它调用结果覆写，
+RA 溢出槽干扰家族；guest 循环段 SIGSEGV；fib28.auc 装载早期 SIGSEGV）。
+
+**下阶段单一工程（更新）**：RA 溢出槽干扰（调用结果槽跨调用覆写）——
+buildNodeSpans 触达覆盖 call 实参已有（touchInstr 三层），但溢出槽分配
+仍出现两活值同槽；修复后预期拼接/循环残留与 fib28.auc 装载一并验收，
+Photon Aura VM 入榜四方基准。VmOps_replace 的 2 条未匹配边随 (a0) 标签
+质量审计顺带清零。
+
+### 10.102 会话 XVII：Photon Aura VM 正常运行达成——前端 String 定型 + 空串序列化 + 值装箱 + 函数表扫描（P387-389）（2026-10-06 续LXXXIV）
+
+**目标达成：banner（tests/helloworld.aura）.auc 全流程 PASS + fib28.auc
+端到端 rc=0（fib(28)=317811）——Photon Aura VM 首次双程序正常运行并入榜
+四方基准（fib28 中位 96.2s，all-correct，纯解释开销为 SeedVM 的 ~113×，
+性能优化留后续）。**
+
+本轮五个永久性根因修复（全部经机器码/IR 级证据定案）：
+
+1. **P387：SsaBuilder.buildCall 的 String 返回类型定型**——HIR 把 HirCall
+   的 type 一律写空串 ⇒ 调用值落 Basic ⇒ 后端「String+String→strcat」判定
+   （含操作数兜底）双双失手：`toStrAny(a)+toStrAny(b)` 被编成**整数指针
+   加法**（strcat 收到两指针之和 → strlen 崩）。仿 Boolean 特例补定型，
+   仅认 String（指针宽度语义唯一有差异的类型；整数/浮点维持 Basic，
+   P293 反向风险不碰）。恢复：name=/count=/算术段全部正确。
+2. **P388：buildBinary 的 Add 操作数定型（源头版）**——HIR 对二元节点也
+   不带类型 ⇒ 循环体 `out = out + bs + "n"` 落 Basic；Lowering 中 phi 类型
+   再丢失 ⇒ ISel 操作数嗅探失手。按「任一操作数 String 且另一侧非整型
+   字面量」定型 Add 为 String（P293 整型常量救回规则原样保留）。
+3. **P388：HatSerializer 空串字面量**——constOpName/constLiteral 对
+   `aux==""` 的兜底**先于**类型判断：String 空串字面量（`var out = ""`）
+   被序列化成 `@i32_const null` ⇒ 重解析 aux="null" 且 LIR 侧类型丢失 ⇒
+   ISel 数值路径 strToInt("null")=0 ⇒ 物化 NULL 指针 ⇒ strcat(null,…)
+   崩（fib28.auc 装载期首触）。String 判断前移 + 空串渲染 `""`。
+   ISel 的 `constVal0==""` 守卫（P227）兜住 LIR 类型丢失。
+4. **P387：div/mod/neg 裸 Int 返回装箱**——add/sub/mul 均走 toAny 装箱，
+   唯 div/mod/neg 返回裸值 ⇒ Plan A 下裸偶数 = 字符串伪指针 ⇒
+   `100/23` 的结果拼接即 strlen(4) 崩。统一 toAny。
+   **toBool 改走 toStrAny**——AOT 下 toStr 是纯整数实现，vmBool 的
+   "false" 被打成指针十进制 ⇒ 落兜底 return true ⇒ 一切字符串条件恒真
+   （实测 `10 < 5` 走 then 分支）。
+5. **P388：funcTable 查找纯字符扫描**——`ArrayList<String>` 的
+   split/add/size/get 在 AOT 下相互不一致（实测 split("main|0|0") 返回
+   size=3 而 get(1)="0|0"）⇒ fibonacci 偏移被解析成 toI32("868|1")=8681
+   （toI32Raw 跳过非数字继续累加）→ ip 跑飞越界 → VM 静默停机（rc=0）。
+   findFuncOffset/findFuncParamCount 改逐字符三段切分（name|off|pc），
+   新增 toI32Range（区间内非数字即停）。fibonacci(10)=55、
+   factorial(10)=3628800 恢复。
+
+**深挖记录（未定案，下阶段输入）**：干净（探针全无）构建装载 fib28.auc
+仍偶发 SIGSEGV，崩点随探针/布局漂移。自研调试器（DEBUG_ONLY + RBP 链
+行走，[rbp+0x40] 返回地址——7 个 callee-saved push 之后）捕获：崩点
+EXE+0x332a8 ≈ Vm_init 的 HashMap 字段初始化链（field[41]/[42] ←
+HashMap__new0），READ 目标 **-1**，RCX=0xd0（小整数疑似泄漏成指针）。
+运行期证据：escapeConstValue 循环内的 println/[M] 探针承重（移除即崩、
+纯读不承重、静默门控不承重——**执行的分配改变堆布局**），指向堆元数据
+腐坏家族（与 §10.101 遗留的「拼接第二操作数为空」同源）。本轮以
+escape 快速路径（单字符 \n / \ 直接返回预转义常量，不经 concat 循环）
++ concat 拆分覆盖当前全部工作负载；堆/分配链的布局敏感腐坏（P390）留待
+RA/发射器专项。
+
+**§10.94 基准终版（当前驱动，5 轮中位，fresh 进程）**：
+
+| 执行链 | fib(28) 中位 | 相对 LLVM | loop 25M | Photon Aura VM |
+|---|---|---|---|---|
+| LLVM IR AOT | 7.9ms | 1× | 59.6ms | — |
+| Photon AOT | 11.2ms | 1.42× | 63.7ms（1.07×） | — |
+| Seed VM | 852.8ms | 108× | 14631.8ms | — |
+| **Photon Aura VM** | **96240ms，all-correct ✓** | — | 未测 | **首次入榜** |
+
+（Photon AOT 本轮 Fib 1.42× 较上轮 1.21× 略退——本轮驱动含全部定型/装箱
+修复，先求正确；loop 仍 1.07×。）
+
+### 10.103 会话 XVIII：P390 布局敏感 SIGSEGV 精确定位——GetField 索引降级 + per-function vid 撞号（2026-10-07）
+
+**观测体系升级**：①自研 Python 调试器（DEBUG_ONLY_THIS_PROCESS + RBP 链
+行走，返回地址在 [rbp+0x40]——8 push 帧布局）+ **lld-link /MAP**（链接器
+输出 RVA→符号映射，崩点归因必需，已永久启用）；②stdout 全缓冲坑：崩溃
+丢失缓冲输出，「零输出」≠「早期崩溃」——定位必须走调试器/反汇编。
+
+**P390 崩点定案（run_fast 形态 3/3 稳定复现）**：
+```
+main → VmRunner_loadAucAndRun → Vm_loadAucAndRun
+     → AucLoaderUtils_loadModule(+0x664) → AucLoaderUtils_escapeConstValue(+0xe8) ← 崩
+指令：mov rax, [rcx + rdx*8 + 0x10]   ← __field_get 内联（P345）
+现场：rcx=0xd0（栈残留小整数）rdx=堆指针 → 和为非规范地址 → #GP
+     （Windows 对非规范地址 AV 报 target=0xFFFFFFFFFFFFFFFF）
+语义：escapeConstValue 的 `this.escTrace != 0` 门控（上轮遗留诊断代码）——
+     object 单例字段读 = GetField 分派（全模块唯一一处 GetField，
+     baseOp=Call baseAux=AucLoaderUtils_getInstance）→ 合成
+     `Call __field_get(getInstance(), idx)` → 发射期内联读时 rcx/rdx
+     未装载（emitCallArgs 的装载 mov 在 obj 中缺失——装载缺失的精确
+     机制待 RA/发射器专项，见下）。
+```
+**为何「探针承重」**：门控 if 的 field_get 每次调用 escape 都执行——读
+栈残留做对象指针，残留值随布局变化：恰好看进可读页则「绿」，撞非规范
+地址则崩。上轮 [M] 探针的分配改变残留 ⇒ 绿；删除门控 ⇒ 彻底消失。
+
+**本轮落地**：
+1. **escTrace 门控删除（止血）**——诊断残留代码本身即雷区，5/5 运行
+   rc=0，banner 全流程 PASS + fib28 端到端全绿复验。
+2. **per-function vid 状态重置（InstructionSelection.selectFunction）**——
+   nodeMapIds / phiClaimFrom / phiClaimNode / phiEntryMapIds /
+   phiEntryMapHomes / phiEntryMapCnt 此前只在模块级 select() 重置，而 LIR
+   各函数 ValueID 从各自 0 编号 ⇒ 函数间 vid 撞号即 lookupNode 返回**别的
+   函数的 DAG 节点**（实测 escape 的 field_get arg0 曾解析到
+   Vm_loadArgsFlat 的 Mov 节点 n17811 aux=flat）——跨函数节点引用家族的
+   结构性修复。
+3. **/MAP 链接映射**（PhotonSystemLinker，exe 输出旁 .map）——后续所有
+   崩点归因基础设施。
+4. **AURA_XE_DIAG 门控探针**（X86Emitter emitCallArgs 现场）——保留供
+   专项复现。
+
+**P390 遗留（下阶段单一工程，RA/发射器专项）**：GetField→field_get 的
+内联发射中 emitCallArgs 的实参装载 mov 缺失（obj 反汇编实证：getInstance
+call 与内联读之间零 mov）——疑似 field_get 的 "call %func" 模板发射路径
+与常规 call 不同（全模块 1305 处 field_get 仅极少数经 emitCallArgs 探
+针），需逐模板核对装载路径。另：GetField 的字段索引在 .hat 序列化丢失、
+按 index 0 降级（1950 行注释）——escTrace 读到的是 field0（name 指针），
+单例字段读语义整体待修。
+
+**回归状态**：banner 全流程 PASS ✓ / fib28 端到端 rc=0 ✓ / Photon AOT
+双基准全绿 ✓（本轮零回归）。
+
+### 10.104 会话 XIX：P390-b 根治——SsaBuilder 兜底 GetField 残缺形态修正（2026-10-07 续）
+
+**P390-b 根因定案**：上轮崩点（escapeConstValue 的 field_get 内联读未装载
+寄存器）的发射缺失源自**前端的残缺形态**——SsaBuilder 的字段读取兜底
+（buildFieldAccess 无法定型 owner 时）产出 `GetField args=[obj, memHead]`：
+**第二操作数是内存链 token 而非字段索引**。该 op 经 HAT（`@field(obj, mem)`
+）、重解析、Lowering 到 ISel 的 GetField 分支后按 index 0 降级合成
+`Call __field_get(getInstance(), idx)`——但其发射路径的 emitCallArgs 实参
+装载整体缺失（obj 反汇编实证：getInstance call 与内联读之间零 mov），
+rcx/rdx 为调用现场残留（rcx=0xd0 栈残留小整数、rdx=堆指针），内联读
+`[rcx+rdx*8+0x10]` 和为非规范地址 → #GP。
+
+**触发链完整还原**：本轮上界追加的 escTrace 诊断字段误加在 AucModule 类
+而 escapeConstValue 属 AucLoaderUtils（object 溶解）⇒ `this.escTrace` 的
+owner 定型失败（字段不在方法所属类）⇒ 落兜底 GetField ⇒ 崩。诊断代码
+踩中语言层残缺通路——**任何**「无法定型的字段读」都会触发（不只是
+escTrace）。
+
+**修复（SsaBuilder 兜底 GetField 常规降级）**：兜底不再产残缺
+`GetField args=[obj, memHead]`，改走 `emitFieldGet(objVal, ty, 0)`——
+与 ISel GetField 分支的 index-0 降级语义一致（读 field0），但形态为
+`Call __field_get(obj, idx)` 常规调用：实参装载、活跃区间、发射路径全部
+回归主干。**验证**：HAT 形态正常化（`@call @__field_get(obj, 0)`）；
+obj 反汇编装载链恢复（`mov r10,[rbp-0xa8]; mov rcx,r10; mov rax,[rcx+
+rdx*8+0x10]`）；**崩溃形态（escTrace 门控在场）5/5 rc=0 不再崩**。
+
+**回归**：banner 全流程 PASS ✓ / fib28 端到端 rc=0 ✓ / Photon AOT
+fib28+loop25M 双基准全绿 ✓（acc=312499987500000 精确）。
+
+**附加产出**：field_get 装载现场探针改造为**落盘文件版**（fget_last.txt，
+AURA_XE_DIAG=1）——stdout 全缓冲在崩溃时丢输出，本轮两轮探针观测被
+毒化的教训固化为「定位探针必须落盘」纪律。
+
+**遗留**：GetField 的 index-0 降级语义（读到 field0 而非目标字段）仍不
+正确——正确修法是 .hat 序列化携带字段名/索引（HatSerializer 的 @field
+不带名字，1950 行注释），单例字段读语义整体留待前端定型专项。当前
+自举代码零用户（[GF] 全量普查仅 escape 一处，已随 escTrace 删除）。
+
+### 10.105 会话 XX：四方执行效率对比终表（Photon Aura VM 首次全量入榜，2026-10-07）
+
+**口径**：同一基准源码经四条执行链，Windows x64，各 5 轮取中位（Wall
+clock，fresh 进程），输出正确性逐轮校验（correct=all 5 runs 输出精确且
+rc=0）。Photon Aura VM 宿主 = PhotonHatCompile 当前驱动构建
+（auc_vm_runner，P385-389 全套修复 + GetField 兜底常规化）。
+
+**fib(28) = 317811（632K 次递归调用）**：
+
+| 执行链 | 中位耗时 | 相对 LLVM | vs Seed VM |
+|---|---|---|---|
+| LLVM IR AOT | **7.9 ms** | 1× | — |
+| Photon AOT | 9.4 ms | **1.19×** | 0.010× |
+| Seed VM（aura run） | 937.2 ms | 119× | 1× |
+| **Photon Aura VM** | 95424.8 ms | 12079× | **102×** |
+
+**loop 100 万次 Long 累加（四方统一口径，新增）**：
+
+| 执行链 | 中位耗时 | 相对 LLVM |
+|---|---|---|
+| LLVM IR AOT | **7.9 ms** | 1× |
+| Photon AOT | 6.5 ms | **0.82×** |
+| Seed VM | 652.7 ms | 83× |
+| **Photon Aura VM** | 23020.9 ms | 2914× |
+
+**loop 2500 万次（三方；Photon Aura VM 按解释比外推单轮 ~9.6 小时/轮不
+可测，未入榜）**：LLVM 58.2 ms / Photon AOT 60.0 ms（1.03×）/ Seed VM
+14071.7 ms（242×）。
+
+**结论**：
+1. **Photon Aura VM 首次以全量正确姿态入榜四方对比**：fib28 与 loop1M
+   两基准逐轮 correct——P387-389 修复链（String 定型 / 空串序列化 / 装箱
+   / 函数表扫描 / GetField 常规化）后纯 Aura VM 解释器端到端可用。
+2. **性能分层清晰**：Photon AOT 贴平 LLVM（fib 1.19×、loop 0.82-1.03×）
+   ；Photon Aura VM 解释开销 = Seed VM（Rust 元循环）的 **35-102×**——
+   纯 Aura 解释器 vs Rust 解释器的实现语言开销是主要项，热路径臂序/
+   装载缓存/超算符融合是后续优化抓手（现 fusion 被 P277 护栏截断）。
+3. 光子自举宿主稳定性备注：seed CLI 的 `--vm=aura` 回放通道自身存在
+   偶发 lex error / 段错误（rc=1/139，产出不受影响），与 photon 链无关。
+
+### 10.106 会话 XXI：Photon Aura VM 性能优化第一轮——arg 预解析 + CALL 目标缓存，fib28 3.85×（2026-10-07 续）
+
+**两个明确的优化抓手落地**（§10.105 入档的遗留项，基线 = §10.105 表）：
+
+1. **arg0Ints/arg1Ints 预解析重新启用（P271 遗留解除）**：装载期就地构建
+   ——loadArgsFlat（.auc 预解码主路径）与 writeArgsRow（文本路径）逐行
+   纯数字落值、否则 argNoneMark 哨兵；fuseHotPairs 的 setArgsRow 同步更新
+   改写行；buildLoadCaches **不再清空**（顺序契约 loadArgsFlat → fuse →
+   buildLoadCaches）。执行期 arg0IntOf/arg1IntOf 命中表项即免一次字符串
+   toI32（P352 表长守卫保留，哨兵回退现场解析语义不变）。P271 当年的
+   「句柄与 argStrs 混叠」属 Vm 对象字段布局家族，P368-375 已根治。
+2. **CALL 目标单槽缓存（P338 家族回避）**：funcOffset/funcParamCount 各自
+   O(表长) 纯字符扫描，递归场景（fib28 = 63 万次 CALL）每次重复两遍。
+   callOrBuiltin 按函数名记忆 (target, pc) 单槽，命中零扫描、失配回退
+   全解析并回填（比恢复全表 List<String> 构建稳——避开 P388 实测的
+   String 列表 add/get 失常家族）。
+
+**效果（5 轮中位，correct 逐轮校验）**：
+
+| 基准 | 优化前 | 优化后 | 加速 |
+|---|---|---|---|
+| fib28（CALL 密集递归） | 95424.8 ms | **24782.3 ms** | **3.85×** |
+| loop 1M（纯算术循环） | 23020.9 ms | **19722.0 ms** | 1.17× |
+
+正确性：banner（33 行）与 seed 参考输出逐行一致、全流程 PASS；
+fib28 = 317811 / loop acc = 499999500000 精确。
+
+**四方对比表更新（Photon Aura VM 行，相对 LLVM 7.9ms）**：fib28
+24782ms（3137×，vs Seed VM **26×**——原 102×）；loop1M 19722ms
+（2497×，vs Seed VM **30×**——原 35×）。CALL 密集负载的解释差距缩至
+26×，纯解释器的实现语言开销边界初现。
+
+**下一轮候选**（按预期收益排序）：①超算符融合 P277 护栏根因（循环
+计数器陈旧读）——融合恢复后指令数直接下降；②argStrOf 的 CALL 函数名
+走哈希/序号直引；③locals 槽池与 VmStack 的复用路径（popLocalsPool/
+retireLocals 的 List 摘挂开销）。
+
+### 10.107 会话 XXII：解释器热路径 Memory 化——fib28 累计 7.14×（2026-10-07 续）
+
+**26× 差距的主项剖析**：Photon 编译的解释器里**所有热数据访问都是
+Collections runtime 调用**——opCodes/argStrs/locals/栈的每次下标读写 =
+一次 getAt/listSet 函数调用（含边界检查与返回值搬运）。fib28 ≈ 1000 万
+条指令 × 每条 4-8 次 List 调用 ≈ 2.5µs/指令，与实测吻合。Seed VM（Rust）
+的对应访问是原生索引——这就是实现语言差距的物理构成。
+
+**修复：热路径数据结构 Memory 裸缓冲化**（Memory.read64/write64 在
+photon runtime 是单条 mov 内联，emitMemoryRead64 = `mov rax,[rcx]`）：
+
+1. **run() 循环**：opCodes/arg0Ints/arg1Ints 装载末尾一次性拷入 Memory
+   裸缓冲（mcOpCodes/mcA0/mcA1，mcValid 门控）；执行期 opCode 读取与
+   arg0/1IntOf 快路径改 `Memory.read64(base + ip*8) as Int`（值域
+   < 2^31 截断无损；probe 先行验证 alloc/write64/read64/地址算术语义）。
+   同时删除 run() 的两条每指令冗余：`ops[ip-1] == ""` 兜底（装载期已
+   NOP 化）与 dispatch 的 opName 参数（每指令一次 List<String> get +
+   传参，未知指令诊断改为 dispatch 内按需直读）。
+2. **VmLocals**：slots/marks → mcSlots/mcMarks Memory 缓冲（Any 槽的
+   64 位裸表示直存直取——指针/tagged int 无损；未写槽读 0 = null ✓；
+   marks 零初始化 ≠ gen ✓ 代语义保持）；扩容 = 新块 + 拷贝。
+3. **VmStack（数据栈）**：d → mc 缓冲（push/pop/peek/vmSlotAt）；
+   P366 的 sp/cap 局部读纪律保留。
+4. **VmCallStack**：ips/frames/closures 三列 Memory 化；funcs 保留
+   String List（低频诊断路径）。
+
+**效果（5 轮中位，correct 逐轮校验）**：
+
+| 基准 | §10.106 末 | Memory 化后 | 本轮加速 | 累计（vs §10.105 基线） |
+|---|---|---|---|---|
+| fib28 | 24782.3 ms | **13365.2 ms** | 1.85× | **7.14×** |
+| loop 1M | 19722.0 ms | **9459.9 ms** | 2.09× | **2.43×** |
+
+**四方表更新**：fib28 相对 LLVM 7.9ms = **1692×**、相对 Seed VM
+937ms = **14.3×**（原 102×）；loop1M 相对 LLVM = **1198×**、相对
+Seed VM = **14.5×**（原 35×）。正确性：banner 33 行与 seed 参考输出
+逐字节一致（仅 host println 的 CRLF 行尾差异）、全流程 PASS；fib28 /
+loop1M 结果精确。
+
+**下一轮候选**：①dispatch 的 if-else 链臂序按动态频次复核（快速分派
+块之外的原链仍长）；②CALL/RET 的 collectArgs/returnFromFunc 路径剖析
+（函数调用语义的字符串参数 still argStrOf）；③超算符融合 P277 护栏
+根因（循环计数器陈旧读）——融合恢复后指令数直接下降。
+
+### 10.108 会话 XXIII：用户函数 CALL 快速路径——fib28 累计 8.73×（P393，2026-10-07 续）
+
+**候选②（CALL/RET 路径）落地**：callOrBuiltin 的内建分派是一条数十臂的
+`funcName == "…"` if-else 链（每臂一次 streq runtime 调用），用户函数名
+排在链尾——递归负载每次 CALL 全链扫到底（fib28 = 63 万次 CALL × ~40-60
+次 streq ≈ 3000 万次字符串比较，估算占解释时间一半以上）。
+
+**修复**：cfName 单槽扩展 cfIsUser 标志；callOrBuiltin **开头**命中
+「缓存名 == 当前名 && cfIsUser」时直接执行调用序列（callStack/savedLocals/
+locals 池/绑参/ip 跳转）并 return——递归场景命中率 ~100%，每次 CALL 的
+分派成本从数十次 streq 降到 2 次 Memory 读。首次调用与内建名走原链
+（内建臂执行后早退不经过回填，cfName 只会是用户函数名或未知名，语义
+自洽）；未知名缓存 (target=0, pc=-1) 快速走 error。
+
+**效果（5 轮中位，correct 逐轮校验）**：
+
+| 基准 | §10.107 末 | 本轮 | 加速 | 累计（vs §10.105 基线） |
+|---|---|---|---|---|
+| fib28 | 13365.2 ms | **10927.7 ms** | 1.22× | **8.73×** |
+| loop 1M | 9459.9 ms | **8150.1 ms** | ~1.16×（含测量噪声） | **2.82×** |
+
+**四方表更新**：fib28 相对 LLVM 7.9ms = **1378×**、相对 Seed VM
+937ms = **11.7×**（原 102×）；loop1M 相对 Seed VM = **12.5×**。
+正确性：banner 与 seed 参考输出逐字节一致（tr -d '\r' 后）、PASS；
+fib28 精确。
+
+**三轮优化总账（§10.106-108）**：arg 预解析 + CALL 目标缓存（3.85×）
+→ 热路径 Memory 化（累计 7.14×）→ 用户函数快速路径（累计 8.73×）。
+解释器从「首个串拼接即崩」到 26× → **11.7×**。
+
+**剩余候选**（收益递减，按序）：①超算符融合 P277 护栏根因（循环计数器
+陈旧读）——恢复后指令数直接下降，上限最高但需先修根因；②collectArgs
+的逐参 pop/类型搬运剖析；③dispatch 原链臂序复核。
+
+### 10.109 会话 XXIV：帧预算污染第二源（jmp/label/cmp-imm）——fib28 累计 18.57×（P394，2026-10-07 续）
+
+**用户质疑成立**：「Photon AOT 已贴平 LLVM，同一解释器逻辑不应比 Rust
+VM 慢 11.7×」。差距必在宿主机器码的调用结构。解剖 Vm_arg0IntOf 的 obj：
+序言 **36 次栈页探测（帧 144KB）**+ 8 push——一个几条真实指令的参数读取
+函数，98% 是序言开销；全函数帧普遍 4-14 万字节。
+
+**根因（帧预算污染第二源，与 P385 互补）**：scanFunctionMaxSlots 把
+**非节点载荷**当 DAG 节点走传递闭包——
+1. `jmp @target` / `jcc @target` / `label` 的 nodes 是**基本块号**（数千
+   起，全模块累计）——块号 < nodeCount 时 dag.nodeOf 返回**完全无关函数
+   的节点**，递归展开其整棵 args 树（P385 的 nodeCount 剪枝挡不住）；
+2. `cmp %src, @imm` 的 nodes[1] 是**裸比较常量**（值 0/1/44…全部
+   < nodeCount）⇒ min 被拉到 0/1 ⇒ **range = 函数末节点号**（DAG 节点号
+   全模块顺序累计，越晚被选的函数越大）⇒ 帧预算 = 区间×8 膨胀数十倍。
+   实测 Vm_arg0IntOf range=18044、VmStack_push range=5072（帧 40KB）。
+
+**修复**：scanFunctionMaxSlots 跳过 jmp/jcc/label 三模板的 nodes 遍历；
+cmp 只扫第一槽（真实节点）。⚠️ 过程中又揪出一个**编译器静默零行为**：
+cmp 分支引用了函数后段才声明的 `ns`（var 函数级作用域提升为未初始化）
+⇒ 分支静默零行为——自行 splitArgs 修复（同类：§10.104 的 ns 前向引用）。
+
+**验证**：帧坍缩——VmStack_push 40736→**672B**、VmLocals_getSlot
+42656→**416B**、escape 69456→**832B**（60-100×）；banner 与 seed 输出
+逐字节一致（tr -d '\r'）、PASS；fib28/loop1M/Photon AOT 双基准全部
+精确。
+
+**效果（5 轮中位，correct 逐轮校验）**：
+
+| 基准 | §10.108 末 | 本轮 | 加速 | 累计（vs §10.105 基线） |
+|---|---|---|---|---|
+| fib28 | 10927.7 ms | **5138.8 ms** | 2.13× | **18.57×** |
+| loop 1M | 8150.1 ms | **3981.7 ms** | 2.05× | **5.78×** |
+
+**四方表更新**：fib28 相对 LLVM 7.9ms = **650×**、相对 Seed VM 937ms =
+**5.5×**（原 102×）；loop1M 相对 Seed VM = **6.1×**（原 35×）。Photon
+AOT 双基准复验无回归（帧修复惠及全部 photon 程序）。
+
+**四轮优化总账（§10.106-109）**：arg 预解析 + CALL 缓存（3.85×）→
+热路径 Memory 化（累计 7.14×）→ 用户函数快速路径（累计 8.73×）→ 帧预算
+污染第二源修复（累计 **18.57×**）。解释器 vs Seed VM 差距：102× →
+**5.5×**。
+
+**剩余候选**：①函数序言按需 callee-saved（8 push → 按实际使用，多数
+叶函数可到 0-2 push——需栈参基址动态化，P226 契约重谈）；②dispatch
+臂内联 locals/栈访问（消每指令 5-7 次 call 残余）；③超算符融合 P277
+护栏根因。
+
+### 10.110 会话 XXV：对齐 Rust VM 的两次尝试与负结果入档（P395/P396，2026-10-07 续）
+
+**目标**：解释器 vs Seed VM 5.5× → 持平。两次尝试均撞上 photon 当前
+**field 内存模型**与**调用协议**的结构性限制，负结果入档（回退，基线
+18.57× 保持全绿）。
+
+**P395 镜像内联（证伪回退）**：把 locals/数据栈缓冲基址镜像为 Vm 字段
+（CALL/RET 同步），热臂（LOAD/STORE_LOCAL、JUMP_IF、融合算术）零函数
+调用直写裸缓冲。现象：fib28 = 10459（错值、非崩、速度 192ms）；纯镜像
+替换（467 处 this.stack.* → pushStk/popStk 镜像方法，不含臂内联）**同样
+10459**；二分未定位到单一非等价点。回退后基线全绿。**教训**：跨函数
+调用的可变状态同步在 photon 当前 field 模型下无法安全表达——field 读
+的失效语义（何时重读）未定义，凡「热循环内可变状态」必须走 Memory
+（read64/write64，带 MemToken 序）或单函数内自洽的局部纪律（P366）。
+**正确的长期路线**：解释器状态区整体 Memory 化（含 sp/gen/基址全部入
+状态缓冲，每指令 2-4 次状态区 call）+ 状态区操作内联为无 call 原语
+（需要发射器支持「零序言叶调用」或裸内存原语）。
+
+**P396 按需 callee-saved（证伪回退）**：P270 全栈槽后热函数体
+（escape/getSlot/arg0IntOf）除序言外 callee-saved **零使用**（objdump
+普查全模块 0 函数真实使用）——固定 7 push + 7 pop 每函数调用 14 条纯
+开销。规则：含 ≥5 真参调用（栈参）→ 全 7（保 P226 的 [rbp+0x68] 契约）；
+其余免保存。首版 ≥6 项判定漏「无 mem 尾参的 5 真参自由函数」（用户自由
+函数不追加 mem token）→ 栈参基址错位 SIGSEGV；精确判定（尾项 MemToken
+识别）后仍崩——**存在未定位的隐式 callee-saved 依赖**（栈参判定完备性
+或其它协议假设）。回退后基线全绿。
+
+**结论**：18.57×（vs Seed VM 5.5×）是 photon 当前**架构表达力**下的
+可达点。对齐 Rust VM 需要两项前置工程（排序）：
+1. **零序言/轻序言叶调用协议**（发射器）：微函数（参数读/栈操作）的
+   call 序言从 ~20 条压到 ~5 条——**不触碰任何语义**，直接把每解释
+   指令的固定 call 开销砍半以上，且为 P395 重启铺路；
+2. **field 失效语义**（编译器）：跨 call 的 field 读重载规则（或显式
+   Memory 状态区原语）——P366/P395 两桩悬案的共同根。
+完成 1+2 后重启 P395（镜像内联）+ P396（按需保存），预期对齐 1-2×。
+
+### 10.111 会话 XXVI：P397 融合两遍重写——正确性验证通过但宿主内仍死循环（2026-10-07 续）
+
+**fuseHotPairs 重写为两遍扫描**（遍 1 纯读识别融合计划 → planR/planF
+列表，遍 2 纯写按计划执行改写）——读写彻底分离，遍间计划行无重叠。
+顺带修复原版两处问题：①6 连守卫（204）的 store/load 不同槽变体被错误
+融合（原第二分支无同槽检查、pair 缺 load 槽参数）——重写版加同槽检查，
+不同槽放弃该对（语义安全）；②206/201 两参对的第二参数构造补全。
+
+**结果**：融合启用后 banner/loop1M **宿主死循环**（[BLC-ft] 前卡住 =
+fuseHotPairs 自身）——**两遍版换掉增量改写形态后仍触发 P277 槽影子读
+家族**：宿主内任何对数千行指令流的循环遍历（无论读写分离与否）都会
+随机触发循环变量槽读回旧值。调用恢复禁用，重写代码保留（发射器修复
+后即可启用），基线（banner PASS、fib28/loop1M 精确、3982ms）复验无
+回归。
+
+**对齐 Rust VM 的路径收束**（§10.110 两项前置之外的第三项）：
+**P398：photon 发射器槽影子读根治**——函数局部变量的栈槽读写被
+「影子槽陈旧读」污染（P277 r 恒 55、P366 sp/cap、P397 循环变量）——
+这是发射器级别 bug（非内存模型限制）：同一局部变量的读槽数量、槽别名
+或 scanFunctionMaxSlots 的 range 计算（P394 修复后已缩小但仍存在某类
+污染）。根治后：融合恢复（指令数 -30-50%）+ P395 镜像内联重启
++ P396 按需保存重试——三层收益叠加，对齐 Rust VM 可期。
+
+### 10.112 会话 XXVII：AucAot（.auc→机器码 AOT）——翻译器完成、宿主集成受阻（P399，2026-10-08）
+
+**新目标**：超越 Rust VM（不止对齐）。分析结论：解释器架构的每指令
+开销有**硬下限**（photon 函数调用 = Memory 读写 call，每 guest 指令
+6-10 次 ≈ 500-1500 周期；Rust VM = 原生索引 ≈ 50-100 周期）——纯解释
+器优化无法超越。唯一路径 = **消灭解释本身**：.auc 字节码直译 x86-64。
+
+**AucAot.aura 完成**（~430 行，photon 编译通过）：
+* loadModule 读 .auc → funcTable 纯字符解析（P388 家族规避）
+* 逐函数逐指令翻译到 X86Encoder（栈消解：操作数栈编译期追踪 → rbp
+  负偏移直读写，零运行时栈指针）；支持 op 0/1/2/5/7/10/11/12/13/
+  20-24/30-35/50/51/60/62/65/66/112-114
+* CALL：guest 内链（aucfn_ 前缀）+ runtime 外链（println/toStr/strcat…）
+* 常量字符串 → @str.N 数据段（fromCharCode(34) 构造引号——photon lex
+  不支持反斜杠转义）
+* COFF 写出（PhotonObjectWriter）+ runtime 链接（PhotonSystemLinker）
+
+**发现并修复的两个 photon 编译器 bug**（AucLoader 缓存失效后暴露）：
+1. **photon lex 不支持反斜杠转义**（`"\\"` / `'\n'` char literal）——
+   seed lex 支持但 photon 独立实现不支持。AucLoader 的 `"\\"` 已改
+   String.fromCharCode(92)；`"\n"` photon 支持无需改。
+2. **Memory.mmap 调用元数错误**（AucSerializer 用 5 参、声明 6 参）
+   ——补 offset=0。
+
+**集成受阻（诚实记录）**：AucAot 编译进宿主闭包后宿主 SIGSEGV——
+两类原因：①photon lex 反斜杠（已修 AucLoader，可能还有别的文件）；
+②**AucAot 闭包拉入 X86Encoder/PhotonObjectWriter/PhotonSystemLinker
+等发射器类**——这些类的 vtable 不在宿主 runtime 的 dataSymbolName
+表里 ⇒ 链接期/运行期不匹配。**回退到 18.57× 基线**（cb2761b），
+AucAot.aura 源码保留为独立文件（未入宿主闭包）。
+
+**下一步（明确排序）**：
+1. **AucAot 独立驱动**——不用 auc_vm_runner/PhotonHatCompile 宿主，
+   写独立的 `AucAotCompiler.aura`（只 import AucLoader + X86Encoder +
+   ObjectWriter + SystemLinker + FileUtils，不含 Vm/VmStack/解释器），
+   由 seed AOT 编译为 `aucat.exe`。这一步绕开宿主闭包问题——编译器
+   自身只需读 .auc + 发射，不需跑 guest。当前 AucAot.aura 已接近此
+   形态（主要问题是 auc_vm_runner 的 467 行解释器调用把它拉进了解
+   释器闭包——**拆成独立文件即解**）。
+2. guest.exe 运行验证 → fib28 → banner → 全量。
+3. 性能：guest 指令 = 3-8 条原生指令（无解释 dispatch），fib28 预期
+   **< 100ms**——超越 Rust VM（937ms）10×+。
+
+### 10.113 四方执行效率对比（当前 HEAD 全量复测，2026-10-08）
+
+**口径**：当前 HEAD（含 P387-394 全套修复），5 轮中位，fresh 进程，
+逐轮 correct 校验（输出精确 + rc=0）。
+
+**fib(28) = 317811（632K 次递归调用）**：
+
+| 执行链 | 中位耗时 | 相对 LLVM | vs Seed VM |
+|---|---|---|---|
+| LLVM IR AOT | **9.3 ms** | 1× | — |
+| Photon AOT | 9.9 ms | **1.06×** | 0.011× |
+| Seed VM（Rust） | 930.3 ms | 100× | 1× |
+| **Photon Aura VM** | 5206.7 ms | 560× | **5.6×** |
+
+**loop 100 万次 Long 累加（四方统一口径）**：
+
+| 执行链 | 中位耗时 | 相对 LLVM |
+|---|---|---|
+| LLVM IR AOT | **8.2 ms** | 1× |
+| Photon AOT | 6.7 ms | **0.82×** |
+| Seed VM | 677.1 ms | 83× |
+| **Photon Aura VM** | 4057.2 ms | 495× |
+
+**loop 2500 万次（三方；Photon Aura VM 未测）**：
+LLVM 58.8ms / Photon AOT 58.5ms（1.00×）/ Seed VM 14100.4ms（240×）。
+
+**要点**：
+1. Photon AOT 与 LLVM 持平（fib 1.06×、loop1M 0.82×、loop25M 1.00×）。
+2. Photon Aura VM 五轮优化后（§10.106-109）从基线 95425ms → 5206ms
+   （fib28 累计 **18.3×**），vs Seed VM 差距从 102× 压缩到 **5.6×**。
+3. 进一步对齐需 AucAot（.auc 直译机器码）——翻译器源码已完成（§10.112），
+   集成路径已入档。
+
+### 10.114 深度分析：Photon Aura VM vs Rust VM 5.5× 差距的逐层定案（2026-10-08）
+
+**核心结论**：5.5× 差距不是单一 bug，而是 **photon 编译模型的系统性
+开销**——每条 guest 指令的解释成本 = 多层 Aura 方法调用的**序言/结语
+固定开销**的复利叠加。以下逐层定案（不修改代码，纯分析）。
+
+---
+
+#### 第 1 层：photon 函数调用的 22 条固定序言/结语
+
+photon 每个函数（无论多简单）的调用约定：
+```
+push rbx,rsi,rdi,r12,r13,r14,r15   ← 7 条（P226 固定 7 push 契约）
+push rbp                            ← 1 条
+mov rsp,rbp                         ← 1 条
+sub rsp,frame                       ← 1 条
+... 函数体 ...
+leave                               ← 1 条
+pop r15,r14,r13,r12,rdi,rsi,rbx    ← 7 条
+ret                                 ← 1 条
+```
+**固定开销 = 20 条**，加上参数装载 ~2 条 = **22 条/call**。
+
+对比 Rust：叶函数只做 `sub rsp,N` + 函数体 + `ret` ≈ **2-5 条**。
+Rust 编译器还会内联小函数，许多调用直接消失。
+
+**影响**：解释器每条 guest 指令调用 3-8 个 Aura 方法（arg0IntOf、
+locals.getSlot、stack.push 等），每次 22 条序言/结语 = **66-176 条
+纯序言指令/guest 指令**。这就是 5.5× 的主体。
+
+---
+
+#### 第 2 层：Memory.read64/write64 也是函数调用
+
+`Memory.read64(addr)` 虽然函数体只是一条 `mov rax,[rcx]`，但 photon
+编译模型将其发射为**真实函数调用**：
+```
+mov rcx, addr          ← 参数装载
+call Memory_read64     ← 函数调用
+  → prologue(0): push rbp + mov rsp,rbp (2条)
+  → mov rax,[rcx]     (1条)
+  → leave + ret       (2条)
+```
+**每次 Memory.read64 = 8 条指令**（含 call + 被调序言/结语），
+而 Rust/LLVM 的等价操作是 **1 条 mov**（8× 开销）。
+
+解释器大量使用 Memory 读写（P392 将 opCodes/locals/栈全部 Memory 化），
+每次操作都有这个 8× 的调用开销。
+
+---
+
+#### 第 3 层：多层 Aura 方法调用的复合效应
+
+以 fib28 最热的 LOAD_LOCAL 指令为例：
+```
+op 10: locals.getSlot(arg0IntOf()) → stack.push(v)
+```
+展开为 photon 调用链：
+```
+1. dispatch()          ← 22 条序言/结语 + if-else 链跳转
+2. arg0IntOf()         ← 22 条 + Memory.read64 call(8) = 30
+3. locals.getSlot()    ← 22 条 + 2× Memory.read64 call(16) = 38
+4. stack.push()        ← 22 条 + Memory.write64 call(8) = 30
+合计 ≈ 120 条 x86 指令
+```
+Rust VM 等价操作：
+```
+OP_LOAD_LOCAL: stack.push(locals[arg0])
+编译后 ≈ 5-8 条指令（LLVM 内联 match 臂 + 数组索引）
+```
+**单条指令比值 = 120/8 = 15×**。混合平均（简单跳转臂便宜）≈ 5.5× ✓
+与实测吻合。
+
+---
+
+#### 第 4 层：无内联能力
+
+photon 编译器**没有内联 pass**——所有 Aura 方法调用（无论函数体多
+简单）都发射真实的 x86 call。这是与 LLVM -O2 的根本差距：
+LLVM 会对小于阈值的函数自动内联，消除了调用开销 + 打开了后续优化
+（常量传播、死代码消除、寄存器提升）。
+
+Rust（rustc + LLVM）自动获得这些优化。photon 缺失全部。
+
+---
+
+#### 第 5 层：field 读写模型的 CSE 风险
+
+P366/P395 的教训：photon 的 field 读写没有内存序语义——`this.sp`
+的读可能被 CSE 到 `field_set` 之前（跨 call 边界也不保证重读）。
+这意味着**无法安全地在 Aura 层做状态镜像或字段缓存**——任何优化都
+可能被 CSE 静默破坏。
+
+---
+
+#### 解决方案路线图（三层递进，总目标 ≤1× Rust VM）
+
+**Layer 1：photon 编译器——轻量函数调用协议**（预期 2-3× 加速）
+1. **按需 callee-saved**：只 push 函数实际使用的 callee-saved 寄存器
+   （P270 全栈槽后大多数函数用 0 个）。纯计算函数（arg0IntOf、getSlot）
+   序言从 20 条 → **2 条**（push rbp + sub rsp）。
+   * P396 失败的根因已定位（栈参判定不完备），需精确扫描所有 5+ 参
+     调用点。风险：遗漏任何一处 = 野写。
+2. **Memory 读写内联**：将 `Memory.read64/write64` 从函数调用改为
+   **发射期直接内联单条 mov**。发射器知道 rcx/rdx 的值来源，可以直接
+   生成 `mov rax,[rcx]` 而非 `call Memory_read64`。
+   * 这消除每次 Memory 操作的 8 条调用开销 → 变成 1 条。
+3. **小函数内联**：对函数体 < 20 条指令的函数做调用点内联。这消除
+   arg0IntOf/getSlot/putSlot 等 trivially inlinable 函数的调用开销。
+   * 需要处理变量重命名、作用域提升。
+
+**Layer 2：解释器结构优化**（预期 2-3×，与 Layer 1 相乘）
+1. **dispatch 内联到 run()**：消除每指令一次的 dispatch() 调用。
+   代价：代码膨胀（140 个 if-else 臂内联），收益：消 22 条/指令。
+2. **locals/栈/参数的零调用访问**：将 `locals.getSlot(slot)` 替换为
+   直接 Memory 读写（当前 P392 已做了部分），并**在 run() 函数内**
+   做所有状态管理（不跨函数边界）。
+   * P395 失败的根因是跨函数 field CSE——**在单函数内**（run 循环
+     里）field 读写是安全的。
+3. **指令预解码合并**：将相邻指令在装载期合并为复合指令（当前
+   fuseHotPairs 已有框架但因 P277 禁用），如 LOAD_LOCAL + ADD +
+   STORE_LOCAL → 单一 INC_LOCAL 指令。
+
+**Layer 3：直接执行**（终极方案，消除解释器）
+1. **AucAot 字节码直译 x86**（已写 ~430 行翻译器）——.auc 字节码
+   → 机器码，guest 递归 = 原生 call/ret。当前阻塞在宿主闭包集成。
+2. **写独立 AucAotCompiler.aura**——只 import AucLoader + X86Encoder
+   + PhotonObjectWriter + PhotonSystemLinker（不含解释器 Vm/VmStack），
+   由 seed AOT 编译为编译器 exe。这绕开宿主闭包问题。
+3. guest 程序性能接近 Photon AOT（≈ LLVM 1×）——**超越 Rust VM
+   100×**。
+
+---
+
+#### 优先排序与依赖关系
+
+```
+Layer 1.2 (Memory 内联)  ←── 独立可做，收益最大（消除 8× call 开销）
+Layer 1.1 (按需 saved)   ←── 独立可做，收益中等（省 14 条/call）
+Layer 1.3 (小函数内联)   ←── 依赖 1.1/1.2 先行
+Layer 2.x (解释器优化)   ←── 与 Layer 1 相乘，但受 field 模型限制
+Layer 3   (AucAot 直接执行) ←── 终极方案，不受 field 模型限制
+```
+
+**预期**：
+* Layer 1 全部完成后：解释器 5.5× → **1.5-2×**
+* Layer 2 叠加：→ **0.8-1.2×**（与 Rust VM 持平）
+* Layer 3 完成：→ **0.01×**（超越 100×）
+
+### 10.115 VM 提速精确方案——110 条指令逐项定量分解（2026-10-08 续）
+
+**不做架构改造（保留解释器），纯发射器+解释器结构优化。**
+
+---
+
+#### 当前每条 guest 指令 = 110 条 x86（以 LOAD_LOCAL 为例）
+
+| 类别 | 指令数 | 说明 |
+|---|---|---|
+| A. 函数序言/结语 | 60 | dispatch(20) + arg0IntOf(10) + getSlot(10) + pushStk(10) + 内部 read64×2(20) |
+| B. Memory 参数装载 | 12 | mov rcx/rdx 等 |
+| C. 实际有用工作 | 8 | load slot + stack push（**Rust VM 的全部**） |
+| D. 解释器簿记 | 10 | instructionCount + ip 递增 + NOP 检查 |
+| E. if-else 链跳转 | 15 | op 10 到达前平均经过 5 个 Int 比较 |
+| **总计** | **110** | |
+
+---
+
+#### 六项优化逐项定量
+
+| # | 优化 | 消除 | 累计 | 加速 |
+|---|---|---|---|---|
+| 1 | **Memory.read64/write64 发射期内联**——emitCall 识别 Memory_read/write64 符号，直接生成 `mov rax,[rcx]` / `mov [rcx],rdx` 而非 call | A 中的 4× 内部 call 序言(20) + B 中的部分(6) = 26 | 84 | 1.31× |
+| 2 | **dispatch 内联到 run()**——if-else 链放进 while 循环体 | A 中 dispatch 序言/结语(20) | 64 | 1.72× |
+| 3 | **arg0IntOf/getSlot/putSlot/pushStk 内联**——热臂中的方法调用改为直接 Memory 读写（在 run() 函数内，field CSE 不适用） | A 中剩余序言/结语(30) | 34 | 3.24× |
+| 4 | **instructionCount 移到周期性检查**——每 65536 条检查一次而非每条 | D 中 7 条 | 27 | 4.07× |
+| 5 | **跳转表替代 if-else 链**——将 op→handler 映射编译为跳转表 | E 中的 15→3 | 15 | 7.33× |
+| 6 | **超算符融合恢复**——LOAD_LOCAL+ADD+STORE_LOCAL → 单条三合一指令 | 减少指令数 ~40% | 有效 ~9 条 | **12.2×** |
+
+**预期终态：每条 guest 指令 ~9-15 条 x86，接近/超越 Rust VM 的 8 条。**
+
+---
+
+#### 每项优化的实施细节
+
+**优化 1（最高优先，纯发射器改动，零语义风险）**：
+X86Emitter.emitCall() 识别被调名 `Memory_read64` / `Memory_write64` /
+`Memory_read32` 等，直接发射函数体指令而非 call：
+* `Memory_read64` → `mov rax, [rcx]`（1 条替代 call+prologue+epilogue）
+* `Memory_write64` → `mov [rcx], rdx`（1 条）
+所有现有 Aura 代码不变——发射器层自动优化。全模块 1305+ 处受益。
+
+**优化 2（解释器结构改动，需验证 field CSE 安全性）**：
+将 dispatch() 的 if-else 链移入 run() 的 while 循环体内。
+消除每指令一次的 dispatch() call 序言/结语。
+⚠️ 需验证：140 个臂在 run() 内不会因函数过大导致寄存器压力/代码缓存问题。
+
+**优化 3（热臂手动内联，需要 P395 的教训校准）**：
+将 `this.arg0IntOf()` / `this.locals.getSlot(slot)` / `this.pushStk(v)`
+在热臂中替换为直接 Memory 读写。
+⚠️ P395 失败原因是跨函数 field CSE——**在 run() 函数内部**（同一函数
+作用域内）的 field 读写是安全的，因为 field_set → field_read 在同一
+DAG 内有序。需要重验。
+
+**优化 5（跳转表）**：
+Aura 没有函数指针/computed goto，但可以用以下替代：
+* 将 op → dispatch offset 预计算为 Memory 表
+* 用 Memory.read64 查表 + 间接跳转
+* 或者：按 opcode 分成 2-3 组，每组一个 if，组内再用小 if 链
+
+**优化 6（超算符融合）**：
+P397 两遍扫描框架已写好，调用已注释。死循环根因是 P277 槽影子读。
+两种解法：①修发射器槽影子读根因；②融合循环用「数组首元素 + 计数器」
+替代「递增游标」——改写 fuseHotPairs 内部循环结构为
+`for (idx = 0; idx < planCount; idx++)`（planCount 为局部 Int 而非
+List.size() 调用），可能绕开影子读的触发布局。
+
+---
+
+#### 实施排序（按风险/收益比）
+
+```
+第 1 步: 优化 1 (Memory 内联)     ← 纯发射器，零风险，全局受益
+第 2 步: 优化 4 (instructionCount) ← 解释器一行改动
+第 3 步: 优化 2 (dispatch 内联)   ← 需验证函数大小影响
+第 4 步: 优化 3 (热臂内联)        ← 需 P395 教训校准
+第 5 步: 优化 5 (跳转表)          ← 需 Aura 原语支持
+第 6 步: 优化 6 (融合恢复)        ← 需 P277 根因修复
+```
+
+### 10.116 会话 XXVIII：六步方案实施——P400 落地 1.11×，P401 保留，P402/P403 负结果与四类新陷阱定案（2026-10-08 续）
+
+按 §10.115 六步方案顺序实施。基线复现：fib28 中位 5231ms（与 §10.113
+的 5206.7ms 吻合，管线可复现）。工具链口径不变：seed AOT 构建驱动
+（PhotonHatCompile.exe）→ 驱动编译 auc_vm_runner 宿主 → lld-link
+runtime → current.exe 跑 build/vm/current.auc；fib28 5 轮中位。
+
+#### 步骤 1（P400，已提交 0bdbfa3）：emitCall 内联 Memory read64/write64 —— **1.11×**
+
+X86Emitter.emitCall 识别 `Memory_read64/read32/read16` → 发射
+`mov rax,[rcx]`（48 8B 01），`Memory_write64/write32/write16` → 发射
+`mov [rcx],rdx`——与 PhotonRuntime.emitMemoryRead64/Write64 函数体逐字
+节一致，纯发射器、零语义变化（write 家族 rax 不定、落槽行为与真实调用
+一致）。重建后 current.obj 的 Memory_read64/write64 重定位引用清零；
+Vm_arg0IntOf 等热点每次 Memory 操作 8 条（call+序言结语）→ 1 条 mov。
+
+**fib28：5231 → 4694ms（1.11×）；banner 全流程 PASS（与 seed 参考逐字
+节一致）。** 全模块 1305+ 处受益（宿主 + 一切 Photon 编译程序）。
+
+#### 步骤 2（P401，保留）：instructionCount 周期检查 —— 单项 ≈1%
+
+逐条 `this.instructionCount += 1`（2 次 field 读 + 1 次 field 写，~7 条
+x86）改为局部 icAcc 累加、每 2^20 条批量刷回 + 一次上限检查；循环所有
+出口都刷回余量，getInstructionCount() 在 run() 返回后仍精确（上限触发
+最迟 2^20 条后生效，护栏语义不变）。**单项实测 4685 vs 4694ms（噪声
+内）——循环头 `running`/`mcValid` 字段读的固定开销稀释了它。保留：消除
+逐指令 field 写， fib28 复测 4655ms（+1%）。**
+
+#### 步骤 3（P402，提交后回退 251384e）：dispatch 内联进 run() —— 微型 guest 回归
+
+dispatch() 仅 run() 一处调用，~140 臂 if-else 链机械移入 while 循环体。
+提交（6d8ef36）时 fib28 4550ms（1.03×）、banner、loop1M 全绿；本轮补做
+**微型 guest 验证**时发现回归：
+
+```
+micro2.aura:  fun main() { val x: Int = 7
+                          println("m2=" + toStr(x)) }   // HEAD: m2=7
+```
+
+P402 宿主打 `m2=0`（toStr 收到 null → LOAD 空 → toAny(0) 兜底）——
+内联后 run() 的取参链路在微型程序上取参错位。fib28/banner/loop1M 均未
+踩中。**处置：恢复 dispatch 独立函数 + 调用**（从 6d8ef36^ 干净重建 +
+手工重加 P401，避免机械拼接二次损伤）。属 **P44/§7.3「加行即坏、减行
+即好」布局敏感雷家族**——ISA 无害改动令特定程序错乱，本轮再次坐实。
+
+#### 步骤 4（P403，负结果全回退）：热臂手动内联 —— 四类新陷阱定案
+
+计划：把热臂（10/11/51/20/21/32）中的 arg0IntOf / locals.getSlot /
+stack.push 内联为直读直写（去 private 跨对象字段 + ip 快照 + mcOk 快径
++ 增长慢路径回落原方法）。**逐一触发并定位了四类此前未定案的
+发射器/编译器缺陷（全部经 micro guest + 反汇编坐实）**：
+
+| # | 陷阱 | 症状 | 定案证据 |
+|---|---|---|---|
+| T1 | **if/else 分支重复声明 val**（`val b` 在快/慢两分支各一次） | 静默错值（loop1M acc 空） | 20/21/32 改唯一命名（a20_/s21_/l32_ 前缀）后 loop1M 立即恢复正确——Aura 函数级作用域提升 + photon 管线对重复声明的静默坏码（§10.109「var 提升未初始化」的 val 版） |
+| T2 | **悬浮读块**：`val ip0 = this.ip` 与后续 field 写无数据依赖时，加载基本块可被放置到非逐迭代路径（疑似仅循环首迭代执行） | ip0 陈旧 → 取参错位 | 反汇编：ip0 加载块（0x348ef）与回边目标（0x34527）分属不同区域，回边路径不经过 ip0 块 |
+| T3 | **局部 RHS 的 field 写对被调不可见**：`this.ip = ipPre + 1`（写消费局部）之后，被调 arg0IntOf 读 `this.ip` 取到**递增前值** → 取参错一格 | STORE 写错槽（micro2 m2=0） | arg0IntOf 改回原方法取参后仍错 → 唯一差异是循环头写法；字段 RHS 原形（`this.ip = this.ip + 1`）恢复后 micro 全绿。**跨 call 的 field 写可见性不可依赖（P366/P395 同根，此处是第三例）** |
+| T4 | **布局敏感雷（P44 家族）**：P402 内联本身在微型 guest 上取参错位 | micro2 m2=0（HEAD m2=7） | 三基准全绿 + micro 即坏；加行即坏减行即好 |
+
+**micro 验证对**（新增回归门，2 个 3-5 行 guest，各 <1s）：
+
+```
+micro1.aura:  fun main() { val x: Int = 7
+                          val y: Int = x + 3
+                          println("m1=" + toStr(y)) }   // 期望 m1=10
+micro2.aura:  见步骤 3                                     // 期望 m2=7
+```
+
+**方法教训（对齐 §10.105-110 的三轮负结果）**：三基准（fib28/banner/
+loop1M）的指令覆盖不足以守护解释器热路径重构——微型 guest 把单一臂
+隔离出来，几秒定位一个本需数小时的回归。后续一切解释器/发射器改动
+必须过 micro1/micro2 + banner + fib28 + loop1M 五门。
+
+**P403 最终状态：全部回退**（VmStack.aura 恢复 private，Vm.aura =
+P400 + P401）。热臂内联的三层收益（消 arg0/getSlot/push 调用）在
+photon 当前发射器下**不可安全表达**——T1-T4 与 P366/P395/P397 同根：
+**CSE/失效语义 + 布局稳定性是发射器级根因（P398），解释器侧无解**。
+
+#### 附带发现：loop25M 在 HEAD 基线上即段错误（立卡待查）
+
+bench_loop.aura（5000×5000 = 25M 次嵌套循环，`as Long` 累加）在
+**HEAD 基线**（无任何本轮改动）上 6.7s 处 rc=139。§10.113 已标注该
+基准「Photon Aura VM 未测」——从未跑通过，非本轮回归。loop1M（同构
+1M 次）全绿 → 体量/时长依赖（§10.106 的 GB 级增长家族或嵌套循环
+特有路径）。下一轮 P-ticket：先在 HEAD 定位崩溃点（ip≈8779 的
+aura_cast 附近），再谈 25M 入榜。
+
+#### 本轮终态
+
+| 基准 | §10.113 基线 | 本轮 | 加速 |
+|---|---|---|---|
+| fib28（5 轮中位） | 5231 ms | **4655 ms** | **1.12×** |
+| banner | PASS | PASS（逐字节一致） | — |
+| loop1M | PASS | PASS（acc=999998000000 精确） | — |
+| micro1/micro2 | — | **新增回归门，全绿** | — |
+
+**四方对比更新（fib28，相对 LLVM 7.9ms / Seed VM 930ms）**：Photon
+Aura VM 4655ms = 589× LLVM / **5.0× Seed VM**（原 5.6×）。
+
+**六步方案结账**：步骤 1（1.11×）+ 步骤 2（+1%）落地；步骤 3/4 负
+结果并产出四类陷阱定案；步骤 5（跳转表）/6（融合）依赖的 Aura 原语
+与 P277 根因未动。**解释器路径在 photon 当前编译模型下的可达点判定为
+P400+P401 ≈ 1.12×（累计 20.8× vs §10.105 基线，vs Seed VM 5.0×）**——
+继续对齐 Rust VM 的全部路径收束到 §10.110 的两项发射器前置
+（P398 槽影子读根治 + field 失效语义），本轮 T1-T4 为其补充了四个
+可复现最小见证（micro guest + 反汇编锚点）。
+
+### 10.117 会话 XXIX：AucAot 路线裁定删除 + P404 探针税清零 + P405 融合两缺陷修复与 P277 最小复现（2026-10-08 续）
+
+基线：§10.116 末态（P400+P401，fib28 中位 4655ms）。方向裁定：**保持
+VM 形态，不做字节码直译 AOT**——AucAot.aura 删除（含本轮修的
+stringConsts/main 符号导出两处未提交修复，随档 git 历史 f5efacd^）。
+
+#### P404a：热路径诊断探针摘除（保留）
+
+op5 [LC]、op62 [62]、callOrBuiltin [CB]、collectArgs [CA] 四块有界探针
++ 计数器字段整体摘除。实测 fib28 4737 vs 4655ms（噪声内）、loop1M
+7226ms——收益噪声边缘，保留为零成本卫生化。装载期一次性探针（[CP]/
+[DC]/[winB] 等）不在热路径，保留。
+
+#### P404b：20/21/32 算术臂内联（负结果回退）
+
+P403 定案的安全形态（每臂唯一命名 + spv2 局部算术 + VmStack 去
+private）。micro1/micro2/banner/fib28 全绿，**loop1M 中位 7947 vs
+7226ms（-9%）**——P400 之后 pop/pop/add/push 的调用体已经足够瘦
+（内联消掉的调用序言 ≈ 跨对象 field 直读的 6-7 条/次成本），净收益
+为零且代码膨胀推高 I-cache 压力。回退。**结论：调用消解类优化在
+P400 后已到收益边界，除非发射器提供零序言叶调用（§10.110 前置 1）。**
+
+#### P405：融合恢复尝试——两个真实缺陷修复 + P277 最小复现（调用保持禁用）
+
+按 §10.115 步骤 6 预案实施：遍 1 改单点递增形态（消「i = i + span;
+continue」双写游标）+ 重启 204/202/203/205 四大模式 + 启用调用。
+结果按二分定位：
+
+1. **buildFusePair 205 分支漏参（真实缺陷，已修）**：205 执行臂读 4 参
+   （a, b, tmpSlot, jumpTarget），旧构造只压 3 参——arg3 落
+   argNoneMark → 0 → 跳回第 0 行。症状：banner 中段重启横幅、loop1M
+   吞掉 println。修复补 r+5 行跳转目标。
+2. **P277 最小复现定案**：205 修复后仍坏，逐模式二分到「仅启用 204 的
+   模式检查」——banner 指令流上 **204 零匹配**（插桩实证 planR 无
+   204 项）、纯代码布局扰动，banner 即陷入无限循环（26K 次头重印后
+   段错误，710K 行输出）。**§10.115「循环形态改写可绕开影子读」证伪**
+   ——P277 与循环写法无关，任何装载路径代码扰动随机触发（§10.111
+   结论成立并升级为最小复现）。
+
+**终态**：融合调用保持禁用；两个修复随档（205 构造 + 单点递增遍 1），
+重启条件不变：**P398 发射器槽影子读根治**。门（禁用态）：
+micro1=10/micro2=7/banner 逐字节/fib28=317811 全绿。
+
+#### 本轮终态与结论
+
+| 基准 | §10.116 末 | 本轮末 | 说明 |
+|---|---|---|---|
+| fib28（5 轮中位） | 4655 ms | **4693 ms** | 噪声带内持平（±2%） |
+| loop1M | 7226 ms | ~7250 ms | 同上 |
+| banner / micro | PASS | PASS | 逐字节一致 |
+
+**fib28 全天累计：5231（§10.113 基线）→ 4693ms = 1.11×（P400 贡献
+全部）；vs Seed VM 930ms = 5.0×。**
+
+**解释器侧优化空间判定（收束）**：P402/P403/P404b/P405 四轮尝试一致
+表明——调用消解、状态直读、装载期融合三条路全部撞上同一堵墙：
+**photon 发射器的槽影子读（P277/P398）、field 跨 call 失效语义
+（P366 家族，本轮 T3 为第三例）、布局敏感雷（P44 家族，本轮 T4/
+P405 复现）**。下一轮唯一高杠杆动作是发射器根治（P398）；其验收
+标准现成：micro1/micro2 + banner + fib28 + loop1M 五门 + P405 的
+「204 检查启用」布局扰动探针。
+
+### 10.118 会话 XXX：P398 破案——「槽影子读」真根因 = SsaBuilder else 分支版本泄漏（修复已验证、部署被后端 phi 缺陷阻塞，2026-10-08 续）
+
+#### 破案过程：14 行微型程序复现 P277
+
+按「最小复现 → 反汇编 → SSA 对照」三步走。新建影子读探针组
+（tests/photon/P5/probe1-5.aura + run-probes.sh，photon 编译 → 运行 →
+与 seed 参考自动对比）：
+
+**probe2（循环变量双写点，14 行）在 photon 宿主上死循环**（seed 正确
+输出 p2=714）。反汇编 main：else 臂的 `i = i + 1` 从 **then 臂中间值
+槽（-0x130）** 装载 i，而 i 的真身槽是 -0xb0——影子槽陈旧读现行。
+对照 .hat SSA 铁证：
+
+```
+bb bb87: (then)  @t558 = @add(@t547, 3)     ← i+3 ✓
+bb bb88: (else)  @t563 = @add(@t558, 1)     ← ★ else 读 then 的 i+3！应为 @t547
+```
+
+#### 根因：SsaBuilder.buildIf 的 else 分支版本表泄漏（P406）
+
+`buildIf` 只在 `thenSelfTerm`（then 以 continue/break/return 结束）时
+回滚 varMap（P326）；**fall-through 时 else 直接继承 then 之后的
+varMap**——支配关系违规，else 臂引用 then 臂的 SSA 值。修复（一行）：
+else 构建前**无条件** `this.varMap = varMapBefore`。
+
+**修复验证**：驱动重建后五探针全绿（probe2 = 714 ✓）。**P277/P366/
+P397「槽影子读」的真根因不是发射器，是前端分支版本泄漏**——循环内
+if/else 的 else 臂读到 then 臂版本 → 上一轮迭代残渣 → 「r 恒 55」/
+「sp/cap 陈旧」/「fuseHotPairs 循环变量不推进」全部同源。
+
+#### 部署被后端 phi 缺陷阻塞（下一个 P-ticket）
+
+修复后宿主（auc_vm_runner，943 函数）编译成功但运行静默坏（guest 打
+"0" 而非 "m2=7"）。逐层排除：mc 缓冲完美（[MC] n=23 ops ✓）、参数
+完美（逐指令 arg0 轨迹 ✓）、常量池完美（[POOL] c0="7" ✓）、执行轨迹
+完整（23 条全跑 ✓）。对宿主 .hat 做规范化 per-function diff
+（vid 重编号归零后）：**仅 9 个函数结构变化**——Vm_dispatch（巨型
+else-if 链的冗余 phi 在修复后正确消失）、Vm_loadArgsFlat、
+readBytecode、String_toInt、String_toFloat、String_split、
+StringBuilder_reset、Vm_freeRegistered、ClosureManager_setUpvalue。
+
+**双重真相**：①基线 SSA 的泄漏曾让 String_toInt「无负号时从下标 1
+开始解析」等**源级错误被意外掩盖**——宿主源码已在被污染的语义上
+调稳；②修复后 SSA 变正确，Vm_dispatch 的 phi 形态变化触发**后端
+（LIR→DAG→发射器）对 phi 合并形态的处理缺陷**（T2 悬浮读块/T3 局部
+RHS field 写不可见同族）。即：前端修一行，后端欠的债浮出水面。
+
+#### 处置与重启路径
+
+SsaBuilder 修复**暂回退**（宿主可用性优先；修复本体一行：
+buildIf 的 else 构建前 `this.varMap = varMapBefore`，随档本节）。
+probe 组永久保留为回归资产。下一轮排序：
+
+1. **P407：后端 phi 合并形态缺陷**——以 Vm_dispatch 新 SSA 为测试
+   用例（5 万行宿主中仅 9 函数结构变化，diff 即靶图）；修好后
+   SsaBuilder 修复即可落地。
+2. 落地后连锁解锁：probe2/probe 全绿（已验证）→ P277 根治 →
+   P405 融合重启门 → 融合/镜像内联收益叠加。
+3. 宿主源码级审计：String_toInt 类「被泄漏掩盖的源级错误」随修复
+   逐一暴露，需按 9 函数清单复核。
+
+**教训**：三层嵌套缺陷（前端泄漏 → 源码将错就错 → 后端 phi 缺陷）
+的解法是「微型探针 + SSA 铁证 + 规范化 diff」三件套——本轮 15+ 次
+构建迭代全部收敛在证据链上，没有一次靠猜。
+
+### 10.119 会话 XXXI：四方基准复测——P400+P401 增益确认 1.12×（2026-10-08 续）
+
+口径：PowerShell .NET Process（ProcessStartInfo，fresh 进程，重定向
+捕获），5 轮中位，逐轮输出校验（fib(28)=317811、loop1M
+acc=999998000000、loop25M acc=124950000000 精确）。⚠️ Git Bash
+`date +%s%N` 口径有 ~45ms spawn 开销、PS Start-Process cmdlet 有
+~1s 常量等待——统一改用 .NET Process API 后数字与 §10.113 对齐
+（LLVM fib28 8ms ≈ 文档 7.9ms ✓）。
+
+**fib(28)（632K 次递归调用）**：
+
+| 执行链 | 中位 | 相对 LLVM | vs Seed VM |
+|---|---|---|---|
+| LLVM IR AOT | **8 ms** | 1× | — |
+| Photon AOT | 10 ms | 1.25× | — |
+| Seed VM（Rust） | 936 ms | 117× | 1× |
+| **Photon Aura VM** | **4637 ms** | **580×** | **4.95×** |
+
+**loop 100 万次（Long 累加，含 MUL/SUB/cast）**：
+
+| 执行链 | 中位 | 相对 LLVM | vs Seed VM |
+|---|---|---|---|
+| LLVM IR AOT | **7 ms** | 1× | — |
+| Photon AOT | 10 ms | 1.43× | — |
+| Seed VM | 1313 ms | 188× | 1× |
+| **Photon Aura VM** | **7100 ms** | **1014×** | **5.41×** |
+
+**loop 2500 万次（5000×5000 嵌套，三方）**：
+
+| 执行链 | 中位 | 相对 LLVM |
+|---|---|---|
+| LLVM IR AOT | **25 ms** | 1× |
+| Photon AOT | 149 ms | 6.0× |
+| Seed VM | 33090 ms | 1324× |
+| Photon Aura VM | **段错误 @6.3s（§10.117 立卡，HEAD 即崩）** | — |
+
+**本轮增益对账（fib28，Photon Aura VM）**：§10.113 基线 5207ms →
+**4637ms = 1.12×**（P400 emitCall 内联 1.11× + P401 探针/周期计数
+~1%）；vs Seed VM 差距 5.6× → **4.95×**。Photon AOT 双基准无回归
+（10ms/10ms，文档 9.4-9.9ms 同水平）。loop1M：7100 vs 文档 4057ms
+——**口径差**：本轮程序含 MUL/SUB/cast（文档版为纯累加），不可直接
+比；同程序跨轮对照以 build/p398probes 体系的留档为准。
+
+**方法学留档**：`scripts/photon/timeit.ps1`（.NET ProcessAPI 计时器，
+用法 `powershell -NoProfile -File scripts/photon/timeit.ps1 -Exe <exe>
+[-ArgsStr "<args>"] [-Runs 5]`，输出 times/median/last-line）+ AOT 产物
+经 `aura build --aot` / PhotonHatCompile 驱动一键重建 + `tests/photon/P5`
+（正确性探针）。四方复测一条命令可重放。

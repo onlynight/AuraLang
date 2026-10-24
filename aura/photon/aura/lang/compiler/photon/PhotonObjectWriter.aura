@@ -86,6 +86,17 @@ class PhotonObjectWriter {
     /// 函数偏移的内部列表（O(1) 追加，取代字符串整段拷贝）。
     private var functionOffsetsList: List<String> = arrayListOf<String>()
 
+    /// `appendFunction` 的追加片段（O(1) 追加，消费点一次物化）。
+    ///
+    /// ⚠️ 旧实现每函数三连 O(全量)：`functions + "," + name`（整段拷贝）、
+    /// `textSection + hex`（整段拷贝）+ `hexByteCount(textSection)`（全量
+    /// 扫描）、`relocs + ";;" + entries`（整段拷贝）。自举规模（数千函数、
+    /// .text hex 134M 字符）下累计拷贝/扫描达数百 GB，AOT 无 GC 全部驻留
+    /// —— 2026-10-09 驱动编译 vmhost 闭包实测 >10 GB 常驻的主因。
+    private var appendTextParts: List<String> = arrayListOf<String>()
+    private var appendTextBytes: Int = 0
+    private var appendRelocParts: List<String> = arrayListOf<String>()
+
     /// 节数据偏移（运行时计算）。
     var textOffset: Int = 0
     var rdataOffset: Int = 0
@@ -95,6 +106,18 @@ class PhotonObjectWriter {
     var textSize: Int = 0
     var rdataSize: Int = 0
     var dataSize: Int = 0
+    /// .data 的 **VirtualSize**（= max(实际初始化字节, dataSymbolName 声明
+    /// 总和)）：超出 SizeOfRawData 的尾部由加载器零填充（[MEM-FIX]，见
+    /// buildCoffFile 的 .data 说明）。SizeOfRawData 存 `dataRawSize`。
+    var dataVirtualSize: Int = 0
+    var dataRawSize: Int = 0
+
+    /// [MEM-FIX] 未初始化数据符号（`name:size` 逗号表，如静态堆
+    /// `heapArena:67108864`）——独立 **.bss** 节：SizeOfRawData=分配量、
+    /// PointerToRawData=0、CNT_UNINITIALIZED_DATA，链接器在镜像里分配空间、
+    /// 加载器零填充——文件不携带 64MB 零字节。空串 = 无 .bss 节。
+    var bssSymbolName: String = ""
+    var bssVirtualSize: Int = 0
 
     /// COFF 布局缓存（buildCoffFile 内部使用）。
     var coffSectionCount: Int = 0
@@ -147,12 +170,19 @@ class PhotonObjectWriter {
         this.functions = ""
         this.functionOffsets = ""
         this.functionOffsetsList = arrayListOf<String>()
+        this.appendTextParts = arrayListOf<String>()
+        this.appendTextBytes = 0
+        this.appendRelocParts = arrayListOf<String>()
         this.textOffset = 0
         this.rdataOffset = 0
         this.dataOffset = 0
         this.textSize = 0
         this.rdataSize = 0
         this.dataSize = 0
+        this.dataVirtualSize = 0
+        this.dataRawSize = 0
+        this.bssSymbolName = ""
+        this.bssVirtualSize = 0
     }
 
     // ── 主入口 ──
@@ -180,6 +210,11 @@ class PhotonObjectWriter {
         this.stringConsts = stringConsts
         this.functions = functionName
         this.relocs = relocEntries
+        // 单函数入口语义 = 重置：清掉可能残留的 appendFunction 待物化片段，
+        // 防止它们在消费点被错误拼接到本函数显式设置的节内容上。
+        this.appendTextParts = arrayListOf<String>()
+        this.appendTextBytes = 0
+        this.appendRelocParts = arrayListOf<String>()
 
         // 单函数 API 的后向兼容入口：首函数永远位于 .text 偏移 0。
         this.functionOffsets = functionName + "|0"
@@ -203,25 +238,50 @@ class PhotonObjectWriter {
         // 多函数单 obj：先记录本函数在 .text 内的基准偏移，再追加机器码。
         this.coffRelocCacheValid = false
         // 后续重定位项会按这个基准换算为节内绝对偏移。
-        val funcOffset: Int = this.hexByteCount(this.textSection)
+        // ⚠️ 运行计数取代旧 `hexByteCount(this.textSection)` 的全量扫描
+        //（见 appendTextParts 字段说明）。
+        val funcOffset: Int = this.appendTextBytes
+        // ⚠️ 函数名保持**直接拼接**：buildSymbols 的调用方在组装期就把
+        // `writer.functions` 当实参读走（PhotonRuntime ×3 / PhotonPipeline ×2），
+        // 片段化会让符号表拿到空串 → 链接期全部内部符号 undefined
+        //（实测 undefined symbol: Memory_alloc）。名字串很小（数千函数
+        // × 数十字节），平方累计 ~200MB 可接受。
         if (this.functions == "") {
             this.functions = functionName
-            this.functionOffsetsList.add(functionName + "|0")
         } else {
             this.functions = this.functions + "," + functionName
-            this.functionOffsetsList.add(functionName + "|" + this.toStr(funcOffset))
         }
+        this.functionOffsetsList.add(functionName + "|" + this.toStr(funcOffset))
 
-        // 追加机器码到 textSection
-        this.textSection = this.textSection + machineCodeHex
+        // 追加机器码到 textSection（片段化；消费点 buildCoffFile 一次物化）
+        this.appendTextParts.add(machineCodeHex)
+        this.appendTextBytes = this.appendTextBytes + this.hexByteCount(machineCodeHex)
 
         // 追加重定位项：将每个条目的偏移加上 funcOffset，变为节内绝对偏移。
         // 用 `;;` 分隔函数边界。
         val rebasedEntries: String = this.rebaseRelocEntries(relocEntries, funcOffset)
-        if (this.relocs == "") {
-            this.relocs = rebasedEntries
-        } else {
-            this.relocs = this.relocs + ";;" + rebasedEntries
+        this.appendRelocParts.add(rebasedEntries)
+    }
+
+    /// 把 appendFunction 的 relocs 追加片段物化为 relocs 字段。
+    ///
+    /// 结果与旧「逐次拼接」**逐字符一致**（沿用「累计为空则直置、否则
+    /// `;;` 相连」的规则）。.text 片段**不**在此物化——buildCoffFile 已
+    /// 流式化（逐片段 normalize + coffBuf 逐片追加，见其头部说明）。
+    private fun materializeRelocParts(): Unit {
+        if (this.appendRelocParts.size > 0) {
+            var rl: String = this.relocs
+            var j: Int = 0
+            while (j < this.appendRelocParts.size) {
+                if (rl == "") {
+                    rl = this.appendRelocParts[j]
+                } else {
+                    rl = rl + ";;" + this.appendRelocParts[j]
+                }
+                j = j + 1
+            }
+            this.relocs = rl
+            this.appendRelocParts = arrayListOf<String>()
         }
     }
 
@@ -320,6 +380,8 @@ class PhotonObjectWriter {
 
     fun buildSymbols(functionName: String, stringConsts: String): Unit {
         this.probePath = this.readProbePath()
+        // .bss 声明解析（符号记录 2c 与节头都依赖 bssVirtualSize）
+        this.bssVirtualSize = this.computeDeclaredSize(this.bssSymbolName)
         this.objwProbe("buildSymbols enter fnChars=" + this.toStr(functionName.length) +
                 " strChars=" + this.toStr(stringConsts.length))
         val recs: List<String> = arrayListOf<String>()
@@ -329,17 +391,44 @@ class PhotonObjectWriter {
         //    否则 call helper 会被链接到 .text 起点（main），导致调用错位。
         if (functionName != "") {
             val funcParts: List<String> = this.splitComma(functionName)
-            val offsetParts: List<String> = this.functionOffsetsList
+            // ⚠️ functionOffsetsList 只被旧 API（emitFromMachineCode/appendFunction）
+            // 填充；compileFromSsa 路径只设置 functionOffsets 字符串
+            // （`name|offset` 以 ';' 连接，';;' 为空段）。列表为空时必须从字符串
+            // 解析，否则每个函数符号都落回 offset=0 —— 链接后**所有**内部调用
+            // 都跳到 .text 起点（2026-10-02 实测：hello.exe 退出码 32、无输出，
+            // nm 显示全部函数符号在 00000000）。
+            var offsetParts: List<String> = this.functionOffsetsList
+            if (offsetParts.size == 0 && this.functionOffsets != "") {
+                val rawParts: List<String> = this.functionOffsets.split(";")
+                val parsed: List<String> = arrayListOf<String>()
+                var ri: Int = 0
+                while (ri < rawParts.size) {
+                    if (rawParts[ri] != "") {
+                        parsed.add(rawParts[ri])
+                    }
+                    ri = ri + 1
+                }
+                offsetParts = parsed
+            }
             var fi: Int = 0
             while (fi < funcParts.size) {
                 if (funcParts[fi] != "") {
-                    val symOffset: Int = 0
-                    if (fi < offsetParts.size) {
+                    var symOffset: Int = 0
+                    if (offsetParts.size == funcParts.size) {
+                        // 顺序一致（parseFuncNames 保持 offsets 串顺序）：按下标取。
                         val of: List<String> = this.splitPipe(offsetParts[fi])
-                        if (of.size >= 2 && of[0] == funcParts[fi]) {
+                        if (of.size >= 2) {
                             symOffset = this.strToInt(of[1])
-                        } else if (of.size >= 2) {
-                            symOffset = this.strToInt(of[1])
+                        }
+                    } else {
+                        // 顺序不一致：按名字精确匹配兜底。
+                        var oi: Int = 0
+                        while (oi < offsetParts.size) {
+                            val of2: List<String> = this.splitPipe(offsetParts[oi])
+                            if (of2.size >= 2 && of2[0] == funcParts[fi]) {
+                                symOffset = this.strToInt(of2[1])
+                            }
+                            oi = oi + 1
                         }
                     }
                     recs.add(funcParts[fi] + "|" + this.toStr(symOffset) + "|1|0x0020|2")
@@ -371,8 +460,14 @@ class PhotonObjectWriter {
             //
             // 偏移按**去引号后**的载荷长度累加（与 `stringConstsToHex` 同步，
             // 两处都用 `unquote`），空串同样占 1 个 NUL 字节。
+            // P365：每条 **8 字节对齐**——紧凑排布产生奇地址 @str 指针，
+            // Plan A「指针恒偶」装箱判定破产（isTaggedInt 误判 → println
+            // 打印指针十进制）。偏移累加与实际写入两处口径必须一致。
             recs.add("@str." + this.toStr(i) + "|" + this.toStr(rdataOff) + "|2|0|3")
-            rdataOff = rdataOff + this.unquote(parts[i]).length + 1  // 内容 + NUL 终止符
+            val plen: Int = this.unquote(parts[i]).length + 1  // 内容 + NUL 终止符
+            var adv: Int = plen
+            if (adv % 8 != 0) { adv = adv + (8 - adv % 8) }
+            rdataOff = rdataOff + adv
             i = i + 1
         }
 
@@ -400,24 +495,29 @@ class PhotonObjectWriter {
             if (this.stringConsts != "") {
                 dataSecNum = 3
             }
-            val dparts: List<String> = this.splitComma(this.dataSymbolName)
-            var dataOff: Int = 0
-            var di: Int = 0
-            while (di < dparts.size) {
-                val spec: String = dparts[di]
-                if (spec != "") {
-                    var nm: String = spec
-                    var sz: Int = 8
-                    val colon: Int = spec.indexOf(":")
-                    if (colon > 0) {
-                        nm = spec.substring(0, colon)
-                        sz = this.strToInt(spec.substring(colon + 1))
-                    }
-                    recs.add(nm + "|" + this.toStr(dataOff) + "|" + this.toStr(dataSecNum) + "|0|2")
-                    dataOff = dataOff + sz
-                }
-                di = di + 1
-            }
+            // ⚠️ P5-① 根修第二刀（2026-10-16）：.data 符号发射改**标量直扫**。
+            // 旧实现 splitComma 物化 66 项 List 再迭代——本函数同时持有
+            // funcParts/offsetParts/parsed/recs/dparts/bparts 六个 List 实例，
+            // 66 项长 CSV 下累加器间歇不前进（runtime obj nm 实证：
+            // objSlots/vehFlag 同偏移 0x10f8、allocRing/crashBuf 同偏移
+            // 0x1100、47 个 vtable 仅 18 个独立偏移 ⇒ 单例槽表只有 8 字节，
+            // 槽号 66 越界直踩 strRing——stOk 的 SelfTestCounters 字段写
+            // 拿到 strRing 残留的 .rdata 字面量指针 = 自检确定性段错误）。
+            // 隔离复刻（单 List）同逻辑同输入完全正确 ⇒ 多 List 实例互扰
+            // （R-v3 缺陷族）。本函数与 bss 循环改为单遍 charCodeAt 扫描 +
+            // 扁平串（";;" 预连接，joinRecords 对合并条目透明）。
+            this.appendDataSpecRecords(this.dataSymbolName, dataSecNum, recs)
+        }
+
+        // 2c) .bss 节符号（[MEM-FIX] 未初始化数据，如静态堆 heapArena）：
+        //     节号 = .text(1) + .rdata(有则+1) + .data(有则+1) + 1（本节）。
+        //     SizeOfRawData=分配量、PointerToRawData=0 → 链接器分配镜像空间、
+        //     加载器零填充，文件零字节。
+        if (this.bssSymbolName != "" && this.bssVirtualSize > 0) {
+            var bssSecNum: Int = 2
+            if (this.stringConsts != "") { bssSecNum = bssSecNum + 1 }
+            if (this.dataSymbolName != "") { bssSecNum = bssSecNum + 1 }  // 声明式数据也会合成 .data
+            this.appendDataSpecRecords(this.bssSymbolName, bssSecNum, recs)
         }
 
         // 3) 重定位引用的外部符号（section = 0 表示未定义，由链接器解析）
@@ -434,6 +534,49 @@ class PhotonObjectWriter {
         this.objwProbe("sym4 joining recs=" + this.toStr(recs.size))
         this.symbols = this.joinRecords(recs)
         this.objwProbe("sym4 done symChars=" + this.toStr(this.symbols.length))
+    }
+
+    /// `name:size` CSV → 符号记录，标量直扫版（P5-① 根修第二刀，2026-10-16）。
+    ///
+    /// 语义与旧 splitComma+List 迭代逐条等价：无冒号条目按 8 字节、
+    /// 空段跳过（不计偏移）。所有状态都是 Int/String 标量局部——本函数
+    /// 不物化任何 List（同函数多 List 实例互扰 = R-v3 缺陷族，66 项长
+    /// CSV 在 buildSymbols 的六 List 语境下累加器间歇不前进，实测把
+    /// runtime objSlots 表坍缩成 8 字节）。记录以 ";;" 预连接成**单个**
+    /// recs 条目：joinRecords 在条目间插 ";;"，合并条目与多条目最终
+    /// symbols 串逐字节一致（splitDoubleSemi 消费端无感）。
+    private fun appendDataSpecRecords(specCsv: String, secNum: Int, recs: List<String>): Unit {
+        var dataOff: Int = 0
+        var dataRecs: String = ""
+        var segStart: Int = 0
+        var pos: Int = 0
+        val dLen: Int = specCsv.length
+        while (pos <= dLen) {
+            if (pos == dLen || this.chEq(specCsv, pos, ",")) {
+                if (pos > segStart) {
+                    var colon: Int = -1
+                    var p: Int = segStart
+                    while (p < pos) {
+                        if (this.chEq(specCsv, p, ":")) { colon = p; p = pos }
+                        p = p + 1
+                    }
+                    var sz: Int = 8
+                    var nm: String = ""
+                    if (colon > segStart) {
+                        nm = specCsv.substring(segStart, colon)
+                        sz = this.strToInt(specCsv.substring(colon + 1, pos))
+                    } else {
+                        nm = specCsv.substring(segStart, pos)
+                    }
+                    val rec: String = nm + "|" + this.toStr(dataOff) + "|" + this.toStr(secNum) + "|0|2"
+                    if (dataRecs == "") { dataRecs = rec } else { dataRecs = dataRecs + ";;" + rec }
+                    dataOff = dataOff + sz
+                }
+                segStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        if (dataRecs != "") { recs.add(dataRecs) }
     }
 
     // ── 重定位表构建 ──
@@ -498,6 +641,7 @@ class PhotonObjectWriter {
     /// → 2,647 次切片分配 + 1 次列表分配），17,066 条重定位 × 2,647 是纯重复
     /// 分配。
     private fun collectExternalSymbols(): List<String> {
+        this.materializeRelocParts()
         val out: List<String> = arrayListOf<String>()
         val funcs: List<String> = this.splitComma(this.functions)
         val dnames: List<String> = if (this.dataSymbolName != "") {
@@ -506,18 +650,39 @@ class PhotonObjectWriter {
             arrayListOf<String>()
         }
         val entries: List<String> = this.parseRelocEntries(this.relocs)
+        // [R96] 函数名建哈希索引：本函数对**每个**重定位条目都判定「符号是否
+        // 由本模块定义」，旧实现线性扫 `funcs`（自举 ~6 千函数）⇒ O(重定位数
+        // × 函数数)。建表后为 O(1)（语义不变：命中与否的结果完全相同）。
+        this.buildSymIdx(funcs)
         var i: Int = 0
         while (i < entries.size) {
             val fields: List<String> = this.splitPipe(entries[i])
             if (fields.size >= 2) {
                 val sym: String = fields[1]
-                if (!this.isDefinedSymbolIn(sym, funcs, dnames) && !this.containsString(out, sym)) {
+                if (!this.isDefinedSymbolFast(sym, dnames) && !this.containsString(out, sym)) {
                     out.add(sym)
                 }
             }
             i = i + 1
         }
         return out
+    }
+
+    /// `isDefinedSymbolIn` 的哈希版（`funcs` 已由 `buildSymIdx` 建表）。
+    /// 判定顺序与旧实现一致：`@str.` 前缀 → data 符号名 → 函数名。
+    private fun isDefinedSymbolFast(name: String, dnames: List<String>): Boolean {
+        if (this.hasPrefix(name, "@str.")) {
+            return true
+        }
+        var dn: Int = 0
+        while (dn < dnames.size) {
+            if (dnames[dn] != "" && this.dataSymbolBaseName(dnames[dn]) == name) {
+                return true
+            }
+            dn = dn + 1
+        }
+        if (name == "") { return false }
+        return this.symIdxGet(name) >= 0
     }
 
     /// 判断符号是否由本模块定义（函数名，或 `@str.N` 形式的字符串常量，或 .data 符号）。
@@ -550,7 +715,82 @@ class PhotonObjectWriter {
     ///
     /// 重定位偏移已在 `appendFunction` 中按函数基准换算为节内绝对偏移，
     /// 此处仅需解析符号名到符号表索引。
+    /// [R96] 符号名 → 符号表下标 的哈希索引。
+    ///
+    /// ⚠️ 重定位解析对**每个**重定位条目都调 `indexOfName(symNames, name)`，
+    /// 而 `symNames` 是整张符号表（自举实测 ~6 万条：函数 + 5.7 万字符串常量
+    /// + 外部符号）⇒ O(重定位数 × 符号数) 次字符串比较，是 writer 46.8s 的
+    /// 主体。改为一次建表 + O(1) 查询；同名仍取**最早出现**者（与线性扫描
+    /// 首次命中完全一致，符号下标因此逐位不变）。
+    private var symIdxNames: List<String> = arrayListOf<String>()
+    private var symIdxTable: List<Int> = arrayListOf<Int>()
+
+    /// 构建符号名哈希索引（一次性）。
+    private fun buildSymIdx(names: List<String>): Unit {
+        this.symIdxNames = names
+        var cap: Int = 16
+        val want: Int = names.size * 2
+        while (cap < want) { cap = cap * 2 }
+        this.symIdxTable = arrayListOf<Int>()
+        var k: Int = 0
+        while (k < cap) {
+            this.symIdxTable.add(0)
+            k = k + 1
+        }
+        var j: Int = 0
+        while (j < names.size) {
+            val nm: String = names[j]
+            var h: Int = 0
+            var c: Int = 0
+            val nmLen: Int = nm.length
+            while (c < nmLen) {
+                h = (h * 31 + (nm.charCodeAt(c) as Int)) % cap
+                c = c + 1
+            }
+            var placed: Boolean = false
+            var probes: Int = 0
+            while (!placed && probes < cap) {
+                val slot: Int = this.symIdxTable[h]
+                if (slot == 0) {
+                    this.symIdxTable[h] = j + 1
+                    placed = true
+                } else if (names[slot - 1] == nm) {
+                    placed = true
+                } else {
+                    h = h + 1
+                    if (h >= cap) { h = 0 }
+                }
+                probes = probes + 1
+            }
+            j = j + 1
+        }
+    }
+
+    /// 哈希查符号下标（未找到 -1）。
+    private fun symIdxGet(name: String): Int {
+        val cap: Int = this.symIdxTable.size
+        if (cap == 0) { return -1 }
+        var h: Int = 0
+        var c: Int = 0
+        val nameLen: Int = name.length
+        while (c < nameLen) {
+            h = (h * 31 + (name.charCodeAt(c) as Int)) % cap
+            c = c + 1
+        }
+        var probes: Int = 0
+        while (probes < cap) {
+            val slot: Int = this.symIdxTable[h]
+            if (slot == 0) { return -1 }
+            if (this.symIdxNames[slot - 1] == name) { return slot - 1 }
+            h = h + 1
+            if (h >= cap) { h = 0 }
+            probes = probes + 1
+        }
+        return -1
+    }
+
     private fun composeRelocations(): List<String> {
+        this.materializeRelocParts()
         if (this.coffRelocCacheValid) {
             return this.coffRelocCache
         }
@@ -567,6 +807,8 @@ class PhotonObjectWriter {
             symNames.add(this.symbolName(symRecs[sn]))
             sn = sn + 1
         }
+        // [R96] 符号名哈希索引：把逐条 O(符号数) 的线性扫描降为 O(1)。
+        this.buildSymIdx(symNames)
 
         // 按 `;;` 分隔函数组，每个组内的条目属于同一个函数
         val groups: List<String> = this.splitDoubleSemi(this.relocs)
@@ -583,7 +825,7 @@ class PhotonObjectWriter {
                     val fields: List<String> = this.splitPipe(entries[i])
                     if (fields.size >= 3) {
                         val absoluteOffset: Int = this.strToInt(fields[0])
-                        val idx: Int = this.indexOfName(symNames, fields[1])
+                        val idx: Int = this.symIdxGet(fields[1])
                         if (absoluteOffset >= 905000 && absoluteOffset <= 907400) {
                             this.objwProbe("RELCHK off=" + toStr(absoluteOffset) +
                                     " sym=" + fields[1] + " idx=" + toStr(idx))
@@ -736,13 +978,34 @@ class PhotonObjectWriter {
     /// （44 vs 40），导致符号表实际位置比声明位置早 2 字节 —— 链接器按声明偏移
     /// 读取时，符号名整体错位 2 字节（"main" → "in"、"@str.0" → "tr.0"）。
     fun buildCoffFile(): String {
-        this.objwProbe("coff enter textChars=" + this.toStr(this.textSection.length) +
+        // ⚠️ .text 片段**流式化**（2026-10-09 内存回合）：不再把
+        // appendTextParts 物化成单串 textSection（134M 字符级 = 物化归并
+        // 中间层 + normalizeHex 全量拷贝 + 919 处 coffAppend 单片，无 GC
+        // 下 ~2 GB 驻留，实测末端 30s 冲 +3.5 GB 的主因）——逐片段
+        // normalize 后留在 appendTextParts，coffBuf 组装时逐片追加。
+        // relocs 仍走物化（composeRelocations/collectExternalSymbols 依赖）。
+        this.materializeRelocParts()
+        var textChars: Int = this.textSection.length
+        var tp: Int = 0
+        var textBytes: Int = 0
+        while (tp < this.appendTextParts.size) {
+            val part: String = this.normalizeHex(this.appendTextParts[tp])
+            this.appendTextParts[tp] = part
+            textBytes = textBytes + this.hexByteCount(part)
+            tp = tp + 1
+        }
+        if (this.appendTextParts.size > 0) {
+            this.textSize = textBytes
+            textChars = textBytes * 2
+        } else {
+            // 单发路径（emitFromMachineCode / textSection 直设）：原逻辑不变
+            this.textSection = this.normalizeHex(this.textSection)
+            this.textSize = this.hexByteCount(this.textSection)
+            textChars = this.textSection.length
+        }
+        this.objwProbe("coff enter textChars=" + this.toStr(textChars) +
                 " strConstChars=" + this.toStr(this.stringConsts.length) +
                 " dataChars=" + this.toStr(this.dataSection.length))
-        // ── 1. 规整节内容 ──
-        this.textSection = this.normalizeHex(this.textSection)
-        this.objwProbe("coff 1a normalizeHex(text) ok len=" + this.toStr(this.textSection.length))
-        this.textSize = this.hexByteCount(this.textSection)
         this.objwProbe("coff 1b textSize=" + this.toStr(this.textSize))
         this.rdataSection = this.stringConstsToHex(this.stringConsts)
         this.objwProbe("coff 1c stringConstsToHex ok rdataChars=" +
@@ -751,16 +1014,51 @@ class PhotonObjectWriter {
         this.objwProbe("coff 1d rdataSize=" + this.toStr(this.rdataSize))
         println("RDATA-CHK rdataSize=" + this.toStr(this.rdataSize) +
                 " chars=" + this.toStr(this.rdataSection.length))
+        // [MEM-FIX] 纯声明式数据（dataSymbolName 有条目但无初始化 hex）：
+        // 合成零 hex 的小 .data（KB 级，可入文件）——这些符号必须落在真实
+        // .data 节内；大尾巴（静态堆等）走 .bss（见 dataVirtualSize）。
+        val dataDeclaredPre: Int = this.computeDataDeclaredSize()
+        if (this.dataSection == "" && dataDeclaredPre > 0) {
+            var block: String = "00"
+            val needChars: Int = dataDeclaredPre * 2
+            while (block.length < needChars) { block = block + block }
+            if (block.length > needChars) { block = block.substring(0, needChars) }
+            this.dataSection = block
+        }
         this.dataSection = this.normalizeHex(this.dataSection)
-        // 把 .data 补齐到 `dataSymbolName` 声明的总大小。
-        //
-        // 为什么需要：`dataSection` 的 hex 是**逐字节**写死的，而符号大小写在
-        // `dataSymbolName`（`name:size`）。若 hex 比声明短，节的实际大小就以
-        // hex 为准 —— 符号会指向节尾之外（读/写越界）。字符串堆 arena 有
-        // 数千字节，不可能在 Aura 源码里手写等长的零 hex，因此由 writer
-        // 按声明大小补零。
-        this.dataSection = this.padDataSectionToDeclaredSize()
+        // [P40x-h] .data 原始字节必须覆盖全部声明符号。旧实现依赖
+        //「VirtualSize > raw 时加载器零填充」——但 COFF **目标文件**的
+        // VirtualSize 字段被 lld-link 忽略（按 SizeOfRawData 截断）→
+        // 尾部符号（heapArenaBase/heapCap/heapBump/envBuffer/…）与紧随的
+        // .bss（heapArena 本体）重叠 = 堆元数据长在堆里互相踩（实测：小程序
+        // toStr-后-strcat 段错误、寄存器呈常量+地址熔合值；VM 宿主因主对象
+        // .data 较大侥幸错开）。
+        val declaredP40x: Int = this.computeDataDeclaredSize()
+        var rawLenP40x: Int = this.hexByteCount(this.dataSection)
+        if (declaredP40x > rawLenP40x) {
+            var padBlock: String = "00"
+            val padChars: Int = (declaredP40x - rawLenP40x) * 2
+            while (padBlock.length < padChars) { padBlock = padBlock + padBlock }
+            if (padBlock.length > padChars) { padBlock = padBlock.substring(0, padChars) }
+            this.dataSection = this.dataSection + padBlock
+            rawLenP40x = this.hexByteCount(this.dataSection)
+        }
+        // [MEM-FIX] .data 尾巴改为 **COFF 虚拟大小**（2026-10-09 内存回合）：
+        // 旧实现把 .data 用零 hex 补齐到 `dataSymbolName` 声明的总大小——
+        // runtime 的 `heapArena:67108864`（64MB 静态堆）于是产生 134M 字符
+        // 的零 hex 数份驻留（倍增补零 + out+block + normalizeHex），obj/exe
+        // 也各白胖 64MB。改为：SizeOfRawData = 实际初始化字节；
+        // VirtualSize = max(实际, 声明)——超出部分由 PE/COFF 加载器零填充
+        //（COFF/PE 标准语义），文件与内存双降。数据符号全部落在初始化段内，
+        // 符号值与重定位语义不变。
         this.dataSize = this.hexByteCount(this.dataSection)
+        this.dataRawSize = this.dataSize  // SizeOfRawData = 仅初始化部分
+        val dataDeclared: Int = this.computeDataDeclaredSize()
+        if (dataDeclared > this.dataSize) {
+            this.dataVirtualSize = dataDeclared
+        } else {
+            this.dataVirtualSize = this.dataSize
+        }
 
         // ── 2. 计数 ──
         this.coffSectionCount = 1
@@ -768,6 +1066,9 @@ class PhotonObjectWriter {
             this.coffSectionCount = 2
         }
         if (this.dataSize > 0) {
+            this.coffSectionCount = this.coffSectionCount + 1
+        }
+        if (this.bssVirtualSize > 0) {
             this.coffSectionCount = this.coffSectionCount + 1
         }
         val symRecs: List<String> = this.splitDoubleSemi(this.symbols)
@@ -815,7 +1116,7 @@ class PhotonObjectWriter {
         val rdataRawOffset: Int = this.alignUp(textRawEnd, 4)
         val rdataRawEnd: Int = rdataRawOffset + this.rdataSize
         val dataRawOffset: Int = this.alignUp(rdataRawEnd, 4)
-        val dataRawEnd: Int = dataRawOffset + this.dataSize
+        val dataRawEnd: Int = dataRawOffset + this.dataRawSize
         this.coffRelocOffset = this.alignUp(dataRawEnd, 4)
         this.coffSymTabOffset = this.coffRelocOffset + 10 * this.coffRelocCount
 
@@ -833,14 +1134,25 @@ class PhotonObjectWriter {
         this.buildCoffHeader()
         this.buildSectionHeaders()
         this.coffAppend(this.padToBytes(textRawOffset))
-        this.coffAppend(this.textSection)
+        if (this.appendTextParts.size > 0) {
+            // 流式追加 .text 片段（片段已在 buildCoffFile 头部逐片 normalize，
+            // 跳过单串物化——见其头部说明）
+            var si: Int = 0
+            while (si < this.appendTextParts.size) {
+                this.coffAppend(this.appendTextParts[si])
+                si = si + 1
+            }
+            this.appendTextParts = arrayListOf<String>()
+        } else {
+            this.coffAppend(this.textSection)
+        }
         if (this.rdataSize > 0) {
             this.coffAppend(this.padToBytes(rdataRawOffset))
             this.coffAppend(this.rdataSection)
         }
         if (this.dataSize > 0) {
             this.coffAppend(this.padToBytes(dataRawOffset))
-            this.coffAppend(this.dataSection)
+            this.coffAppend(this.dataSection)  // 仅初始化部分（尾巴是虚拟零填充）
         }
         this.objwProbe("coff6 sections done bufParts=" + this.toStr(this.coffBuf.size) +
                 " bufHexChars=" + this.toStr(this.coffBufHexLen()))
@@ -851,7 +1163,33 @@ class PhotonObjectWriter {
         this.buildStringTable()
         this.objwProbe("coff9 strTable done bufHexChars=" + this.toStr(this.coffBufHexLen()))
 
+        // ⚠️ 终归并是 134M 字符级驻留大头（内容 × log₂(片段数) 的成对中间
+        // 层，无 GC 全驻留）：emitPieces() 路径跳过——驱动分片 print 到
+        // stdout / writeObjectFilePieces 分片解码落盘。
+        if (this.piecesMode) {
+            this.coffBuiltBuf = this.coffBuf
+            return ""
+        }
         return this.coffJoin()
+    }
+
+    /// 分片模式开关（emitPieces 用）：buildCoffFile 只构建 coffBuf 不归并。
+    private var piecesMode: Boolean = false
+
+    /// 最近一次分片构建的 coffBuf（emitPieces 的返回暂存）。
+    private var coffBuiltBuf: List<String> = arrayListOf<String>()
+
+    /// 构建 COFF 并**分片**返回（不归并成单串）。
+    ///
+    /// 消费方：驱动把各片段直接 `print` 到 stdout（marker 协议要求单行，
+    /// 用无换行 print 拼接）；`PhotonNativeWriter.writeObjectFilePieces`
+    /// 分片解码落盘。归并中间层 = 内容 × log₂(片段数)，134M 字符级
+    /// ≈ 1.3-2 GB 无 GC 驻留——分片化直接归零（2026-10-09 内存回合）。
+    fun emitPieces(): List<String> {
+        this.piecesMode = true
+        this.buildCoffFile()
+        this.piecesMode = false
+        return this.coffBuiltBuf
     }
 
     /// 追加一个片段到 COFF 缓冲（O(1)）。
@@ -987,15 +1325,30 @@ class PhotonObjectWriter {
         }
         if (this.dataSize > 0) {
             this.coffAppend(this.padSectionName(".data", 8))
+            this.coffAppend(this.writeIntLe(this.dataVirtualSize, 4))  // VirtualSize（含零填充尾巴）
             this.coffAppend(this.writeIntLe(0, 4))
-            this.coffAppend(this.writeIntLe(0, 4))
-            this.coffAppend(this.writeIntLe(this.dataSize, 4))
+            this.coffAppend(this.writeIntLe(this.dataRawSize, 4))      // SizeOfRawData（仅初始化部分）
             this.coffAppend(this.writeIntLe(this.dataOffset, 4))
             this.coffAppend(this.writeIntLe(0, 4))          // 无重定位
             this.coffAppend(this.writeIntLe(0, 4))
             this.coffAppend(this.writeIntLe(0, 2))
             this.coffAppend(this.writeIntLe(0, 2))
             this.coffAppend(this.writeIntLe(0xC0400040, 4)) // CNT_INITIALIZED_DATA|MEM_READ|MEM_WRITE|ALIGN_4
+        }
+        if (this.bssVirtualSize > 0) {
+            // [MEM-FIX] .bss：对象文件里 SizeOfRawData=分配量、PointerToRawData=0、
+            // CNT_UNINITIALIZED_DATA——链接器分配镜像空间，加载器零填充，
+            // 文件零字节（旧实现 64MB 静态堆走 .data 原始字节 = obj/exe 白胖 64MB）。
+            this.coffAppend(this.padSectionName(".bss", 8))
+            this.coffAppend(this.writeIntLe(0, 4))
+            this.coffAppend(this.writeIntLe(0, 4))
+            this.coffAppend(this.writeIntLe(this.bssVirtualSize, 4))   // 分配量
+            this.coffAppend(this.writeIntLe(0, 4))                     // 无原始数据
+            this.coffAppend(this.writeIntLe(0, 4))          // 无重定位
+            this.coffAppend(this.writeIntLe(0, 4))
+            this.coffAppend(this.writeIntLe(0, 2))
+            this.coffAppend(this.writeIntLe(0, 2))
+            this.coffAppend(this.writeIntLe(0xC0000080, 4)) // CNT_UNINITIALIZED_DATA|MEM_READ|MEM_WRITE
         }
     }
 
@@ -1153,7 +1506,8 @@ class PhotonObjectWriter {
             return false
         }
         var i: Int = 0
-        while (i < prefix.length) {
+        val prefixLen: Int = prefix.length
+        while (i < prefixLen) {
             // `charCodeAt` 直取码值：`s[i]` 每次索引都新建单字符字符串（见 `chEq` 说明）。
             if ((s.charCodeAt(i) as Int) != (prefix.charCodeAt(i) as Int)) {
                 return false
@@ -1187,31 +1541,36 @@ class PhotonObjectWriter {
 
         var i: Int = 0
         val seg1: String = "%&'()*+,-./"
-        while (i < seg1.length) {
+        val seg1Len: Int = seg1.length
+        while (i < seg1Len) {
             if (c == seg1[i]) { return 37 + i }
             i = i + 1
         }
         val digits: String = "0123456789"
         i = 0
-        while (i < digits.length) {
+        val digitsLen: Int = digits.length
+        while (i < digitsLen) {
             if (c == digits[i]) { return 48 + i }
             i = i + 1
         }
         val seg2: String = ":;<=>?@"
         i = 0
-        while (i < seg2.length) {
+        val seg2Len: Int = seg2.length
+        while (i < seg2Len) {
             if (c == seg2[i]) { return 58 + i }
             i = i + 1
         }
         val upper: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         i = 0
-        while (i < upper.length) {
+        val upperLen: Int = upper.length
+        while (i < upperLen) {
             if (c == upper[i]) { return 65 + i }
             i = i + 1
         }
         val lower: String = "abcdefghijklmnopqrstuvwxyz"
         i = 0
-        while (i < lower.length) {
+        val lowerLen: Int = lower.length
+        while (i < lowerLen) {
             if (c == lower[i]) { return 97 + i }
             i = i + 1
         }
@@ -1230,7 +1589,8 @@ class PhotonObjectWriter {
     private fun digitOf(c: String): Int {
         var i: Int = 0
         val digits: String = "0123456789"
-        while (i < digits.length) {
+        val digitsLen2: Int = digits.length
+        while (i < digitsLen2) {
             if (c == digits[i]) { return i }
             i = i + 1
         }
@@ -1241,13 +1601,15 @@ class PhotonObjectWriter {
     private fun hexValOf(c: String): Int {
         var i: Int = 0
         val lower: String = "0123456789abcdef"
-        while (i < lower.length) {
+        val lowerLen2: Int = lower.length
+        while (i < lowerLen2) {
             if (c == lower[i]) { return i }
             i = i + 1
         }
         val upper: String = "0123456789ABCDEF"
         i = 0
-        while (i < upper.length) {
+        val upperLen2: Int = upper.length
+        while (i < upperLen2) {
             if (c == upper[i]) { return i }
             i = i + 1
         }
@@ -1267,6 +1629,7 @@ class PhotonObjectWriter {
 
     /// 计算重定位项数量。
     private fun countRelocs(): Int {
+        this.materializeRelocParts()
         if (this.relocs == "") {
             return 0
         }
@@ -1312,40 +1675,41 @@ class PhotonObjectWriter {
     ///
     /// `dataSymbolName` 形如 `toStrBuffer:32,strcatArena:4096,strcatBump:8`；
     /// 声明大小即符号跨距，节的实际大小必须 ≥ 该跨距，否则符号指向节外。
-    private fun padDataSectionToDeclaredSize(): String {
-        if (this.dataSymbolName == "") { return this.dataSection }
-        val specs: List<String> = this.splitComma(this.dataSymbolName)
+    /// [MEM-FIX] `dataSymbolName` 声明的总字节数（`name:size` 求和，无名者 8）。
+    private fun computeDataDeclaredSize(): Int {
+        return this.computeDeclaredSize(this.dataSymbolName)
+    }
+
+    /// `name:size` 逗号表的总字节数（无名者 8）。
+    private fun computeDeclaredSize(specCsv: String): Int {
+        if (specCsv == "") { return 0 }
+        // ⚠️ P5-① 根修第二刀（2026-10-16）：标量直扫（同 appendDataSpecRecords
+        // 的理由——多 List 语境下 splitComma 路径累加器间歇不前进；本函数
+        // 算错会让 [P40x-h] 的 .data 补零欠账，尾部符号重新落进 bss 互踩）。
         var declared: Int = 0
-        var i: Int = 0
-        while (i < specs.size) {
-            val spec: String = specs[i]
-            if (spec != "") {
-                val colon: Int = spec.indexOf(":")
-                if (colon > 0) {
-                    declared = declared + this.strToInt(spec.substring(colon + 1))
-                } else {
-                    declared = declared + 8
+        var segStart: Int = 0
+        var pos: Int = 0
+        val len: Int = specCsv.length
+        while (pos <= len) {
+            if (pos == len || this.chEq(specCsv, pos, ",")) {
+                if (pos > segStart) {
+                    var colon: Int = -1
+                    var p: Int = segStart
+                    while (p < pos) {
+                        if (this.chEq(specCsv, p, ":")) { colon = p; p = pos }
+                        p = p + 1
+                    }
+                    if (colon > segStart) {
+                        declared = declared + this.strToInt(specCsv.substring(colon + 1, pos))
+                    } else {
+                        declared = declared + 8
+                    }
                 }
+                segStart = pos + 1
             }
-            i = i + 1
+            pos = pos + 1
         }
-        var out: String = this.dataSection
-        var have: Int = this.hexByteCount(out)
-        var need: Int = declared - have
-        if (need <= 0) { return out }
-        // ⚠ 填充必须是**倍增**（`block = block + block`）：逐字节
-        // `out = out + "00"` 是 O(need²)（每次整段拷贝），arena 达数十 KB 时
-        // 完全不可接受；倍增的拷贝量为 2,4,8,…,need，总计 O(need)。
-        // `block` 长度按 hex 字符计（每字节 2 个字符）。
-        var block: String = "00"
-        val needChars: Int = need * 2
-        while (block.length < needChars) {
-            block = block + block
-        }
-        if (block.length > needChars) {
-            block = block.substring(0, needChars)
-        }
-        return out + block
+        return declared
     }
 
     /// 去掉 `dataSymbolName` 条目里的 `:size` 后缀，取纯符号名。
@@ -1370,7 +1734,16 @@ class PhotonObjectWriter {
         var i: Int = 0
         while (i < parts.size) {
             // `unquote`：.rdata 里放不带引号的载荷（与 `buildSymbols` 的偏移口径一致）
-            val one: String = this.asciiToHex(this.unquote(parts[i]), -1) + "00"  // NUL 终止
+            // P365：每条 8 字节对齐（与 buildSymbols 的偏移累加口径一致）
+            val payload: String = this.unquote(parts[i])
+            var one: String = this.asciiToHex(payload, -1) + "00"  // NUL 终止
+            var pad: Int = 8 - ((payload.length + 1) % 8)
+            if (pad == 8) { pad = 0 }
+            var pi: Int = 0
+            while (pi < pad) {
+                one = one + "00"
+                pi = pi + 1
+            }
             outParts.add(one)
             i = i + 1
             if (i % 50 == 0) {
@@ -1770,6 +2143,12 @@ class PhotonObjectWriter {
     // ── ELF 目标文件生成 ──
 
     private fun buildElfFile(): String {
+        this.materializeRelocParts()
+        // ELF 路径（非热）保留整体物化：.text 片段归并成单串后走旧逻辑
+        if (this.appendTextParts.size > 0) {
+            this.textSection = this.textSection + this.coffJoinList(this.appendTextParts)
+            this.appendTextParts = arrayListOf<String>()
+        }
         // ── 1. 规整节内容 ──
         this.textSection = this.normalizeHex(this.textSection)
         this.textSize = this.hexByteCount(this.textSection)
@@ -2080,22 +2459,22 @@ class PhotonObjectWriter {
 object PhotonObjectWriterUtils {
 
     /// COFF 常量。
-    val COFF_MACHINE_AMD64: Int = 0x8664
-    val COFF_CHAR_EXECUTABLE: Int = 0x0102
-    val SECTION_CODE: Int = 0x20
-    val SECTION_MEM_READ: Int = 0x40000000
-    val SECTION_MEM_EXECUTE: Int = 0x20000000
-    val SECTION_MEM_WRITE: Int = 0x80000000
-    val SECTION_ALIGN_16: Int = 0x0010
-    val REL32: Int = 0x04
+    const val COFF_MACHINE_AMD64: Int = 0x8664
+    const val COFF_CHAR_EXECUTABLE: Int = 0x0102
+    const val SECTION_CODE: Int = 0x20
+    const val SECTION_MEM_READ: Int = 0x40000000
+    const val SECTION_MEM_EXECUTE: Int = 0x20000000
+    const val SECTION_MEM_WRITE: Int = 0x80000000
+    const val SECTION_ALIGN_16: Int = 0x0010
+    const val REL32: Int = 0x04
 
     /// ELF 常量。
-    val ELF_MAGIC: Int = 0x7F454C46
-    val ELF_CLASS64: Int = 2
-    val ELF_DATA_LE: Int = 1
-    val ELF_TYPE_REL: Int = 1
-    val ELF_MACHINE_X86_64: Int = 62
-    val ELF_VERSION: Int = 1
+    const val ELF_MAGIC: Int = 0x7F454C46
+    const val ELF_CLASS64: Int = 2
+    const val ELF_DATA_LE: Int = 1
+    const val ELF_TYPE_REL: Int = 1
+    const val ELF_MACHINE_X86_64: Int = 62
+    const val ELF_VERSION: Int = 1
 
     /// 创建空的 AOT 后端。
     fun emptyBackend(): PhotonObjectWriter {

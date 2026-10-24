@@ -1,0 +1,14 @@
+import aura.lang.std.String
+import "../../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
+
+fun main(): Int {
+    val vm = VmRunner()
+    vm.loadBytecode("CONST_INT 42\nPRINT\nHALT\n", "42\n", "main|0|0\n")
+    val err: String = vm.getError()
+    if (err.length() > 0) {
+        println("ERROR: " + err)
+        return 1
+    }
+    println("VM-OK exit=" + toStr(vm.getExitCode()))
+    return 0
+}

@@ -127,11 +127,6 @@
 
 **每次改动 `aura/compiler/aura/lang/compiler/**` 后必须重建驱动**，否则跑的是旧驱动（已多次踩坑）。
 
-> ⚠️ **路径注意**：`aura/compiler/aura/lang/compiler/photon` 是一个**junction**，
-> 指向 `aura/photon/aura/lang/compiler/photon`。`aura.exe` 无法通过 junction 路径读取文件
-> （报 `Error reading file`），必须使用 `aura/photon/aura/lang/compiler/photon/...` 路径。
-> 但 `read` / `edit` 工具可以正常读写 junction 路径。
-
 ```powershell
 # ① 重建驱动（用全新缓存目录避免陈旧对象；约 2–4 分钟）
 $env:AURA_CACHE_DIR="build\cache-cleanNN"          # NN 每轮递增

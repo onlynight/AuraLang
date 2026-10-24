@@ -1,0 +1,16 @@
+// build/bench/bench_loop1m.aura
+// Photon Aura VM 副基准：100 万次 Long 累加（紧循环，JUMP_IF/ADD/STORE_LOCAL
+// 密集、无 CALL）——§10.105-113 四方表「loop 100 万次」的复现载体的补档。
+//
+//   期望输出: loop acc = 999998000000   (Σ_{i=0..N-1}(2i-1) = N²-2N, N=1e6)
+//   ⚠ 此前注释误写为 N²-N=999999000000；Σ(2i-1)=2·N(N-1)/2 - N = N²-2N。
+
+fun main() {
+    var i: Int = 0
+    var acc: Long = 0
+    while (i < 1000000) {
+        acc = acc + (i * 2 - 1) as Long
+        i = i + 1
+    }
+    println("loop acc = " + toStr(acc))
+}

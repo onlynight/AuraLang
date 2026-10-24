@@ -1,0 +1,4251 @@
+// aura:///aura/compiler/aura/lang/compiler/vm/Vm.aura
+package aura.lang.compiler.vm
+// ─────────────────────────────────────────────────────────────
+// 完整虚拟机核心 — P0: Rust VM 替代实现
+//
+// 替换原始占位桩，实现完整指令集、Any 值模型、对象/类/集合/
+// 闭包/异常/FFI/ARC/协程/并发 全部运行时能力。
+//
+// 字节码格式（文本模式，与 Codegen.aura 一致）：
+//   每行一条指令：OPCODE arg1 arg2 ...
+//
+// 值模型：Any（Int/Float/String/Boolean/Null/Long/对象引用）
+// 对象模型：Long 堆指针（Memory.alloc + Memory.read/write）
+// ARC：引用计数由 VM 自动管理（Retain/Release/DropRef）
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.fs.FileUtils
+import aura.lang.std.IO
+import aura.lang.std.Process
+import aura.lang.std.Env
+import aura.lang.std.Time
+import aura.lang.native.Memory
+import aura.lang.native.Cpu
+import aura.lang.native.time.Clock
+import aura.lang.native.ThreadOps
+import aura.lang.collection.HashMap
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.vm.Opcodes
+import aura.lang.compiler.vm.VmOps
+import aura.lang.compiler.vm.VmCollections
+import aura.lang.compiler.vm.VmStack
+import aura.lang.compiler.serialize.AucLoader
+
+/// 完整虚拟机实现（P0 替代占位桩）。
+class Vm {
+
+    // ── 常量 ──
+
+    private var MAX_INSTRUCTIONS: Int = 2000000000
+
+    // ── 加载期索引与诊断（方案 A2/D/E）──
+    private var traceMode: Boolean = false
+    /// 函数表索引（P334：HashMap 在 photon 编译下 get/put 读空崩溃
+    ///（§10.85 Memory_read64(0)），改平行 List 线性扫描——函数表 ~300 项、
+    /// CALL 低频，性能无碍。
+    private var funcNamesL: List<String> = arrayListOf<String>()
+    private var funcOffL: List<Int> = arrayListOf<Int>()
+    private var funcPcL: List<Int> = arrayListOf<Int>()
+    private var constLines: List<String> = arrayListOf<String>()
+    private var arg0Ints: List<Int> = arrayListOf<Int>()
+    private var arg1Ints: List<Int> = arrayListOf<Int>()
+    private var argNoneMark: Int = 2147483647
+    /// P379：collectArgs 弹出值诊断专用计数（不与 [LC]/[P7v] 共享，防饿死）。
+    // locals 帧池：调用帧局部表复用（retire 重置 / pop 取用），热身后零分配。
+    private var localsPool: List<VmLocals> = arrayListOf<VmLocals>()
+
+    // ── VM 状态 ──
+
+    private var bytecode: String = ""
+    private var constPool: String = ""
+    private var funcTable: String = ""
+
+    /// 导出表（每行 `name|funcIdx`，来自 .auc 的 exports 区段）。
+    private var exportsTable: String = ""
+    /// 导入表（每行 `name|module|symbol|funcIdx`，来自 .auc 的 imports 区段）。
+    private var importsTable: String = ""
+
+    /// 加载期缓存的「指令行 / opcode 助记符 / 数值编号 / 参数表」
+    ///（四者的下标与 `ip` 对齐）。
+    ///
+    /// 执行期不再做 `substring` / 参数字符串切分：AOT 运行时没有 GC，
+    /// 逐条解析会把临时字符串累积到 GB 级。
+    ///
+    /// P0.4（ADR-002）：`opCodes` 在加载期经 `Opcodes.fromName` 一次性把助记符
+    /// 转为数值编号，分派只做整数比较；`ops` 保留助记符仅供未知指令诊断。
+    /// 注释行 / 空行编号为 `Opcodes.OP_NOP`。
+    private var lines: List<String> = arrayListOf<String>()
+    private var ops: List<String> = arrayListOf<String>()
+    private var opCodes: List<Int> = arrayListOf<Int>()
+    // ── 参数扁平存储（2026-10-06）：取代 argCache List<List<String>>——
+    // 2MB 编译器 .auc ≈ 20 万指令 × 每指令一个 List（8KB 追加余量）
+    // = 1.6GB 堆耗尽（实测 buildLoadCaches alloc 返 NULL）。
+    // argStrs 步长 3（槽 0/1/2 字符串，覆盖全部既有 get(0..2) 用法）；
+    // arg2/3/4Ints 为**数值快路径**（融合臂/跳转/槽号，sentinel=非数值）；
+    // argCounts 供 `args.size()` 语义。
+    private var argStrs: List<String> = arrayListOf<String>()
+    private var arg2Ints: List<Int> = arrayListOf<Int>()
+    private var arg3Ints: List<Int> = arrayListOf<Int>()
+    private var arg4Ints: List<Int> = arrayListOf<Int>()
+    private var argCounts: List<Int> = arrayListOf<Int>()
+
+    private var ip: Int = 0
+    private var running: Boolean = true
+    private var returnValue: Any = null
+    private var error: String = ""
+    private var exitCode: Int = 0
+
+    /// 时钟读取缓冲区（16 字节，惰性分配后复用；`Time.now` 原语用）。
+    private var clockBuf: Long = 0L
+
+    // 栈：VmStack（原生列表 + 显式栈指针，O(1) push/pop，AOT 自举安全）
+    private var stack: VmStack = VmStack()
+
+    // 局部变量：slot -> value
+    private var locals: VmLocals = VmLocals()
+
+    // 全局变量：name -> value
+    private var globals: HashMap<String, Any> = HashMap<String, Any>()
+
+    // 调用栈：每帧为 "returnIp|frameId|funcName"
+    private var callStack: VmCallStack = VmCallStack()
+
+    /// P391：CALL 目标单槽缓存（按函数名记忆 offset/参数个数，见 callOrBuiltin）。
+    /// P393：cfIsUser=1 表示该名是用户函数（快速路径跳过内建 if-else 链）。
+    private var cfName: String = ""
+    private var cfTarget: Int = 0
+    private var cfPc: Int = 0
+    private var cfIsUser: Int = 0
+
+    /// P392：执行期热数组 Memory 裸缓冲（read64/write64 = runtime 单条 mov，
+    /// 替代 List 下标的 Collections_getAt 函数调用——每条指令 3 次 List 调用
+    /// 是解释器 26× 差距的主项）。buildLoadCaches 末尾从最终态一次性拷入。
+    private var mcOpCodes: Long = 0
+    private var mcA0: Long = 0
+    private var mcA1: Long = 0
+    private var mcN: Int = 0
+    private var mcValid: Int = 0
+
+    // ── P411-d 临时诊断：per-opcode 动态执行计数 ──
+    // 目的：拿到 fib28 / loop1M 的**真实**指令分布（此前所有成本分析都是
+    // 源码推测，本轮实测已证伪其中两条）。计数表按 op+3 索引（容纳
+    // OP_NOP=-2 / OP_UNKNOWN=-1），256 槽覆盖全部既有 opcode（0..211）。
+    // ⚠ 纯诊断用，**不得进入任何计时口径**（每条指令多一次 Memory RMW）。
+    // 由环境开关 AURA_OP_PROF=1 启用；关闭时零成本（先比较整型字段）。
+    private var mcOpCnt: Long = 0
+    private var opProfOn: Int = 0
+
+    // 保存的局部变量帧（帧切换用）
+    private var savedLocals: VmFrameStack = VmFrameStack()
+
+    // 当前帧 ID 和函数名
+    private var currentFrame: Int = 0
+    private var currentFunc: String = ""
+
+    // 用户函数形参的起始槽位。
+    //
+    // 两套调用约定不同：
+    //   * Aura 文本字节码（Codegen.aura）：参数在槽 `0..n-1`
+    //   * Rust 生成的 `.auc`：参数在槽 `1..n`（槽 0 是函数指针占位，
+    //     见 `Rust vm/mod.rs::Frame::new`「参数从 locals[1] 开始」）
+    // 槽位错位会让 `fact(3)` 恒返回 1（读到的永远是未赋值的槽 0）。
+    private var aucArgBase: Int = 0
+
+    // 是否处于 `.auc`（Rust MIR）执行模式。
+    //
+    // 两套字节码对「栈式指令」的约定不同，例如 `LIST_LEN`：
+    //   * Aura 文本字节码：**peek**（列表留在栈上）
+    //   * Rust `.auc`：**pop**（弹出列表、压入长度，见 Rust `Instr::ListLen`）
+    private var aucMode: Boolean = false
+
+    // 指令计数
+    private var instructionCount: Int = 0
+
+    // 异常处理器栈
+    private var handlerStack: VmStrStack = VmStrStack()
+
+    // 闭包表：closureId -> funcName
+    private var closureTable: HashMap<Int, String> = HashMap<Int, String>()
+
+    // 闭包捕获表（P1.3）：closureId -> 捕获值列表（按压入顺序，下标即 upvalue 序号）。
+    // STORE_UPVALUE 可原位改写捕获值（闭包对象共享可变状态）。
+    private var closureCaptures: HashMap<Int, List<Any>> = HashMap<Int, List<Any>>()
+    private var nextClosureId: Int = 0
+    // 捕获值总数（getUpvalueCount 用；避免宿主对泛型 List 迭代/求和的推导问题）
+    private var upvalueTotal: Int = 0
+    // 当前帧所属闭包（LOAD/STORE_UPVALUE 的寻址上下文；-1 = 无闭包上下文）。
+    // 调用帧以 callStack 第 4 字段保存/恢复（见 callOrBuiltin / returnFromFunc）。
+    private var currentClosure: Int = -1
+
+    // ── 对象模型（P0.5 / P1.2 / P1.5，ADR-003）──
+    // 实例字段表：键 "<objPtr>" -> (字段名 -> 值)。按实例隔离；嵌套结构使
+    // 对象释放时可 O(1) 摘除其全部字段（P1.5）。
+    private var objectFields: HashMap<String, HashMap<String, Any>> = HashMap<String, HashMap<String, Any>>()
+    // 对象类名表：键 "<objPtr>" -> 类名（方法分派 / 类型过滤用）。
+    private var objectClass: HashMap<String, String> = HashMap<String, String>()
+    // 类继承注册表（P1.2）：类名 -> 父类名（"" 或 "-" = 无父类）。
+    // DEF_CLASS 指令 / registerClass API 写入；方法解析与 instanceOf 沿父类链行走。
+    private var classParents: HashMap<String, String> = HashMap<String, String>()
+
+    // ── 堆分配注册表（P1.5）：ptrKey -> kind ──
+    // kind ∈ object|box|list|map|array|mutex|atomic|channel|rwlock|condvar。
+    // 这是「该值是否为 VM 堆对象」的唯一真值来源：DEC_REF 只对注册过的指针
+    // 生效（指针与整数的装箱类型名无法区分，未注册值一律透传，避免误释放）。
+    private var heapKinds: HashMap<String, String> = HashMap<String, String>()
+    // 装箱值侧表（P1.1 boxAlloc 类型感知）：非数值装箱值无法写裸内存，
+    // 以 "<objPtr>" 键存放于托管侧表（box 释放时同步摘除）。
+    private var boxValues: HashMap<String, Any> = HashMap<String, Any>()
+    // 模块注册表（P2.3）：已登记模块名 -> 导出表文本（`name|funcIdx` 每行）。
+    // 完整跨模块执行需多代码段 VM（P4 自举时单模块合并即覆盖主场景）。
+    private var loadedModuleExports: HashMap<String, String> = HashMap<String, String>()
+
+    // ── 加速派发钩子（P0.8，接口预留不实现加速逻辑）──
+    // 热函数直呼表：funcName -> 入口行号；callOrBuiltin 用户函数路径优先查询。
+    // JIT/Photon 任务对接点（VM-PA-00 §2.3 契约）：接口签名保持稳定。
+    private var accelEnabled: Boolean = false
+    private var accelTable: HashMap<String, Int> = HashMap<String, Int>()
+
+    // 挂起状态（suspend()/resume() 使用；协程调度器已按 D5 废弃移除）
+    private var suspended: Boolean = false
+
+    init() {
+        this.bytecode = ""
+        this.constPool = ""
+        this.funcTable = ""
+        this.exportsTable = ""
+        this.importsTable = ""
+        this.lines = arrayListOf<String>()
+        this.ops = arrayListOf<String>()
+        this.opCodes = arrayListOf<Int>()
+        this.argStrs = arrayListOf<String>()
+        this.arg2Ints = arrayListOf<Int>()
+        this.arg3Ints = arrayListOf<Int>()
+        this.arg4Ints = arrayListOf<Int>()
+        this.argCounts = arrayListOf<Int>()
+        this.ip = 0
+        this.running = true
+        this.returnValue = null
+        this.error = ""
+        this.exitCode = 0
+        this.stack = VmStack()
+        this.locals.reset()
+        this.globals = HashMap<String, Any>()
+        this.callStack.reset()
+        this.savedLocals = VmFrameStack()
+        this.currentFrame = 0
+        this.currentFunc = ""
+        this.instructionCount = 0
+        this.handlerStack = VmStrStack()
+        this.closureTable = HashMap<Int, String>()
+        this.closureCaptures = HashMap<Int, List<Any>>()
+        this.nextClosureId = 0
+        this.upvalueTotal = 0
+        this.currentClosure = -1
+        this.objectFields = HashMap<String, HashMap<String, Any>>()
+        this.objectClass = HashMap<String, String>()
+        this.classParents = HashMap<String, String>()
+        this.heapKinds = HashMap<String, String>()
+        this.boxValues = HashMap<String, Any>()
+        this.accelEnabled = false
+        this.accelTable = HashMap<String, Int>()
+        this.suspended = false
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  加载与初始化
+    // ═══════════════════════════════════════════════════════════
+
+    /// 加载字节码（文本模式：每行一条指令）。
+    fun loadBytecode(code: String, consts: String, funcs: String): Unit {
+        this.bytecode = code
+
+        this.ip = 0
+        this.running = true
+        this.error = ""
+        this.returnValue = null
+        this.exitCode = 0
+        this.stack = VmStack()
+        this.locals.reset()
+        this.globals = HashMap<String, Any>()
+        this.callStack.reset()
+        this.savedLocals = VmFrameStack()
+        this.handlerStack = VmStrStack()
+        this.instructionCount = 0
+        this.currentFrame = 0
+        this.currentFunc = ""
+        this.suspended = false
+        this.aucArgBase = 0
+        this.aucMode = false
+        this.objectFields = HashMap<String, HashMap<String, Any>>()
+        this.objectClass = HashMap<String, String>()
+        this.classParents = HashMap<String, String>()
+        this.heapKinds = HashMap<String, String>()
+        this.boxValues = HashMap<String, Any>()
+        this.closureCaptures = HashMap<Int, List<Any>>()
+        this.currentClosure = -1
+        this.buildLineCache()
+        this.buildLoadCaches()
+    }
+
+    /// 从二进制 .auc 文件加载并执行。
+    ///
+    /// P2.2：加载器产出**数值化指令数组**（无文本中间层）时走 `loadPredecoded`
+    /// 直读路径；类定义表自动注册进类继承注册表（继承/虚方法分派生效）。
+    fun loadAucAndRun(path: String): Any {
+        AucLoaderUtils.loadModule(path)
+        // ⚠️ P266：从全局槽读取（绕开返回值传递链的句柄漂移）
+        val mod: AucModule = AucLoaderUtils.lastLoaded
+        val loadOnly: String = Env.get("AURA_VM_LOADONLY", "")
+        if (loadOnly == "1") {
+            this.error = "loadonly valid=" + toStr(mod.isValid()) + " numeric=" + toStr(mod.numericMode)
+                + " err=[" + mod.error + "] funcs=" + toStr(mod.funcsCount)
+                + " consts=" + toStr(mod.constsCount) + " name=" + mod.name
+            this.running = false
+            return null
+        }
+        if (!mod.isValid()) {
+            this.error = "loadAucAndRun: " + mod.error
+            this.running = false
+            return null
+        }
+        if (mod.numericMode) {
+            // P241 窗口二分：registerAucClasses 之前
+                // P2.2c：类表 → 类继承注册表（parent_id 0 = Any；防自环）
+                this.registerAucClasses(mod.classNames, mod.classParentIds)
+                        this.loadPredecoded(mod.numOpNames, mod.numOpCodes, mod.numArgsFlat, mod.constPool,
+                mod.constLines, mod.funcTable, mod.exports, mod.imports)
+            println("[winC2] post-loadPredecoded")
+            val r: Any = this.run()
+            return r
+        }
+        // 遗留文本路径（数值模式失败时的回退）
+        this.bytecode = mod.bytecode
+        this.constPool = mod.constPool
+        // 加载器已从 .auc 的函数区还原出 `name|起始行|参数个数` 文本函数表
+        this.funcTable = mod.funcTable
+        // 加载导出/导入表（跨模块调用需要）
+        this.exportsTable = mod.exports
+        this.importsTable = mod.imports
+        this.ip = 0
+        this.running = true
+        this.error = ""
+        this.returnValue = null
+        this.stack = VmStack()
+        this.locals.reset()
+        this.globals = HashMap<String, Any>()
+        this.callStack.reset()
+        this.savedLocals = VmFrameStack()
+        this.handlerStack = VmStrStack()
+        this.instructionCount = 0
+        this.currentFrame = 0
+        this.currentFunc = ""
+        this.suspended = false
+        // `.auc` 的形参槽从 1 开始（见 aucArgBase）
+        this.aucArgBase = 1
+        this.aucMode = true
+        this.objectFields = HashMap<String, HashMap<String, Any>>()
+        this.objectClass = HashMap<String, String>()
+        this.classParents = HashMap<String, String>()
+        this.heapKinds = HashMap<String, String>()
+        this.boxValues = HashMap<String, Any>()
+        this.closureCaptures = HashMap<Int, List<Any>>()
+        this.currentClosure = -1
+        this.buildLineCache()
+        this.buildLoadCaches()
+        return this.run()
+    }
+
+    /// 加载预解码指令数组（P2.2b：.auc 数值直读路径）。
+    ///
+    /// 助记符经 `Opcodes.fromName` 数值化（加载期一次），参数为加载器已解析的
+    /// 最终形态（函数名/常量下标/全局行号）；执行期零解析。
+    /// `.auc` 调用约定：形参槽从 1 开始（`aucArgBase = 1`）。
+    fun loadPredecoded(opNames: List<String>, opCodesNum: List<Int>, args: List<String>, consts: String,
+        constLinesIn: List<String>, funcs: String, exports: String, imports: String): Unit {
+        this.bytecode = ""
+
+        this.exportsTable = exports
+        this.importsTable = imports
+        // ⚠️ P293 关键修复：consts/funcs 参数此前从未赋给字段——末尾的
+        // buildLoadCaches() 从 this.funcTable/this.constPool 构建
+        // funcOffsetMap/funcParamMap/constLines，恒空 → LOAD_CONST 全垃圾、
+        // CALL funcName 截断（Unknown function: p）。
+        this.constPool = consts
+        this.funcTable = funcs
+        // P239 括号探针 B：loadArgsFlat 消费点
+        println("[winB] n=" + toStr(args.size()))
+        println("[winB-0]=[" + args.get(0) + "]")
+        println("[hbB]=" + toStr(HeapDiag.heapbump()))
+        val probeL2: List<String> = arrayListOf<String>()
+        probeL2.add("CC")
+        probeL2.add("DD")
+        println("[winB3] fresh=[" + probeL2.get(0) + probeL2.get(1) + "]")
+        println("[hbB2]=" + toStr(HeapDiag.heapbump()))
+        println("[winB-2]=[" + args.get(2) + "]")
+        this.loadArgsFlat(args)
+        // P279 flat 探针：loader 侧 args vs VM 侧 argStrs，定位 "p" 截断层
+        println("[FLAT0] [0]=[" + args.get(0) + "] [1]=[" + args.get(1) + "] [2]=[" + args.get(2) + "] [3]=[" + args.get(3) + "]")
+        println("[FLAT30] [30]=[" + args.get(30) + "] [31]=[" + args.get(31) + "] [32]=[" + args.get(32) + "]")
+        println("[AS] [30]=[" + this.argStrs.get(30) + "] [31]=[" + this.argStrs.get(31) + "] [32]=[" + this.argStrs.get(32) + "]")
+        this.opCodes = arrayListOf<Int>()
+        if (opCodesNum.size() == opNames.size() && opNames.size() > 0) {
+            // P350：直接消费解码期数值 opcode（fromName 的字符串比较在 photon
+            // 下布局敏感误配——PRINT 误配成 STORE_LOCAL 之类）
+            var i2: Int = 0
+            while (i2 < opCodesNum.size()) {
+                this.opCodes.add(opCodesNum[i2])
+                i2 = i2 + 1
+            }
+        } else {
+            var i: Int = 0
+            while (i < opNames.size()) {
+                this.opCodes.add(Opcodes.fromName(opNames.get(i)))
+                i = i + 1
+            }
+        }
+        // P373：opcode 头部诊断
+        println("[OC] n=" + toStr(this.opCodes.size())
+            + " [0]=" + toStr(this.opCodes.get(0))
+            + " [1]=" + toStr(this.opCodes.get(1))
+            + " numN=" + toStr(opNames.size()) + " numC=" + toStr(opCodesNum.size()))
+        this.lines = arrayListOf<String>()
+        this.ip = 0
+        this.running = true
+        this.error = ""
+        this.returnValue = null
+        this.exitCode = 0
+        this.stack = VmStack()
+        this.locals.reset()
+        this.globals = HashMap<String, Any>()
+        this.callStack.reset()
+        this.savedLocals = VmFrameStack()
+        this.handlerStack = VmStrStack()
+        this.instructionCount = 0
+        this.currentFrame = 0
+        this.currentFunc = ""
+        this.suspended = false
+        this.aucArgBase = 1
+        this.aucMode = true
+        this.objectFields = HashMap<String, HashMap<String, Any>>()
+        this.objectClass = HashMap<String, String>()
+        this.heapKinds = HashMap<String, String>()
+        this.boxValues = HashMap<String, Any>()
+        this.closureCaptures = HashMap<Int, List<Any>>()
+        this.currentClosure = -1
+        this.accelEnabled = false
+        this.accelTable = HashMap<String, Int>()
+        // P333：buildLoadCaches 恢复启用——§10.85 的 Memory_read64(0) 崩点之后
+        // 已落地五项修复（mmap 文件缓冲 / 帧预算 ID 区间上界 / buildIf varMap
+        // 回滚 / phi (b) 兜底删除 / realDecoded）。constLines 走本函数的
+        // charCodeAt 扫描构建（getFieldAt 兜底扫描在 photon 下漏换行），
+        // funcOffsetMap 换平行 List（HashMap 在 photon 下读空，§10.85 同族）。
+        // P359/P370：constLines 直接引用解码端列表（转义态，getConstByIdx/
+        // getConst 统一反转义）。拷贝循环的 listAppend/get 调用窗按布局
+        // 崩/漂移——引用赋值零调用，VM 侧只读。
+        this.constLines = constLinesIn
+        val clLines: List<String> = this.constLines
+        val cln: Int = clLines.size()
+        if (cln > 12) {
+            println("[CL2] n=" + toStr(cln)
+                + " [9]=[" + clLines.get(9) + "] [10]=[" + clLines.get(10) + "]"
+                + " L=" + toStr(clLines.get(9).length) + "," + toStr(clLines.get(10).length))
+        } else {
+            println("[CL2] n=" + toStr(cln) + " (short)")
+        }
+        // P369/P397/P405：fuseHotPairs 两遍扫描 + 遍 1 单点递增形态 + 205
+        // pair 漏参修复（执行臂 4 参 vs 旧构造 3 参）已就绪，但调用保持
+        // 禁用：P277 槽影子读**与循环写法无关**——本轮实证仅启用 204 的
+        // 模式检查（banner 流零匹配、纯布局扰动）即令 banner 陷入无限
+        // 循环（26K 次头重印后段错误），与 §10.111「任何装载路径代码扰动
+        // 随机触发」一致。重启条件不变：P398 发射器槽影子读根治。
+        // this.fuseHotPairs()
+        this.buildLoadCaches()
+    }
+
+    /// 注册 .auc 类定义表（P2.2c）：类名 + 父类下标 → 类继承注册表。
+    fun registerAucClasses(names: List<String>, parentIds: List<Int>): Unit {
+        var i: Int = 0
+        while (i < names.size()) {
+            var parent: String = ""
+            val pid: Int = parentIds.get(i)
+            if (pid >= 0 && pid < names.size() && pid != i) {
+                parent = names.get(pid)
+            }
+            this.classParents.put(names.get(i), parent)
+            i = i + 1
+        }
+    }
+
+    /// 从二进制数据加载（P1 预留接口）。
+    fun loadAucBinary(data: Array<Byte>): Unit {
+        this.error = "loadAucBinary: use loadAucAndRun(path) instead"
+        this.running = false
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  主执行循环
+    // ═══════════════════════════════════════════════════════════
+
+    /// 执行字节码，返回最终结果。
+    ///
+    /// 性能/内存要点：指令行、opcode、参数都在**加载期**一次性解析并缓存
+    /// （`lines` / `ops` / 参数扁平槽）。AOT 运行时**没有 GC**，若在执行循环里
+    /// 逐条 `substring`/`parseArgs`，长循环会把临时字符串累积成 GB 级内存。
+    fun run(): Any {
+        // 从 main 函数入口开始
+        this.ip = this.funcOffset("main")
+        this.currentFunc = "main"
+
+        // P401：指令计数改周期检查——逐条 field 加一（~7 条 x86/指令）改为
+        // 局部 icAcc 累加、每 2^20 条批量刷回 + 一次上限检查；循环所有出口
+        // （正常/错误/上限 break）都刷回余量，getInstructionCount() 在
+        // run() 返回后仍精确（上限触发最迟 2^20 条后生效，护栏语义不变）。
+        var icAcc: Int = 0
+        while (this.running && (this.mcValid == 0 || this.ip < this.mcN)) {
+            icAcc = icAcc + 1
+            if (icAcc >= 1048576) {
+                this.instructionCount = this.instructionCount + icAcc
+                icAcc = 0
+                if (this.instructionCount > this.MAX_INSTRUCTIONS) {
+                    this.error = "Instruction limit exceeded (" + toStr(this.MAX_INSTRUCTIONS) + ")"
+                    this.running = false
+                    break
+                }
+            }
+
+            // P392：热路径读 Memory 裸缓冲（值域 < 2^31，read64 as Int 无损）。
+            val opCode: Int = Memory.read64(this.mcOpCodes + this.ip * 8) as Int
+            this.ip = this.ip + 1
+
+            // P411-d：诊断计数（默认关闭；开关是整型字段比较，关时不进分支体）。
+            if (this.opProfOn == 1) {
+                this.mcOpCnt = this.mcOpCnt + 0
+                Memory.write64(this.profSlot(opCode),
+                        Memory.read64(this.profSlot(opCode)) + 1)
+            }
+
+            // 注释行 / 空行（加载期已编号为 OP_NOP——buildLineCache 与
+            // loadPredecoded 对空名/注释行统一编号，装载后不再有「空 ops 行」，
+            // 旧兜底 `ops[ip-1] == ""` 每指令一次 List<String> get + streq 纯冗余，
+            // P392 移除）。
+            if (opCode == Opcodes.OP_NOP) {
+                continue
+            }
+
+            this.dispatch(opCode)
+        }
+        this.instructionCount = this.instructionCount + icAcc
+
+        if (this.opProfOn == 1) {
+            this.dumpOpProfile()
+        }
+
+        return this.returnValue
+    }
+
+    /// P411-d：opcode → 计数槽地址（op+3，容纳 OP_NOP=-2 / OP_UNKNOWN=-1）。
+    private fun profSlot(op: Int): Long {
+        return this.mcOpCnt + (op + 3) * 8
+    }
+
+    /// P411-d：把 per-opcode 计数**单趟按槽序**打到 stdout（诊断专用）。
+    ///
+    /// 输出 `[OPPROF] <op> <mnemonic> <count>`，只打非零槽；排序留给外部
+    /// 脚本（Python sort）——曾用 VM 内选择排序，二次扫描恒只出一行
+    /// （疑与嵌套 while 的变量/读缓存交互），单趟序输出绕开该风险。
+    private fun dumpOpProfile(): Unit {
+        var i: Int = 0
+        var total: Long = 0
+        while (i < 256) {
+            val v: Long = Memory.read64(this.mcOpCnt + i * 8)
+            if (v > 0) {
+                val op: Int = i - 3
+                println("[OPPROF] " + toStr(op) + " " + Opcodes.opcodeName(op)
+                        + " " + toStr(v))
+                total = total + v
+            }
+            i = i + 1
+        }
+        println("[OPPROF-TOTAL] " + toStr(total))
+    }
+
+    /// 加载期预处理：把字节码切成行并缓存 `opcode` 助记符 / **数值编号** / 参数表
+    ///（只分配一次；助记符→编号转换在此一次完成，ADR-002）。
+    private fun buildLineCache() {
+        this.lines = this.bytecode.split("\n")
+        this.ops = arrayListOf<String>()
+        this.opCodes = arrayListOf<Int>()
+        this.argStrs = arrayListOf<String>()
+        this.arg2Ints = arrayListOf<Int>()
+        this.arg3Ints = arrayListOf<Int>()
+        this.arg4Ints = arrayListOf<Int>()
+        this.argCounts = arrayListOf<Int>()
+        this.arg0Ints = arrayListOf<Int>()
+        this.arg1Ints = arrayListOf<Int>()
+        var i: Int = 0
+        while (i < this.lines.size()) {
+            val ln: String = this.lines[i]
+            var pos: Int = 0
+            var lineLen: Int = ln.length
+            while (pos < lineLen) {
+                if (VmOps.isSpace(ln.charCodeAt(pos))) {
+                    break
+                }
+                pos = pos + 1
+            }
+            val name: String = VmOps.vmSubstr(ln, 0, pos)
+            this.ops.add(name)
+            // 注释行（# 开头）/ 空行 → OP_NOP；其余经唯一编号源转数值
+            if (name == "" || this.startsWith(ln, "#")) {
+                this.opCodes.add(Opcodes.OP_NOP)
+            } else {
+                this.opCodes.add(Opcodes.fromName(name))
+            }
+            this.writeArgsRow(VmOps.parseArgs(ln, pos))
+            i = i + 1
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  指令分派
+    // ═══════════════════════════════════════════════════════════
+
+    /// 按加载期缓存的数值编号执行一条指令。
+    ///
+    /// P0.4（ADR-002）：分派只做**整数**比较（`Opcodes` 常量），无指令名
+    /// 字符串比较；`opName` 仅用于未知指令的诊断信息。
+    private fun dispatch(op: Int): Unit {
+        // ── 常量指令 ──
+        // ── 热指令快速分派（方案 D）：按动态频次把高频臂前置，
+        // 未命中落入下方原链（臂语义与原链逐字一致）。 ──
+        //
+        // ⚠ P412（2026-10-07）：本块的**顺序依据改为实测动态频次**，
+        // 不再是静态猜测。仪器：Vm 内置 per-opcode 计数器
+        // （AURA_OP_PROF=1，见 dumpOpProfile），实测 fib28（3137 万条
+        // guest 指令）与 loop1M（5300 万条）的分布，两基准一致：
+        //
+        //   LOAD_LOCAL 41.0% / STORE_LOCAL 26.2% / LOAD_CONST_I 6.6%
+        //   RETAIN 6.6% / RETURN+CALL+JUMP_IF_FALSE+LE 共 13.2%
+        //
+        // **反汇编实测**：每条 `if (op == N)` 编译成 11 条 x86
+        // （常量落栈 → 读回 → cmp → setcc → movzbq → 落栈 → 读回 →
+        //  cmp 0 → jcc），命中第 d 个臂须付 11×d 条。原链里
+        // **RETAIN 在第 95 位、LE 在第 45 位**，而两者分别执行 206 万 /
+        // 103 万次 ⇒ 仅比较链就 2.15B + 0.51B 条 x86——分别占 fib28
+        // 全程序 x86 的 ~28% 与 ~6.6%，是当前最大的单项开销。
+        //
+        // 本步（Step A）只把这两条提到 depth 4/5，其余臂顺移 2 位。
+        // 净收益 ≈ 2.3B 条 x86（约全程序 30%）。
+        if (op == 10) {
+            val slot: Int = this.arg0IntOf()
+            val v: Any = this.locals.getSlot(slot)
+            if (v == null) {
+                this.stack.push(toAny(0))
+            } else {
+                this.stack.push(v)
+            }
+        } else if (op == 11) {
+            val slot: Int = this.arg0IntOf()
+            val sv: Any = this.stack.pop()
+            this.locals.putSlot(slot, sv)
+        } else if (op == 5) {
+            // P404：[LC] 装载链诊断探针摘除（2026-10-06 追踪用，git 历史
+            // 可考）——逐指令 field 读 + 分支的热路径税。
+            this.stack.push(toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))))
+        } else if (op == 112) {
+            // P412：RETAIN 原在第 95 位（206 万次 × 1045 条 = 2.15B 条 x86）。
+            // 臂体与原链逐字一致（原链 arm 仍是兜底，永不命中）。
+            this.retain()
+        } else if (op == 34) {
+            // P412：LE 原在第 45 位（103 万次 × 495 条 = 0.51B 条 x86）。
+            // 局部名加 34 后缀——§10.116 T1「if/else 分支重复声明同名 val
+            // ⇒ 函数级作用域提升 + 静默坏码」，本块已有 b/a（op 20/21/32），
+            // 新臂必须避让。
+            val b34: Any = this.stack.pop()
+            val a34: Any = this.stack.pop()
+            this.stack.push(VmOps.le(a34, b34))
+        } else if (op == 51) {
+            val cond: Any = this.stack.pop()
+            if (!VmOps.toBool(cond)) {
+                this.ip = this.arg0IntOf()
+            }
+        } else if (op == 200) {
+            this.stack.push(toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))))
+            this.locals.putSlot(this.arg1IntOf(), this.stack.pop())
+        } else if (op == 201) {
+            val v: Any = this.locals.getSlot(this.arg0IntOf())
+            if (v == null) {
+                this.stack.push(toAny(0))
+            } else {
+                this.stack.push(v)
+            }
+            val cond: Any = this.stack.pop()
+            if (!VmOps.toBool(cond)) {
+                this.ip = this.arg1IntOf()
+            }
+        } else if (op == 202) {
+            // local[a] OP const[c] → local[s]
+            val b: Any = this.locals.getSlot(this.arg0IntOf())
+            val c: Any = toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg1IntOf()))))
+            val binop: Int = this.arg2IntOf()
+            var r: Any = 0
+            if (binop == 20) {
+                r = VmOps.add(b, c)
+            } else if (binop == 21) {
+                r = VmOps.sub(b, c)
+            } else if (binop == 22) {
+                r = VmOps.mul(b, c)
+            }
+            this.locals.putSlot(this.arg3IntOf(), r)
+        } else if (op == 203) {
+            // local[a] OP local[b] → local[s]
+            val b: Any = this.locals.getSlot(this.arg0IntOf())
+            val c: Any = this.locals.getSlot(this.arg1IntOf())
+            val binop: Int = this.arg2IntOf()
+            var r2: Any = 0
+            if (binop == 20) {
+                r2 = VmOps.add(b, c)
+            } else if (binop == 21) {
+                r2 = VmOps.sub(b, c)
+            } else if (binop == 22) {
+                r2 = VmOps.mul(b, c)
+            }
+            this.locals.putSlot(this.arg3IntOf(), r2)
+        } else if (op == 204) {
+            // local[a] < const[c] → tmp；false 跳 t（循环守卫 6 连合一）
+            val b: Any = this.locals.getSlot(this.arg0IntOf())
+            val c: Any = toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg1IntOf()))))
+            val cond: Any = VmOps.lt(b, c)
+            this.locals.putSlot(this.arg3IntOf(), cond)
+            if (!VmOps.toBool(cond)) {
+                this.ip = this.arg4IntOf()
+            }
+        } else if (op == 205) {
+            // local[a] < local[b] → tmp；false 跳 j（双局部守卫 5 连合一）
+            val x: Any = this.locals.getSlot(this.arg0IntOf())
+            val y: Any = this.locals.getSlot(this.arg1IntOf())
+            val cond: Any = VmOps.lt(x, y)
+            this.locals.putSlot(this.arg2IntOf(), cond)
+            if (!VmOps.toBool(cond)) {
+                this.ip = this.arg3IntOf()
+            }
+        } else if (op == 206) {
+            // local[a] → local[b]（拷贝合一）
+            val v: Any = this.locals.getSlot(this.arg0IntOf())
+            if (v == null) {
+                this.locals.putSlot(this.arg1IntOf(), toAny(0))
+            } else {
+                this.locals.putSlot(this.arg1IntOf(), v)
+            }
+        } else if (op == 20) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.add(a, b))
+        } else if (op == 21) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.sub(a, b))
+        } else if (op == 32) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.lt(a, b))
+        } else if (op == 60) {
+            val funcName: String = this.argStrOf(0)
+            var argc: Int = 0
+            if (this.argCountOf() >= 2) {
+                argc = this.arg1IntOf()
+            } else {
+                argc = this.funcParamCount(funcName)
+                if (argc < 0) { argc = 0 }
+            }
+            this.callOrBuiltin(funcName, argc)
+        } else if (op == 65) {
+            this.returnFromFunc()
+        } else if (op == 50) {
+            this.ip = this.arg0IntOf()
+        } else {
+                if (op == 0) {
+            val idx: Int = VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))
+            this.stack.push(toAny(idx))
+        } else if (op == 1) {
+            val val: Any = this.getConstByIdx(this.arg0IntOf())
+            this.stack.push(VmOps.parseFloat(toStr(val)))
+        } else if (op == 2) {
+            val val: Any = this.getConstByIdx(this.arg0IntOf())
+            this.stack.push(val)
+        } else if (op == 3) {
+            this.stack.push(this.argStrOf(0) == "true")
+        } else if (op == 4) {
+            this.stack.push(null)
+        }
+
+        // ── 类型化常量加载（`.auc` 路径：LoadConst 单操作码 + 常量标签）──
+        else if (op == 5) {
+            this.stack.push(toAny(VmOps.toI32(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())))))
+        } else if (op == 6) {
+            this.stack.push(VmOps.parseFloat(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf()))))
+        } else if (op == 7) {
+            this.stack.push(this.getConstByIdx(this.arg0IntOf()))
+        } else if (op == 8) {
+            this.stack.push(VmOps.toStrAny(this.getConstByIdx(this.arg0IntOf())) == "1")
+        } else if (op == 9) {
+            this.stack.push(null)
+        }
+
+        // ── 栈操作 ──
+        else if (op == 10) {
+            val slot: Int = VmOps.toI32(this.argStrOf(0))
+            val v: Any = this.locals.getSlot(slot)
+            // **不要**写成 `push(if (v == null) 0 else v)`：混合类型 if 表达式会被
+            // 推导成 `Int`，非空分支里的 `String` 指针会被截断成整数
+            //（自检样例槽位里存的是整数所以看不出来；`.auc` 路径存字符串时，
+            // `println(toStr(x))` 就会打印出 0）。
+            if (v == null) {
+                this.stack.push(toAny(0))
+            } else {
+                this.stack.push(v)
+            }
+        } else if (op == 11) {
+            val slot: Int = VmOps.toI32(this.argStrOf(0))
+            this.locals.putSlot(slot, this.stack.pop())
+        } else if (op == 12) {
+            val slot: Int = VmOps.toI32(this.argStrOf(0))
+            this.locals.putSlot(slot, toAny(0))
+        } else if (op == 13) {
+            this.stack.pop()
+        } else if (op == 14) {
+            this.stack.push(this.stack.peek())
+        } else if (op == 15) {
+            val top: Any = this.stack.pop()
+            val second: Any = this.stack.pop()
+            this.stack.push(top)
+            this.stack.push(second)
+        }
+
+        // ── 算术运算 ──
+        else if (op == 20) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.add(a, b))
+        } else if (op == 21) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.sub(a, b))
+        } else if (op == 22) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.mul(a, b))
+        } else if (op == 23) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.div(a, b))
+        } else if (op == 24) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.mod(a, b))
+        } else if (op == 25) {
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.neg(a))
+        } else if (op == 26) {
+            val a: Any = this.stack.pop()
+            this.stack.push(a)
+        }
+
+        // ── 比较运算 ──
+        else if (op == 30) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.eq(a, b))
+        } else if (op == 31) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.neq(a, b))
+        } else if (op == 32) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.lt(a, b))
+        } else if (op == 33) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.gt(a, b))
+        } else if (op == 34) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.le(a, b))
+        } else if (op == 35) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.ge(a, b))
+        }
+
+        // ── 逻辑/位运算 ──
+        else if (op == 40) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.and(a, b))
+        } else if (op == 41) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.or(a, b))
+        } else if (op == 42) {
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.not(a))
+        } else if (op == 43) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.bitAnd(a, b))
+        } else if (op == 44) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.bitOr(a, b))
+        } else if (op == 45) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.bitXor(a, b))
+        } else if (op == 46) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.shl(a, b))
+        } else if (op == 47) {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.shr(a, b))
+        }
+
+        // ── 控制流 ──
+        else if (op == 50) {
+            this.ip = VmOps.toI32(this.argStrOf(0))
+        } else if (op == 51) {
+            val cond: Any = this.stack.pop()
+            if (!VmOps.toBool(cond)) {
+                this.ip = VmOps.toI32(this.argStrOf(0))
+            }
+        } else if (op == 52) {
+            val cond: Any = this.stack.pop()
+            if (VmOps.toBool(cond)) {
+                this.ip = VmOps.toI32(this.argStrOf(0))
+            }
+        } else if (op == 53) {
+            this.running = false
+        } else if (op == 54) {
+            // SSA phi 节点：在文本模式下为 no-op
+        }
+
+        // ── 函数调用 ──
+        else if (op == 60) {
+            val funcName: String = this.argStrOf(0)
+            // 文本字节码：`CALL name argc`；.auc 二进制：`CALL <函数下标>`（无 argc，
+            // 由函数表的参数个数补全）。
+            var argc: Int = 0
+            if (this.argCountOf() >= 2) {
+                argc = VmOps.toI32(this.argStrOf(1))
+            } else {
+                argc = this.funcParamCount(funcName)
+                if (argc < 0) { argc = 0 }
+            }
+            this.callOrBuiltin(funcName, argc)
+        } else if (op == 61) {
+            val methodName: String = this.argStrOf(0)
+            this.callMethod(methodName)
+        } else if (op == 62) {
+            // `.auc` 路径：加载器已把原生函数**下标**解析成名字，
+            // 直接复用内建分派（println / toStr / …）。
+            val fname: String = this.argStrOf(0)
+            var argc2: Int = 0
+            if (this.argCountOf() >= 2) {
+                argc2 = VmOps.toI32(this.argStrOf(1))
+            }
+            // P404：[62] CALL 参数诊断探针摘除（P380 追踪用）。
+            this.callOrBuiltin(fname, argc2)
+        } else if (op == 63) {
+            val idx: Int = VmOps.toI32(this.argStrOf(0))
+            this.callNative(idx)
+        } else if (op == 64) {
+            val idx: Int = VmOps.toI32(this.argStrOf(0))
+            this.callC(idx)
+        } else if (op == 65) {
+            this.returnFromFunc()
+        } else if (op == 66) {
+            this.returnValue = "Unit"
+            this.returnFromFunc()
+        } else if (op == 211) {
+            // P1.6：尾调用（帧复用）。文本：`CALL_TAIL name argc`；argc 省略时按函数表推导。
+            val tFunc: String = this.argStrOf(0)
+            var tArgc: Int = 0
+            if (this.argCountOf() >= 2) {
+                tArgc = VmOps.toI32(this.argStrOf(1))
+            } else {
+                tArgc = this.funcParamCount(tFunc)
+                if (tArgc < 0) { tArgc = 0 }
+            }
+            this.callTail(tFunc, tArgc)
+        }
+
+        // ── 对象/类 ──
+        else if (op == 70) {
+            val className: String = this.argStrOf(0)
+            this.newObject(className)
+        } else if (op == 71) {
+            val fieldName: String = this.argStrOf(0)
+            this.getField(fieldName)
+        } else if (op == 72) {
+            val fieldName: String = this.argStrOf(0)
+            this.setField(fieldName)
+        } else if (op == 73) {
+            val size: Any = this.stack.pop()
+            this.newArray(size)
+        } else if (op == 74) {
+            this.getIndex()
+        } else if (op == 75) {
+            this.setIndex()
+        } else if (op == 76) {
+            val ctorName: String = this.argStrOf(0)
+            this.callCtor(ctorName)
+        } else if (op == 210) {
+            // P1.2：声明类继承（parent "-" 或空 = 无父类）
+            var parent: String = ""
+            if (this.argCountOf() >= 2) { parent = this.argStrOf(1) }
+            this.defClass(this.argStrOf(0), parent)
+        }
+
+        // ── 集合 ──
+        else if (op == 80) {
+            this.stack.push(VmCollections.newList())
+            this.registerHeapTop("list")
+        } else if (op == 81) {
+            this.stack.push(VmCollections.newMap())
+            this.registerHeapTop("map")
+        } else if (op == 82) {
+            val list: Any = this.stack.pop()
+            val elem: Any = this.stack.pop()
+            VmCollections.push(list, elem)
+        } else if (op == 83) {
+            val list: Any = this.stack.peek()
+            this.stack.push(VmCollections.pop(list))
+        } else if (op == 84) {
+            // `.auc`（Rust MIR）语义是 **pop**（`Instr::ListLen`）；Aura 文本字节码用 peek
+            if (this.aucMode) {
+                val list: Any = this.stack.pop()
+                this.stack.push(VmCollections.listLen(list))
+            } else {
+                val list: Any = this.stack.peek()
+                this.stack.push(VmCollections.listLen(list))
+            }
+        } else if (op == 85) {
+            val map: Any = this.stack.pop()
+            val key: Any = this.stack.pop()
+            val val: Any = this.stack.pop()
+            VmCollections.mapSet(map, key, val)
+        } else if (op == 86) {
+            val map: Any = this.stack.pop()
+            val key: Any = this.stack.pop()
+            this.stack.push(VmCollections.mapGet(map, key))
+        } else if (op == 87) {
+            val map: Any = this.stack.peek()
+            this.stack.push(VmCollections.mapLen(map))
+        }
+
+        // ── 闭包 ──
+        else if (op == 90) {
+            this.loadClosure(this.argStrOf(0))
+        } else if (op == 91) {
+            this.makeClosure(this.argStrOf(0))
+        } else if (op == 92) {
+            this.callClosureAt()
+        } else if (op == 93) {
+            this.loadUpvalue(VmOps.toI32(this.argStrOf(0)))
+        } else if (op == 94) {
+            this.storeUpvalue(VmOps.toI32(this.argStrOf(0)))
+        }
+
+        // ── 类型检查 ──
+        else if (op == 100) {
+            val typeName: String = this.argStrOf(0)
+            this.instanceOf(typeName)
+        } else if (op == 101) {
+            val typeName: String = this.argStrOf(0)
+            this.checkCast(typeName)
+        } else if (op == 102) {
+            val typeName: String = this.argStrOf(0)
+            this.cast(typeName)
+        } else if (op == 103) {
+            val typeName: String = this.argStrOf(0)
+            this.checkType(typeName)
+        }
+
+        // ── ARC 生命周期 ──
+        else if (op == 110) {
+            this.incRef()
+        } else if (op == 111) {
+            this.decRef()
+        } else if (op == 112) {
+            this.retain()
+        } else if (op == 113) {
+            this.release()
+        } else if (op == 114) {
+            this.dropRef()
+        } else if (op == 115) {
+            this.weakRef()
+        } else if (op == 116) {
+            this.weakGet()
+        } else if (op == 117) {
+            this.boxAlloc()
+        }
+
+        // ── defer ──
+        else if (op == 120) {
+            // defer 区域开始（由 VM 管理清理栈）
+        } else if (op == 121) {
+            // defer 区域结束
+        }
+
+        // ── 协程（D5：已废弃，指令不进入 ADR-001 指令集，走到 else 报未知指令）──
+
+        // ── FFI ──
+        else if (op == 130) {
+            this.cstring()
+        } else if (op == 131) {
+            this.readCstr()
+        } else if (op == 132) {
+            this.ptrIsNull()
+        } else if (op == 133) {
+            this.ptrToInt()
+        } else if (op == 134) {
+            this.intToPtr()
+        }
+
+        // ── 异常处理 ──
+        else if (op == 122) {
+            this.pushHandlerAt()
+        } else if (op == 123) {
+            this.popHandler()
+        } else if (op == 124) {
+            this.throwException()
+        }
+
+        // ── 并发 ──
+        else if (op == 140) {
+            this.threadSpawn()
+        } else if (op == 141) {
+            this.threadJoin()
+        } else if (op == 142) {
+            this.threadSleep()
+        } else if (op == 143) {
+            this.threadId()
+        } else if (op == 144) {
+            this.threadParallelism()
+        } else if (op == 150) {
+            this.mutexNew()
+        } else if (op == 151) {
+            this.mutexLock()
+        } else if (op == 152) {
+            this.mutexUnlock()
+        } else if (op == 153) {
+            this.mutexTryLock()
+        } else if (op == 160) {
+            this.channelNew()
+        } else if (op == 161) {
+            this.channelSend()
+        } else if (op == 162) {
+            this.channelRecv()
+        } else if (op == 170) {
+            this.atomicNew()
+        } else if (op == 171) {
+            this.atomicLoad()
+        } else if (op == 172) {
+            this.atomicStore()
+        } else if (op == 173) {
+            this.atomicAdd()
+        } else if (op == 174) {
+            this.atomicCas()
+        } else if (op == 180) {
+            this.rwLockNew()
+        } else if (op == 181) {
+            this.rwLockReadLock()
+        } else if (op == 182) {
+            this.rwLockWriteLock()
+        } else if (op == 183) {
+            this.rwLockReadUnlock()
+        } else if (op == 184) {
+            this.rwLockWriteUnlock()
+        } else if (op == 190) {
+            this.condvarNew()
+        } else if (op == 191) {
+            this.condvarWait()
+        } else if (op == 192) {
+            this.condvarSignal()
+        } else if (op == 193) {
+            this.condvarBroadcast()
+        }
+
+        // ── 枚举 ──
+        else if (op == 200) {
+            this.enumConstruct(this.argStrOf(0))
+        } else if (op == 201) {
+            this.enumTag()
+        } else if (op == 202) {
+            this.makeFnRef(this.argStrOf(0))
+        }
+
+        // ── 跨模块 ──
+        else if (op == 67) {
+            this.callExport(this.argStrOf(0))
+        } else if (op == 68) {
+            this.callExternal(this.argStrOf(0), this.argStrOf(1))
+        }
+
+        // ── AOT ──
+        else if (op == 69) {
+            this.callAot(this.argStrOf(0))
+        }
+
+        // ── 未知指令（含已废弃的协程指令，D5/ADR-001）──
+        // P392：opName 参数移除——run() 每条指令为它做一次 List<String>
+        // get + 传参（streq 诊断仅未知指令需要），改此处按需直读。
+        else {
+            this.error = "Unknown opcode: " + toStr(op) + " [" + this.ops[this.ip - 1] + "]"
+            this.running = false
+        }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  函数调用与返回
+    // ═══════════════════════════════════════════════════════════
+
+    /// 调用内置函数或用户函数。
+    private fun callOrBuiltin(funcName: String, argc: Int): Unit {
+        // ── P393：用户函数快速路径（缓存命中时跳过内建名 if-else 链）──
+        //
+        // 内建分派是一条数十臂的 `funcName == "…"` 链（每臂一次 streq
+        // runtime 调用），用户函数名（fibonacci/add/…）排在链尾——递归
+        // 负载（fib28 = 63 万次 CALL）每次都要全链扫到底，估算占解释时间
+        // 一半以上。cfName 单槽（P391）命中且为用户函数时，直接执行调用
+        // 序列；首次/内建/未知名走下方原链（内建臂执行后早退不经过回填，
+        // cfName 只会是用户函数名或未知名，语义自洽）。
+        if (this.cfName == funcName && this.cfIsUser == 1) {
+            val target: Int = this.cfTarget
+            val pc: Int = this.cfPc
+            this.callStack.push(this.ip, this.currentFrame, this.currentFunc, this.currentClosure)
+            this.savedLocals.push(this.locals)
+            this.locals = this.popLocalsPool()
+            var k: Int = pc - 1
+            while (k >= 0 && k < argc) {
+                this.locals.putSlot(k + this.aucArgBase, this.stack.pop())
+                k = k - 1
+            }
+            this.currentFunc = funcName
+            this.currentFrame = this.currentFrame + 1
+            this.ip = target
+            return
+        }
+        // 内置函数
+        if (funcName == "println" || funcName == "print") {
+            val text: String = this.collectArgs(argc)
+            if (funcName == "println") {
+                println(text)
+            } else {
+                print(text)
+            }
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "toStr" || funcName == "toString") {
+            val v: Any = this.stack.pop()
+            val r: String = VmOps.toStrAny(v)
+            this.stack.push(r)
+            return
+        } else if (funcName == "toInt") {
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.toI32(VmOps.toStrAny(v)))
+            return
+        } else if (funcName == "toFloat") {
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.parseFloat(VmOps.toStrAny(v)))
+            return
+        } else if (funcName == "toBool") {
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.toBool(v))
+            return
+        } else if (funcName == "aura_cast" || funcName == "aura_cast_safety") {
+            // `x as T` 的运行时转换（与 AOT emit 的 aura_cast 分支同语义）。
+            val targetTy: String = toStr(this.stack.pop())
+            val cv: Any = this.stack.pop()
+            if (targetTy == "Long") {
+                this.stack.push(VmOps.toI64(VmOps.toStrAny(cv)))
+            } else if (targetTy == "Int") {
+                this.stack.push(VmOps.intOf(cv))
+            } else if (targetTy == "Float" || targetTy == "Double") {
+                this.stack.push(VmOps.parseFloat(VmOps.toStrAny(cv)))
+            } else if (targetTy == "String") {
+                this.stack.push(VmOps.toStrAny(cv))
+            } else {
+                this.stack.push(cv)
+            }
+            return
+        } else if (funcName == "typeof" || funcName == "typeOf") {
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.typeName(v))
+            return
+        } else if (funcName == "isOfType") {
+            val typeName: String = toStr(this.stack.pop())
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.typeName(v) == typeName)
+            return
+        } else if (funcName == "exit") {
+            val code: Any = this.stack.pop()
+            this.exitCode = VmOps.toI32(toStr(code))
+            this.running = false
+            return
+        } else if (funcName == "throw") {
+            val msg: Any = this.stack.pop()
+            this.throwException()
+            return
+        } else if (funcName == "__callClosure" && argc >= 3) {
+            // __callClosure(closure, sig, arg) — 闭包间接调用（Collections.filter/map）。
+            // 栈顺序：arg, sig, closure（closure 在栈顶）。
+            val closureId: Any = this.stack.pop()
+            val sig: Any = this.stack.pop()  // 忽略
+            val arg: Any = this.stack.pop()
+            val cid: Int = VmOps.toI32(toStr(closureId))
+            val funcName2: String = this.closureTable.getOrDefault(cid, "")
+            if (funcName2 == "") {
+                this.error = "Invalid closure id: " + toStr(cid)
+                this.running = false
+                return
+            }
+            // 将参数压回栈，递归调用目标函数
+            this.stack.push(arg)
+            this.callOrBuiltin(funcName2, 1)
+            return
+        } else if (funcName == "abs") {
+            val v: Any = this.stack.pop()
+            val iv: Int = VmOps.toI32(VmOps.toStrAny(v))
+            this.stack.push(if (iv < 0) -iv else iv)
+            return
+        } else if (funcName == "min") {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            val av: Int = VmOps.toI32(toStr(a))
+            val bv: Int = VmOps.toI32(toStr(b))
+            this.stack.push(if (av < bv) av else bv)
+            return
+        } else if (funcName == "max") {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            val av: Int = VmOps.toI32(toStr(a))
+            val bv: Int = VmOps.toI32(toStr(b))
+            this.stack.push(if (av > bv) av else bv)
+            return
+        } else if (funcName == "round") {
+            val v: Any = this.stack.pop()
+            val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
+            this.stack.push(VmOps.toI32(toStr(fv + 0.5)))
+            return
+        } else if (funcName == "floor") {
+            val v: Any = this.stack.pop()
+            val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
+            this.stack.push(VmOps.toI32(toStr(fv)))
+            return
+        } else if (funcName == "ceil") {
+            val v: Any = this.stack.pop()
+            val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
+            this.stack.push(VmOps.toI32(toStr(fv + 1)))
+            return
+        } else if (funcName == "listOf") {
+            // 按**原顺序**取实参（见 `VmStack.vmSlotAt`：逐个 pop 会反转元素顺序）
+            val list: Any = VmCollections.newList()
+            val base: Int = this.stack.size() - argc
+            var j: Int = 0
+            while (j < argc) {
+                VmCollections.push(list, this.stack.vmSlotAt(base + j))
+                j = j + 1
+            }
+            var k: Int = 0
+            while (k < argc) {
+                this.stack.pop()
+                k = k + 1
+            }
+            this.stack.push(list)
+            return
+        } else if (funcName == "mapOf") {
+            val map: Any = VmCollections.newMap()
+            var i: Int = argc - 1
+            while (i >= 0) {
+                val val: Any = this.stack.pop()
+                val key: Any = this.stack.pop()
+                VmCollections.mapSet(map, key, val)
+                i = i - 1
+            }
+            this.stack.push(map)
+            return
+        } else if (funcName == "stringConcat") {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(toStr(a) + toStr(b))
+            return
+        } else if (funcName == "error") {
+            val msg: Any = this.stack.pop()
+            this.error = toStr(msg)
+            this.running = false
+            return
+        } else if (funcName == "Collections.getAt" || funcName == "aura.lang.std.Collections.getAt"
+            || funcName == "__get") {
+            // `.auc` 里 `xs[0]` / `xs.get(0)` → `Collections.getAt(list, idx)`
+            val idx: Any = this.stack.pop()
+            val list: Any = this.stack.pop()
+            this.stack.push(VmCollections.vmListAt(list, idx))
+            return
+        } else if (funcName == "Collections.count" || funcName == "aura.lang.std.Collections.count"
+            || funcName == "__size") {
+            val list: Any = this.stack.pop()
+            this.stack.push(VmCollections.listLen(list))
+            return
+        } else if (funcName == "length" || funcName == "String.length" || funcName == "strlen") {
+            // `.auc` 里 `s.length` 被编译成原生调用（原生表下标 563 = `String.length`）。
+            // 缺此分支会落到下面的「未知函数」兜底 → 结果恒为 0（实测 `len=0`）。
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.toStrAny(v).length)
+            return
+        }
+
+        // ── Math（带命名空间） ──
+        else if (funcName == "aura.lang.std.Math.abs" || funcName == "Math.abs") {
+            val v: Any = this.stack.pop()
+            val iv: Int = VmOps.toI32(VmOps.toStrAny(v))
+            this.stack.push(if (iv < 0) -iv else iv)
+            return
+        } else if (funcName == "aura.lang.std.Math.min" || funcName == "Math.min") {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            val av: Int = VmOps.toI32(toStr(a))
+            val bv: Int = VmOps.toI32(toStr(b))
+            this.stack.push(if (av < bv) av else bv)
+            return
+        } else if (funcName == "aura.lang.std.Math.max" || funcName == "Math.max") {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            val av: Int = VmOps.toI32(toStr(a))
+            val bv: Int = VmOps.toI32(toStr(b))
+            this.stack.push(if (av > bv) av else bv)
+            return
+        } else if (funcName == "aura.lang.std.Math.round" || funcName == "Math.round") {
+            val v: Any = this.stack.pop()
+            val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
+            this.stack.push(VmOps.toI32(toStr(fv + 0.5)))
+            return
+        } else if (funcName == "aura.lang.std.Math.floor" || funcName == "Math.floor") {
+            val v: Any = this.stack.pop()
+            val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
+            this.stack.push(VmOps.toI32(toStr(fv)))
+            return
+        } else if (funcName == "aura.lang.std.Math.ceil" || funcName == "Math.ceil") {
+            val v: Any = this.stack.pop()
+            val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
+            this.stack.push(VmOps.toI32(toStr(fv + 1)))
+            return
+        } else if (funcName == "aura.lang.std.Math.sqrt" || funcName == "Math.sqrt") {
+            val v: Any = this.stack.pop()
+            val fv: Float = VmOps.parseFloat(VmOps.toStrAny(v))
+            this.stack.push(VmOps.sqrt(fv))
+            return
+        } else if (funcName == "aura.lang.std.Math.pow" || funcName == "Math.pow") {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.pow(VmOps.parseFloat(toStr(a)), VmOps.parseFloat(toStr(b))))
+            return
+        }
+
+        // ── String 方法（带命名空间） ──
+        else if (funcName == "String.isEmpty" || funcName == "isEmpty") {
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.toStrAny(v).length == 0)
+            return
+        } else if (funcName == "String.toUpper" || funcName == "toUpper") {
+            val v: Any = this.stack.pop()
+            val svtoUpperCase: String = toStr(v)
+            this.stack.push(svtoUpperCase.toUpperCase())
+            return
+        } else if (funcName == "String.toLower" || funcName == "toLower") {
+            val v: Any = this.stack.pop()
+            val svtoLowerCase: String = toStr(v)
+            this.stack.push(svtoLowerCase.toLowerCase())
+            return
+        } else if (funcName == "String.contains" || funcName == "contains") {
+            val sub: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.contains(toStr(v), toStr(sub)))
+            return
+        } else if (funcName == "String.trim" || funcName == "trim") {
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.trim(toStr(v)))
+            return
+        } else if (funcName == "String.startsWith" || funcName == "startsWith") {
+            val prefix: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.startsWith(toStr(v), toStr(prefix)))
+            return
+        } else if (funcName == "String.endsWith" || funcName == "endsWith") {
+            val suffix: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.endsWith(toStr(v), toStr(suffix)))
+            return
+        } else if (funcName == "String.split" || funcName == "split") {
+            val sep: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            val sepStr: String = toStr(sep)
+            val text: String = toStr(v)
+            val result: Any = VmCollections.newList()
+            if (sepStr == "") {
+                // 空分隔符：每字符一个元素
+                var ci: Int = 0
+                while (ci < text.length) {
+                    VmCollections.push(result, String.fromCharCode(text.charCodeAt(ci)))
+                    ci = ci + 1
+                }
+                this.stack.push(result)
+                return
+            }
+            var pos: Int = 0
+            while (pos < text.length) {
+                val idx: Int = VmOps.indexOf(text, sepStr, pos)
+                if (idx < 0) {
+                    VmCollections.push(result, VmOps.vmSubstr(text, pos, text.length - pos))
+                    break
+                }
+                VmCollections.push(result, VmOps.vmSubstr(text, pos, idx - pos))
+                pos = idx + sepStr.length
+            }
+            this.stack.push(result)
+            return
+        } else if (funcName == "String.replace" || funcName == "replace") {
+            val newStr: Any = this.stack.pop()
+            val oldStr: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.replace(toStr(v), toStr(oldStr), toStr(newStr)))
+            return
+        }
+
+        // ── `.auc` 原生名别名（P2.2：.auc 的原生表使用 std 全名，
+        //    与上方短名不同；差分框架实测补齐）──
+        else if (funcName == "String.toUpperCase" || funcName == "toUpperCase") {
+            val v: Any = this.stack.pop()
+            val svtoUpperCase: String = toStr(v)
+            this.stack.push(svtoUpperCase.toUpperCase())
+            return
+        } else if (funcName == "String.toLowerCase" || funcName == "toLowerCase") {
+            val v: Any = this.stack.pop()
+            val svtoLowerCase: String = toStr(v)
+            this.stack.push(svtoLowerCase.toLowerCase())
+            return
+        } else if (funcName == "String.charAt" || funcName == "charAt") {
+            val idx: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            val s: String = toStr(v)
+            val i: Int = VmOps.toI32(toStr(idx))
+            if (i < 0 || i >= s.length) {
+                this.stack.push("")
+            } else {
+                this.stack.push(VmOps.vmSubstr(s, i, 1))
+            }
+            return
+        } else if (funcName == "String.indexOf" || funcName == "indexOf") {
+            val sub: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.indexOf(toStr(v), toStr(sub), 0))
+            return
+        } else if (funcName == "String.substring" || funcName == "substring") {
+            val endI: Any = this.stack.pop()
+            val startI: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            val s: String = toStr(v)
+            val st: Int = VmOps.toI32(toStr(startI))
+            var en: Int = VmOps.toI32(toStr(endI))
+            if (st < 0) { this.stack.push(""); return }
+            if (st >= s.length) { this.stack.push(""); return }
+            if (en > s.length) { en = s.length }
+            if (en <= st) { this.stack.push(""); return }
+            this.stack.push(VmOps.vmSubstr(s, st, en - st))
+            return
+        } else if (funcName == "Collections.set" || funcName == "aura.lang.std.Collections.set") {
+            // xs.set(idx, value)：栈顶 value、其下 idx、其下列表
+            val value: Any = this.stack.pop()
+            val idx: Any = this.stack.pop()
+            val list: Any = this.stack.pop()
+            this.stack.push(VmCollections.vmListSet(list, idx, value))
+            return
+        }
+
+        // ── 文件 I/O ──
+        else if (funcName == "fileRead" || funcName == "IO.fileRead"
+            || funcName == "aura.lang.std.IO.fileRead") {
+            val path: Any = this.stack.pop()
+            this.stack.push(IO.readFile(toStr(path)))
+            return
+        } else if (funcName == "fileWrite" || funcName == "IO.fileWrite"
+            || funcName == "aura.lang.std.IO.fileWrite") {
+            val content: Any = this.stack.pop()
+            val path: Any = this.stack.pop()
+            IO.writeFile(toStr(path), toStr(content))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "readLine" || funcName == "IO.readLine"
+            || funcName == "aura.lang.std.IO.readLine") {
+            this.stack.push(IO.readLine())
+            return
+        }
+
+        // ── Process ──
+        else if (funcName == "argCount" || funcName == "Process.argCount"
+            || funcName == "aura.lang.std.Process.argCount") {
+            this.stack.push(Process.argCount())
+            return
+        } else if (funcName == "arg" || funcName == "Process.arg"
+            || funcName == "aura.lang.std.Process.arg") {
+            val idx: Any = this.stack.pop()
+            this.stack.push(Process.arg(VmOps.toI32(toStr(idx))))
+            return
+        } else if (funcName == "ProcessOps.aura_process_argCount") {
+            // ⚠️ 种子编译器把 `Process.argCount()` 直接降级为 extern 原生调用
+            //（.auc 原生名 = 全限定接口名），不经 Aura 包装器。自举 Stage-2 的
+            // 编译器 .acu 一进 main 就撞在这里（实测 VM-ERROR=Unknown function:
+            // ProcessOps.aura_process_argCount，2026-10-05）。AOT 载体
+            //（auc_vm_runner.exe）里 Process.argCount() 走同一 C 访问器，
+            // 拿到的就是宿主 argv ✓。
+            this.stack.push(Process.argCount())
+            return
+        } else if (funcName == "ProcessOps.aura_process_args") {
+            // 全量 argv 以 '\n' 连接（与 C 侧 aura_process_args 语义一致；
+            // ProcessNative.arg(i) 即按 '\n' 切分）。
+            val cnt: Int = Process.argCount()
+            var all: String = ""
+            var ai: Int = 0
+            while (ai < cnt) {
+                if (ai > 0) { all = all + "\n" }
+                all = all + Process.arg(ai)
+                ai = ai + 1
+            }
+            this.stack.push(all)
+            return
+        } else if (funcName == "Memory.alloc") {
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.alloc(VmOps.toI64(toStr(n))))
+            return
+        } else if (funcName == "Memory.free") {
+            val n: Any = this.stack.pop()
+            Memory.free(VmOps.toI64(toStr(n)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.read") {
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.read(VmOps.toI64(toStr(n))) as Int)
+            return
+        } else if (funcName == "Memory.read16") {
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.read16(VmOps.toI64(toStr(n))) as Int)
+            return
+        } else if (funcName == "Memory.read32") {
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.read32(VmOps.toI64(toStr(n))))
+            return
+        } else if (funcName == "Memory.read64") {
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.read64(VmOps.toI64(toStr(n))))
+            return
+        } else if (funcName == "Memory.write") {
+            val v: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            Memory.write(VmOps.toI64(toStr(n)), VmOps.toI32(VmOps.toStrAny(v)) as Byte)
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.write16") {
+            val v: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            Memory.write16(VmOps.toI64(toStr(n)), VmOps.toI32(VmOps.toStrAny(v)) as Short)
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.write32") {
+            val v: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            Memory.write32(VmOps.toI64(toStr(n)), VmOps.toI32(VmOps.toStrAny(v)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.write64") {
+            val v: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            Memory.write64(VmOps.toI64(toStr(n)), VmOps.toI64(toStr(v)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.copy") {
+            val ln: Any = this.stack.pop()
+            val src: Any = this.stack.pop()
+            val dst: Any = this.stack.pop()
+            Memory.copy(VmOps.toI64(toStr(dst)), VmOps.toI64(toStr(src)),
+                        VmOps.toI64(toStr(ln)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.set") {
+            val ln: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            Memory.set(VmOps.toI64(toStr(n)), VmOps.toI32(VmOps.toStrAny(v)) as Byte,
+                       VmOps.toI64(toStr(ln)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.arcIncrement") {
+            val n: Any = this.stack.pop()
+            Memory.arcIncrement(VmOps.toI64(toStr(n)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.arcDecrement") {
+            val n: Any = this.stack.pop()
+            Memory.arcDecrement(VmOps.toI64(toStr(n)))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Memory.atomicAdd") {
+            val delta: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.atomicAdd(VmOps.toI64(toStr(n)),
+                                             VmOps.toI64(toStr(delta))))
+            return
+        } else if (funcName == "Memory.mprotect") {
+            val prot: Any = this.stack.pop()
+            val ln: Any = this.stack.pop()
+            val n: Any = this.stack.pop()
+            this.stack.push(Memory.mprotect(VmOps.toI64(toStr(n)),
+                                            VmOps.toI64(toStr(ln)),
+                                            VmOps.toI32(toStr(prot))))
+            return
+        } else if (funcName == "charCodeAt") {
+            // 字符串原语族：种子 .auc 的裸名原生（自举 Stage-2 的编译器
+            // 代码大量使用，2026-10-05 补齐）。⚠️ 越界返回 -1（与
+            // VmOps/AucLoader 的防御语义一致）：编译器对残缺行存在
+            // idx==len 的探测读，直接透传会在 AOT 载体下段错误
+            //（实测 CEA-1 后崩，2026-10-05）。
+            val idx: Any = this.stack.pop()
+            val s: Any = this.stack.pop()
+            val sv: String = toStr(s)
+            val ii: Int = VmOps.toI32(toStr(idx))
+            if (ii < 0 || ii >= sv.length) {
+                this.stack.push(-1)
+            } else {
+                this.stack.push(sv.charCodeAt(ii))
+            }
+            return
+        } else if (funcName == "strcat") {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(toStr(a) + toStr(b))
+            return
+        } else if (funcName == "puts") {
+            val s: Any = this.stack.pop()
+            println(toStr(s))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "String.fromCharCode" || funcName == "String_fromCharCode") {
+            val c: Any = this.stack.pop()
+            this.stack.push(String.fromCharCode(VmOps.toI32(toStr(c))))
+            return
+        } else if (funcName == "substring" || funcName == "String_substring"
+            || funcName == "String.substring") {
+            val end: Any = this.stack.pop()
+            val start: Any = this.stack.pop()
+            val s: Any = this.stack.pop()
+            val sv: String = toStr(s)
+            var st: Int = VmOps.toI32(toStr(start))
+            var en: Int = VmOps.toI32(toStr(end))
+            if (st < 0) { st = 0 }
+            if (en > sv.length) { en = sv.length }
+            if (st >= en) {
+                this.stack.push("")
+            } else {
+                this.stack.push(sv.substring(st, en))
+            }
+            return
+        } else if (funcName == "Process.exit" || funcName == "aura.lang.std.Process.exit") {
+            val code: Any = this.stack.pop()
+            this.exitCode = VmOps.toI32(toStr(code))
+            this.running = false
+            return
+        } else if (funcName == "Process.env" || funcName == "aura.lang.std.Process.env") {
+            val name: Any = this.stack.pop()
+            this.stack.push(Env.get(toStr(name), ""))
+            return
+        }
+
+        // ── Collections（补充） ──
+        else if (funcName == "Collections.push" || funcName == "aura.lang.std.Collections.push") {
+            val elem: Any = this.stack.pop()
+            val list: Any = this.stack.pop()
+            VmCollections.push(list, elem)
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Collections.listOf" || funcName == "aura.lang.std.Collections.listOf") {
+            // 与顶层 listOf 相同
+            val list: Any = VmCollections.newList()
+            val base: Int = this.stack.size() - argc
+            var j: Int = 0
+            while (j < argc) {
+                VmCollections.push(list, this.stack.vmSlotAt(base + j))
+                j = j + 1
+            }
+            var k: Int = 0
+            while (k < argc) {
+                this.stack.pop()
+                k = k + 1
+            }
+            this.stack.push(list)
+            return
+        } else if (funcName == "Collections.mapOf" || funcName == "aura.lang.std.Collections.mapOf") {
+            val map: Any = VmCollections.newMap()
+            var i: Int = argc - 1
+            while (i >= 0) {
+                val val: Any = this.stack.pop()
+                val key: Any = this.stack.pop()
+                VmCollections.mapSet(map, key, val)
+                i = i - 1
+            }
+            this.stack.push(map)
+            return
+        }
+
+        // ── Time ──
+        else if (funcName == "Time.now" || funcName == "aura.lang.std.Time.now"
+            || funcName == "Time.sinceEpoch" || funcName == "aura.lang.std.Time.sinceEpoch") {
+            // 不能写 `Time.getNowMs()`：std 的纯 Aura 函数不在本模块编译单元的
+            // fn_index 里 → `未解析的函数调用 'Time.getNowMs'`。
+            // 直接走原生时钟接口（与 std `ClockImpl.timeMs()` 同一条实现路径）。
+            this.stack.push(this.clockNowMs())
+            return
+        }
+
+        // ── Json ──
+        else if (funcName == "Json.parse" || funcName == "aura.lang.std.Json.parse") {
+            val text: Any = this.stack.pop()
+            // 简化实现：返回原始字符串（完整 JSON 解析需要专用解析器）
+            this.stack.push(toStr(text))
+            return
+        } else if (funcName == "Json.stringify" || funcName == "aura.lang.std.Json.stringify") {
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.toStrAny(v))
+            return
+        }
+
+        // ── Assert ──
+        else if (funcName == "Assert.equal" || funcName == "aura.lang.std.Assert.equal") {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            if (VmOps.eq(a, b)) {
+                this.stack.push("Unit")
+            } else {
+                this.error = "Assertion failed: " + VmOps.toStrAny(a) + " != " + VmOps.toStrAny(b)
+                this.running = false
+            }
+            return
+        }
+
+        // 用户函数：压栈返回地址，跳转到函数入口
+        //
+        // P391：**单槽目标缓存**——funcOffset/funcParamCount 各自对 funcTable
+        // 做 O(表长) 纯字符扫描（P388），递归/循环调用（fib28 = 63 万次 CALL）
+        // 每次重复扫两遍。按名记忆 (target, pc)，命中即零扫描；名字失配回退
+        // 全解析并回填。递归/热点调用场景命中率 ~100%。
+        var target: Int = 0
+        var pc: Int = 0
+        if (this.cfName == funcName) {
+            target = this.cfTarget
+            pc = this.cfPc
+        } else {
+            target = this.funcOffset(funcName)
+            pc = this.funcParamCount(funcName)
+            this.cfName = funcName
+            this.cfTarget = target
+            this.cfPc = pc
+            this.cfIsUser = 1
+        }
+        // P0.8 加速派发钩子（可插拔，默认关闭）：直呼表命中时以表内入口
+        // 覆盖函数表查找结果。本阶段不做任何加速，仅为 JIT/Photon 预留
+        // 稳定对接点（VM-PA-00 §2.3 契约；接口见 enableAccelDispatch 等）。
+        if (this.accelEnabled) {
+            val accel: Int = this.accelTable.getOrDefault(funcName, -1)
+            if (accel >= 0) {
+                target = accel
+            }
+        }
+        if (target == 0 && pc < 0) {
+            this.error = "Unknown function: " + funcName
+            this.running = false
+            return
+        }
+
+        // 保存返回地址和当前帧（第 4 字段为调用者的闭包上下文，P1.3）
+        this.callStack.push(this.ip, this.currentFrame, this.currentFunc, this.currentClosure)
+        this.savedLocals.push(this.locals)
+        this.locals = this.popLocalsPool()
+
+        // 绑定参数到槽位（槽基址随调用约定不同，见 `aucArgBase`）
+        var k: Int = pc - 1
+        while (k >= 0 && k < argc) {
+            this.locals.putSlot(k + this.aucArgBase, this.stack.pop())
+            k = k - 1
+        }
+
+        this.currentFunc = funcName
+        this.currentFrame = this.currentFrame + 1
+        this.ip = target
+    }
+
+    /// 从函数返回。
+    private fun returnFromFunc(): Unit {
+        var retVal: Any = "Unit"
+        if (this.stack.size() > 0) {
+            retVal = this.stack.pop()
+        }
+        this.returnValue = retVal
+        this.currentFunc = ""
+
+        if (this.callStack.size() == 0) {
+            this.running = false
+            return
+        }
+
+        val returnIp: Int = this.callStack.peekIp()
+        val savedClosure: Int = this.callStack.peekClosure()
+        this.callStack.pop()
+
+        // 恢复局部变量与闭包上下文
+        this.retireLocals(this.locals)
+        this.locals = this.popSavedLocals()
+        this.currentClosure = savedClosure
+        this.currentFrame = this.currentFrame - 1
+
+        // 把返回值压回调用者的栈
+        this.stack.push(retVal)
+        this.ip = returnIp
+    }
+
+    /// 尾调用（P1.6）：复用当前调用帧，不压 callStack / savedLocals。
+    ///
+    /// 语义：弹出实参绑定到新帧 → ip 跳转目标入口。当前帧的 callStack 条目
+    /// （返回地址、保存的局部变量）原样保留，因此被调函数 RETURN 时直接
+    /// 返回到**原调用者**——深层递归的调用深度恒为 O(1)。
+    /// 实参绑定与 `callOrBuiltin` 的用户函数路径一致（含 aucArgBase 基址）。
+    private fun callTail(funcName: String, argc: Int): Unit {
+        var target: Int = this.funcOffset(funcName)
+        if (this.accelEnabled) {
+            val accel: Int = this.accelTable.getOrDefault(funcName, -1)
+            if (accel >= 0) { target = accel }
+        }
+        if (target == 0 && this.funcParamCount(funcName) < 0) {
+            this.error = "Unknown function: " + funcName
+            this.running = false
+            return
+        }
+        this.retireLocals(this.locals)
+        this.locals = this.popLocalsPool()
+        val pc: Int = this.funcParamCount(funcName)
+        var k: Int = pc - 1
+        while (k >= 0 && k < argc) {
+            this.locals.putSlot(k + this.aucArgBase, this.stack.pop())
+            k = k - 1
+        }
+        this.currentFunc = funcName
+        this.ip = target
+    }
+
+    /// 弹出最后一个保存的局部变量块。
+    private fun popSavedLocals(): VmLocals {
+        if (this.savedLocals.size() == 0) {
+            return VmLocals()
+        }
+        return this.savedLocals.pop()
+    }
+
+    /// 从池中取一个（已重置的）locals；池空则新建。
+    private fun popLocalsPool(): VmLocals {
+        val n: Int = this.localsPool.size()
+        if (n > 0) {
+            val v: VmLocals = this.localsPool.get(n - 1)
+            this.localsPool.removeAt(n - 1)
+            return v
+        }
+        return VmLocals()
+    }
+
+    /// 退役帧 locals：代际重置后归还池（容量保留，热身后零分配）。
+    private fun retireLocals(m: VmLocals): Unit {
+        m.reset()
+        this.localsPool.add(m)
+    }
+
+    /// 弹出 argc 个实参并按源顺序拼接为字符串。
+    ///
+    /// 转换统一走 `VmOps.toStrAny`（见其注释：直接在本类方法里对「刚从容器
+    /// 取回的值」调用 `toStr` 在自举 AOT 下会得到错误结果）。
+    private fun collectArgs(argc: Int): String {
+        if (argc <= 0) {
+            return ""
+        }
+        var result: String = ""
+        var i: Int = argc - 1
+        while (i >= 0) {
+            val v: Any = this.stack.pop()
+            val s: String = VmOps.toStrAny(v)
+            // P404：[CA] 值类型诊断探针摘除（P379 追踪用）。
+            if (result == "") {
+                result = s
+            } else {
+                result = s + " " + result
+            }
+            i = i - 1
+        }
+        return result
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  对象与类
+    // ═══════════════════════════════════════════════════════════
+
+    /// 分配对象（在堆上分配内存，返回 Long 指针）。
+    ///
+    /// P0.5（ADR-003）：对象头 16 字节——`offset 0` 类标识（预留 vtable/类表
+    /// 扩展位，0 = 通用对象）、`offset 8` 引用计数 = 1（与 ARC 指令布局一致）。
+    /// 类名登记进 `objectClass`，供 `CALL_METHOD` 虚方法解析与类型查询使用；
+    /// 字段值存 `objectFields`（按实例隔离），不写裸内存（装箱 Any 无法安全
+    /// round-trip，见 ADR-003 偏差记录）。
+    private fun newObject(className: String): Unit {
+        val objSize: Long = 16
+        val ptr: Long = Memory.alloc(objSize)
+        Memory.write64(ptr, 0)          // 类型标签（0 = 通用对象；类表接入 P1.2 后写类 id）
+        Memory.write32(ptr + 8, 1)      // 引用计数 = 1
+        this.stack.push(ptr)
+        // 类名键取栈值的 toStrAny 形态——与 get/set/方法解析同一转换路径；
+        // 不得对 Long 局部变量做 toStr（装箱路径不一致会导致键不匹配）。
+        val objKey: String = VmOps.toStrAny(this.stack.peek())
+        this.objectClass.put(objKey, className)
+        this.objectFields.put(objKey, HashMap<String, Any>())
+        // P1.5：登记堆分配（DEC_REF 释放与活跃计数的数据源）
+        this.heapKinds.put(objKey, "object")
+    }
+
+    /// 读取对象字段（含字符串/集合的**内建成员**）。
+    ///
+    /// 内建成员对应 Rust VM 的 `builtin_member`：`s.length` / `xs.size` /
+    /// `xs.isEmpty` / `xs.first` / `xs.last`。加载器已把 `GET_FIELD` 的哈希操作数
+    /// 翻译成这些名字（见 `AucLoaderUtils.fieldNameOf`）。
+    private fun getField(fieldName: String): Unit {
+        val obj: Any = this.stack.pop()
+        if (fieldName == "length" || fieldName == "size" || fieldName == "count") {
+            // `.auc` 里集合的 `.size` 会被降级成 `LIST_LEN`，故此处只可能是字符串
+            this.stack.push(toStr(obj).length)
+            return
+        }
+        if (fieldName == "isEmpty") {
+            val n: Int = toStr(obj).length
+            if (n == 0) {
+                this.stack.push(true)
+            } else {
+                this.stack.push(false)
+            }
+            return
+        }
+        if (fieldName == "first" || fieldName == "last") {
+            val n: Int = VmCollections.listLen(obj)
+            if (n <= 0) {
+                this.stack.push(null)
+                return
+            }
+            var idx: Int = 0
+            if (fieldName == "last") {
+                idx = n - 1
+            }
+            this.stack.push(VmCollections.vmListAt(obj, idx))
+            return
+        }
+        // P0.5（ADR-003）：字段按**实例**存储（键 "<objPtr>|<name>"），
+        // 不再写入全局表——两个实例的同名字段互不可见。
+        // 键统一取自栈值（Any）的 toStrAny 形态（转换路径与 newObject 一致）。
+        // 注意：堆指针的装箱类型名随宿主不同可能是 "Int" 或 "Long"（实测
+        // seed 宿主为 "Int"），故此处接受全部整型，非整型值非对象。
+        if (!VmOps.isNumeric(obj)) {
+            this.stack.push(toAny(0))
+            return
+        }
+        val objKey: String = VmOps.toStrAny(obj)
+        if (VmOps.toI64(objKey) == 0L) {
+            // 空指针 / 非对象值：保持旧的容错语义（读缺失字段得 0）
+            this.stack.push(toAny(0))
+            return
+        }
+        val fields: HashMap<String, Any> = this.objectFields.getOrDefault(objKey, HashMap<String, Any>())
+        val val = fields.get(fieldName)
+        this.stack.push(if (val == null) 0 else val)
+    }
+
+    /// 设置对象字段。
+    ///
+    /// P0.5（ADR-003）：字段按**实例**存储（键 "<objPtr>|<name>"）。
+    /// 栈序：value 在顶、objPtr 在其下。
+    private fun setField(fieldName: String): Unit {
+        val val: Any = this.stack.pop()
+        val obj: Any = this.stack.pop()
+        // 指针装箱类型名随宿主可能是 "Int"/"Long"（见 getField 注释），接受整型
+        if (!VmOps.isNumeric(obj)) {
+            // 无接收者可写（遗留容错）：丢弃，行为与旧桩一致
+            return
+        }
+        val objKey: String = VmOps.toStrAny(obj)
+        if (VmOps.toI64(objKey) == 0L) {
+            return
+        }
+        var fields: HashMap<String, Any> = this.objectFields.getOrDefault(objKey, HashMap<String, Any>())
+        if (fields.getSize() == 0 && !this.objectFields.containsKey(objKey)) {
+            fields = HashMap<String, Any>()
+            this.objectFields.put(objKey, fields)
+        }
+        fields.put(fieldName, val)
+    }
+
+    /// 分配数组（在堆上）。
+    ///
+    /// 采用与 `Collections` 列表**相同的布局**（`len@0` / `cap@8` / `items@16`，
+    /// 元素在独立数组里），这样 `GET_INDEX`/`SET_INDEX` 对数组与列表语义一致 ——
+    /// `.auc` 的 `xs[0]`（`List<Int>`）走的就是 `GET_INDEX`（实测 Rust VM 输出
+    /// `x0=1`），若数组另用「元素内联」布局，同一个操作码无法兼顾，且列表会被
+    /// 当成数组读 → 读到 items 指针当元素（实测访问违规崩溃）。
+    /// 当前 Unix 时间戳（毫秒），基于 `Clock.clockGettime(CLOCK_REALTIME)`。
+    ///
+    /// 缓冲区惰性分配后复用（每次取时间都 malloc 会在长循环里持续泄漏）；
+    /// 读取失败（返回值非 0）时返回 0，与 VM 其余原语的容错风格一致。
+    private fun clockNowMs(): Long {
+        if (this.clockBuf == 0L) {
+            this.clockBuf = Memory.alloc(16L)
+        }
+        if (this.clockBuf == 0L) { return 0L }
+        val rc: Long = Clock.clockGettime(0, this.clockBuf)
+        if (rc != 0L) { return 0L }
+        val sec: Long = Memory.read64(this.clockBuf)
+        val nsec: Long = Memory.read64(this.clockBuf + 8L)
+        return sec * 1000L + nsec / 1000000L
+    }
+
+    private fun newArray(size: Any): Unit {
+        val count: Int = VmOps.toI32(toStr(size))
+        val ptr: Long = Memory.alloc(24)
+        // Int → Long 用 `as Long`（`.toLong()` 重名无法解析）
+        val itemsBytes: Long = (count * 8) as Long
+        val countL: Long = count as Long
+        val items: Long = Memory.alloc(itemsBytes)
+        Memory.write64(ptr, countL)
+        Memory.write64(ptr + 8, countL)
+        Memory.write64(ptr + 16, items)
+        // 初始化为 0
+        Memory.set(items, 0, itemsBytes)
+        this.stack.push(ptr)
+    }
+
+    /// 数组/列表元素读取（`Collections` 布局：元素在 `read64(ptr+16)` 指向的数组中）。
+    private fun getIndex(): Unit {
+        val idx: Any = this.stack.pop()
+        val objAny: Any = this.stack.pop()
+        this.stack.push(VmCollections.vmListAt(objAny, idx))
+    }
+
+    /// 数组元素写入。
+    private fun setIndex(): Unit {
+        // 栈序（见 Rust `OpCode::SetIndex` 注释）：栈顶为索引、其下为引用、再下为值
+        val idx: Any = this.stack.pop()
+        val objAny: Any = this.stack.pop()
+        val v: Any = this.stack.pop()
+        VmCollections.vmListSet(objAny, idx, v)
+    }
+
+    /// 声明类继承关系（P1.2，ADR-003 扩展）。
+    ///
+    /// `DEF_CLASS cls parent` 指令与 `registerClass` API 共用；
+    /// parent 为 "" 或 "-" 表示无父类。
+    private fun defClass(cls: String, parent: String): Unit {
+        var p: String = parent
+        if (p == "-") { p = "" }
+        this.classParents.put(cls, p)
+    }
+
+    /// 沿父类链解析方法（P1.2）：返回 "类名.方法名"，链上无命中返回 ""。
+    private fun resolveMethodInChain(cls: String, methodName: String): String {
+        var cur: String = cls
+        var depth: Int = 0
+        while (cur != "" && depth < 64) {
+            val candidate: String = cur + "." + methodName
+            if (this.funcParamCount(candidate) >= 0 || this.funcOffset(candidate) != 0) {
+                return candidate
+            }
+            cur = this.classParents.getOrDefault(cur, "")
+            depth = depth + 1
+        }
+        return ""
+    }
+
+    /// 类名 cls 是否为 target 自身或其祖先链上的类型（P1.2，instanceOf/checkCast 用）。
+    private fun classIsA(cls: String, target: String): Boolean {
+        if (cls == "") { return false }
+        var cur: String = cls
+        var depth: Int = 0
+        while (cur != "" && depth < 64) {
+            if (cur == target) { return true }
+            cur = this.classParents.getOrDefault(cur, "")
+            depth = depth + 1
+        }
+        return false
+    }
+
+    /// 对象值是否为注册的堆对象（P1.2/P1.5 共用），是则返回其类名。
+    private fun heapObjectClass(v: Any): String {
+        if (v == null) { return "" }
+        val key: String = VmOps.toStrAny(v)
+        if (this.heapKinds.getOrDefault(key, "") != "object") { return "" }
+        return this.objectClass.getOrDefault(key, "")
+    }
+    ///
+    /// depth = 接收者之下压着的实参个数（0 = 接收者在栈顶）。
+    private fun receiverClassAt(depth: Int): String {
+        if (depth < 0) { return "" }
+        val idx: Int = this.stack.size() - 1 - depth
+        if (idx < 0) { return "" }
+        val v: Any = this.stack.vmSlotAt(idx)
+        if (v == null) { return "" }
+        // 仅整型堆指针可能是 VM 对象（装箱类型名随宿主为 "Int"/"Long"，
+        // 见 getField 注释）；字符串/布尔等直接排除
+        if (!VmOps.isNumeric(v)) { return "" }
+        return this.objectClass.getOrDefault(VmOps.toStrAny(v), "")
+    }
+
+    /// 虚方法调用（P0.5，ADR-003）。
+    ///
+    /// 方法函数以 `"类名.方法名"` 注册、**首参为接收者 self**。
+    /// `CALL_METHOD name [argc]`：argc 可选（除 self 外的实参个数；
+    /// 省略时按无参方法处理，接收者 = 栈顶）。解析失败退让旧路径
+    /// `callOrBuiltin(name, 0)`，兼容遗留字节码。
+    private fun callMethod(methodName: String): Unit {
+        if (this.aucMode) {
+            // `.auc` 布局（Rust emit.rs CallMethod）：[self, args..., receiverCopy]，
+            // 栈顶是接收者**副本**，仅用于虚分派（Rust VM 同样丢弃该副本）。
+            // 绑定：丢弃副本后按目标函数形参个数（含 self）整体绑定。
+            val cls0: String = this.receiverClassAt(0)
+            var resolved: String = methodName
+            if (cls0 != "") {
+                val chainHit: String = this.resolveMethodInChain(cls0, methodName)
+                if (chainHit != "") { resolved = chainHit }
+            }
+            if (this.stack.size() > 0) {
+                this.stack.pop()  // 丢弃接收者副本
+            }
+            val pc: Int = this.funcParamCount(resolved)
+            if (pc < 0) {
+                this.error = "Unknown method: " + resolved
+                this.running = false
+                return
+            }
+            this.callOrBuiltin(resolved, pc)
+            return
+        }
+        var argc: Int = -1
+        if (this.argCountOf() >= 2) {
+            argc = VmOps.toI32(this.argStrOf(1))
+        }
+        val receiverDepth: Int = if (argc >= 0) argc else 0
+        val cls: String = this.receiverClassAt(receiverDepth)
+        if (cls != "") {
+            // P1.2：沿父类链解析方法（子类覆写优先，未覆写则命中父类实现）
+            val resolved: String = this.resolveMethodInChain(cls, methodName)
+            if (resolved != "") {
+                var callArgc: Int = 1
+                if (argc >= 0) {
+                    callArgc = argc + 1
+                } else {
+                    val pc: Int = this.funcParamCount(resolved)
+                    if (pc >= 0) { callArgc = pc }
+                }
+                this.callOrBuiltin(resolved, callArgc)
+                return
+            }
+        }
+        // 退让：遗留行为（忽略接收者，按全局函数名调用）
+        this.callOrBuiltin(methodName, 0)
+    }
+
+    /// 构造器调用（P0.5，ADR-003）。
+    ///
+    /// `CALL_CTOR name [argc]`：对象已由 `NEW_OBJECT` 分配（接收者在栈上、
+    /// 实参之下），构造器函数以 `"类名.ctor"`（或 `"类名." + name`）注册，
+    /// self 为首参。解析失败退让旧路径。
+    private fun callCtor(ctorName: String): Unit {
+        var argc: Int = 0
+        if (this.argCountOf() >= 2) {
+            argc = VmOps.toI32(this.argStrOf(1))
+        }
+        val cls: String = this.receiverClassAt(argc)
+        if (cls != "") {
+            var resolved: String = cls + "." + ctorName
+            if (this.funcParamCount(resolved) < 0 && this.funcOffset(resolved) == 0 && ctorName == cls) {
+                resolved = cls + ".new"
+            }
+            if (this.funcParamCount(resolved) >= 0 || this.funcOffset(resolved) != 0) {
+                this.callOrBuiltin(resolved, argc + 1)
+                return
+            }
+        }
+        // 退让：遗留行为
+        this.callOrBuiltin(ctorName, 0)
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  闭包
+    // ═══════════════════════════════════════════════════════════
+
+    /// 加载闭包（遗留文本格式：`LOAD_CLOSURE "funcName|varNames"`）。
+    ///
+    /// varNames 在文本模式下无 name→slot 映射可解析，按 0 捕获处理；
+    /// 捕获语义由 `MAKE_CLOSURE name nCaptures`（弹栈捕获）承担。
+    private fun loadClosure(closureData: String): Unit {
+        val parts: List<String> = VmOps.split(closureData, "|")
+        if (parts.size >= 1) {
+            this.makeClosure(parts.get(0), parts)
+        }
+    }
+
+    /// 创建闭包（P1.3）。
+    ///
+    /// `MAKE_CLOSURE funcName [nCaptures]`：带 nCaptures 时从栈顶弹出
+    /// nCaptures 个值作为捕获（按压入顺序存为 upvalue 0..n-1）；
+    /// 无第二个操作数时为 0 捕获（遗留 .auc 路径兼容）。
+    /// 压入 closureId（Int），`CALL_CLOSURE` 按其调用。
+    private fun makeClosure(funcName: String): Unit {
+        var n: Int = 0
+        if (this.argCountOf() >= 2) {
+            n = VmOps.toI32(this.argStrOf(1))
+        }
+        val caps: List<Any> = arrayListOf<Any>()
+        if (n > 0) {
+            // 栈顶在下，弹出顺序与压入相反：先收进临时表再反转
+            val tmp: List<Any> = arrayListOf<Any>()
+            var i: Int = 0
+            while (i < n) {
+                tmp.add(this.stack.pop())
+                i = i + 1
+            }
+            var j: Int = n - 1
+            while (j >= 0) {
+                caps.add(tmp.get(j))
+                j = j - 1
+            }
+        }
+        val closureId: Int = this.nextClosureId
+        this.nextClosureId = this.nextClosureId + 1
+        this.closureTable.put(closureId, funcName)
+        this.closureCaptures.put(closureId, caps)
+        this.upvalueTotal = this.upvalueTotal + n
+        this.stack.push(closureId)
+    }
+
+    /// 调用闭包（P1.3）。
+    ///
+    /// `CALL_CLOSURE [argc]`：栈序 closureId 在下、argc 个实参在其上
+    /// （与 CALL 一致）。argc 省略时按目标函数参数个数推导（兼容旧路径
+    /// 的无参调用）。调用期间 currentClosure 指向该闭包，函数体内的
+    /// LOAD_UPVALUE/STORE_UPVALUE 按此寻址。
+    private fun callClosureAt(): Unit {
+        var argc: Int = 0
+        if (this.argCountOf() >= 1) {
+            argc = VmOps.toI32(this.argStrOf(0))
+        }
+        if (this.stack.size() < argc + 1) {
+            this.error = "CALL_CLOSURE: stack underflow"
+            this.running = false
+            return
+        }
+        // 先摘出实参再取 closureId，然后按原顺序压回实参
+        val argVals: List<Any> = arrayListOf<Any>()
+        var i: Int = 0
+        while (i < argc) {
+            argVals.add(this.stack.pop())
+            i = i + 1
+        }
+        val closureIdAny: Any = this.stack.pop()
+        val cid: Int = VmOps.toI32(toStr(closureIdAny))
+        val funcName: String = this.closureTable.getOrDefault(cid, "")
+        if (funcName == "") {
+            this.error = "Invalid closure id: " + toStr(cid)
+            this.running = false
+            return
+        }
+        if (argc > 0) {
+            var j: Int = argc - 1
+            while (j >= 0) {
+                this.stack.push(argVals.get(j))
+                j = j - 1
+            }
+        }
+        this.currentClosure = cid
+        this.callOrBuiltin(funcName, argc)
+    }
+
+    /// 读取当前闭包的第 idx 个 upvalue（P1.3）。
+    private fun loadUpvalue(idx: Int): Unit {
+        if (this.currentClosure < 0) {
+            this.error = "LOAD_UPVALUE: no closure context"
+            this.running = false
+            return
+        }
+        val caps: List<Any> = this.closureCaptures.getOrDefault(this.currentClosure, arrayListOf<Any>())
+        if (idx < 0 || idx >= caps.size()) {
+            this.error = "LOAD_UPVALUE: index " + toStr(idx) + " out of range"
+            this.running = false
+            return
+        }
+        this.stack.push(caps.get(idx))
+    }
+
+    /// 原位改写当前闭包的第 idx 个 upvalue（P1.3，闭包间共享可变状态）。
+    private fun storeUpvalue(idx: Int): Unit {
+        if (this.currentClosure < 0) {
+            this.error = "STORE_UPVALUE: no closure context"
+            this.running = false
+            return
+        }
+        val caps: List<Any> = this.closureCaptures.getOrDefault(this.currentClosure, arrayListOf<Any>())
+        if (idx < 0 || idx >= caps.size()) {
+            this.error = "STORE_UPVALUE: index " + toStr(idx) + " out of range"
+            this.running = false
+            return
+        }
+        val v: Any = this.stack.pop()
+        caps.set(idx, v)
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  类型检查
+    // ═══════════════════════════════════════════════════════════
+
+    // ═══════════════════════════════════════════════════════════
+    //  类型检查（P1.2：对象值沿类继承链判定）
+    // ═══════════════════════════════════════════════════════════
+
+    private fun instanceOf(typeName: String): Unit {
+        val v: Any = this.stack.pop()
+        // 对象值：沿类继承链匹配（is-a 语义）
+        val objCls: String = this.heapObjectClass(v)
+        if (objCls != "") {
+            this.stack.push(this.classIsA(objCls, typeName))
+            return
+        }
+        this.stack.push(VmOps.typeName(v) == typeName)
+    }
+
+    private fun checkCast(typeName: String): Unit {
+        val v: Any = this.stack.pop()
+        if (v == null) {
+            this.stack.push(v)
+            return
+        }
+        val objCls: String = this.heapObjectClass(v)
+        var ok: Boolean = false
+        if (objCls != "") {
+            ok = this.classIsA(objCls, typeName)
+        } else {
+            ok = VmOps.typeName(v) == typeName
+        }
+        if (ok) {
+            this.stack.push(v)
+        } else {
+            this.error = "CheckCast failed: " + VmOps.typeName(v) + " is not " + typeName
+            this.running = false
+        }
+    }
+
+    private fun cast(typeName: String): Unit {
+        // 运行时类型转换（简化：直接压回原值）
+        val v: Any = this.stack.pop()
+        this.stack.push(v)
+    }
+
+    private fun checkType(typeName: String): Unit {
+        val v: Any = this.stack.pop()
+        this.stack.push(VmOps.typeName(v) == typeName)
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  ARC 生命周期
+    // ═══════════════════════════════════════════════════════════
+
+    // ARC 生命周期：基于堆对象头引用计数（offset 8 = u32 refcount）。
+    //
+    // 安全前提：编译器**仅**对引用类型（对象/集合/闭包）发射 ARC 指令。
+    // 但 VM 仍做**防御性类型检查**——若栈顶不是 Long 指针，直接透传
+    // （`typeName` 区分 Int/String/Float/Boolean 等装箱值）。
+    //
+    // 对象布局（与 `newObject` / `boxAlloc` 一致）：
+    //   offset 0..7   : 类型标签 / 值载荷 (u64)
+    //   offset 8..11  : 引用计数 (u32)
+    //   offset 12..15 : 保留
+
+    // ═══════════════════════════════════════════════════════════
+    //  堆分配注册表（P1.5）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 登记一个堆分配（栈顶值即句柄；键取 toStrAny 形态）。
+    private fun registerHeapTop(kind: String): Unit {
+        this.heapKinds.put(VmOps.toStrAny(this.stack.peek()), kind)
+    }
+
+    /// 释放注册过的堆块（按 kind 释放其内层数组并摘除登记/侧表）。
+    ///
+    /// 容器（list/map/array）布局与 `aura.lang.collection.Collections` 兼容、
+    /// 头部无引用计数字段，采用「丢弃即释放」语义；别名容器重复 DEC_REF
+    /// 会双重释放 —— 已知限制，等价 Rust VM 的即时回收行为（heap.rs）。
+    private fun freeRegistered(ptrKey: String, kind: String): Unit {
+        val ptr: Long = VmOps.toI64(ptrKey)
+        if (ptr == 0L) { return }
+        if (kind == "list") {
+            val items: Long = Memory.read64(ptr + 16)
+            if (items != 0L) { Memory.free(items) }
+            Memory.free(ptr)
+        } else if (kind == "map") {
+            val keys: Long = Memory.read64(ptr + 16)
+            val vals: Long = Memory.read64(ptr + 24)
+            if (keys != 0L) { Memory.free(keys) }
+            if (vals != 0L) { Memory.free(vals) }
+            Memory.free(ptr)
+        } else if (kind == "array") {
+            val items: Long = Memory.read64(ptr + 16)
+            if (items != 0L) { Memory.free(items) }
+            Memory.free(ptr)
+        } else {
+            // object / box / mutex / atomic / channel / rwlock / condvar：单块内存
+            Memory.free(ptr)
+        }
+        this.heapKinds.remove(ptrKey)
+        if (kind == "object") {
+            this.objectFields.remove(ptrKey)
+            this.objectClass.remove(ptrKey)
+        } else if (kind == "box") {
+            this.boxValues.remove(ptrKey)
+        }
+    }
+
+    /// 活跃堆对象计数（P1.5 泄漏检测：长循环创建/销毁后应归零）。
+    fun getActiveHeapObjects(): Int {
+        return this.heapKinds.getSize()
+    }
+
+    /// 当前调用深度（主帧为 1）。
+    fun getCallDepth(): Int {
+        return this.callStack.size() + 1
+    }
+
+    /// 递增引用计数。
+    ///
+    /// 仅对带引用计数头的堆块生效（object/box，rc 位于 offset 8）；
+    /// 其余注册类型（容器/资源）无 rc 字段，为 no-op。
+    private fun incRef(): Unit {
+        val v: Any = this.stack.pop()
+        if (v == null || !VmOps.isNumeric(v)) {
+            this.stack.push(v)
+            return
+        }
+        // Plan A 装箱整数绝不可能是注册堆对象，直接透传（免 toStrAny 键分配）。
+        if (VmOps.isTaggedInt(v)) {
+            this.stack.push(v)
+            return
+        }
+        val key: String = VmOps.toStrAny(v)
+        val kind: String = this.heapKinds.getOrDefault(key, "")
+        if (kind == "object" || kind == "box") {
+            val ptr: Long = VmOps.toI64(key)
+            if (ptr > 0) {
+                val rc: Int = Memory.read32(ptr + 8)
+                if (rc > 0) {
+                    Memory.write32(ptr + 8, rc + 1)
+                }
+            }
+        }
+        this.stack.push(v)
+    }
+
+    /// 递减引用计数，归零时按类型释放堆内存（P1.5）。
+    private fun decRef(): Unit {
+        val v: Any = this.stack.pop()
+        if (v == null || !VmOps.isNumeric(v)) {
+            this.stack.push(null)
+            return
+        }
+        // 同 incRef：装箱整数透传，零分配。
+        if (VmOps.isTaggedInt(v)) {
+            this.stack.push(v)
+            return
+        }
+        val key: String = VmOps.toStrAny(v)
+        val kind: String = this.heapKinds.getOrDefault(key, "")
+        if (kind == "") {
+            // 未注册值（整数/字符串/裸指针外值）：透传
+            this.stack.push(v)
+            return
+        }
+        if (kind == "object" || kind == "box") {
+            val ptr: Long = VmOps.toI64(key)
+            val rc: Int = Memory.read32(ptr + 8)
+            val newRc: Int = rc - 1
+            if (newRc <= 0) {
+                this.freeRegistered(key, kind)
+                this.stack.push(null)
+            } else {
+                Memory.write32(ptr + 8, newRc)
+                this.stack.push(v)
+            }
+        } else {
+            // 容器/资源：丢弃即释放
+            this.freeRegistered(key, kind)
+            this.stack.push(null)
+        }
+    }
+
+    /// 保留（别名 incRef，语义更显式）。
+    private fun retain(): Unit {
+        this.incRef()
+    }
+
+    /// 释放（别名 decRef，语义更显式）。
+    private fun release(): Unit {
+        this.decRef()
+    }
+
+    /// 丢弃引用：弹出并按注册类型回收（P1.5）。
+    private fun dropRef(): Unit {
+        val v: Any = this.stack.pop()
+        if (v == null || !VmOps.isNumeric(v)) {
+            return
+        }
+        // 同 incRef：装箱整数透传，零分配。
+        if (VmOps.isTaggedInt(v)) {
+            return
+        }
+        val key: String = VmOps.toStrAny(v)
+        val kind: String = this.heapKinds.getOrDefault(key, "")
+        if (kind == "") {
+            return
+        }
+        if (kind == "object" || kind == "box") {
+            val ptr: Long = VmOps.toI64(key)
+            val rc: Int = Memory.read32(ptr + 8)
+            if (rc > 0) {
+                val newRc: Int = rc - 1
+                if (newRc <= 0) {
+                    this.freeRegistered(key, kind)
+                } else {
+                    Memory.write32(ptr + 8, newRc)
+                }
+            }
+        } else {
+            this.freeRegistered(key, kind)
+        }
+    }
+
+    /// 创建弱引用（不增加引用计数，返回原指针值）。
+    private fun weakRef(): Unit {
+        val v: Any = this.stack.pop()
+        this.stack.push(v)
+    }
+
+    /// 弱引用升级（P1.5 真弱引用）：仅当对象仍在堆注册表中存活时升级成功
+    /// （object/box 引用计数 +1 并返回原值）；已释放的块已被摘除登记，
+    /// 一律返回 null——不再有「读已释放内存的 rc」的未定义行为。
+    private fun weakGet(): Unit {
+        val v: Any = this.stack.pop()
+        if (v == null || !VmOps.isNumeric(v)) {
+            this.stack.push(v)
+            return
+        }
+        val key: String = VmOps.toStrAny(v)
+        val kind: String = this.heapKinds.getOrDefault(key, "")
+        if (kind == "object" || kind == "box") {
+            val ptr: Long = VmOps.toI64(key)
+            val rc: Int = Memory.read32(ptr + 8)
+            if (rc > 0) {
+                Memory.write32(ptr + 8, rc + 1)
+                this.stack.push(v)
+                return
+            }
+        }
+        this.stack.push(null)
+    }
+
+    /// 装箱分配（P1.1 类型感知；24 字节头：tag@0 / rc@8 / value@16）。
+    ///
+    /// 数值装箱值直接写 value 槽；非数值（字符串等句柄值）写裸内存会截断，
+    /// 存入 `boxValues` 侧表（键 = objPtr 的 toStrAny 形态）。
+    private fun boxAlloc(): Unit {
+        val v: Any = this.stack.pop()
+        val ptr: Long = Memory.alloc(24)
+        Memory.write32(ptr + 8, 1)  // 初始引用计数 = 1
+        if (v == null) {
+            Memory.write64(ptr, 0)          // tag 0 = Null
+            Memory.write64(ptr + 16, 0)
+        } else if (VmOps.typeName(v) == "Int" || VmOps.typeName(v) == "Long") {
+            Memory.write64(ptr, 1)          // tag 1 = 整数
+            Memory.write64(ptr + 16, VmOps.toI64(VmOps.toStrAny(v)))
+        } else {
+            Memory.write64(ptr, 3)          // tag 3 = 托管侧表值（字符串/对象句柄等）
+            this.boxValues.put(VmOps.toStrAny(ptr), v)
+        }
+        this.stack.push(ptr)
+        this.heapKinds.put(VmOps.toStrAny(this.stack.peek()), "box")
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  协程（D5：已废弃，2026-10-01）
+    //
+    //  原 Yield/NewCoroutine/ResumeCoroutine 桩实现已随 P0.4 分派器重构
+    //  移除（ADR-001：协程指令不进入指令集；并发模型仅保留 Actor，P3.3）。
+    //  suspend()/resume() 仅保留为挂起/恢复执行的公共接口。
+    // ═══════════════════════════════════════════════════════════
+
+    // ═══════════════════════════════════════════════════════════
+    //  FFI
+    // ═══════════════════════════════════════════════════════════
+
+    private fun callC(idx: Int): Unit {
+        // C ABI 函数调用。
+        //
+        // `.auc` 路径中，AucLoader 已将 CALL_C 转为 CALL_NATIVE_ARGS（按名分派），
+        // 此方法仅用于文本字节码直接生成的 CALL_C 指令。
+        // 完整的 C FFI 需要 VM 持有原生函数指针表，当前以清晰错误退让。
+        this.error = "CallC: index=" + toStr(idx)
+            + " (native function table not loaded; use .auc path via AucLoader)"
+        this.running = false
+    }
+
+    private fun callNative(idx: Int): Unit {
+        // 原生函数调用（按索引）。
+        //
+        // `.auc` 路径中，AucLoader 已将 CALL_NATIVE(27) 转为 CALL_NATIVE_ARGS
+        // 并将原生表下标解析为函数名，由 callOrBuiltin 按名分派。
+        // 此方法仅用于文本字节码直接生成的 CALL_NATIVE 指令。
+        this.error = "CallNative: index=" + toStr(idx)
+            + " (native function table not loaded; .auc files are handled by AucLoader)"
+        this.running = false
+    }
+
+    private fun cstring(): Unit {
+        val v: Any = this.stack.pop()
+        // 转换为 C 字符串（简化：直接返回字符串指针表示）
+        this.stack.push(v)
+    }
+
+    private fun readCstr(): Unit {
+        val ptr: Any = this.stack.pop()
+        // 从 C 字符串指针读取（简化：返回原值）
+        this.stack.push(ptr)
+    }
+
+    private fun ptrIsNull(): Unit {
+        val ptr: Any = this.stack.pop()
+        val val = VmOps.toI64(toStr(ptr))
+        this.stack.push(val == 0)
+    }
+
+    private fun ptrToInt(): Unit {
+        val ptr: Any = this.stack.pop()
+        this.stack.push(VmOps.toI32(toStr(VmOps.toI64(toStr(ptr)))))
+    }
+
+    private fun intToPtr(): Unit {
+        val v: Any = this.stack.pop()
+        this.stack.push(VmOps.toI64(toStr(v)))
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  异常处理
+    // ═══════════════════════════════════════════════════════════
+
+    // ═══════════════════════════════════════════════════════════
+    //  异常处理（P1.4：类型过滤 / 多级过滤 / 帧截断 / 字符串自动包装）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 压入异常处理器。
+    ///
+    /// `PUSH_HANDLER target slot catchType`；记录条目
+    /// `target|ip|slot|catchType|frame`（slot = catch 后异常值的落槽，-1 = 不落槽）。
+    private fun pushHandlerAt(): Unit {
+        val target: String = this.argStrOf(0)
+        var slot: String = "-1"
+        if (this.argCountOf() >= 2) { slot = this.argStrOf(1) }
+        var catchType: String = ""
+        if (this.argCountOf() >= 3) { catchType = this.argStrOf(2) }
+        this.handlerStack.push(target + "|" + toStr(this.ip) + "|" + slot + "|" + catchType
+            + "|" + toStr(this.currentFrame))
+    }
+
+    private fun popHandler(): Unit {
+        if (this.handlerStack.size() > 0) {
+            this.handlerStack.pop()
+        }
+    }
+
+    /// 异常值是否命中 catch 类型过滤器（P1.4）。
+    ///
+    /// 匹配规则：
+    ///   * catchType 为 "" / "Any"：匹配一切；
+    ///   * 异常值为注册对象：沿其类继承链匹配（子类实例可被父类 catch）；
+    ///   * 异常值为字符串：视为自动包装的 Exception（匹配 "Exception"/"String"）；
+    ///   * 其他内置类型：按 `typeName` 精确匹配。
+    private fun exceptionMatches(ex: Any, catchType: String): Boolean {
+        if (catchType == "" || catchType == "Any") { return true }
+        if (ex == null) { return catchType == "Null" }
+        val objCls: String = this.heapObjectClass(ex)
+        if (objCls != "") {
+            return this.classIsA(objCls, catchType)
+        }
+        val tn: String = VmOps.typeName(ex)
+        if (tn == "String") {
+            // 字符串消息自动包装为 Exception（Rust VM interp.rs 的 auto-wrap 语义）
+            return catchType == "Exception" || catchType == "String"
+        }
+        return tn == catchType
+    }
+
+    private fun throwException(): Unit {
+        val ex: Any = if (this.stack.size() > 0) this.stack.pop() else "Exception"
+
+        // 自内向外逐层过滤（P1.4 多级过滤：内层不匹配则继续外层）
+        while (this.handlerStack.size() > 0) {
+            val handler: String = this.handlerStack.peek()
+            this.handlerStack.pop()
+            val parts: List<String> = VmOps.split(handler, "|")
+            if (parts.size < 5) {
+                continue
+            }
+            val target: Int = VmOps.toI32(parts.get(0))
+            val slot: Int = VmOps.toI32(parts.get(2))
+            val catchType: String = parts.get(3)
+            val frame: Int = VmOps.toI32(parts.get(4))
+            if (!this.exceptionMatches(ex, catchType)) {
+                continue
+            }
+            // 帧截断：丢弃 handler 之上（含当前）的调用帧，恢复到 handler 帧
+            while (this.currentFrame > frame && this.callStack.size() > 0) {
+                this.currentClosure = this.callStack.peekClosure()
+                this.callStack.pop()
+                this.locals = this.popSavedLocals()
+                this.currentFrame = this.currentFrame - 1
+            }
+            // 异常值落槽（若 handler 指定）并压栈
+            if (slot >= 0) {
+                this.locals.putSlot(slot, ex)
+            }
+            this.stack.push(ex)
+            this.ip = target
+            return
+        }
+
+        // 没有处理器，终止 VM
+        this.error = "Uncaught exception: " + VmOps.toStrAny(ex)
+        this.running = false
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  并发（完整实现：线程 / 互斥锁 / 原子 / 通道 / 读写锁 / 条件变量）
+    // ═══════════════════════════════════════════════════════════
+    //
+    // 实现分层：
+    //   * 线程操作委托到 `ThreadOps`（native 桥）
+    //   * 自旋锁/原子操作使用 `Cpu.atomicAdd`（lock xaddq）
+    //   * 数据结构与状态管理在 Aura 中完成
+    //
+    // 与 `aura.lang.concurrent.*` 模块对应：
+    //   ThreadOps ←→ Thread; Mutex.*; Atomic.*; RwLock.*; Condvar.*
+    // ═══════════════════════════════════════════════════════════
+
+    /// 自旋获取：`fetch_add(1)` 返回 0 则获得锁。
+    private fun vmSpinAcquire(word: Long): Unit {
+        while (true) {
+            if (Cpu.atomicAdd(word, 1L) == 0L) { return }
+            Cpu.atomicAdd(word, 0L - 1L)
+        }
+    }
+
+    /// 自旋释放：`fetch_add(-1)`。
+    private fun vmSpinRelease(word: Long): Unit {
+        Cpu.atomicAdd(word, 0L - 1L)
+    }
+
+    // ── 线程 ──
+
+    private fun threadSpawn(): Unit {
+        val arg: Any = this.stack.pop()
+        val fnId: Any = this.stack.pop()
+        val handle: Int = ThreadOps.create(
+            VmOps.toI32(toStr(fnId)), VmOps.toI32(toStr(arg)))
+        this.stack.push(handle)
+    }
+
+    private fun threadJoin(): Unit {
+        val tid: Any = this.stack.pop()
+        val result: Int = ThreadOps.join(VmOps.toI32(toStr(tid)))
+        this.stack.push(result)
+    }
+
+    private fun threadSleep(): Unit {
+        val ms: Any = this.stack.pop()
+        ThreadOps.sleepMs(VmOps.toI32(toStr(ms)))
+    }
+
+    private fun threadId(): Unit {
+        this.stack.push(ThreadOps.currentId())
+    }
+
+    private fun threadParallelism(): Unit {
+        this.stack.push(ThreadOps.cores())
+    }
+
+    // ── 互斥锁（自旋锁，8 字节锁字） ──
+
+    private fun mutexNew(): Unit {
+        val addr: Long = Memory.alloc(8L)
+        Memory.write64(addr, 0L)
+        this.stack.push(addr)
+    }
+
+    private fun mutexLock(): Unit {
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        while (true) {
+            if (Cpu.atomicAdd(addr, 1L) == 0L) { return }
+            Cpu.atomicAdd(addr, 0L - 1L)
+        }
+    }
+
+    private fun mutexTryLock(): Unit {
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        if (Cpu.atomicAdd(addr, 1L) == 0L) {
+            this.stack.push(true)
+        } else {
+            Cpu.atomicAdd(addr, 0L - 1L)
+            this.stack.push(false)
+        }
+    }
+
+    private fun mutexUnlock(): Unit {
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        Cpu.atomicAdd(addr, 0L - 1L)
+    }
+
+    // ── 原子整数（16 字节：值 + CAS 守卫） ──
+
+    private fun atomicNew(): Unit {
+        val initial: Any = this.stack.pop()
+        val addr: Long = Memory.alloc(16L)
+        Memory.write64(addr, VmOps.toI64(toStr(initial)))
+        Memory.write64(addr + 8L, 0L)
+        this.stack.push(addr)
+    }
+
+    private fun atomicLoad(): Unit {
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        this.stack.push(Memory.read64(addr))
+    }
+
+    private fun atomicStore(): Unit {
+        val value: Any = this.stack.pop()
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        Memory.write64(addr, VmOps.toI64(toStr(value)))
+    }
+
+    private fun atomicAdd(): Unit {
+        val delta: Any = this.stack.pop()
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        this.stack.push(Cpu.atomicAdd(addr, VmOps.toI64(toStr(delta))))
+    }
+
+    private fun atomicCas(): Unit {
+        val desired: Any = this.stack.pop()
+        val expected: Any = this.stack.pop()
+        val base: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val guard: Long = base + 8L
+        val expVal: Long = VmOps.toI64(toStr(expected))
+        val desVal: Long = VmOps.toI64(toStr(desired))
+        vmSpinAcquire(guard)
+        val ok: Boolean = Memory.read64(base) == expVal
+        if (ok) { Memory.write64(base, desVal) }
+        vmSpinRelease(guard)
+        this.stack.push(ok)
+    }
+
+    // ── 通道（32B 头 + cap×8B 环形缓冲区） ──
+
+    private fun channelNew(): Unit {
+        val cap: Any = this.stack.pop()
+        var capacity: Long = VmOps.toI32(toStr(cap)) as Long
+        if (capacity <= 0L) { capacity = 64L }
+        val addr: Long = Memory.alloc(32L + capacity * 8L)
+        Memory.write64(addr, 0L)
+        Memory.write64(addr + 8L, 0L)
+        Memory.write64(addr + 16L, capacity)
+        Memory.write64(addr + 24L, 0L)
+        this.stack.push(addr)
+    }
+
+    private fun channelSend(): Unit {
+        val value: Any = this.stack.pop()
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val valueRaw: Long = VmOps.toI64(toStr(value))
+        val capacity: Long = Memory.read64(addr + 16L)
+        while (true) {
+            vmSpinAcquire(addr + 24L)
+            val head: Long = Memory.read64(addr)
+            val tail: Long = Memory.read64(addr + 8L)
+            if (head - tail < capacity) {
+                Memory.write64(addr + 32L + (head % capacity) * 8L, valueRaw)
+                Memory.write64(addr, head + 1L)
+                vmSpinRelease(addr + 24L)
+                return
+            }
+            vmSpinRelease(addr + 24L)
+            ThreadOps.sleepMs(1)
+        }
+    }
+
+    private fun channelRecv(): Unit {
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val capacity: Long = Memory.read64(addr + 16L)
+        while (true) {
+            vmSpinAcquire(addr + 24L)
+            val head: Long = Memory.read64(addr)
+            val tail: Long = Memory.read64(addr + 8L)
+            if (head > tail) {
+                val val: Long = Memory.read64(addr + 32L + (tail % capacity) * 8L)
+                Memory.write64(addr + 8L, tail + 1L)
+                vmSpinRelease(addr + 24L)
+                this.stack.push(val)
+                return
+            }
+            vmSpinRelease(addr + 24L)
+            ThreadOps.sleepMs(1)
+        }
+    }
+
+    // ── 读写锁（24 字节：守卫 + 读者计数 + 写者标志） ──
+
+    private fun rwLockNew(): Unit {
+        val addr: Long = Memory.alloc(24L)
+        Memory.write64(addr, 0L)
+        Memory.write64(addr + 8L, 0L)
+        Memory.write64(addr + 16L, 0L)
+        this.stack.push(addr)
+    }
+
+    private fun rwLockReadLock(): Unit {
+        val guard: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val readers: Long = guard + 8L
+        val writer: Long = guard + 16L
+        while (true) {
+            vmSpinAcquire(guard)
+            if (Memory.read64(writer) == 0L) {
+                Memory.write64(readers, Memory.read64(readers) + 1L)
+                vmSpinRelease(guard)
+                return
+            }
+            vmSpinRelease(guard)
+        }
+    }
+
+    private fun rwLockWriteLock(): Unit {
+        val guard: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val readers: Long = guard + 8L
+        val writer: Long = guard + 16L
+        while (true) {
+            vmSpinAcquire(guard)
+            if (Memory.read64(readers) == 0L && Memory.read64(writer) == 0L) {
+                Memory.write64(writer, 1L)
+                vmSpinRelease(guard)
+                return
+            }
+            vmSpinRelease(guard)
+        }
+    }
+
+    private fun rwLockReadUnlock(): Unit {
+        val guard: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val readers: Long = guard + 8L
+        vmSpinAcquire(guard)
+        Memory.write64(readers, Memory.read64(readers) - 1L)
+        vmSpinRelease(guard)
+    }
+
+    private fun rwLockWriteUnlock(): Unit {
+        val guard: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val writer: Long = guard + 16L
+        vmSpinAcquire(guard)
+        Memory.write64(writer, 0L)
+        vmSpinRelease(guard)
+    }
+
+    // ── 条件变量（16 字节：守卫 + 代数计数器） ──
+
+    private fun condvarNew(): Unit {
+        val addr: Long = Memory.alloc(16L)
+        Memory.write64(addr, 0L)
+        Memory.write64(addr + 8L, 0L)
+        this.stack.push(addr)
+    }
+
+    private fun condvarWait(): Unit {
+        val mutexId: Any = this.stack.pop()
+        val cvId: Any = this.stack.pop()
+        val guard: Long = VmOps.toI64(toStr(cvId))
+        val gen: Long = guard + 8L
+        vmSpinAcquire(guard)
+        val observed: Long = Memory.read64(gen)
+        vmSpinRelease(guard)
+        val mutexAddr: Long = VmOps.toI64(toStr(mutexId))
+        Cpu.atomicAdd(mutexAddr, 0L - 1L)
+        while (Memory.read64(gen) == observed) {
+            // 自旋等待 signal / broadcast
+        }
+        Cpu.atomicAdd(mutexAddr, 1L)
+    }
+
+    private fun condvarSignal(): Unit {
+        val guard: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val gen: Long = guard + 8L
+        vmSpinAcquire(guard)
+        Memory.write64(gen, Memory.read64(gen) + 1L)
+        vmSpinRelease(guard)
+    }
+
+    private fun condvarBroadcast(): Unit {
+        this.condvarSignal()
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  枚举
+    // ═══════════════════════════════════════════════════════════
+
+    private fun enumConstruct(tagName: String): Unit {
+        val tag: Any = this.stack.pop()
+        // 枚举构造：压入标签值
+        this.stack.push(tag)
+    }
+
+    private fun enumTag(): Unit {
+        // 获取枚举变体索引（简化：直接返回栈顶值）
+        // 不弹出，直接返回
+    }
+
+    private fun makeFnRef(funcName: String): Unit {
+        // 创建函数引用：压入**函数表下标（Int）**，与 Rust VM 一致。
+        //
+        // `MAKE_FN_REF` 的唯一消费者是 `Thread.spawn(fn, arg)` / `Future.spawn`，
+        // 原生 `ThreadOps.create(fnId, arg)` 以整数取函数下标（见 `threadSpawn`）。
+        // 原实现压入**函数名字符串**，`toI32` 解析失败得 0 → 新线程恒执行函数 #0。
+        this.stack.push(VmOps.toI32(funcName))
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  跨模块
+    // ═══════════════════════════════════════════════════════════
+
+    private fun callExport(symName: String): Unit {
+        this.callOrBuiltin(symName, 0)
+    }
+
+    private fun callExternal(modIdx: String, symIdx: String): Unit {
+        // CALL_EXTERNAL(modIdx, symIdx)：
+        // modIdx 是导入表下标，symIdx 未使用（导入表已含目标符号名）。
+        // 导入表格式：每行 `name|module|symbol|funcIdx`
+        //
+        // 语义（对应 Rust `interp.rs` 的 CallExternal）：
+        //   1. 从导入表查找 modIdx 对应的导入条目
+        //   2. 从导入条目获取 module 和 symbol 名称
+        //   3. 在当前模块的导出表中查找该符号（同模块自引用场景）
+        //   4. 若找到，按 funcIdx 调用；否则退让为错误
+        val importIdx: Int = VmOps.toI32(modIdx)
+        val importEntry: String = lookupImport(importIdx)
+        if (importEntry == "") {
+            this.error = "CallExternal: import index " + modIdx + " out of range"
+            this.running = false
+            return
+        }
+        // 解析导入表条目：name|module|symbol|funcIdx
+        val parts: List<String> = splitPipe(importEntry)
+        if (parts.size < 4) {
+            this.error = "CallExternal: malformed import entry: " + importEntry
+            this.running = false
+            return
+        }
+        val targetSymbol: String = parts.get(2)
+        val localFuncIdxStr: String = parts.get(3)
+        val localFuncIdx: Int = VmOps.toI32(localFuncIdxStr)
+
+        // 尝试从导出表查找目标符号（同模块场景）
+        val exportEntry: String = lookupExportByName(targetSymbol)
+        if (exportEntry != "") {
+            val expParts: List<String> = splitPipe(exportEntry)
+            if (expParts.size >= 2) {
+                val expFuncIdx: Int = VmOps.toI32(expParts.get(1))
+                // 通过函数表按索引调用
+                val funcName: String = findFuncNameByIndex(expFuncIdx)
+                if (funcName != "") {
+                    this.callOrBuiltin(funcName, 0)
+                    return
+                }
+            }
+        }
+
+        // 退让：尝试直接用导入条目的 funcIdx 作为全局函数索引
+        if (localFuncIdx >= 0) {
+            val fallbackName: String = findFuncNameByIndex(localFuncIdx)
+            if (fallbackName != "") {
+                this.callOrBuiltin(fallbackName, 0)
+                return
+            }
+        }
+
+        // P2.3：符号名直呼 —— 种子编译器把 import 内联进同一 `.auc`
+        //（`resolve_aura_imports`），导入符号在本模块函数表中即为目标实现。
+        if (this.funcParamCount(targetSymbol) >= 0 || this.funcOffset(targetSymbol) != 0) {
+            val directArgc: Int = this.funcParamCount(targetSymbol)
+            this.callOrBuiltin(targetSymbol, if (directArgc < 0) 0 else directArgc)
+            return
+        }
+
+        // P2.3：模块注册表查询（已登记模块的导出符号诊断）
+        val regExports: String = this.loadedModuleExports.getOrDefault(parts.get(1), "")
+        if (regExports != "") {
+            val regEntry: String = this.lookupExportIn(regExports, targetSymbol)
+            if (regEntry != "") {
+                this.error = "CallExternal: module=" + parts.get(1)
+                    + " symbol=" + targetSymbol
+                    + " (registered but its code is not loaded into this VM instance)"
+            } else {
+                this.error = "CallExternal: module=" + parts.get(1)
+                    + " symbol=" + targetSymbol + " (registered module lacks this symbol)"
+            }
+        } else {
+            this.error = "CallExternal: module=" + parts.get(1)
+                + " symbol=" + targetSymbol
+                + " (cross-module linking requires loaded module registry)"
+        }
+        this.running = false
+    }
+
+    /// 在导出表文本（每行 `name|funcIdx`）中查找符号（P2.3 注册表辅助）。
+    private fun lookupExportIn(exportsText: String, symName: String): String {
+        if (exportsText == "" || symName == "") { return "" }
+        var pos: Int = 0
+        var len: Int = exportsText.length
+        while (pos < len) {
+            val nl: Int = indexOfChar(exportsText, pos, 10)
+            val end: Int = if (nl >= 0) nl else len
+            val line: String = exportsText.substring(pos, end)
+            pos = end + 1
+            val pipe: Int = indexOfChar(line, 0, 124)
+            if (pipe > 0 && line.substring(0, pipe) == symName) {
+                return line
+            }
+        }
+        return ""
+    }
+
+    /// 登记已加载模块的导出表（P2.3 ModuleRegistry；供跨模块诊断/解析）。
+    fun registerLoadedModule(moduleName: String, exportsText: String): Unit {
+        this.loadedModuleExports.put(moduleName, exportsText)
+    }
+
+    /// 在导入表中按索引查找条目（格式 `name|module|symbol|funcIdx`）。
+    private fun lookupImport(idx: Int): String {
+        if (this.importsTable == "" || idx < 0) { return "" }
+        var lineIdx: Int = 0
+        var pos: Int = 0
+        var len: Int = this.importsTable.length
+        while (pos < len) {
+            val nl: Int = indexOfChar(this.importsTable, pos, 10)
+            val end: Int = if (nl >= 0) nl else len
+            val line: String = this.importsTable.substring(pos, end)
+            pos = end + 1
+            if (lineIdx == idx) {
+                return line
+            }
+            lineIdx = lineIdx + 1
+        }
+        return ""
+    }
+
+    /// 在导出表中按符号名查找条目（格式 `name|funcIdx`）。
+    private fun lookupExportByName(symName: String): String {
+        if (this.exportsTable == "" || symName == "") { return "" }
+        var pos: Int = 0
+        var len: Int = this.exportsTable.length
+        while (pos < len) {
+            val nl: Int = indexOfChar(this.exportsTable, pos, 10)
+            val end: Int = if (nl >= 0) nl else len
+            val line: String = this.exportsTable.substring(pos, end)
+            pos = end + 1
+            val pipe: Int = indexOfChar(line, 0, 124)
+            if (pipe > 0 && line.substring(0, pipe) == symName) {
+                return line
+            }
+        }
+        return ""
+    }
+
+    /// 按全局函数索引查找函数名（函数表行序 = 全局索引）。
+    private fun findFuncNameByIndex(idx: Int): String {
+        if (this.funcTable == "" || idx < 0) { return "" }
+        var lineIdx: Int = 0
+        var pos: Int = 0
+        var len: Int = this.funcTable.length
+        while (pos < len) {
+            val nl: Int = indexOfChar(this.funcTable, pos, 10)
+            val end: Int = if (nl >= 0) nl else len
+            val line: String = this.funcTable.substring(pos, end)
+            pos = end + 1
+            if (lineIdx == idx) {
+                val pipe: Int = indexOfChar(line, 0, 124)
+                if (pipe > 0) {
+                    return line.substring(0, pipe)
+                }
+                return line
+            }
+            lineIdx = lineIdx + 1
+        }
+        return ""
+    }
+
+    /// 在字符串中查找指定字符的下标（从 start 开始搜索），未找到返回 -1。
+    private fun indexOfChar(s: String, start: Int, ch: Int): Int {
+        var i: Int = start
+        val len: Int = s.length
+        while (i < len) {
+            if (s.charCodeAt(i) == ch) { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 按管道符分割字符串。
+    private fun splitPipe(s: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        var pos: Int = 0
+        var len: Int = s.length
+        while (pos < len) {
+            val pipe: Int = indexOfChar(s, pos, 124)
+            val end: Int = if (pipe >= 0) pipe else len
+            result.add(s.substring(pos, end))
+            pos = end + 1
+        }
+        return result
+    }
+
+    private fun callAot(funcName: String): Unit {
+        // AOT 调度：尝试按函数名分派（复用 callOrBuiltin），
+        // 若为未知函数则退让。
+        this.callOrBuiltin(funcName, 0)
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  字节码解析辅助
+    // ═══════════════════════════════════════════════════════════
+
+    /// 获取字节码行数。
+    private fun bytecodeLineCount(): Int {
+        var count: Int = 0
+        var i: Int = 0
+        var len: Int = this.bytecode.length
+        while (i < len) {
+            if (this.bytecode.charCodeAt(i) == 10) {
+                count = count + 1
+            }
+            i = i + 1
+        }
+        if (this.bytecode.length > 0 && this.bytecode.charCodeAt(this.bytecode.length - 1) != 10) {
+            count = count + 1
+        }
+        return count
+    }
+
+    /// 获取指定行的字节码。
+    private fun getBytecodeLine(lineIdx: Int): String {
+        var pos: Int = 0
+        var len: Int = this.bytecode.length
+        var lineStart: Int = 0
+        var cur: Int = 0
+
+        while (pos < len) {
+            val c: Int = this.bytecode.charCodeAt(pos)
+            if (c == 10) {
+                if (cur == lineIdx) {
+                    return VmOps.vmSubstr(this.bytecode, lineStart, pos - lineStart)
+                }
+                cur = cur + 1
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        if (cur == lineIdx) {
+            return VmOps.vmSubstr(this.bytecode, lineStart, len - lineStart)
+        }
+        return ""
+    }
+
+    /// 查找函数入口偏移（未找到返回 0）。
+    private fun funcOffset(funcName: String): Int {
+        var i: Int = 0
+        val n: Int = this.funcNamesL.size()
+        while (i < n) {
+            if (this.funcNamesL.get(i) == funcName) {
+                return this.funcOffL.get(i)
+            }
+            i = i + 1
+        }
+        return VmOps.findFuncOffset(this.funcTable, funcName)
+    }
+
+    /// 查找函数参数个数（未找到返回 -1）。
+    private fun funcParamCount(funcName: String): Int {
+        var i: Int = 0
+        val n: Int = this.funcNamesL.size()
+        while (i < n) {
+            if (this.funcNamesL.get(i) == funcName) {
+                return this.funcPcL.get(i)
+            }
+            i = i + 1
+        }
+        return VmOps.findFuncParamCount(this.funcTable, funcName)
+    }
+
+    /// 获取常量池中的值。
+    /// 算术融合白名单：与快速分派块的臂一一对应。
+    private fun isArithOp(op: Int): Boolean {
+        return op == 20 || op == 21 || op == 22
+    }
+
+    /// 装载期索引构建（方案 A2+E）：函数表 → 两张 HashMap；常量池 → 行缓存；
+    /// 指令参数 → 预解析 Int。装载完成后调用一次；执行路径零解析零分配。
+    private fun buildLoadCaches(): Unit {
+        this.funcNamesL = arrayListOf<String>()
+        this.funcOffL = arrayListOf<Int>()
+        this.funcPcL = arrayListOf<Int>()
+        // P338：funcTable 手工扫描循环在 photon 下崩溃（[BLC-ft] 前崩），
+        // 暂跳过——funcOffset/funcParamCount 走 VmOps.findFuncOffset/findFuncParamCount
+        // 现场解析（独立实现）。CALL 低频，性能可接受。
+        if (false) {
+        val ft: String = this.funcTable
+        var start: Int = 0
+        var i: Int = 0
+        val n: Int = ft.length
+        while (i < n) {
+            if (ft.charCodeAt(i) == 10) {
+                if (i > start) {
+                    val line: String = VmOps.vmSubstr(ft, start, i - start)
+                    val p1: Int = VmOps.indexOf(line, "|", 0)
+                    if (p1 >= 0) {
+                        val p2: Int = VmOps.indexOf(line, "|", p1 + 1)
+                        if (p2 > p1) {
+                            val name: String = VmOps.vmSubstr(line, 0, p1)
+                            if (name != "") {
+                                val off: Int = VmOps.toI32(VmOps.vmSubstr(line, p1 + 1, p2 - p1 - 1))
+                                val pc: Int = VmOps.toI32(VmOps.vmSubstr(line, p2 + 1, line.length - p2 - 1))
+                                this.funcNamesL.add(name)
+                                this.funcOffL.add(off)
+                                this.funcPcL.add(pc)
+                            }
+                        }
+                    }
+                }
+                start = i + 1
+            }
+            i = i + 1
+        }
+        }
+        println("[BLC-ft] names=" + toStr(this.funcNamesL.size()))
+        // P359：constLines 构建移至 loadPredecoded（消费解码端就地切分的
+        // mod.constLines；本函数作用域无 constLinesIn，曾误置于此）。
+        // P391：arg0Ints/arg1Ints **不再在此清空**——P271 跳过已解除：
+        // 预解析现由 loadArgsFlat/writeArgsRow 装载期就地构建（纯数字落值、
+        // 否则哨兵），fuseHotPairs 的 setArgsRow 同步更新改写行。当年的
+        // 「句柄与 argStrs 混叠」观察属 Vm 对象字段布局家族，P368-375 已
+        // 根治；本优化经 banner/fib28/loop1M 三程序输出精确校验。
+        // ⚠️ 顺序契约：loadArgsFlat → fuseHotPairs → buildLoadCaches，
+        // 本函数不得触碰 arg0/1Ints。
+        // P392：最终态拷入 Memory 裸缓冲（执行期零 List 调用）。
+        this.mcN = this.opCodes.size()
+        this.mcOpCodes = Memory.alloc(this.mcN * 8)
+        this.mcA0 = Memory.alloc(this.mcN * 8)
+        this.mcA1 = Memory.alloc(this.mcN * 8)
+        var mi: Int = 0
+        while (mi < this.mcN) {
+            Memory.write64(this.mcOpCodes + mi * 8, this.opCodes[mi])
+            val a0: Int = if (this.arg0Ints.size() > mi) { this.arg0Ints[mi] } else { this.argNoneMark }
+            val a1: Int = if (this.arg1Ints.size() > mi) { this.arg1Ints[mi] } else { this.argNoneMark }
+            Memory.write64(this.mcA0 + mi * 8, a0)
+            Memory.write64(this.mcA1 + mi * 8, a1)
+            mi = mi + 1
+        }
+        this.mcValid = 1
+
+        // P411-d：诊断计数表（256 槽 = op+3 索引，覆盖 0..211 与 -2/-1）。
+        // 无论开关是否打开都分配（256×8 = 2KB，可忽略），避免开关判定
+        // 散布到多个位置。
+        this.mcOpCnt = Memory.alloc(2048)
+        var ci: Int = 0
+        while (ci < 256) {
+            Memory.write64(this.mcOpCnt + ci * 8, 0)
+            ci = ci + 1
+        }
+        if (Env.get("AURA_OP_PROF", "") == "1") {
+            this.opProfOn = 1
+            println("[OPPROF-ON] mcN=" + toStr(this.mcN))
+        }
+    }
+
+    /// 装载期超级指令融合（方案 D）：对预解码流做一次线性窥孔改写。
+    /// ⚠ 就地改写（不压缩流）：跳转目标是原始行号，压缩会错位（实测死循环）。
+    /// 融合对写首行，次行 OP_NOP 占位——行号全稳定，每对省一次完整分派。
+    ///
+    /// P397：**两遍扫描**——遍 1 纯读识别融合计划（行号+融合 opcode），遍 2
+    /// 纯写执行改写。旧实现单循环边读边写增量改写，在 photon 下触发槽
+    /// 影子读家族（P277：r 不推进 14 万次；P366 同族）需要护栏截断，融合
+    /// 长期失效。读写分离后计划行间无重叠，遍 2 的写入不影响遍 1 结论。
+    private fun fuseHotPairs(): Unit {
+        val n: Int = this.opCodes.size()
+        if (n < 2) { return }
+        // 跳转目标位图：融合窗口 [r+1, r+span) 内不得含任何跳转目标行，
+        // 否则跳到中间行会命中 OP_NOP → 整条融合指令被跳过（语义错误）。
+        val isTarget: List<Int> = arrayListOf<Int>()
+        var ti: Int = 0
+        while (ti < n) {
+            isTarget.add(0)
+            ti = ti + 1
+        }
+        var sj: Int = 0
+        while (sj < n) {
+            val jop: Int = this.opCodes.get(sj)
+            if (jop == 50 || jop == 51 || jop == 52) {
+                if (this.argCounts.get(sj) > 0) {
+                    val t: Int = VmOps.toI32(this.argStrs.get(sj * 3))
+                    if (t >= 0 && t < n) {
+                        isTarget.set(t, 1)
+                    }
+                }
+            }
+            sj = sj + 1
+        }
+        // ── Pass 1：识别（纯读）── P405：单点递增形态——步长经局部 step
+        // 在循环底一次性结算，消除「i = i + span; continue」双写游标
+        //（P277 影子读的触发布局）；blocked 内层循环同样单点递增。
+        val planR: List<Int> = arrayListOf<Int>()
+        val planF: List<Int> = arrayListOf<Int>()
+        val n1: Int = n - 1
+        var i: Int = 0
+        while (i < n1) {
+            val f: Int = this.matchFuseAt(i, n)
+            var step: Int = 1
+            if (f != 0) {
+                val span: Int = this.fuseSpanOf(f)
+                var blocked: Int = 0
+                var k2: Int = i + 1
+                val kEnd: Int = i + span
+                while (k2 < kEnd) {
+                    if (k2 < n && isTarget.get(k2) == 1) {
+                        blocked = 1
+                        k2 = kEnd
+                    }
+                    k2 = k2 + 1
+                }
+                if (blocked == 0) {
+                    planR.add(i)
+                    planF.add(f)
+                    step = span
+                }
+            }
+            i = i + step
+        }
+        // ── Pass 2：改写（纯写）──
+        var pi: Int = 0
+        val pn: Int = planR.size()
+        while (pi < pn) {
+            val r: Int = planR.get(pi)
+            val f: Int = planF.get(pi)
+            val span: Int = this.fuseSpanOf(f)
+            val pair: List<String> = this.buildFusePair(r, f)
+            this.opCodes.set(r, f)
+            this.setArgsRow(r, pair)
+            this.ops.set(r, this.fuseNameOf(f))
+            var kk: Int = 1
+            while (kk < span) {
+                this.opCodes.set(r + kk, Opcodes.OP_NOP)
+                this.setArgsRow(r + kk, arrayListOf<String>())
+                this.ops.set(r + kk, "")
+                kk = kk + 1
+            }
+            pi = pi + 1
+        }
+    }
+
+    /// 融合对识别：返回融合 opcode（0 = 无）。语义与原增量版一致，唯
+    /// 6 连守卫（204）保留 store/load 同槽检查（tmpW==tmpR）——不同槽
+    /// 时原第二分支会错误假设同槽，此处不融合（放弃该对，语义安全）。
+    private fun matchFuseAt(r: Int, n: Int): Int {
+        val op: Int = this.opCodes.get(r)
+        if (r < n - 5
+            && op == 10
+            && this.opCodes.get(r + 1) == 5
+            && this.opCodes.get(r + 2) == 32
+            && this.opCodes.get(r + 3) == 11
+            && this.opCodes.get(r + 4) == 10
+            && this.opCodes.get(r + 5) == 51) {
+            val a3s: String = this.argStrs.get((r + 3) * 3)
+            val a4s: String = this.argStrs.get((r + 4) * 3)
+            if (a3s == a4s) {
+                return 204
+            }
+            return 0
+        }
+        if (r < n - 3
+            && op == 10
+            && this.opCodes.get(r + 1) == 5
+            && this.isArithOp(this.opCodes.get(r + 2))
+            && this.opCodes.get(r + 3) == 11) {
+            return 202
+        }
+        if (r < n - 3
+            && op == 10
+            && this.opCodes.get(r + 1) == 10
+            && this.isArithOp(this.opCodes.get(r + 2))
+            && this.opCodes.get(r + 3) == 11) {
+            return 203
+        }
+if (false && (r < n - 5
+            && op == 10
+            && this.opCodes.get(r + 1) == 10
+            && this.opCodes.get(r + 2) == 32
+            && this.opCodes.get(r + 3) == 11
+            && this.opCodes.get(r + 4) == 10
+            && this.opCodes.get(r + 5) == 51) {
+            return 205
+        }
+        if (op == 10 && this.opCodes.get(r + 1) == 11) {
+            return 206
+        }
+        if (op == 5 && this.opCodes.get(r + 1) == 11) {
+            return 200
+        }
+        if (op == 10 && this.opCodes.get(r + 1) == 51) {
+            return 201
+        }
+        return 0
+    }
+
+    /// 融合对的窗口跨度。
+    private fun fuseSpanOf(f: Int): Int {
+        if (f == 204 || f == 205) { return 6 }
+        if (f == 202 || f == 203) { return 4 }
+        return 2
+    }
+
+    /// 融合对的参数构造（从 argStrs 读取原行参数）。
+    private fun buildFusePair(r: Int, f: Int): List<String> {
+        val pair: List<String> = arrayListOf<String>()
+        val a0s: String = this.argStrs.get(r * 3)
+        val a1s: String = this.argStrs.get((r + 1) * 3)
+        if (f == 202 || f == 203 || f == 205) {
+            val a3s: String = this.argStrs.get((r + 3) * 3)
+            if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+            if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
+            if (f == 205) {
+                // P405 修复：205 的执行臂读 4 参（a,b,tmpSlot=arg2,
+                // jumpTarget=arg3）——原构造漏掉 r+5 行的跳转目标，
+                // arg3 落 argNoneMark → 0 → 跳回第 0 行（banner 重启 /
+                // loop1M 吞输出的实相）。
+                if (a3s != "") { pair.add(a3s) } else { pair.add("-1") }
+                val a5s: String = this.argStrs.get((r + 5) * 3)
+                if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
+            } else {
+                pair.add(toStr(this.opCodes.get(r + 2)))
+                if (a3s != "") { pair.add(a3s) } else { pair.add("0") }
+            }
+        } else if (f == 204) {
+            val a3s: String = this.argStrs.get((r + 3) * 3)
+            val a5s: String = this.argStrs.get((r + 5) * 3)
+            if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+            if (a1s != "") { pair.add(a1s) } else { pair.add("0") }
+            pair.add(toStr(32))
+            if (a3s != "") { pair.add(a3s) } else { pair.add("-1") }
+            if (a5s != "") { pair.add(a5s) } else { pair.add("0") }
+        } else if (f == 206 || f == 201) {
+            // 两参融合对：arg1 在 r+1 行（STORE 槽 / JIF 跳转目标）。
+            val a1b: String = this.argStrs.get((r + 1) * 3)
+            if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+            if (a1b != "") { pair.add(a1b) } else { pair.add("0") }
+        } else if (f == 200) {
+            if (a0s != "") { pair.add(a0s) } else { pair.add("0") }
+            pair.add(a1s)
+        }
+        return pair
+    }
+
+    /// 融合指令的助记符名。
+    private fun fuseNameOf(f: Int): String {
+        if (f == 204) { return "LDLC_LTL_JIFS" }
+        if (f == 202) { return "LDLC_OP_STL" }
+        if (f == 203) { return "LDLB_OP_STL" }
+        if (f == 205) { return "LDLB_LTL_JIFS" }
+        if (f == 206) { return "LDL_STL" }
+        if (f == 200) { return "LDIC_STL" }
+        return "LDL_JIF"
+    }
+
+    /// 第 i 条指令的 arg0 整数值（预解析未命中时回退现场解析）。
+
+    /// 取第 k 个参数的字符串值（扁平槽：0/1/2 直取；≥3 当前指令集无此形态）。
+    private fun argStrOf(k: Int): String {
+        if (k <= 2) {
+            // P341：下标形式（.get 调用窗口实参槽覆写，布局敏感）
+            return this.argStrs[(this.ip - 1) * 3 + k]
+        }
+        return ""
+    }
+
+    /// 取第 k 个参数的字符串值（k ≥ 3 恒空：当前指令集参数最多 5 个且
+    /// 槽 3/4 仅融合指令使用、必为数值——走 arg3/4IntOf）。
+    private fun argCountOf(): Int {
+        return this.argCounts[this.ip - 1]
+    }
+
+    /// 数值快路径：槽 2/3/4 的预解析值（sentinel 时回退按字符串解析）。
+    private fun arg2IntOf(): Int {
+        val v: Int = this.arg2Ints[this.ip - 1]
+        if (v != this.argNoneMark) {
+            return v
+        }
+        return VmOps.toI32(this.argStrOf(2))
+    }
+
+    private fun arg3IntOf(): Int {
+        val v: Int = this.arg3Ints[this.ip - 1]
+        if (v != this.argNoneMark) {
+            return v
+        }
+        return VmOps.toI32(this.argStrOf(3))
+    }
+
+    private fun arg4IntOf(): Int {
+        val v: Int = this.arg4Ints[this.ip - 1]
+        if (v != this.argNoneMark) {
+            return v
+        }
+        return VmOps.toI32(this.argStrOf(4))
+    }
+
+    /// 常量池按下标直取（arg0/1IntOf 预解析下标的免解析快路径）。
+    private fun getConstByIdx(idx: Int): Any {
+        // P364：**单返回路径**——旧双返回（String 路径 + Any fallback 路径）
+        // 的合并值在 photon 下按调用点布局被 Int 装箱（字符串指针
+        // (v<<1)|1），println 打印指针十进制（[CA] tagged=true 实证）。
+        // constLines 已完备（54 条解码期直建），fallback 仅作越界兜底。
+        val n: Int = this.constLines.size()
+        var k: Int = idx
+        if (k < 0) { k = 0 }
+        if (k > n - 1) { k = n - 1 }
+        if (n <= 0) {
+            return ""
+        }
+        return this.unescapeConst(this.constLines[k])
+    }
+
+    /// 装载扁平参数串（loadPredecoded）：每条 "a0,a1[,a2]"，空段保序。
+    /// ⚠️ 槽 3/4 装载期不存在（融合指令由 fuseHotPairs 生成并回填）。
+    private fun loadArgsFlat(flat: List<String>): Unit {
+        this.argStrs = arrayListOf<String>()
+        this.arg2Ints = arrayListOf<Int>()
+        this.arg3Ints = arrayListOf<Int>()
+        this.arg4Ints = arrayListOf<Int>()
+        this.argCounts = arrayListOf<Int>()
+        this.arg0Ints = arrayListOf<Int>()
+        this.arg1Ints = arrayListOf<Int>()
+        var i: Int = 0
+        val n: Int = flat.size()
+        while (i < n) {
+            val ln: String = flat.get(i)
+            var c0: Int = -1
+            var c1: Int = -1
+            var p: Int = 0
+            val lnN: Int = ln.length
+            while (p < lnN) {
+                if (ln.charCodeAt(p) == 44) {
+                    if (c0 < 0) {
+                        c0 = p
+                    } else if (c1 < 0) {
+                        c1 = p
+                    }
+                }
+                p = p + 1
+            }
+            var s0: String = ln
+            var s1: String = ""
+            var s2: String = ""
+            if (c0 >= 0) {
+                s0 = VmOps.vmSubstr(ln, 0, c0)
+                if (c1 >= 0) {
+                    s1 = VmOps.vmSubstr(ln, c0 + 1, c1 - c0 - 1)
+                    s2 = VmOps.vmSubstr(ln, c1 + 1, lnN - c1 - 1)
+                } else {
+                    s1 = VmOps.vmSubstr(ln, c0 + 1, lnN - c0 - 1)
+                }
+            }
+            this.argStrs.add(s0)
+            this.argStrs.add(s1)
+            this.argStrs.add(s2)
+            var seg: Int = 0
+            if (ln != "") {
+                seg = 1
+                if (c0 >= 0) {
+                    seg = 2
+                    if (c1 >= 0) {
+                        seg = 3
+                    }
+                }
+            }
+            this.argCounts.add(seg)
+            this.arg2Ints.add(this.argNoneMark)
+            this.arg3Ints.add(this.argNoneMark)
+            this.arg4Ints.add(this.argNoneMark)
+            // P391：arg0/arg1 整数预解析（P271 重新启用）——执行期每条指令
+            // 的 arg0IntOf/arg1IntOf 免一次字符串 toI32。纯数字才落值，
+            // 否则哨兵（执行期回退现场解析，语义与 P352 表长守卫一致）。
+            if (VmOps.isAllDigits(s0)) {
+                this.arg0Ints.add(VmOps.toI32(s0))
+            } else {
+                this.arg0Ints.add(this.argNoneMark)
+            }
+            if (VmOps.isAllDigits(s1)) {
+                this.arg1Ints.add(VmOps.toI32(s1))
+            } else {
+                this.arg1Ints.add(this.argNoneMark)
+            }
+            i = i + 1
+        }
+    }
+
+    /// 文本路径（buildLineCache）写一行参数槽（与 loadArgsFlat 同构）。
+    /// ⚠️ 不写 arg0/1Ints——buildLoadCaches 在融合**之后**统一重建。
+    private fun writeArgsRow(temp: List<String>): Unit {
+        var k: Int = 0
+        while (k < 3) {
+            val v: String = if (k < temp.size()) { temp.get(k) } else { "" }
+            this.argStrs.add(v)
+            if (k == 0) {
+                // P391：arg0/arg1 整数预解析（文本路径与预解码路径同构）。
+                if (VmOps.isAllDigits(v)) {
+                    this.arg0Ints.add(VmOps.toI32(v))
+                } else {
+                    this.arg0Ints.add(this.argNoneMark)
+                }
+            } else if (k == 1) {
+                if (VmOps.isAllDigits(v)) {
+                    this.arg1Ints.add(VmOps.toI32(v))
+                } else {
+                    this.arg1Ints.add(this.argNoneMark)
+                }
+            }
+            if (VmOps.isAllDigits(v)) {
+                val n: Int = VmOps.toI32(v)
+                if (k == 2) {
+                    this.arg2Ints.add(n)
+                } else {
+                    this.arg2Ints.add(this.argNoneMark)
+                }
+            } else {
+                this.arg2Ints.add(this.argNoneMark)
+            }
+            k = k + 1
+        }
+        this.arg3Ints.add(this.argNoneMark)
+        this.arg4Ints.add(this.argNoneMark)
+        this.argCounts.add(temp.size())
+    }
+
+    /// 融合写回：把 pair 的槽写回第 r 行（字符串槽 0-2 + 数值槽 2-4 + 计数）。
+    /// ⚠️ 不写 arg0/1Ints——fuseHotPairs 在 buildLoadCaches **之前**运行，
+    /// 后者会从 argStrs 统一重建。
+    private fun setArgsRow(r: Int, pair: List<String>): Unit {
+        var k: Int = 0
+        while (k < 3) {
+            val v: String = if (k < pair.size()) { pair.get(k) } else { "" }
+            this.argStrs.set(r * 3 + k, v)
+            if (k == 0) {
+                // P391：融合改写行同步更新 arg0/1Ints（P271 重新启用后
+                // arg0/1Ints 不再由 buildLoadCaches 事后重建）。
+                if (VmOps.isAllDigits(v)) {
+                    this.arg0Ints.set(r, VmOps.toI32(v))
+                } else {
+                    this.arg0Ints.set(r, this.argNoneMark)
+                }
+            } else if (k == 1) {
+                if (VmOps.isAllDigits(v)) {
+                    this.arg1Ints.set(r, VmOps.toI32(v))
+                } else {
+                    this.arg1Ints.set(r, this.argNoneMark)
+                }
+            } else if (k == 2) {
+                if (VmOps.isAllDigits(v)) {
+                    this.arg2Ints.set(r, VmOps.toI32(v))
+                } else {
+                    this.arg2Ints.set(r, this.argNoneMark)
+                }
+            }
+            k = k + 1
+        }
+        if (pair.size() > 3) {
+            this.arg3Ints.set(r, VmOps.toI32(pair.get(3)))
+        } else {
+            this.arg3Ints.set(r, this.argNoneMark)
+        }
+        if (pair.size() > 4) {
+            this.arg4Ints.set(r, VmOps.toI32(pair.get(4)))
+        } else {
+            this.arg4Ints.set(r, this.argNoneMark)
+        }
+        this.argCounts.set(r, pair.size())
+    }
+
+    private fun arg0IntOf(): Int {
+        // P392：Memory 缓冲快路径（mcValid 后哨兵语义由装载期落值保证——
+        // 非纯数字行装载期落 argNoneMark，此处哨兵值按调用方语义兜底 0）。
+        if (this.mcValid == 1) {
+            val v: Int = Memory.read64(this.mcA0 + (this.ip - 1) * 8) as Int
+            if (v != this.argNoneMark) {
+                return v
+            }
+            return 0
+        }
+        // P352：快路径必须先查表长——arg0Ints 未填充（P271 跳过）时，
+        // 空表 OOB 读经 __list_get 的 null 守卫返回 0，哨兵比较误通过
+        // ⇒ 所有指令参数恒 0（STORE_LOCAL 槽号、JUMP 目标全错）。
+        if (this.arg0Ints.size() > this.ip - 1) {
+            val v: Int = this.arg0Ints[this.ip - 1]
+            if (v != this.argNoneMark) {
+                return v
+            }
+        }
+        return VmOps.toI32(this.argStrOf(0))
+    }
+
+    /// 第 i 条指令的 arg1 整数值（同上）。
+    private fun arg1IntOf(): Int {
+        if (this.mcValid == 1) {
+            val v: Int = Memory.read64(this.mcA1 + (this.ip - 1) * 8) as Int
+            if (v != this.argNoneMark) {
+                return v
+            }
+            return 0
+        }
+        if (this.arg1Ints.size() > this.ip - 1) {
+            val v: Int = this.arg1Ints[this.ip - 1]
+            if (v != this.argNoneMark) {
+                return v
+            }
+        }
+        return VmOps.toI32(this.argStrOf(1))
+    }
+
+    private fun getConst(idxStr: String): Any {
+        val idx: Int = VmOps.toI32(idxStr)
+        val n: Int = this.constLines.size()
+        if (idx >= 0 && idx < n) {
+            // P359：转义态统一反转义
+            return unescapeConst(this.constLines.get(idx))
+        }
+        return unescapeConst(VmOps.getFieldAt(this.constPool, idx, "\n"))
+    }
+
+    /// 反转义 AucLoader 的常量值转义（\\ → \、\n → 换行）。
+    private fun unescapeConst(s: String): String {
+        var hasEscape: Boolean = false
+        var i0: Int = 0
+        val n0: Int = s.length
+        while (i0 < n0) {
+            if (s.charCodeAt(i0) == 92) {
+                hasEscape = true
+                i0 = n0
+            }
+            i0 = i0 + 1
+        }
+        if (!hasEscape) {
+            return s
+        }
+        var out: String = ""
+        var i: Int = 0
+        val n: Int = s.length
+        while (i < n) {
+            val c: Int = s.charCodeAt(i)
+            if (c == 92 && i + 1 < n) {
+                val c2: Int = s.charCodeAt(i + 1)
+                if (c2 == 110) {
+                    out = out + String.fromCharCode(10)
+                    i = i + 2
+                } else if (c2 == 92) {
+                    out = out + String.fromCharCode(92)
+                    i = i + 2
+                } else {
+                    out = out + String.fromCharCode(c)
+                    i = i + 1
+                }
+            } else {
+                out = out + String.fromCharCode(c)
+                i = i + 1
+            }
+        }
+        return out
+    }
+
+    /// 检查字符串是否以指定前缀开头。
+    private fun startsWith(s: String, prefix: String): Boolean {
+        if (s.length < prefix.length) {
+            return false
+        }
+        var i: Int = 0
+        while (i < prefix.length) {
+            if (s.charCodeAt(i) != prefix.charCodeAt(i)) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  状态查询
+    // ═══════════════════════════════════════════════════════════
+
+    /// 获取错误信息。
+    fun getError(): String {
+        return this.error
+    }
+
+    /// 获取指令计数。
+    fun getInstructionCount(): Int {
+        return this.instructionCount
+    }
+
+    /// 检查是否运行中。
+    fun isRunning(): Boolean {
+        return this.running
+    }
+
+    /// 获取栈深度。
+    fun getStackDepth(): Int {
+        return this.stack.size()
+    }
+
+    /// 获取退出码。
+    fun getExitCode(): Int {
+        return this.exitCode
+    }
+
+    /// 获取返回值。
+    fun getReturnValue(): Any {
+        return this.returnValue
+    }
+
+    /// 获取全局变量。
+    fun getGlobal(name: String): Any {
+        return this.globals.getOrDefault(name, null)
+    }
+
+    /// 设置全局变量。
+    fun setGlobal(name: String, value: Any): Unit {
+        this.globals.put(name, value)
+    }
+
+    /// 获取闭包总数。
+    fun getClosureCount(): Int {
+        return this.closureTable.getSize()
+    }
+
+    /// 获取捕获值（upvalue）总数（P1.3）。
+    fun getUpvalueCount(): Int {
+        return this.upvalueTotal
+    }
+
+    /// 注册类继承关系（P1.2；与 DEF_CLASS 指令等效，parent 空/"-" = 无父类）。
+    fun registerClass(cls: String, parent: String): Unit {
+        this.defClass(cls, parent)
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  加速派发钩子（P0.8，仅接口；VM-PA-00 §2.3 契约）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 启用/禁用加速派发钩子（默认关闭，行为与未接入时完全一致）。
+    fun enableAccelDispatch(enabled: Boolean): Unit {
+        this.accelEnabled = enabled
+    }
+
+    /// 注册热函数直呼入口（funcName -> 入口行号）。
+    fun setAccelEntry(funcName: String, entryIp: Int): Unit {
+        this.accelTable.put(funcName, entryIp)
+    }
+
+    /// 清空直呼表。
+    fun clearAccelEntries(): Unit {
+        this.accelTable = HashMap<String, Int>()
+    }
+
+    /// 查询钩子是否启用。
+    fun isAccelDispatchEnabled(): Boolean {
+        return this.accelEnabled
+    }
+
+    /// VM 版本。
+    fun version(): String {
+        return "1.1.0-p0-numeric-dispatch"
+    }
+
+    /// 检查 VM 是否就绪。
+    fun isReady(): Boolean {
+        return true
+    }
+
+    /// 挂起执行（P0：仅置挂起标志；原协程语义已按 D5 废弃）。
+    fun suspend(): Unit {
+        this.suspended = true
+        this.running = false
+    }
+
+    /// 恢复执行。
+    fun resume(): Unit {
+        this.suspended = false
+        this.running = true
+    }
+
+    /// 保存 VM 状态（用于协程切换）。
+    fun saveState(): HashMap<String, Any> {
+        val state: HashMap<String, Any> = HashMap<String, Any>()
+        state.put("ip", this.ip)
+        state.put("running", this.running)
+        state.put("suspended", this.suspended)
+        state.put("returnValue", this.returnValue)
+        state.put("error", this.error)
+        state.put("exitCode", this.exitCode)
+        state.put("instructionCount", this.instructionCount)
+        state.put("currentFrame", this.currentFrame)
+        state.put("currentFunc", this.currentFunc)
+        return state
+    }
+
+    /// 恢复 VM 状态。
+    fun restoreState(state: HashMap<String, Any>): Unit {
+        val ipVal = state.get("ip")
+        if (ipVal != null) this.ip = ipVal as Int
+        val runningVal = state.get("running")
+        if (runningVal != null) this.running = runningVal as Boolean
+        val suspendedVal = state.get("suspended")
+        if (suspendedVal != null) this.suspended = suspendedVal as Boolean
+        val retVal = state.get("returnValue")
+        if (retVal != null) this.returnValue = retVal
+        val errVal = state.get("error")
+        if (errVal != null) this.error = errVal as String
+        val exitVal = state.get("exitCode")
+        if (exitVal != null) this.exitCode = exitVal as Int
+        val icVal = state.get("instructionCount")
+        if (icVal != null) this.instructionCount = icVal as Int
+        val cfVal = state.get("currentFrame")
+        if (cfVal != null) this.currentFrame = cfVal as Int
+        val cfName = state.get("currentFunc")
+        if (cfName != null) this.currentFunc = cfName as String
+        this.suspended = false
+        this.running = true
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  测试/工具方法（供 VmRunner 委托）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 压栈（测试用）。
+    fun push(value: String): Unit {
+        this.stack.push(value)
+    }
+
+    /// 栈顶（测试用）。
+    fun peek(): String {
+        val v = this.stack.peek()
+        if (v == null) return ""
+        return toStr(v)
+    }
+
+    /// 弹栈（测试用）。
+    fun pop(): String {
+        val v = this.stack.pop()
+        if (v == null) return ""
+        return toStr(v)
+    }
+
+    /// 设置局部变量（测试用）。
+    fun setLocal(idx: Int, value: String): Unit {
+        this.locals.putSlot(idx, value)
+    }
+
+    /// 诊断：读融合后指令流的操作码名（dump 用，不进热路径）。
+    fun debugOpName(i: Int): String {
+        return this.ops.get(i)
+    }
+
+    /// 诊断：读融合后指令流的参数个数。
+    fun debugArgCount(i: Int): Int {
+        return this.argCounts.get(i)
+    }
+
+    /// 诊断：读融合后指令流的第 j 个参数。
+    fun debugArg(i: Int, j: Int): String {
+        if (j <= 2) {
+            return this.argStrs.get(i * 3 + j)
+        }
+        if (j == 3) {
+            val v: Int = this.arg3Ints.get(i)
+            if (v != this.argNoneMark) { return toStr(v) }
+        }
+        if (j == 4) {
+            val v: Int = this.arg4Ints.get(i)
+            if (v != this.argNoneMark) { return toStr(v) }
+        }
+        return ""
+    }
+
+    /// 获取局部变量（测试用）。
+    fun getLocal(idx: Int): String {
+        val v = this.locals.getSlot(idx)
+        if (v == null) return ""
+        return toStr(v)
+    }
+
+    /// 加法（测试用）。
+    fun arithAdd(a: String, b: String): String {
+        return VmOps.intToStr(VmOps.vrToInt(a) + VmOps.vrToInt(b))
+    }
+
+    /// 减法（测试用）。
+    fun arithSub(a: String, b: String): String {
+        return VmOps.intToStr(VmOps.vrToInt(a) - VmOps.vrToInt(b))
+    }
+
+    /// 乘法（测试用）。
+    fun arithMul(a: String, b: String): String {
+        return VmOps.intToStr(VmOps.vrToInt(a) * VmOps.vrToInt(b))
+    }
+
+    /// 除法（测试用）。
+    fun arithDiv(a: String, b: String): String {
+        val div: Int = VmOps.vrToInt(b)
+        if (div == 0) return "0"
+        return VmOps.intToStr(VmOps.vrToInt(a) / div)
+    }
+}

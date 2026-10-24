@@ -1,3 +1,12 @@
+// ================================================================
+// 【冻结基线】Rust VM 双实现常驻（VM-PA-00 v3.2 / D6 / P4.3）
+// [FROZEN BASELINE] Rust VM dual-impl co-resident (D6/P4.3): bug-fix only, no new capabilities, never reference the Aura VM.
+// 本文件属于 Rust VM（只读冻结的兼容基线、第二实现）：
+//   - 禁止新增能力，仅允许修 bug 与安全修补；
+//   - 不得引用 Aura VM 实现（aura/compiler/aura/lang/compiler/vm/）；
+//   - 与 Aura VM 的唯一交集是 .auc 二进制格式（Rust 编译器产出，两侧各自执行）。
+// 依据：docs/vm_pure_aura/00-VM纯Aura化技术方案与达成路径.md 三-阶段P4 / 决策D6。
+// ================================================================
 //! Aura VM 运行时值（`Value`）
 //!
 //! 对应 技术方案 §4 / §7.1 的对象模型。VM 采用 **带标签的联合（tagged union）**
@@ -84,6 +93,10 @@ impl Value {
             Value::Float(f) => *f,
             Value::Int(i) => *i as f64,
             Value::Bool(b) => *b as i64 as f64,
+            // 2026-10-01 修复：字符串 → 浮点解析缺失（`_ => 0.0` 兜底吞掉），
+            // `toFloat("2.5")` 恒得 0.0 —— 连带 `.auc` 常量池的浮点常量
+            // （LOAD_CONST_F 经 parseFloat 文本解析）全部归零（差分实测）。
+            Value::Str(s) => s.trim().parse::<f64>().unwrap_or(0.0),
             _ => 0.0,
         }
     }

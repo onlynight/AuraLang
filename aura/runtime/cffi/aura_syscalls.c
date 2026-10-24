@@ -1086,6 +1086,12 @@ int64_t aura_condvar_new(void) {
 #ifdef _WIN32
     AuraCondvar *c = (AuraCondvar *)malloc(sizeof(AuraCondvar));
     if (!c) return -1;
+    /* CONDITION_VARIABLE 必须处于「已初始化」状态才能用于
+     * SleepConditionVariableCS / Wake*ConditionVariable：
+     * 其内部是一个链表指针，未初始化（malloc 返回脏内存）时
+     * 唤醒会顺着野指针遍历，表现为段错误或永久挂起。
+     * 与 POSIX 分支的 pthread_cond_init 对齐，这里显式初始化。 */
+    InitializeConditionVariable(&c->cv);
     return (int64_t)(uintptr_t)c;
 #else
     pthread_cond_t *c = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
@@ -1171,6 +1177,9 @@ int64_t aura_barrier_new(int64_t count) {
     b->gen = 0;
 #ifdef _WIN32
     InitializeCriticalSection(&b->cs);
+    /* 同上：CONDITION_VARIABLE 需初始化，否则 WakeAllConditionVariable
+     * 会遍历 malloc 遗留的野指针。与 POSIX 分支的 pthread_cond_init 对齐。 */
+    InitializeConditionVariable(&b->cv);
 #else
     pthread_mutex_init(&b->mu, NULL);
     pthread_cond_init(&b->cv, NULL);
@@ -1246,27 +1255,122 @@ void aura_barrier_destroy(int64_t id) {
 /* 线程分派函数指针类型 */
 typedef int64_t (*AuraThreadFunc)(int64_t arg);
 
-/* 线程函数表 — 由 AOT 发射器填充，或运行时动态注册 */
+/* 线程函数表 — 与 AOT 发射器生成的 __aura_fn_table 共享。
+ * __aura_fn_table 在 LLVM IR 中由 emit.rs 生成，包含 trampoline 函数指针。
+ * aura_thread_fns 指向同一张表，避免双表重复。
+ * 运行时动态注册的线程函数追加到表末尾（从 AURA_THREAD_FN_MAX 开始）。 */
 #define AURA_THREAD_FN_MAX 64
-static AuraThreadFunc aura_thread_fns[AURA_THREAD_FN_MAX];
-static int64_t aura_thread_fn_count = 0;
+/* extern 引用 LLVM IR 生成的全局分派表（类型用 void* 兼容 LLVM ptr 类型） */
+extern const void *const __aura_fn_table[];
+extern int64_t __aura_fn_count;
+/* 运行时动态注册表（扩展区） */
+static AuraThreadFunc aura_thread_fns_ext[AURA_THREAD_FN_MAX];
+static int64_t aura_thread_fn_ext_count = 0;
+
+/* 线程结果槽 —— `Thread.join` 语义要求返回工作线程的返回值，
+ * 而 Win32 / POSIX 的线程 API 都不携带返回值（pthread_join 的 void** 在
+ * `aura_fn` 的 `int64_t(int64_t)` 约定下也用不上）。故这里维护
+ * `handle → 结果槽` 的注册表：
+ *   - create 成功后登记 handle（槽在 entry 完成时被写入）；
+ *   - join 先按 handle 摘除节点、再阻塞等待，最后读取并释放槽。
+ *
+ * 槽与 `AuraThreadParam` 分离：新线程可能在 create 尚未返回（handle 未知）
+ * 时就跑完 entry，此时结果必须落到一个**已存在**的槽里，而不是尚待登记的
+ * 注册节点上——否则会出现「先完成、后登记」丢结果。 */
+typedef struct {
+    int64_t value;
+} AuraThreadResult;
+
+typedef struct AuraThreadResultNode {
+    int64_t handle;
+    AuraThreadResult *slot;
+    struct AuraThreadResultNode *next;
+} AuraThreadResultNode;
+
+static AuraThreadResultNode *aura_thread_result_head = NULL;
+
+#ifdef _WIN32
+static CRITICAL_SECTION aura_thread_result_cs;
+static INIT_ONCE aura_thread_result_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK aura_thread_result_init_cb(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+    (void)once; (void)param; (void)ctx;
+    InitializeCriticalSection(&aura_thread_result_cs);
+    return TRUE;
+}
+static void aura_thread_result_lock(void) {
+    InitOnceExecuteOnce(&aura_thread_result_once, aura_thread_result_init_cb, NULL, NULL);
+    EnterCriticalSection(&aura_thread_result_cs);
+}
+static void aura_thread_result_unlock(void) { LeaveCriticalSection(&aura_thread_result_cs); }
+#else
+static pthread_mutex_t aura_thread_result_mu = PTHREAD_MUTEX_INITIALIZER;
+static void aura_thread_result_lock(void) { pthread_mutex_lock(&aura_thread_result_mu); }
+static void aura_thread_result_unlock(void) { pthread_mutex_unlock(&aura_thread_result_mu); }
+#endif
+
+static void aura_thread_result_register(int64_t handle, AuraThreadResult *slot) {
+    AuraThreadResultNode *n = (AuraThreadResultNode *)malloc(sizeof(AuraThreadResultNode));
+    if (!n) return;
+    n->handle = handle;
+    n->slot = slot;
+    aura_thread_result_lock();
+    n->next = aura_thread_result_head;
+    aura_thread_result_head = n;
+    aura_thread_result_unlock();
+}
+
+/* 摘除并返回 handle 对应的结果槽（未登记则返回 NULL）。 */
+static AuraThreadResult *aura_thread_result_take(int64_t handle) {
+    AuraThreadResult *slot = NULL;
+    AuraThreadResultNode **pp;
+    aura_thread_result_lock();
+    pp = &aura_thread_result_head;
+    while (*pp) {
+        if ((*pp)->handle == handle) {
+            AuraThreadResultNode *dead = *pp;
+            slot = dead->slot;
+            *pp = dead->next;
+            free(dead);
+            break;
+        }
+        pp = &(*pp)->next;
+    }
+    aura_thread_result_unlock();
+    return slot;
+}
 
 /* 线程参数结构 */
 typedef struct {
     int64_t fn_id;
     int64_t arg;
+    AuraThreadResult *result;
 } AuraThreadParam;
+
+static AuraThreadFunc aura_fn_get(int64_t fn_id) {
+    /* 优先查 __aura_fn_table（AOT 静态生成的 trampoline） */
+    if (fn_id >= 0 && fn_id < __aura_fn_count) {
+        AuraThreadFunc fn = (AuraThreadFunc)__aura_fn_table[fn_id];
+        if (fn) return fn;
+    }
+    /* 回退到运行时动态注册表 */
+    int64_t ext_id = fn_id - __aura_fn_count;
+    if (ext_id >= 0 && ext_id < AURA_THREAD_FN_MAX && aura_thread_fns_ext[ext_id]) {
+        return aura_thread_fns_ext[ext_id];
+    }
+    return NULL;
+}
 
 #ifdef _WIN32
 static DWORD WINAPI aura_thread_entry(LPVOID param) {
     AuraThreadParam *p = (AuraThreadParam *)param;
     int64_t fn_id = p->fn_id;
     int64_t arg = p->arg;
+    AuraThreadResult *slot = p->result;
     free(p);
 
-    if (fn_id >= 0 && fn_id < AURA_THREAD_FN_MAX && aura_thread_fns[fn_id]) {
-        aura_thread_fns[fn_id](arg);
-    }
+    AuraThreadFunc fn = aura_fn_get(fn_id);
+    if (slot) slot->value = fn ? fn(arg) : 0;
+    else if (fn) fn(arg);
     return 0;
 }
 #else
@@ -1274,45 +1378,73 @@ static void *aura_thread_entry(void *param) {
     AuraThreadParam *p = (AuraThreadParam *)param;
     int64_t fn_id = p->fn_id;
     int64_t arg = p->arg;
+    AuraThreadResult *slot = p->result;
     free(p);
 
-    if (fn_id >= 0 && fn_id < AURA_THREAD_FN_MAX && aura_thread_fns[fn_id]) {
-        aura_thread_fns[fn_id](arg);
-    }
+    AuraThreadFunc fn = aura_fn_get(fn_id);
+    if (slot) slot->value = fn ? fn(arg) : 0;
+    else if (fn) fn(arg);
     return NULL;
 }
 #endif
 
 int64_t aura_thread_create(int64_t fn_id, int64_t arg) {
     AuraThreadParam *p = (AuraThreadParam *)malloc(sizeof(AuraThreadParam));
+    AuraThreadResult *slot;
     if (!p) return -1;
+    slot = (AuraThreadResult *)calloc(1, sizeof(AuraThreadResult));
+    if (!slot) { free(p); return -1; }
     p->fn_id = fn_id;
     p->arg = arg;
+    p->result = slot;
 
 #ifdef _WIN32
-    HANDLE h = CreateThread(NULL, 0, aura_thread_entry, p, 0, NULL);
-    if (!h) { free(p); return -1; }
-    return (int64_t)(uintptr_t)h;
-#else
-    pthread_t tid;
-    if (pthread_create(&tid, NULL, aura_thread_entry, p) != 0) {
-        free(p);
-        return -1;
+    {
+        HANDLE h = CreateThread(NULL, 0, aura_thread_entry, p, 0, NULL);
+        int64_t handle;
+        if (!h) { free(p); free(slot); return -1; }
+        handle = (int64_t)(uintptr_t)h;
+        aura_thread_result_register(handle, slot);
+        return handle;
     }
-    return (int64_t)(uintptr_t)tid;
+#else
+    {
+        pthread_t tid;
+        int64_t handle;
+        if (pthread_create(&tid, NULL, aura_thread_entry, p) != 0) {
+            free(p);
+            free(slot);
+            return -1;
+        }
+        handle = (int64_t)(uintptr_t)tid;
+        aura_thread_result_register(handle, slot);
+        return handle;
+    }
 #endif
 }
 
-void aura_thread_join(int64_t id) {
-    if (id <= 0) return;
+/* 等待线程结束并返回其返回值（`Thread.join` 的 Aura 语义；与 VM 路径一致）。
+ * 无对应结果槽（未知/重复 join 的 handle）时返回 0，绝不阻塞在无效 handle 上。 */
+int64_t aura_thread_join(int64_t id) {
+    AuraThreadResult *slot;
+    int64_t result;
+    if (id <= 0) return 0;
+    slot = aura_thread_result_take(id);
 #ifdef _WIN32
-    HANDLE h = (HANDLE)(uintptr_t)id;
-    WaitForSingleObject(h, INFINITE);
-    CloseHandle(h);
+    {
+        HANDLE h = (HANDLE)(uintptr_t)id;
+        WaitForSingleObject(h, INFINITE);
+        CloseHandle(h);
+    }
 #else
-    pthread_t tid = (pthread_t)(uintptr_t)id;
-    pthread_join(tid, NULL);
+    {
+        pthread_t tid = (pthread_t)(uintptr_t)id;
+        pthread_join(tid, NULL);
+    }
 #endif
+    result = slot ? slot->value : 0;
+    if (slot) free(slot);
+    return result;
 }
 
 void aura_thread_sleep(int64_t ms) {
@@ -1348,11 +1480,12 @@ int64_t aura_thread_available_parallelism(void) {
 #endif
 }
 
-/* 辅助: 注册线程函数（供 AOT 发射器或用户代码调用） */
+/* 辅助: 注册线程函数（运行时动态注册，追加到扩展区） */
 int64_t aura_thread_register_fn(AuraThreadFunc fn) {
-    if (aura_thread_fn_count >= AURA_THREAD_FN_MAX) return -1;
-    aura_thread_fns[aura_thread_fn_count] = fn;
-    return aura_thread_fn_count++;
+    if (aura_thread_fn_ext_count >= AURA_THREAD_FN_MAX) return -1;
+    aura_thread_fns_ext[aura_thread_fn_ext_count] = fn;
+    /* 返回相对于 __aura_fn_table 起始的偏移，与 __aura_fn_count 对齐 */
+    return (int64_t)(__aura_fn_count + aura_thread_fn_ext_count++);
 }
 
 /* =============================================================================
@@ -1444,6 +1577,72 @@ int32_t wait4(int32_t pid, int64_t status, int32_t options, int64_t rusage) {
 int32_t fork(void) {
     /* Windows 无 fork；返回 -1 表示不支持 */
     return -1;
+}
+
+/*
+ * aura_system — Windows CreateProcessA 版 system()
+ *
+ * 标准 C system() 在 Windows 上通过 cmd.exe /c 执行命令，
+ * 但 CreateProcess 的 lpCommandLine 参数解析与 cmd /c 不同：
+ * 特别是路径中的 '+' 字符会被 cmd.exe 当作命令分隔符。
+ * 此函数直接调用 CreateProcessA，避免 cmd.exe 的解析差异。
+ */
+int32_t aura_system(const char *cmd) {
+#ifdef _WIN32
+    if (!cmd) return 0;
+
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi = { 0 };
+
+    /* CreateProcessA 的 lpApplicationName 指定可执行文件路径，
+     * lpCommandLine 需要包含完整的命令字符串（包括可执行文件名和所有参数）。
+     * 当 lpApplicationName 非 NULL 时，系统直接使用它作为可执行文件路径，
+     * lpCommandLine 仅用于进程创建时的命令行参数。
+     *
+     * 关键：cmd.exe 会把路径中的 '+' 当作命令分隔符，
+     * 所以直接用 CreateProcessA 避免 cmd.exe 的解析。
+     *
+     * 从命令字符串中提取可执行文件路径（第一个 token）：
+     * 如果以引号开头，找到对应的结尾引号；否则找第一个空格。 */
+    char exe_path[1024];
+    char cmd_line[4096];
+    const char *p = cmd;
+    while (*p == ' ') p++; /* 跳过前导空格 */
+    if (*p == '"') {
+        p++; /* 跳过开头引号 */
+        int i = 0;
+        while (*p && *p != '"' && i < (int)sizeof(exe_path) - 1) {
+            exe_path[i++] = *p++;
+        }
+        exe_path[i] = '\0';
+        if (*p == '"') p++; /* 跳过结尾引号 */
+    } else {
+        int i = 0;
+        while (*p && *p != ' ' && i < (int)sizeof(exe_path) - 1) {
+            exe_path[i++] = *p++;
+        }
+        exe_path[i] = '\0';
+    }
+    /* lpCommandLine 使用原始命令字符串 */
+    int ci = 0;
+    while (*cmd && ci < (int)sizeof(cmd_line) - 1) {
+        cmd_line[ci++] = *cmd++;
+    }
+    cmd_line[ci] = '\0';
+
+    if (!CreateProcessA(exe_path, cmd_line, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        DWORD err = GetLastError();
+        return (int32_t)err;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code = 0;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return (int32_t)exit_code;
+#else
+    return system(cmd);
+#endif
 }
 
 /* =============================================================================

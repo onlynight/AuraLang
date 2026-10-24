@@ -87,7 +87,8 @@ class TypeChecker {
                     var tyBuf: String = ""
                     var foundSep: Boolean = false
                     var k: Int = 0
-                    while (k < line.length) {
+                    val lineLen: Int = line.length
+                    while (k < lineLen) {
                         val c: String = toStr(line[k])
                         if (!foundSep && c == "|") {
                             foundSep = true
@@ -375,8 +376,10 @@ class TypeChecker {
             return -1
         }
         var i: Int = 0
-        while (i + sub.length <= s.length) {
-            if (s.substring(i, i + sub.length) == sub) {
+        val subLen: Int = sub.length
+        val sLen: Int = s.length
+        while (i + subLen <= sLen) {
+            if (s.substring(i, i + subLen) == sub) {
                 return i
             }
             i = i + 1

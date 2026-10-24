@@ -19,6 +19,7 @@
 //! - 字符串作为 `i8*`（C ABI `char*`），长度由 `strlen` 或显式参数携带
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::codegen::aot::dwarf::{DebugInfo, emit_debug_metadata, emit_subprogram};
 use crate::codegen::aot::error::AotError;
@@ -32,6 +33,10 @@ use crate::codegen::hir::{
 use crate::codegen::opcode::{Const, FfiAbi};
 
 use super::AotCodeGenerator;
+
+/// [P3-诊断] 全模块累计：登记的 ARC 局部量 / 其中判定为可释放的量。
+pub(crate) static ARC_LOCAL_TOTAL: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static ARC_LOCAL_RELEASABLE: AtomicUsize = AtomicUsize::new(0);
 
 /// LLVM IR 生成上下文
 pub(crate) struct EmitCtx {
@@ -63,6 +68,11 @@ pub(crate) struct EmitCtx {
     pub const_counter: u64,
     /// 当前函数内变量作用域栈
     pub var_scope: Vec<HashMap<String, VarSlot>>,
+    /// 模块级全局变量表（顶层 `val`/`var`）：name → 指向 `@<name>` 的槽。
+    ///
+    /// 与 `var_scope` 分开的独立作用域：它跨函数有效，且其 LLVM 槽位是**全局符号**
+    /// 而非 alloca，所以不能复用同一套 `VarSlot` 语义之外的机制。
+    pub global_slots: HashMap<String, VarSlot>,
     /// 函数级变量回退表：登记该函数内**曾经声明过**的全部变量。
     ///
     /// 作用域栈在离开块时会弹出条目，但 Aura 的动态语义允许在块外继续引用块内
@@ -72,6 +82,23 @@ pub(crate) struct EmitCtx {
     pub func_vars: HashMap<String, VarSlot>,
     /// 函数级 Aura 类型回退表（用途同 `func_vars`）。
     pub func_aura_types: HashMap<String, String>,
+    /// 模块级全局量的 Aura 类型表：顶层 `val`/`var` 名 → Aura 类型名。
+    ///
+    /// `func_aura_types` 在 `emit_function` 入口会被清空（防跨函数 `%var.N` 串用），
+    /// 因此**不能**用它承载全局量的类型。而顶层量存在「先标量占位、后在流程里
+    /// 换成语柄」的两段式写法：
+    ///   val WORKER_DONE = -1            // 顶层：类型 Int
+    ///   ...
+    ///   do { WORKER_DONE = Atomic.new(0) }   // 赋值点登记为 Atomic
+    ///   ...
+    ///   do { WORKER_DONE.store(0) }          // **另一个块**里使用
+    /// 类型登记发生在第一个 `do {}` 块内（`var_aura_types` 随块弹出 + 跨函数清空），
+    /// 使用却在后续另一个块里，于是 `lookup_var_aura_ty("WORKER_DONE")` 返回空 ⇒
+    /// 裸名 `store` 无法改派到 `aura_lang_concurrent_Atomic_store` ⇒
+    /// llc `use of undefined value '@store'`（integration.aura 场景 6 实测）。
+    ///
+    /// 此表在整个模块内**不清空**，并在 `emit_function` 里回注到 `func_aura_types`。
+    pub global_aura_types: HashMap<String, String>,
     /// 全局常量/变量定义（模块顶层，§9.2.1 generate_globals）
     pub globals: Vec<String>,
     /// 全局常量去重（key → 对应 LLVM 全局名），避免同一字符串重复分配
@@ -153,9 +180,31 @@ pub(crate) struct EmitCtx {
     pub var_aura_types: Vec<HashMap<String, String>>,
     /// 函数名 → Aura 返回类型名（用于推断无显式类型标注的表达式的 Aura 类型）。
     pub func_ret_aura_types: HashMap<String, String>,
+    /// 用户自定义（非 native、非入口 `main`）函数的 HIR 名 → LLVM 符号名。
+    ///
+    /// 见 [`EmitCtx::fn_symbol`]：用户函数统一进 `aura_user_` 前缀的独立符号空间，
+    /// 避免与运行时 `declare`（`add` / `size` / `getAt` / `length` / `println` …）
+    /// 或原生包装器同名而触发 llc 的 `invalid redefinition of function`。
+    pub user_fn_symbols: HashMap<String, String>,
     /// 类名 → (字段名 → Aura 类型名)：`this.src.length`/`this.src[i]` 这类
     /// 字段访问的 String↔List 判定依赖它（字段的 LLVM 类型同样是 `i8*`）。
     pub class_field_aura_types: HashMap<String, HashMap<String, String>>,
+    /// [P2/D4] 各作用域内本函数持有的 ARC 局部量（与 `var_scope` 同层压栈）。
+    pub arc_scope_locals: Vec<Vec<ArcLocal>>,
+    /// [P2/D4] 是否把 `declare_var` 的槽登记为 ARC 局部量。
+    /// 形参声明期临时置 false（形参 release 属 D4 实参规则，与调用点 retain
+    /// 同轮启停；未启用时形参不 release，调用点不 retain，两侧一致）。
+    pub arc_track: bool,
+    /// [P3] 本函数**逃逸**的局部变量名集合（值可能活到本帧之外 ⇒ 禁止
+    /// release）。由 `scan_escapes` 在 `emit_function` 入口一次性算出。
+    /// 未启用受限释放（`AURA_ARC_ESCAPE=0`）时保持空集（退化到 P2 行为）。
+    pub arc_escaping: std::collections::HashSet<String>,
+    /// [P3] 本函数各局部量的**定值自有性**：所有定值都是「可证明独占持有」
+    /// （复制类右值已由发射层 retain，或右值是新建临时串）才为 true。
+    /// 由 `scan_escapes` 同趟算出；`AURA_ARC_OWNED=1` 时作为第四道闸门。
+    pub arc_owned_defs: HashMap<String, bool>,
+    /// [P3-诊断] (登记的 ARC 局部量总数, 其中判定为可释放的数量)。
+    pub arc_local_stats: (usize, usize),
 }
 
 /// 变量槽（LLVM 名称 + 类型）
@@ -163,6 +212,20 @@ pub(crate) struct EmitCtx {
 pub(crate) struct VarSlot {
     llvm_name: String,
     llvm_ty: String,
+}
+
+/// [P2/D4] 作用域内「本函数持有的」ARC 局部量（声明序，退出时逆序 release）。
+/// 形参默认不登记（`arc_track=false` 期间声明）—— 形参的 release 与调用点
+/// retain 必须同轮落地（D4 实参规则），由 `arc_track` 开关统一控制。
+#[derive(Debug, Clone)]
+pub(crate) struct ArcLocal {
+    name: String,
+    slot: String,
+    llvm_ty: String,
+    aura_ty: String,
+    /// [P3] 释放许可：逃逸分析判定「该值不会活到本帧之外」才为 true。
+    /// false ⇒ 只 retain 不 release（泄漏方向安全）。
+    releasable: bool,
 }
 
 impl EmitCtx {
@@ -195,8 +258,10 @@ impl EmitCtx {
             const_counter: 0,
             loop_stack: Vec::new(),
             var_scope: vec![HashMap::new()],
+            global_slots: HashMap::new(),
             func_vars: HashMap::new(),
             func_aura_types: HashMap::new(),
+            global_aura_types: HashMap::new(),
             globals: Vec::new(),
             global_const_map: HashMap::new(),
             subprogram_meta: Vec::new(),
@@ -225,8 +290,30 @@ impl EmitCtx {
             var_aura_types: vec![HashMap::new()],
             fn_index_map: HashMap::new(),
             func_ret_aura_types: HashMap::new(),
+            user_fn_symbols: HashMap::new(),
             class_field_aura_types: HashMap::new(),
+            arc_scope_locals: vec![Vec::new()],
+            arc_track: true,
+            arc_escaping: std::collections::HashSet::new(),
+            arc_owned_defs: HashMap::new(),
+            arc_local_stats: (0, 0),
         }
+    }
+
+    /// 用户函数的 LLVM 符号名。
+    ///
+    /// 历史实现直接以 `sanitizellvm(func.name)` 作符号，用户函数与运行时
+    /// `declare` / 原生包装器**同名**时，llc 报
+    /// `invalid redefinition of function 'X'` —— `tests/concurrent/thread_basics.aura`
+    /// 里的 `fun add(a: Int)` 撞上发射器硬编码的 `declare void @add(i8*, i64)`
+    /// 即中招，9 个并发用例里 8 个无法构建。
+    ///
+    /// 这里把用户函数放进 `aura_user_` 前缀的独立符号空间，从根上消除冲突
+    /// （`aura_user_*` 不与任何运行时符号/原生声明重叠）。未登记时回退到
+    /// `sanitizellvm(name)`，保持对 `main` 与未在 `user_fn_symbols` 中的名字
+    /// （native / runtime / std 调用点）的既有行为。
+    pub fn fn_symbol(&self, name: &str) -> String {
+        self.user_fn_symbols.get(name).cloned().unwrap_or_else(|| sanitizellvm(name))
     }
 
     /// 类型映射（带「未定义结构体 → `i8*`」降级）。
@@ -273,14 +360,74 @@ impl EmitCtx {
 
     pub fn declare_var(&mut self, name: &str, llvm_name: String, llvm_ty: String) {
         let slot = VarSlot {
-            llvm_name,
-            llvm_ty,
+            llvm_name: llvm_name.clone(),
+            llvm_ty: llvm_ty.clone(),
         };
         if let Some(scope) = self.var_scope.last_mut() {
             scope.insert(name.to_string(), slot.clone());
         }
         // 函数级回退表（见 `func_vars` 说明）：离开块后仍可解析该名字。
         self.func_vars.insert(name.to_string(), slot);
+        // [P2/D4] 登记 ARC 局部量（当前作用域，声明序）。Aura 类型以
+        // `declare_var_aura_ty` 先登记为准（调用方均在其后调用本函数）；
+        // 未记录类型（Any/空）时按指针即管辖——C 侧防线（低位位测 /
+        // 标签校验）负责装箱整数与外来指针。形参声明期由 `arc_track=false`
+        // 临时关闭（见 emit_function 形参循环）。
+        if self.arc_track && arc_emit_enabled() {
+            let aura_ty = self.lookup_var_aura_ty(name);
+            if arc_managed(&llvm_ty, &aura_ty) {
+                let releasable = self.arc_releasable(name, &llvm_ty, &aura_ty);
+                self.arc_local_stats.0 += 1;
+                if releasable {
+                    self.arc_local_stats.1 += 1;
+                }
+                if let Some(top) = self.arc_scope_locals.last_mut() {
+                    top.push(ArcLocal {
+                        name: name.to_string(),
+                        slot: llvm_name,
+                        llvm_ty,
+                        aura_ty,
+                        releasable,
+                    });
+                }
+            }
+        }
+    }
+
+    /// [P3] 释放许可判定：只有**逃逸分析放行**且**静态类型明确**的局部量
+    /// 才参与 release。三道保守闸门任一不过 ⇒ 不释放（只 retain，泄漏方向安全）：
+    ///
+    /// 1. 逃逸：见 `scan_escapes`（值可能活到本帧之外）；
+    /// 2. 类型未知：Aura 类型为空 / `Any` 的量不放行 —— `Any` 槽可能装
+    ///    装箱整数、`{i8*, i64}` 包装体的一方指针，P2 实测这些正是「逃逸
+    ///    引用未计数」的重灾区（AV / 符号名损坏）；
+    /// 3. 非 ARC 管辖（标量 / 非指针）由 `arc_managed` 排除。
+    fn arc_releasable(&self, name: &str, llvm_ty: &str, aura_ty: &str) -> bool {
+        // `AURA_ARC_ESCAPE=0` ⇒ 退化到 P2（所有局部量都释放），用于二分对照。
+        if !arc_knob("AURA_ARC_ESCAPE") {
+            return true;
+        }
+        if self.arc_escaping.contains(name) {
+            return false;
+        }
+        if aura_ty.is_empty() || aura_ty == "Any" || aura_ty_is_arc_scalar(aura_ty) {
+            return false;
+        }
+        // `AURA_ARC_STRINGONLY=1`：进一步缩到**只有静态类型为 String** 的局部量。
+        // 容器/类实例被别名持有得远比字符串复杂（静态注册表、父子反指、
+        // 结构体值副本），是否放行只能逐档增量验证。
+        if arc_knob("AURA_ARC_STRINGONLY") && aura_ty != "String" {
+            return false;
+        }
+        // 4. [P3] 定值自有性：`AURA_ARC_OWNED=1` 时，只有**每个定值都独占
+        //    持有**（复制类已 retain / 新建临时值）的量才释放。缺席登记表
+        //    （非 HIR 路径的写入，如解构绑定、catch 绑定）按不可释放处理。
+        //    这道闸门把「槽里偶尔混进借用值」的变量整体剔除 —— 作用域退出
+        //    的 release 无条件触发，一旦错踩就是单调变坏的数据损坏。
+        if arc_knob_opt_in("AURA_ARC_OWNED") && !self.arc_owned_defs.get(name).copied().unwrap_or(false) {
+            return false;
+        }
+        arc_managed(llvm_ty, aura_ty)
     }
 
     pub fn lookup_var(&self, name: &str) -> Option<&VarSlot> {
@@ -290,17 +437,184 @@ impl EmitCtx {
             }
         }
         // 块外引用块内声明：回退到函数级表，避免造出未定义 SSA 值。
-        self.func_vars.get(name)
+        if let Some(v) = self.func_vars.get(name) {
+            return Some(v);
+        }
+        // 顶层 `val`/`var`（脚本模式）：函数体内裸名落到模块级全局符号。
+        // 不查这一步时顶层量退化成 `format!("%{}", name)` 造出未定义 SSA 值
+        // （`llc: use of undefined value '%SHARED_COUNT'`）；即便偶然链接成功，
+        // `emit_assign` 也会各自开局部槽位，「共享状态」在多线程下失效。
+        self.global_slots.get(name)
+    }
+
+    /// 模块级全局符号（顶层 `val`/`var`）表，与 `var_scope` 分开的独立作用域。
+    pub fn lookup_global_slot(&self, name: &str) -> Option<&VarSlot> {
+        self.global_slots.get(name)
+    }
+
+    /// 登记模块级全局符号：追加 `@<name> = global i64 0` 定义。
+    pub fn register_global_slot(&mut self, name: &str) {
+        if self.global_slots.contains_key(name) {
+            return;
+        }
+        let gname = format!("@{}", sanitizellvm(name));
+        self.globals.push(format!("{} = global i64 0", gname));
+        self.global_slots.insert(
+            name.to_string(),
+            VarSlot {
+                llvm_name: gname,
+                llvm_ty: "i64".to_string(),
+            },
+        );
+    }
+
+    /// 批量登记模块级全局符号。
+    pub fn register_global_slots(&mut self, names: &[String]) {
+        for n in names {
+            self.register_global_slot(n);
+        }
     }
 
     pub fn enter_scope(&mut self) {
         self.var_scope.push(HashMap::new());
         self.var_aura_types.push(HashMap::new());
+        // [P2/D4] ARC 局部量表与作用域同层压栈。
+        self.arc_scope_locals.push(Vec::new());
     }
 
     pub fn exit_scope(&mut self) {
         self.var_scope.pop();
         self.var_aura_types.pop();
+        self.arc_scope_locals.pop();
+    }
+
+    // ── [P2/D4] ARC 发射助手（retain/release 注入）─────────────────
+
+    /// 发射 `retain(val)`（ARC 开 + 类型管辖 + SSA 值才发；常量/全局
+    /// 符号如 `@str_data.N` 是 .rdata 字面量，永生无需 retain）。
+    pub fn arc_retain(&mut self, blocks: &mut FuncBlocks, val: &str, val_ty: &str, aura_ty: &str) {
+        if !arc_emit_enabled()
+            || !arc_knob("AURA_ARC_RETAIN")
+            || !arc_managed(val_ty, aura_ty)
+            || !val.starts_with('%')
+        {
+            return;
+        }
+        let v = self.arc_ptr_arg(blocks, val, val_ty);
+        blocks
+            .last_mut()
+            .body
+            .push(format!("call void @aura_arc_retain(i8* {})", v));
+    }
+
+    /// 发射 `release(val)`（门控条件同 retain，且必须显式
+    /// `AURA_ARC_RELEASE=1` —— 释放是本项目唯一会让内存消失的操作，
+    /// 详见 P2 报告 §三）。
+    pub fn arc_release(&mut self, blocks: &mut FuncBlocks, val: &str, val_ty: &str, aura_ty: &str) {
+        if !arc_emit_enabled()
+            || !arc_release_enabled()
+            || !arc_managed(val_ty, aura_ty)
+            || !val.starts_with('%')
+        {
+            return;
+        }
+        let v = self.arc_ptr_arg(blocks, val, val_ty);
+        blocks
+            .last_mut()
+            .body
+            .push(format!("call void @aura_arc_release(i8* {})", v));
+    }
+
+    /// 把指针值规整为 `i8*`（非 i8*/ptr 类型先 bitcast；LLVM 调用点
+    /// 要求实参类型与声明一致）。
+    fn arc_ptr_arg(&mut self, blocks: &mut FuncBlocks, val: &str, val_ty: &str) -> String {
+        if val_ty == "i8*" || val_ty == "ptr" {
+            return val.to_string();
+        }
+        let c = self.fresh_var();
+        blocks
+            .last_mut()
+            .body
+            .push(format!("{} = bitcast {} {} to i8*", c, val_ty, val));
+        c
+    }
+
+    /// release 一个已登记的 ARC 局部量：load 当前值 → release。
+    /// 槽内可能是 null（可空量）—— load 出 "null" 时 arc_release 自动跳过。
+    /// [P3] 逃逸放行制：`releasable == false` 的量（逃逸 / 类型不明）不发射
+    /// release，只 retain —— 多留一份引用是泄漏方向，绝不产生悬空引用。
+    pub fn arc_release_local(&mut self, blocks: &mut FuncBlocks, l: &ArcLocal) {
+        if !arc_emit_enabled() || !l.releasable || blocks.has_terminator() {
+            return;
+        }
+        let old = self.fresh_var();
+        // 注意 slot_ptr_ty 已返回「槽指针类型」（`i8*` → `i8**`），
+        // 不能再补 `*`（否则生成 `i8***`，虽同址但 IR 类型不自洽）。
+        blocks.last_mut().body.push(format!(
+            "{} = load {}, {} {}",
+            old,
+            l.llvm_ty,
+            slot_ptr_ty(&l.llvm_ty),
+            l.slot
+        ));
+        self.arc_release(blocks, &old, &l.llvm_ty, &l.aura_ty);
+    }
+
+    /// [P2/D4] 作用域退出发射：逆序 release 本作用域的 ARC 局部量
+    /// （当前块未终止时），然后弹出三层作用域栈。
+    /// 已终止块（return/break/continue 路径）跳过发射 —— 泄漏方向安全
+    /// （return 路径已在 Return 发射点统一释放；break/continue 的边释放
+    /// 属 P3 收尾项）。
+    pub fn emit_arc_scope_exit(&mut self, blocks: &mut FuncBlocks) {
+        let locals = self.arc_scope_locals.pop();
+        if let Some(locals) = locals {
+            if arc_emit_enabled()
+                && arc_release_enabled()
+                && arc_knob_opt_in("AURA_ARC_SCOPE")
+                && !blocks.has_terminator()
+            {
+                for l in locals.iter().rev() {
+                    self.arc_release_local(blocks, l);
+                }
+            }
+        }
+        self.var_scope.pop();
+        self.var_aura_types.pop();
+    }
+
+    /// [P2/D4] release 当前（最内）打开作用域的 ARC 局部量，不弹栈。
+    /// 用于函数体发射完、终止符生成前（形参在本函数出口释放）。
+    pub fn arc_release_top_scope(&mut self, blocks: &mut FuncBlocks) {
+        if !arc_emit_enabled() || blocks.has_terminator() {
+            return;
+        }
+        // 借用地：先克隆局部量表避免借用冲突（表小，成本可忽略）。
+        let locals = self.arc_scope_locals.last().cloned().unwrap_or_default();
+        for l in locals.iter().rev() {
+            self.arc_release_local(blocks, l);
+        }
+    }
+
+    /// [P2/D4] release 全部打开作用域的 ARC 局部量（最内优先），不弹栈。
+    /// 用于显式 `return`：终止符生成前把本函数所有持有量释放掉
+    /// （复制类返回值已先 retain，自赋值/返回自有量均安全）。
+    pub fn arc_release_all_scopes(&mut self, blocks: &mut FuncBlocks) {
+        if !arc_emit_enabled()
+            || !arc_release_enabled()
+            || !arc_knob_opt_in("AURA_ARC_RETURN")
+            || blocks.has_terminator()
+        {
+            return;
+        }
+        let all: Vec<ArcLocal> = self
+            .arc_scope_locals
+            .iter()
+            .rev()
+            .flat_map(|s| s.iter().rev().cloned())
+            .collect();
+        for l in all.iter() {
+            self.arc_release_local(blocks, l);
+        }
     }
 
     /// 记录变量的 Aura 类型名（空/`Any` 视为未知，不记录）。
@@ -312,6 +626,11 @@ impl EmitCtx {
             scope.insert(name.to_string(), aura_ty.to_string());
         }
         self.func_aura_types.insert(name.to_string(), aura_ty.to_string());
+        // 全局量（顶层 `val`/`var`）额外登记到模块级表：`func_aura_types` 按函数
+        // 清空，跨函数的后续使用只能靠这张表（见 `global_aura_types` 的说明）。
+        if self.global_slots.contains_key(name) {
+            self.global_aura_types.insert(name.to_string(), aura_ty.to_string());
+        }
     }
 
     /// 查询变量的 Aura 类型名（未记录返回 `""`）。
@@ -537,6 +856,20 @@ impl EmitCtx {
         s.push_str("declare i64 @aura_cpu_rdtsc()\n");
         s.push_str("declare void @aura_cpu_mem_fence()\n");
         s.push_str("declare i64 @aura_cpu_atomic_add(i64 %arg.0, i64 %arg.1)\n");
+        // [MEM-FIX] 阶段区域原语：Memory.regionEnter/regionReset 的 Builtin
+        // 包装体直接 call 这两个 C 符号（实现在 aura_std_cffi.c）。declare
+        // 与定义并存为 LLVM 允许的冗余声明。
+        s.push_str("declare i64 @RegionEnter()\n");
+        s.push_str("declare i64 @RegionReset()\n");
+        // [R87] scratch 并行 arena(逐模块 parse 中间物回收)
+        s.push_str("declare i64 @RegionScratchTarget()\n");
+        s.push_str("declare i64 @RegionRetainTarget()\n");
+        s.push_str("declare i64 @ScratchReset()\n");
+        // [R87] æ å¼ mark/rewind
+        s.push_str("declare i64 @ScratchMark()\n");
+        s.push_str("declare i64 @ScratchRewind(i64)\n");
+        // [R89] 字符串幸存者 dup 落 retain
+        s.push_str("declare i8* @StrdupRetain(i8*)\n");
         // Phase D: 异常值全局变量（setjmp/longjmp 桥用）— 在 aura_syscalls.c 中定义
         s.push_str("@aura_exception_value = external global i8*\n");
         // LLVM 内建函数声明（Memory.copy / Memory.set / Memory.compare 用）
@@ -597,6 +930,567 @@ impl EmitCtx {
             self.sections.push(s);
         }
     }
+}
+
+// ── [P2/D4] ARC 发射层（AURA_ARC=1 开关，默认关 = 逃生门）──────────
+//
+// 契约（方案 D4 规则表 + D5 native 边界）：
+//   · 槽位存储：复制类右值（Var / 字段读 / 下标读 / 返回别名的 C 调用）
+//     先 retain 再 release 旧值再存入（`x = x` 自赋值安全）；
+//   · 新建槽：复制类初值 retain，否则无动作（新值所有权转移给槽）；
+//   · 字段写：retain 新值 + release 旧字段值；字段读：不单独 retain
+//     （retain 发生在「成为新持有者」的消费点，避免瞬态读泄漏）；
+//   · return：复制类返回值先 retain，再逆序释放全部打开作用域；
+//   · 实参：Aura 被调者的指针实参按复制类 retain（被调者出口 release
+//     形参配对）；C 被调者只借用（D5），不 retain；
+//   · 容器元素：push/set 的 retain 在 C 侧（P1），发射器不重复。
+//
+// 单线程非原子 rc（D6）；逃逸门：AURA_ARC 未设/为 0 时全部规则静默，
+// 产物与 R147 基线逐字节一致。
+
+/// [P2] ARC 发射开关（进程内读一次）。
+fn arc_emit_enabled() -> bool {
+    static ARC_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ARC_ON.get_or_init(|| {
+        std::env::var_os("AURA_ARC")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
+/// [P2] **release 总闸（默认关）**：`AURA_ARC=1` 只启用 retain 计数；
+/// 只有显式 `AURA_ARC_RELEASE=1` 才发射作用域/return/闭包释放。
+/// 实测（R148→R149）：本代码库存在多处「逃逸引用未计数」的别名
+/// （结构体值副本、静态注册表、`Any` 包装、模块级全局），一旦释放就会
+/// 踩掉仍被引用的对象（AV / 符号名损坏，见 P2 报告 §三）。默认关闭 ⇒
+/// 不会静默产生内存错误；开启是显式的实验开关。
+fn arc_release_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("AURA_ARC_RELEASE")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
+/// [P2-DEBUG] 细粒度规则开关（发射期读环境变量，默认全开）：
+/// `AURA_ARC_SCOPE=0` 关作用域退出释放、`AURA_ARC_RETURN=0` 关 return 路径
+/// 释放、`AURA_ARC_RETAIN=0` 关全部 retain。用于二分定位失衡规则。
+/// 旋钮读取：默认**开**（未设或 `=0`/空 之外的值都算开）。
+fn arc_knob(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => !(v == "0" || v.is_empty()),
+        Err(_) => true,
+    }
+}
+
+/// [P3] 旋钮读取：默认**关**（只有显式 `=1` 才打开）。
+///
+/// 用于「尚未验证安全」的释放通道。P3 的二分实测只有**覆盖释放**经得起
+/// 全样例 + 全链自举（`.obj` 逐字节一致）；作用域退出释放与 return 出口
+/// 释放无论单独还是叠加、无论是否叠加定值自有性闸门，都会踩掉仍被引用的
+/// 对象（`bad_magic≠0` / `.obj` 内容损坏）。因此这两类默认关闭，想继续
+/// 探索必须显式打开（见 P3 报告 §四）。
+fn arc_knob_opt_in(name: &str) -> bool {
+    matches!(std::env::var(name), Ok(v) if v == "1")
+}
+
+/// 标量 Aura 类型（Plan A 装箱或原生数值，不参与 ARC）。
+fn aura_ty_is_arc_scalar(ty: &str) -> bool {
+    matches!(
+        ty,
+        "Int" | "Long" | "Short" | "Byte" | "U8" | "Float" | "Double" | "Boolean"
+            | "Bool" | "Char" | "Unit" | "void" | ""
+    )
+}
+
+/// 该 LLVM 类型 + Aura 类型是否 ARC 管辖：指针且非标量。
+/// Aura 类型未知（Any/空）的指针值也管辖——装箱整数/字面量/栈地址由
+/// C 侧四道防线 + 标签校验（~2^-30 假阳性）安全跳过。
+fn arc_managed(llvm_ty: &str, aura_ty: &str) -> bool {
+    is_ptr_ty(llvm_ty) && !aura_ty_is_arc_scalar(aura_ty)
+}
+
+/// [P2/D5] 返回「已存在对象别名」而非新持有值的 C 调用点：
+///  · 借用返回（getAt/listGet/mapGet/getOrDefault）—— 调用方把结果存槽
+///    必须 retain，否则槽位 release 会踩掉容器持有的引用（UAF）；
+///  · 接收者返回（listAppend/listRemoveAt/set/mapSet/hashMapPut）——
+///    返回调用方已持有的同一对象，同理。
+/// Aura 函数不在此列：其返回值要么是新构造（所有权转移），要么在返回
+/// 点已按复制类规则 retain。用户同名函数经 `user_fn_symbols` 排除。
+fn arc_c_call_aliases(ctx: &EmitCtx, callee: &str) -> bool {
+    if ctx.user_fn_symbols.contains_key(callee) {
+        return false;
+    }
+    let bare = callee.rsplit('.').next().unwrap_or(callee);
+    matches!(
+        bare,
+        "getAt" | "listGet" | "mapGet" | "getOrDefault" | "listAppend"
+            | "__list_push" | "listRemoveAt" | "__list_remove_at" | "mapSet"
+            | "hashMapPut" | "put" | "add" | "set" | "__get" | "__list_get"
+    )
+}
+
+/// [P2/D4] 右值是否为「复制类」——求值结果是**已存在持有量**的别名，
+/// 存入新槽/传给 Aura 被调者/返回前必须 retain（否则引用计数少计）。
+/// 其余（调用/字面量/运算/New/lambda）视为新持有或永生，无需 retain。
+fn is_copy_expr(ctx: &EmitCtx, e: &HirExpr) -> bool {
+    match e {
+        HirExpr::Var(name) => {
+            // 单例实例是模块级全局（.data，永生）；枚举名不是值。
+            !ctx.singleton_structs.contains(name) && !ctx.enum_variants.contains_key(name)
+        }
+        // 字段读/下标读：容器/对象字段的借用值（枚举变体构造除外——
+        // 那是每次求值新建的栈上值，见 emit_member_access 枚举分支）。
+        HirExpr::Member { object, .. } => match object.as_ref() {
+            HirExpr::Var(v) => !ctx.enum_variants.contains_key(v),
+            _ => true,
+        },
+        HirExpr::Index { .. } => true,
+        // 返回别名的 C 调用（借用/接收者返回）。
+        HirExpr::Call { callee, .. } => arc_c_call_aliases(ctx, callee),
+        HirExpr::CallVirtual { name, .. } => arc_c_call_aliases(ctx, name),
+        // 分支/块表达式：**必须递归看分支**。`val x = if c { obj.field } else { "" }`
+        // 求值结果是借用值（phi 汇聚），不 retain 就会在槽释放时踩掉
+        // 字段持有者的引用（实测 `Lowering.lowerCallValue` 的 `val op =
+        // if (…) { srcVal.op } else { "" }`：每次调用释放一次 MirValue.op，
+        // 第二次调用即 use-after-free）。任一分支借用即 retain ——
+        // 多 retain 只泄漏一次引用（安全方向），少 retain 是 UAF。
+        HirExpr::If { then_e, else_e, .. } => {
+            is_copy_expr(ctx, then_e) || is_copy_expr(ctx, else_e)
+        }
+        HirExpr::Block(b) => match b.stmts.last() {
+            Some(HirStmt::Expr(x)) => is_copy_expr(ctx, x),
+            Some(HirStmt::Return(Some(x))) => is_copy_expr(ctx, x),
+            _ => false,
+        },
+        HirExpr::Await(inner) => is_copy_expr(ctx, inner),
+        // New / Lambda / Box / WeakRef / 字面量 / 运算：新建或永生。
+        _ => false,
+    }
+}
+
+// ── [P3] 受限逃逸分析（scoped release 的准入判定）────────────────────
+//
+// P2 实测：对**全部** ARC 局部量注入 release 会产生 UAF / 数据损坏，根因是
+// 「逃逸引用未计数」（结构体值副本、静态注册表、`Any` 包装、模块级全局、
+// 枚举载荷 —— 见 P2 报告 §三.(3)）。P3 不试图一次性闭合所有权，而是**缩窄
+// 释放范围**：只对编译期可证明「值不会活到本帧之外」的局部量发射 release。
+// 判不定的一律不释放 —— 泄漏方向安全。
+//
+// 逃逸写到 ⇒ 禁止释放：
+//   · 字段赋值 (`o.f = x`)、下标赋值 (`c[i] = x`)、未声明目标（模块级全局）；
+//   · `New` 的实参（挂到新建对象上）；
+//   · 存储型运行时调用的实参（`listAppend`/`mapSet`/`put`/`add`/…）；
+//   · `Defer` 体与 `try` 体内出现的量（生命周期被延迟/异常路径拉长）；
+//   · `box` / `weak` / `await` 的操作数（可能被协程帧长期持有）。
+// 非逃逸 ⇒ 可释放：
+//   · 纯读取（`o.f`、`c[i]`、比较、运算操作数、receiver）；
+//   · 非存储型调用的实参（D5 借用语义：C 侧只借不存）；
+//   · `return` 的值（Return 发射点已先 retain，再释放作用域，配平）；
+//   · `x = <expr>` 的赋值目标自身（覆盖语义自带 release）。
+//
+// 同名冲突（lambda 内 shadow 外层同名变量）只会让判定更保守 —— 安全方向。
+
+/// [P3] 运行时里**会把实参长期挂到容器/表上**的入口。
+///
+/// 与 `arc_c_call_aliases` 的分工：后者是「返回值属于借用/接收者」的入口；
+/// 这里是「被调者会存下实参」的入口。绝大多数字符串/IO 函数按 D5 只借用
+/// 实参，把它们也算成逃逸会砍掉绝大部分收益 —— 故列表只收容器写入语义。
+fn arc_call_stores_arg(ctx: &EmitCtx, callee: &str) -> bool {
+    if ctx.user_fn_symbols.contains_key(callee) {
+        return false;
+    }
+    let bare = callee.rsplit('.').next().unwrap_or(callee);
+    matches!(
+        bare,
+        "listAppend" | "__list_push" | "push" | "listSet" | "__list_set"
+            | "mapSet" | "hashMapPut" | "put" | "add" | "set" | "insert"
+            | "listRemoveAt" | "__list_remove_at"
+    )
+}
+
+/// 收集表达式中出现的全部变量名（递归，含 lambda 体 —— 保守方向）。
+fn collect_var_names(e: &HirExpr, out: &mut Vec<String>) {
+    match e {
+        HirExpr::Var(n) => out.push(n.clone()),
+        HirExpr::Lit(_) => {}
+        HirExpr::Binary { lhs, rhs, .. } => {
+            collect_var_names(lhs, out);
+            collect_var_names(rhs, out);
+        }
+        HirExpr::Unary { operand, .. } => collect_var_names(operand, out),
+        HirExpr::Call { args, .. } => {
+            for a in args {
+                collect_var_names(a, out);
+            }
+        }
+        HirExpr::CallVirtual { recv, args, .. } => {
+            collect_var_names(recv, out);
+            for a in args {
+                collect_var_names(a, out);
+            }
+        }
+        HirExpr::Member { object, .. } => collect_var_names(object, out),
+        HirExpr::Index { container, index } => {
+            collect_var_names(container, out);
+            collect_var_names(index, out);
+        }
+        HirExpr::New { args, .. } => {
+            for a in args {
+                collect_var_names(a, out);
+            }
+        }
+        HirExpr::If { cond, then_e, else_e } => {
+            collect_var_names(cond, out);
+            collect_var_names(then_e, out);
+            collect_var_names(else_e, out);
+        }
+        HirExpr::Block(b) => collect_block_vars(b, out),
+        HirExpr::Box(x) | HirExpr::WeakRef(x) | HirExpr::Await(x) => collect_var_names(x, out),
+        HirExpr::Lambda { body, .. } => collect_block_vars(body, out),
+    }
+}
+
+/// 语句 → 出现的全部变量名（保守区域的兜底收集）。
+fn collect_stmt_vars(s: &HirStmt, out: &mut Vec<String>) {
+    match s {
+        HirStmt::Val { init, .. } | HirStmt::Var { init, .. } => {
+            if let Some(e) = init {
+                collect_var_names(e, out);
+            }
+        }
+        HirStmt::Assign { target, value } => {
+            collect_var_names(target, out);
+            collect_var_names(value, out);
+        }
+        HirStmt::Expr(e) | HirStmt::Return(Some(e)) => collect_var_names(e, out),
+        HirStmt::If { cond, then_b, else_b } => {
+            collect_var_names(cond, out);
+            collect_block_vars(then_b, out);
+            if let Some(b) = else_b {
+                collect_block_vars(b, out);
+            }
+        }
+        HirStmt::While { cond, body } => {
+            collect_var_names(cond, out);
+            collect_block_vars(body, out);
+        }
+        HirStmt::Block(b) | HirStmt::Defer(b) => collect_block_vars(b, out),
+        HirStmt::Try { body, catch_body, finally, .. } => {
+            collect_block_vars(body, out);
+            collect_block_vars(catch_body, out);
+            if let Some(b) = finally {
+                collect_block_vars(b, out);
+            }
+        }
+        HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}
+    }
+}
+
+fn collect_block_vars(b: &HirBlock, out: &mut Vec<String>) {
+    for s in &b.stmts {
+        collect_stmt_vars(s, out);
+    }
+}
+
+/// [P3] 扫描函数体，返回**逃逸**的局部变量名集合。
+///
+/// `declared` 为「本函数可见的声明名」集合（形参先由调用方填好，遍历中遇
+/// `val`/`var`/lambda 形参继续补充）；它对每个字面上的 name 只保留一个概念：
+/// 「这是本帧声明的量，还是外部（模块级全局 / 未知）目标」。
+pub struct EscapeScan {
+    /// 命Escape 的变量名（值可能活到本帧之外 ⇒ 禁止 release）。
+    pub escaping: std::collections::HashSet<String>,
+    /// 各局部量「所有定值都独占持有」的判定（缺席 ⇒ 不敢释放）。
+    pub owned_defs: HashMap<String, bool>,
+}
+
+pub fn scan_escapes(
+    ctx: &EmitCtx,
+    body: &HirBlock,
+    declared: &mut std::collections::HashSet<String>,
+) -> EscapeScan {
+    let mut esc: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut owned: HashMap<String, bool> = HashMap::new();
+    for s in &body.stmts {
+        scan_stmt(ctx, s, declared, &mut esc, &mut owned);
+    }
+    EscapeScan { escaping: esc, owned_defs: owned }
+}
+
+/// [P3] 定值自有性——该右值存入槽后，槽隔出的是**独占**持有。
+///
+/// 两种情形成立：
+///   · 复制类右值（`is_copy_expr` 为真）：发射层已在存入前 retain，
+///     槽多得的那一份正对应将来的一次 release —— 收支必然配平；
+///   · 新建值（字面量 / 拼接 / 运算）：结果对象的 rc=1 且此刻无人持有，
+///     所有权随存入完整转移给槽。
+///
+/// 其余（`Call` / `New` / `Lambda` / 枚举变体等）无法静态证明独占 ——
+/// 一次 algebraic false 会让整个变量失去释放资格（泄漏方向安全）。
+fn owned_def(ctx: &EmitCtx, e: &HirExpr) -> bool {
+    if is_copy_expr(ctx, e) {
+        return true;
+    }
+    match e {
+        HirExpr::Lit(_) | HirExpr::Binary { .. } => true,
+        HirExpr::If { then_e, else_e, .. } => {
+            owned_def(ctx, then_e) && owned_def(ctx, else_e)
+        }
+        HirExpr::Block(b) => match b.stmts.last() {
+            Some(HirStmt::Expr(x)) | Some(HirStmt::Return(Some(x))) => owned_def(ctx, x),
+            _ => false,
+        },
+        HirExpr::Await(x) => owned_def(ctx, x),
+        _ => false,
+    }
+}
+
+fn arc_record_def(
+    ctx: &EmitCtx,
+    name: &str,
+    rhs: &HirExpr,
+    owned: &mut HashMap<String, bool>,
+) {
+    let ok = owned_def(ctx, rhs);
+    let cur = owned.entry(name.to_string()).or_insert(true);
+    if !ok {
+        *cur = false;
+    }
+}
+
+fn scan_stmt(
+    ctx: &EmitCtx,
+    s: &HirStmt,
+    declared: &mut std::collections::HashSet<String>,
+    esc: &mut std::collections::HashSet<String>,
+    owned: &mut HashMap<String, bool>,
+) {
+    match s {
+        HirStmt::Val { name, init, .. } | HirStmt::Var { name, init, .. } => {
+            declared.insert(name.clone());
+            // 初值的所有权转移给新槽 ⇒ 不因「存入」逃逸；但其内部的逃逸
+            // 写点（New 实参、存储型调用实参）仍要递归登记。
+            if let Some(e) = init {
+                arc_record_def(ctx, name, e, owned);
+                scan_expr(ctx, e, declared, esc, owned);
+            }
+        }
+        HirStmt::Assign { target, value } => {
+            let escaping_store = match target {
+                HirExpr::Var(n) => !declared.contains(n),
+                HirExpr::Member { .. } | HirExpr::Index { .. } => true,
+                _ => true,
+            };
+            if !escaping_store {
+                if let HirExpr::Var(n) = target {
+                    arc_record_def(ctx, n, value, owned);
+                }
+            }
+            if escaping_store {
+                let mut vs = Vec::new();
+                collect_var_names(value, &mut vs);
+                for v in vs {
+                    esc.insert(v);
+                }
+            }
+            scan_expr(ctx, target, declared, esc, owned);
+            scan_expr(ctx, value, declared, esc, owned);
+        }
+        HirStmt::Return(e) => {
+            if let Some(e) = e {
+                scan_expr(ctx, e, declared, esc, owned);
+            }
+        }
+        HirStmt::Expr(e) => scan_expr(ctx, e, declared, esc, owned),
+        HirStmt::If { cond, then_b, else_b } => {
+            scan_expr(ctx, cond, declared, esc, owned);
+            for s2 in &then_b.stmts {
+                scan_stmt(ctx, s2, declared, esc, owned);
+            }
+            if let Some(b) = else_b {
+                for s2 in &b.stmts {
+                    scan_stmt(ctx, s2, declared, esc, owned);
+                }
+            }
+        }
+        HirStmt::While { cond, body } => {
+            scan_expr(ctx, cond, declared, esc, owned);
+            for s2 in &body.stmts {
+                scan_stmt(ctx, s2, declared, esc, owned);
+            }
+        }
+        HirStmt::Block(b) => {
+            for s2 in &b.stmts {
+                scan_stmt(ctx, s2, declared, esc, owned);
+            }
+        }
+        // defer / try：清理块与异常路径把生命周期拉出本帧 ⇒ 保守全标逃逸。
+        HirStmt::Defer(b) => {
+            let mut vs = Vec::new();
+            collect_block_vars(b, &mut vs);
+            for v in vs {
+                esc.insert(v);
+            }
+        }
+        HirStmt::Try { body, catch_body, finally, .. } => {
+            let mut vs = Vec::new();
+            collect_block_vars(body, &mut vs);
+            collect_block_vars(catch_body, &mut vs);
+            if let Some(b) = finally {
+                collect_block_vars(b, &mut vs);
+            }
+            for v in vs {
+                esc.insert(v);
+            }
+        }
+        HirStmt::Break | HirStmt::Continue => {}
+    }
+}
+
+fn scan_expr(
+    ctx: &EmitCtx,
+    e: &HirExpr,
+    declared: &mut std::collections::HashSet<String>,
+    esc: &mut std::collections::HashSet<String>,
+    owned: &mut HashMap<String, bool>,
+) {
+    match e {
+        HirExpr::Var(_) | HirExpr::Lit(_) => {}
+        HirExpr::Binary { lhs, rhs, .. } => {
+            scan_expr(ctx, lhs, declared, esc, owned);
+            scan_expr(ctx, rhs, declared, esc, owned);
+        }
+        HirExpr::Unary { operand, .. } => scan_expr(ctx, operand, declared, esc, owned),
+        HirExpr::Call { callee, args } => {
+            if arc_call_stores_arg(ctx, callee) {
+                for a in args {
+                    let mut vs = Vec::new();
+                    collect_var_names(a, &mut vs);
+                    for v in vs {
+                        esc.insert(v);
+                    }
+                }
+            }
+            for a in args {
+                scan_expr(ctx, a, declared, esc, owned);
+            }
+        }
+        HirExpr::CallVirtual { name, recv, args } => {
+            if arc_call_stores_arg(ctx, name) {
+                let mut vs = Vec::new();
+                collect_var_names(recv, &mut vs);
+                for a in args {
+                    collect_var_names(a, &mut vs);
+                }
+                for v in vs {
+                    esc.insert(v);
+                }
+            }
+            scan_expr(ctx, recv, declared, esc, owned);
+            for a in args {
+                scan_expr(ctx, a, declared, esc, owned);
+            }
+        }
+        // New：实参被写进新建对象的字段 ⇒ 逃逸。
+        HirExpr::New { args, .. } => {
+            let mut vs = Vec::new();
+            for a in args {
+                collect_var_names(a, &mut vs);
+            }
+            for v in vs {
+                esc.insert(v);
+            }
+        }
+        HirExpr::Member { object, .. } => scan_expr(ctx, object, declared, esc, owned),
+        HirExpr::Index { container, index } => {
+            scan_expr(ctx, container, declared, esc, owned);
+            scan_expr(ctx, index, declared, esc, owned);
+        }
+        HirExpr::If { cond, then_e, else_e } => {
+            scan_expr(ctx, cond, declared, esc, owned);
+            scan_expr(ctx, then_e, declared, esc, owned);
+            scan_expr(ctx, else_e, declared, esc, owned);
+        }
+        HirExpr::Block(b) => {
+            for s in &b.stmts {
+                scan_stmt(ctx, s, declared, esc, owned);
+            }
+        }
+        // lambda 体并入同一轮判定：捕获项在 env 构造时已 retain（P2），
+        // 故「只读捕获」不构成逃逸；体局部量按同一套规则各自判定。
+        HirExpr::Lambda { params, body } => {
+            for p in params {
+                declared.insert(p.name.clone());
+            }
+            for s in &body.stmts {
+                scan_stmt(ctx, s, declared, esc, owned);
+            }
+        }
+        // box / weak / await：可能被协程帧或弱引用长期持有 ⇒ 操作数逃逸。
+        HirExpr::Box(x) | HirExpr::WeakRef(x) | HirExpr::Await(x) => {
+            let mut vs = Vec::new();
+            collect_var_names(x, &mut vs);
+            for v in vs {
+                esc.insert(v);
+            }
+            scan_expr(ctx, x, declared, esc, owned);
+        }
+    }
+}
+
+/// 取 `call void @fname(i8* X)` 形式的 ARC 调用的实参名（否则 None）。
+fn arc_call_arg(line: &str, fname: &str) -> Option<String> {
+    let l = line.trim_start();
+    let pat = format!("call void @{}(", fname);
+    let rest = l.strip_prefix(&pat)?;
+    let inner = rest.strip_suffix(')')?.trim();
+    let arg = inner.strip_prefix("i8* ")?.trim();
+    Some(arg.to_string())
+}
+
+/// [P3] ARC 窥孔：删除同一 SSA 值上**相邻**的 `retain(v); release(v)` 配对。
+///
+/// 净效应为 0（rc +1-1），且两条指令之间没有任何副作用 —— 删除是安全的。
+/// `-O0` 下每条都是真实函数调用（本项目 C 运行时无优化旗标），这条窥孔直接
+/// 兑现 P0 报告 §三.7 提到的「-O0 放大调用开销」的一部分。
+///
+/// **反向配对 `release(v); retain(v)` 绝不消除**：release 可能已把 rc 减到 0
+/// 并真正 free 掉对象，紧随其后 retain 的是野指针。ASF 方向的节省不值得引入
+/// use-after-free（P2 的核心教训）。
+fn arc_peephole(blocks: &mut FuncBlocks) -> usize {
+    if !arc_emit_enabled() || !arc_knob("AURA_ARC_PEEP") {
+        return 0;
+    }
+    let mut removed = 0usize;
+    for bb in blocks.blocks.iter_mut() {
+        // ARC 只在 `-O0` 的线性块里出现（本 IR 生成器不跨块重排），单趟扫描即可。
+        let src = std::mem::take(&mut bb.body);
+        let n = src.len();
+        let mut out: Vec<String> = Vec::with_capacity(n);
+        let mut i = 0;
+        while i < n {
+            let mut skip = false;
+            if i + 1 < n {
+                let a = arc_call_arg(&src[i], "aura_arc_retain");
+                let b = arc_call_arg(&src[i + 1], "aura_arc_release");
+                if let (Some(x), Some(y)) = (a, b) {
+                    if x == y {
+                        removed += 2;
+                        skip = true;
+                        i += 2;
+                    }
+                }
+            }
+            if !skip {
+                out.push(src[i].clone());
+                i += 1;
+            }
+        }
+        bb.body = out;
+    }
+    removed
 }
 
 /// 某 LLVM 类型的零值字面量（补齐无显式返回路径；与 Aura 侧 `defaultValue` 一致）。
@@ -942,11 +1836,15 @@ fn emit_native_wrapper(
             let method_lower = method_name.to_lowercase();
             let sym_lower = sym.to_lowercase();
             if sym_lower.contains("alloc") {
-                // Memory.alloc(n) → call malloc(n), ptrtoint to i64
-                "%ptr.alloc = call i8* @malloc(i64 %arg.0)\n%result = ptrtoint i8* %ptr.alloc to i64".to_string()
+                // Memory.alloc(n) → call aura_malloc(n), ptrtoint to i64
+                // [R90] 不能用 @malloc（/NODEFAULTLIB 下无 libc）；aura_malloc
+                // 带上限检查 + 记账，与第二路径（bare=="alloc"）一致。
+                "%ptr.alloc = call i8* @aura_malloc(i64 %arg.0)\n%result = ptrtoint i8* %ptr.alloc to i64".to_string()
             } else if sym_lower.contains("free") {
-                // Memory.free(addr) → inttoptr from i64, call free
-                "%ptr.free = inttoptr i64 %arg.0 to i8*\ncall void @free(i8* %ptr.free)".to_string()
+                // Memory.free(addr) → inttoptr from i64, call aura_free
+                // [R90] 不能用 @free（/NODEFAULTLIB 下无 libc 且 aura_mem_free
+                // 自身调 free 会递归）；aura_free 走 aura_mem_free 统一记账。
+                "%ptr.free = inttoptr i64 %arg.0 to i8*\ncall void @aura_free(i8* %ptr.free)".to_string()
             } else if func.name.contains("Memory") && method_lower.starts_with("read") {
                 // Memory.read(addr) / read16 / read32 / read64
                 let (load_ty, ptr_ty) = if method_lower == "read16" {
@@ -983,6 +1881,34 @@ fn emit_native_wrapper(
             } else if func.name.contains("Memory") && method_lower == "set" {
                 // Memory.set(addr, v, n) → @llvm.memset
                 "%ptr.addr = inttoptr i64 %arg.0 to i8*\ncall void @llvm.memset(i8* %ptr.addr, i8 %arg.1, i64 %arg.2, i1 false)".to_string()
+            } else if method_lower == "regionscratchtarget" {
+                // [R87] scratch 并行 arena(见 aura_std_cffi.c)
+                "call i64 @RegionScratchTarget()".to_string()
+            } else if method_lower == "regionretaintarget" {
+                "call i64 @RegionRetainTarget()".to_string()
+            } else if method_lower == "scratchreset" {
+                "call i64 @ScratchReset()".to_string()
+            } else if method_lower == "scratchmark" {
+                "call i64 @ScratchMark()".to_string()
+            } else if method_lower == "scratchrewind" {
+                "call i64 @ScratchRewind(i64 %arg.0)".to_string()
+            } else if method_lower == "strdupretain" {
+                "call i8* @StrdupRetain(i8* %arg.0)".to_string()
+            } else if method_lower == "regionenter" || method_lower == "regionreset" {
+                // [MEM-FIX] 阶段区域原语 → C runtime 同名符号（Aura 方法名
+                // regionEnter/regionReset → C 导出 RegionEnter/RegionReset）。
+                // ⚠️ 2026-10-10 方案3-R1 实证修复：此前无此分支，调用落入
+                // 「未知内置」空桩（define i64 @Memory_regionReset(){ret 0}）
+                // ——区域从未生效、前端垃圾从未回收，7.41GB 峰值实际全部
+                // 来自 7814f5e 的 CSV 炸弹修复。驱动全量构建 5.2GB→预期 3.5GB。
+                format!(
+                    "call i64 @{}()",
+                    if method_lower == "regionenter" {
+                        "RegionEnter"
+                    } else {
+                        "RegionReset"
+                    }
+                )
             } else if sym_lower.contains("console") && sym_lower.contains("println") {
                 // Console.println(msg) → call aura_lang_std_Console_println
                 "call void @aura_lang_std_Console_println(i64 %arg.0)".to_string()
@@ -1052,11 +1978,44 @@ pub fn emit_program(
         c_abi,
     );
 
+    // 0. 用户函数符号空间（必须在任何 define/declare 之前建立）。
+    //
+    // 每个非 native 的用户函数加 `aura_user_` 前缀，与运行时 `declare`
+    // （`add`/`size`/`getAt`/`length`/`println`…）及原生包装器分属不同符号空间，
+    // 避免 llc 的 `invalid redefinition of function`（详见 `EmitCtx::fn_symbol`）。
+    // `main` 是 C 入口，必须保持原名；native 函数由 extern declare 承担符号。
+    for func in &program.functions {
+        if func.is_native || func.name == "main" {
+            continue;
+        }
+        ctx.user_fn_symbols
+            .insert(func.name.clone(), format!("aura_user_{}", sanitizellvm(&func.name)));
+    }
+
     // 1. 模块头
     ctx.emit_module_header();
 
     // 2. 结构体类型定义
     ctx.emit_struct_defs(program);
+
+    // 2.2 顶层 `val`/`var` 声明（脚本模式：`program.top_level_statements`）：
+    //     发射模块级全局符号 `@<name> = global i64 0`，并把指向它的槽登记进
+    //     每个函数作用域的**函数级回退表**，使函数体内的裸名读写落到**同一个**
+    //     存储单元。缺失这一步时，顶层量在函数体内既无局部 alloca、也无
+    //     全局定义，`emit_variable_load` 退化成 `format!("%{}", name)` 造出
+    //     未定义 SSA 值（`llc: use of undefined value '%SHARED_COUNT'`）；
+    //     即便偶然能链接，`emit_assign` 也会各自开一个局部槽位，
+    //     「共享状态」在多线程下变成每线程私有的副本。
+    //
+    // 数据来源必须是 `program.globals`（AST→HIR 阶段收集、跨 synthesize 保留），
+    // **不能**用 `top_level_statements`：`synthesize_main_if_missing` 已把它
+    // `take()` 走并搬进 `main` 体（见 `hir.rs`），此后恒为 `None`，依赖它会让
+    // 全部顶层量退化成本地量 —— 表现为 `llc: use of undefined value '%SHARED_COUNT'`
+    // （mutex_shared / rwlock_condvar / barrier_semaphore / integration 构建失败的
+    // 根因）。`globals` 与 VM/MIR 路径同一真相源（`LowerCtx.globals`）。
+    if !program.globals.is_empty() {
+        ctx.register_global_slots(&program.globals);
+    }
 
     // 2.5 FFI 常量（P8.1）：extern 块中的常量声明 → LLVM 全局常量
     ctx.emit_ffi_constants(program);
@@ -1399,7 +2358,10 @@ pub fn emit_program(
             continue;
         }
 
-        let sanitized = sanitizellvm(&func.name);
+        // 调用目标用**用户函数符号**（`aura_user_*`），与 define 一致；
+        // trampoline 自身沿用派生名（`aura_user_X_trampoline`），仍可去重且不与
+        // 运行时的 `*_trampoline` 冲突（运行时无此后缀符号）。
+        let sanitized = ctx.fn_symbol(&func.name);
         let tramp_name = format!("@{}_trampoline", sanitized);
         if !emitted_tramp.insert(tramp_name.clone()) {
             fn_ptrs.push(format!("ptr {}", tramp_name));
@@ -1513,7 +2475,43 @@ pub fn emit_program(
 
     // 8. 全部完成（Debug 元数据已在步骤 4.5 输出）
 
+    // [P3-诊断] 逃逸放行率：可释放局部量 / 登记局部量。比率过低说明释放
+    // 覆盖面不足（内存收益有限），比率异常高说明分析过于激进（风险上升）。
+    if arc_emit_enabled() {
+        let (tot, rel) = (ARC_LOCAL_TOTAL.load(Ordering::Relaxed), ARC_LOCAL_RELEASABLE.load(Ordering::Relaxed));
+        eprintln!(
+            "[ARC-P3] emit: arc locals={} releasable={} ({:.1}%) {}",
+            tot,
+            rel,
+            if tot == 0 {
+                0.0
+            } else {
+                rel as f64 * 100.0 / tot as f64
+            },
+            // [P3] 打印完整开关组合：自举的每个 release 都挂着这套闸门，
+            // 出问题时按这行就能判定「跑的是哪一档」。
+            format!(
+                "escape={} stringonly={} owned={} assign={} scope={} return={} release={}",
+                knob(arc_knob("AURA_ARC_ESCAPE")),
+                knob(arc_knob("AURA_ARC_STRINGONLY")),
+                knob(arc_knob_opt_in("AURA_ARC_OWNED")),
+                knob(arc_knob("AURA_ARC_ASSIGN")),
+                knob(arc_knob_opt_in("AURA_ARC_SCOPE")),
+                knob(arc_knob_opt_in("AURA_ARC_RETURN")),
+                knob(arc_release_enabled()),
+            )
+        );
+    }
     Ok(ctx.sections.join("\n"))
+}
+
+/// [P3-诊断] bool → on/off（免被调用处反复写三元表达式）。
+fn knob(v: bool) -> &'static str {
+    if v {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 /// 生成单个函数的 LLVM IR
@@ -1529,6 +2527,17 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
     let mut blocks = FuncBlocks::new();
     let entry_name = ctx.fresh_bb("entry");
     let _ = blocks.add_block_named(&entry_name);
+    // 顶层 `val`/`var` 槽：函数级回退表已被上面清空，重新注入指向模块级
+    // 全局符号的槽，使函数体内的裸名读写落到共享存储（跨 OS 线程一致）。
+    for (gname, slot) in ctx.global_slots.iter() {
+        ctx.func_vars.insert(gname.clone(), slot.clone());
+    }
+    // 顶层量的 **Aura 类型**同样回注：类型登记发生在某个早先的块/函数里
+    //（如 `WORKER_DONE = Atomic.new(0)`），使用点在后续另一个块，若只靠
+    // 块内 `var_aura_types` 会丢失 → 裸名方法无法改派到 concurrent CFFI 符号。
+    for (gname, ty) in ctx.global_aura_types.iter() {
+        ctx.func_aura_types.insert(gname.clone(), ty.clone());
+    }
 
     // 返回类型：无显式返回类型时默认为 void（Unit 函数）
     let mut ret_ty =
@@ -1618,7 +2627,7 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
         "define {}{} @{}({}) {{\n",
         if ctx.blob_mode { "internal " } else { "" },
         ret_str,
-        sanitizellvm(&func.name),
+        ctx.fn_symbol(&func.name),
         params_str
     ));
 
@@ -1648,6 +2657,24 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
     }
 
     // 为参数生成 alloca 并 store
+    // [P2/D4] 形参**借用**语义：不登记为 ARC 局部量、不在出口 release。
+    // 调用点的实参发射路径多达数十条（内建特化/方法改派/幽灵首参/直接
+    // 直调），逐条配平 retain 不可靠（实测 `Stdio.stringToBuffer`
+    // 的实参未 retain、被调方出口 release ⇒ 调用者对象被提前释放）。
+    // 「被调方借、调用者持有」是唯一无需跨路径约定的安全方向：
+    // 新持有实参（调用结果）在调用期间由调用者的槽/临时量保活，
+    // 最坏是漏一次 release（泄漏方向安全），绝不产生悬空引用。
+    let arc_track_prev = ctx.arc_track;
+    ctx.arc_track = false;
+    // [P3] 逃逸分析：先把形参名登记为「本帧声明」，再扫一遍函数体
+    // （含嵌套 lambda 体）算出逃逸集。必须在任何 `declare_var` 之前完成 ——
+    // declare_var 登记时会立即读取该集合决定释放许可。
+    let mut declared: std::collections::HashSet<String> =
+        func.params.iter().map(|p| p.name.clone()).collect();
+    let scan = scan_escapes(ctx, &func.body, &mut declared);
+    ctx.arc_escaping = scan.escaping;
+    ctx.arc_owned_defs = scan.owned_defs;
+    ctx.arc_local_stats = (0, 0);
     for (name, ty) in &params {
         let var_name = ctx.fresh_var();
         {
@@ -1663,6 +2690,7 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
         }
         ctx.declare_var(name, var_name.clone(), ty.clone());
     }
+    ctx.arc_track = arc_track_prev;
 
     // C 入口 main：把宿主 argv 存入 C 运行时，供 Process.arg/argCount 读取。
     if is_entry_main {
@@ -1673,7 +2701,7 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
         for name in ctx.singleton_inits.clone() {
             let llvm_name = format!("%struct.{}", sanitizellvm(&name));
             let gname = format!("@{}_instance", sanitizellvm(&name));
-            let sym = sanitizellvm(&format!("{}.__singletonInit", name));
+            let sym = ctx.fn_symbol(&format!("{}.__singletonInit", name));
             blocks.last_mut().body.push(format!(
                 "call void @{}({}* {})",
                 sym, llvm_name, gname
@@ -1683,6 +2711,12 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
 
     // 生成函数体
     emit_block(ctx, &mut blocks, &func.body)?;
+
+    // [P2/D4] 形参出口释放：函数体块退出时已释放体局部量；形参栈
+    // （本函数最外作用域）在此释放——**必须在终止符生成之前**
+    // （块终止后无法再插入指令）。显式 return 路径已在 Return 发射
+    // 点经 arc_release_all_scopes 统一处理。形参不持有（借用），不参与释放。
+    // （函数体作用域的局部量已在 emit_block 出口释放。）
 
     // 若函数体没有终止符，追加 return
     if !blocks.has_terminator() {
@@ -1702,6 +2736,16 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
                 }
             }
         }
+    }
+
+    // [P3] 函数体 IR 生成完毕 → ARC 窥孔（相邻的 retain/release 配对消除）。
+    // 必须在 `blocks.to_string()` 之前：此后 IR 文本即冻结。
+    let _peep = arc_peephole(&mut blocks);
+
+    // [P3-诊断] 本函数的释放放行率计入模块级汇总。
+    if arc_emit_enabled() {
+        ARC_LOCAL_TOTAL.fetch_add(ctx.arc_local_stats.0, Ordering::Relaxed);
+        ARC_LOCAL_RELEASABLE.fetch_add(ctx.arc_local_stats.1, Ordering::Relaxed);
     }
 
     s.push_str(&blocks.to_string());
@@ -1796,7 +2840,9 @@ fn emit_block(
         emit_statement(ctx, blocks, stmt)?;
     }
 
-    ctx.exit_scope();
+    // [P2/D4] 作用域退出：逆序 release 本块 ARC 局部量（块未终止时），
+    // 再弹栈。if/while 的块体走此路径 ⇒ 分支尾/迭代尾自动释放。
+    ctx.emit_arc_scope_exit(blocks);
     Ok(())
 }
 
@@ -1820,7 +2866,23 @@ fn emit_statement(
         HirStmt::Assign {
             target,
             value,
-        } => emit_assign(ctx, blocks, target, value)?,
+        } => {
+            // 赋值时补登目标变量的 Aura 类型。
+            //
+            // 与 HIR 侧 `Expr::Assign` 的补登同源：顶层量常写成「先标量占位、
+            // 再换成语柄」的两段式（`val W = -1` … `W = Atomic.new(0)`），
+            // 声明处登记的类型（`Int`）会被后续赋值覆盖为 `Atomic`，否则
+            // `W.store(0)` 无法改派到 `aura_lang_concurrent_Atomic_store`。
+            //
+            // 只在右侧能推断出 **concurrent 类型**时写入，避免把普通表达式的
+            // 推断类型错误覆盖到已有类型上。
+            if let HirExpr::Var(name) = target {
+                if let Some(ty) = concurrent_factory_ty_of_value(value) {
+                    ctx.declare_var_aura_ty(name, &ty);
+                }
+            }
+            emit_assign(ctx, blocks, target, value)?
+        }
         HirStmt::Expr(e) => {
             let _ = emit_expr_val(ctx, blocks, e)?;
         }
@@ -1835,9 +2897,31 @@ fn emit_statement(
                     // void 函数中的 `return expr`（含末尾表达式转 Return）：丢弃值，统一 ret void，
                     // 避免 define void 与 ret i32 类型不匹配
                     let _ = emit_expr_val(ctx, blocks, v)?;
+                    // [P2/D4] 出口：释放本函数全部打开作用域的持有量
+                    // （终止符之前）。丢弃的右值不产生新持有者 ⇒ 无需
+                    // retain（复制类右值的引用随原槽位保留，语义安全）。
+                    ctx.arc_release_all_scopes(blocks);
                     blocks.set_terminator("ret void");
                 } else {
                     let (val_ir, val_ty) = emit_expr_val(ctx, blocks, v)?;
+                    // [P2/D4] 复制类返回值先 retain（调用方按「新持有」
+                    // 接收，不再 retain；本地量/形参的 release 随后执行，
+                    // 配对准守）。新持有返回值无需动作。
+                    if is_copy_expr(ctx, v) {
+                        let ity = {
+                            let t = ctx.lookup_var_aura_ty(match v {
+                                HirExpr::Var(n) => n.as_str(),
+                                _ => "",
+                            });
+                            if t.is_empty() {
+                                ctx.current_ret_aura_ty.clone().unwrap_or_default()
+                            } else {
+                                t
+                            }
+                        };
+                        ctx.arc_retain(blocks, &val_ir, &val_ty, &ity);
+                    }
+                    ctx.arc_release_all_scopes(blocks);
                     // 返回值类型必须与函数签名的返回类型一致（如 Float 函数里 `return 0.0`）
                     let converted = coerce_return_value(ctx, blocks, val_ir, &val_ty, &want);
                     blocks.set_terminator(&format!("ret {} {}", converted.1, converted.0));
@@ -1845,6 +2929,8 @@ fn emit_statement(
             } else {
                 // 裸 `return`：按当前函数返回类型补零值终止符。
                 // 入口 main 被强制为 `i32`，若仍发 `ret void` 会导致签名不匹配。
+                // [P2/D4] 出口同样释放全部打开作用域（终止符之前）。
+                ctx.arc_release_all_scopes(blocks);
                 let want = ctx.current_ret_ty.clone();
                 if want.is_empty() || want == "void" {
                     blocks.set_terminator("ret void");
@@ -1945,6 +3031,9 @@ fn emit_statement(
                 let cur2 = blocks.last_mut();
                 cur2.body.push(format!("{} = load i8*, i8* @aura_exception_value", exc_val));
                 ctx.declare_var(var_name, exc_val.clone(), "i8*".to_string());
+                // [P2/D4] catch 变量成为异常值的新持有者（来源是全局借用）
+                // ⇒ retain；与 catch 体作用域退出的 release 配对。
+                ctx.arc_retain(blocks, &exc_val, "i8*", "");
             }
             emit_block(ctx, blocks, catch_body)?;
             blocks.set_terminator(&format!("br label %{}", merge_bb));
@@ -1987,6 +3076,20 @@ fn emit_variable_decl(
         _ => init.as_ref().map(|e| aura_ty_of_expr(ctx, e)).unwrap_or_default(),
     };
     ctx.declare_var_aura_ty(name, &decl_aura_ty);
+
+    // P3.2（AOT）：顶层 `val`/`var` → 模块级全局槽。
+    //
+    // 与 VM/MIR 路径一致（mir.rs `lower_stmt`：命中 `ctx.globals` 即 StoreGlobal、
+    // **不声明帧局部槽**）。这里同样只把初值写入 `@<name>`，不建局部 alloca：
+    // 否则 main 内的读写落在私有副本上，而其他函数 / 线程读到的全局槽永远是 0。
+    if let Some(gs) = ctx.lookup_global_slot(name).cloned() {
+        if let Some(init_expr) = init {
+            let (val_ir, val_ty) = emit_expr_val(ctx, blocks, init_expr)?;
+            emit_store_converted(ctx, blocks, &gs.llvm_ty, &val_ir, &val_ty, &gs.llvm_name);
+        }
+        return Ok(());
+    }
+
     // 闭包签名推断：
     // - 显式函数类型标注 `val f: (Int) -> Int = ...`
     // - 由返回函数类型的调用推断 `val f = makeAdder(5)`
@@ -2003,8 +3106,13 @@ fn emit_variable_decl(
     let fn_sig = declared_sig.clone().or_else(|| inferred_sig.clone());
 
     // 当类型未显式标注时，从初始化器推断 LLVM 类型
+    //
+    // ⚠ 显式标注的局部槽必须用 `llvm_type_checked`：类型解析失败（目标类不在
+    // 本编译单元、跨模块类型缺失等）时退化为 `i8*` 而非残留 `%struct.X*`。
+    // 残留 unsized 结构体指针会让该槽位的所有 load/store 与后续 GEP 全部落到
+    // 错误的布局上（局部指针损坏家族缺陷的槽位侧）。
     let llvm_ty = if let Some(t) = ty {
-        ctx.llvm_type(t)
+        ctx.llvm_type_checked(t)
     } else if let Some(init_expr) = init {
         // 先发射初始化器获取其类型
         if let Some(ref sig) = fn_sig {
@@ -2012,6 +3120,12 @@ fn emit_variable_decl(
         }
         let (val_ir, val_ty) = emit_expr_val(ctx, blocks, init_expr)?;
         let var_name = ctx.fresh_var();
+        // [P2/D4] 复制类初值（`val t = s` / `val t = obj.f`）：新槽成为
+        // 共同持有者 ⇒ retain（新持有初值无需动作，所有权随存入转移）。
+        if is_copy_expr(ctx, init_expr) {
+            let ity = ctx.lookup_var_aura_ty(name);
+            ctx.arc_retain(blocks, &val_ir, &val_ty, &ity);
+        }
         // void 类型初始化器（如调用 void 函数）：不存储返回值，用默认值初始化
         if val_ty == "void" {
             push_alloca_entry(blocks, &var_name, "i32");
@@ -2057,6 +3171,11 @@ fn emit_variable_decl(
             ctx.pending_lambda_sig = Some(sig.clone());
         }
         let (val_ir, val_ty) = emit_expr_val(ctx, blocks, init)?;
+        // [P2/D4] 复制类初值 retain（同上面的推断型路径）。
+        if is_copy_expr(ctx, init) {
+            let ity = ctx.lookup_var_aura_ty(name);
+            ctx.arc_retain(blocks, &val_ir, &val_ty, &ity);
+        }
         emit_store_converted(ctx, blocks, &llvm_ty, &val_ir, &val_ty, &var_name);
     }
 
@@ -2216,6 +3335,24 @@ fn emit_store_converted(
             "store {} {} , {}* {}",
             dst_ty, out, dst_ty, var_name
         ));
+    } else if is_int_ty(val_ty) && is_int_ty(dst_ty) && val_ty != dst_ty {
+        // 整数宽度适配（P4.1）：i8（`Memory.read` 返回的 `Byte`）/i16/i32/i64 互转。
+        // 原实现只有 i32↔i64 两臂，`val b: Int = reader.readByte()` 这类
+        // Byte→Int 赋值落到末尾兜底，生成 `store i8 %v, i32* %slot` ——
+        // LLVM 接受该 IR，但只写槽位低 1 字节，高 3 字节是栈上陈旧垃圾
+        // （实测 `Memory.read` 读出 `v | 0x7F7F00`，`.auc` 加载器常量区
+        // 整体失步、Aura VM 无法在 AOT 基底上加载字节码）。
+        let out = ctx.fresh_var();
+        let op = if int_bits(val_ty) < int_bits(dst_ty) { "sext" } else { "trunc" };
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = {} {} {} to {}",
+            out, op, val_ty, val_ir, dst_ty
+        ));
+        cur.body.push(format!(
+            "store {} {} , {}* {}",
+            dst_ty, out, dst_ty, var_name
+        ));
     } else if is_float_ty(val_ty) && is_int_ty(dst_ty) {
         // 浮点 → 整数：fptosi 到 i64，再按目标宽度截断
         let i64v = ctx.fresh_var();
@@ -2287,9 +3424,48 @@ fn emit_assign(
 
     match target {
         HirExpr::Var(name) => {
+            // [P2-DEBUG] 逃逸引用检测：赋值目标不在任何打开作用域 ⇒ 经
+            // func_vars 回退引用「块内声明、块外使用」的变量 —— 其值可能
+            // 已在声明块的退出时被 release（UAF/过量释放机制）。
+            if arc_emit_enabled()
+                && !ctx.var_scope.iter().any(|s| s.contains_key(name.as_str()))
+                && ctx.func_vars.contains_key(name.as_str())
+                && std::env::var_os("AURA_ARC_DEBUG").is_some()
+            {
+                eprintln!("[ARC-DEBUG] escaped assign target: {}", name);
+            }
             if let Some(slot) = ctx.lookup_var(name) {
                 let slot_ty = slot.llvm_ty.clone();
                 let slot_name = slot.llvm_name.clone();
+                let aura_ty = ctx.lookup_var_aura_ty(name);
+                // [P2/D4] 覆盖语义：复制类右值先 retain（`x = x` 自赋值时
+                // retain 先于 release， rc 1→2→1 安全），再 release 旧值，
+                // 最后存入。新持有右值（调用/运算/字面量）不 retain——
+                // 其所有权随存入转移给槽。
+                // [P3-窥孔] 自赋值 `x = x`：retain/release 在同一值上净 0，
+                // 两条都不发（store 冗余但无害，保留以免改变 IR 形状）。
+                let self_assign = matches!(value, HirExpr::Var(v) if v == name);
+                if is_copy_expr(ctx, value) && !self_assign {
+                    ctx.arc_retain(blocks, &val_ir, &val_ty, &aura_ty);
+                }
+                // [P3] 覆盖释放同样受逃逸放行制约束：逃逸/类型不明的槽只
+                // 收新值不还旧值（`out = out + line` 的旧串会滞留，但不会
+                // 踩掉别处仍在使用的引用）。
+                if arc_managed(&slot_ty, &aura_ty)
+                    && !self_assign
+                    && arc_knob("AURA_ARC_ASSIGN")
+                    && ctx.arc_releasable(name, &slot_ty, &aura_ty)
+                {
+                    let old = ctx.fresh_var();
+                    blocks.last_mut().body.push(format!(
+                        "{} = load {}, {}* {}",
+                        old,
+                        slot_ty,
+                        slot_ptr_ty(&slot_ty),
+                        slot_name
+                    ));
+                    ctx.arc_release(blocks, &old, &slot_ty, &aura_ty);
+                }
                 emit_store_converted(ctx, blocks, &slot_ty, &val_ir, &val_ty, &slot_name);
             }
         }
@@ -2323,9 +3499,14 @@ fn emit_member_assign(
     val_ir: String,
     val_ty: String,
 ) -> Result<(), AotError> {
-    // 字段索引 / 类型表：优先按对象静态类型解析（this/self → 当前类；变量 → 其声明类），
-    // 再退回按字段名全局扫描
-    let found = resolve_member_field_owner(ctx, object, None, field);
+    // ⚠ 先求值对象再解析归属：归属解析需要对象的**静态 LLVM 类型**
+    //（`%struct.X*`），与 `emit_member_access` 的 `Some(&obj_ty)` 同源。
+    // 传 None 会让解析退化成「按字段名全局字典序扫描」——闭包里任何
+    // 字母序更靠前的类若恰好有同名字段，写入就落到**无关类**：之后读取
+    // 该字段拿到的是另一个类的值（实测装箱整数被当字符串 strlen →
+    // 段错误；新增一个零调用 import 即复现，见 probe_gc 探针矩阵）。
+    let (obj_ir, obj_ty) = emit_expr_val(ctx, _blocks, object)?;
+    let found = resolve_member_field_owner(ctx, object, Some(&obj_ty), field);
 
     // 情形 1：对象是「结构体值的局部变量」→ load / insertvalue / store 回写
     if let (HirExpr::Var(var_name), Some((class, field_ty, field_idx))) = (object, &found) {
@@ -2336,16 +3517,35 @@ fn emit_member_assign(
                 let (v, vty) = coerce_arg(ctx, _blocks, val_ir, &val_ty, field_ty);
                 let loaded = ctx.fresh_var();
                 let updated = ctx.fresh_var();
-                let cur = _blocks.last_mut();
-                cur.body.push(format!(
+                _blocks.last_mut().body.push(format!(
                     "{} = load {}, {}* {}",
                     loaded, struct_ty, struct_ty, slot.llvm_name
                 ));
-                cur.body.push(format!(
+                // [P2/D4] 字段写：**先 retain 新值再 release 旧字段值**，
+                // 最后存回。自赋值 `this.x = this.x` 时 retain/release
+                // 配对抵消（rc +1-1），顺序颠倒会先 release 到 0 释放、
+                // 再 retain 已释放块（UAF）。旧值从刚 load 的结构体里
+                // extractvalue 取出（store 之前）。
+                // [P2/D4] 结构体**值**语义：槽里是 `%struct.X` 的副本，同一
+                // 字段指针可能被多个副本共享 ⇒ **只 retain 新值，绝不
+                // release 旧字段值**（否则会踩掉其他副本/原对象的引用，
+                // 实测 `val m = src; m.f = x` 型代码 UAF）。旧值的引用由
+                // 最终持有者的作用域退出统一归还；此处多 retain 只是
+                // 多留一份（安全方向）。
+                if arc_managed(field_ty, "") {
+                    let faty = ctx
+                        .class_field_aura_types
+                        .get(class)
+                        .and_then(|m| m.get(field))
+                        .cloned()
+                        .unwrap_or_default();
+                    ctx.arc_retain(_blocks, &v, &vty, &faty);
+                }
+                _blocks.last_mut().body.push(format!(
                     "{} = insertvalue {} {}, {} {}, {}",
                     updated, struct_ty, loaded, vty, v, field_idx
                 ));
-                cur.body.push(format!(
+                _blocks.last_mut().body.push(format!(
                     "store {} {}, {}* {}",
                     struct_ty, updated, struct_ty, slot.llvm_name
                 ));
@@ -2355,23 +3555,40 @@ fn emit_member_assign(
     }
 
     // 情形 2：对象是「指向结构体的指针」→ GEP 取字段地址后 store
-    let (obj_ir, obj_ty) = emit_expr_val(ctx, _blocks, object)?;
     if let Some((class, field_ty, field_idx)) = found {
         let struct_ty = format!("%struct.{}", sanitizellvm(&class));
         if obj_ty.ends_with('*') || obj_ty == "i8*" || obj_ty == "ptr" {
             let cast = ctx.fresh_var();
             let gep = ctx.fresh_var();
             let (v, vty) = coerce_arg(ctx, _blocks, val_ir, &val_ty, &field_ty);
-            let cur = _blocks.last_mut();
-            cur.body.push(format!(
+            _blocks.last_mut().body.push(format!(
                 "{} = bitcast {} {} to {}*",
                 cast, obj_ty, obj_ir, struct_ty
             ));
-            cur.body.push(format!(
+            _blocks.last_mut().body.push(format!(
                 "{} = getelementptr {}, {}* {}, i32 0, i32 {}",
                 gep, struct_ty, struct_ty, cast, field_idx
             ));
-            cur.body.push(format!("store {} {}, {}* {}", vty, v, vty, gep));
+            // [P2/D4] 字段写：**只 retain 新值、不 release 旧值**。
+            //   · 旧字段值的所有权不唯一——同一指针可能被「结构体值副本 /
+            //     全局注册表 / 容器」多处持有，release 会踩掉别人的引用
+            //     （实测 `PhotonObjectWriter.buildSectionHeaders` 读到
+            //     已释放字符串 ⇒ AV 0xC0000005）；
+            //   · 对象块是 TAG_PLAIN、无析构级联，字段引用本就不会在对象
+            //     释放时归还 —— 写侧 release 只是把泄漏换了个位置。
+            // 但**必须 retain**：字段是「逃逸引用」，不计数就会在产生它的
+            // 局部量作用域退出时被释放，字段变悬空（实测 Symbol 名损坏 /
+            // AV）。单向 retain 是保守方向（旧值漏一次计数）。
+            if arc_managed(&field_ty, "") {
+                let faty = ctx
+                    .class_field_aura_types
+                    .get(&class)
+                    .and_then(|m| m.get(field))
+                    .cloned()
+                    .unwrap_or_default();
+                ctx.arc_retain(_blocks, &v, &vty, &faty);
+            }
+            _blocks.last_mut().body.push(format!("store {} {}, {}* {}", vty, v, vty, gep));
             return Ok(());
         }
     }
@@ -2643,14 +3860,30 @@ fn emit_expr_val(
                 .collect();
 
             // 闭包 env 结构体字面类型 `{ ptr, T1, T2, ... }`
+            // [P2/D4] ARC 模式下插入 count 字段：`{ ptr, i64 count, T1, … }`
+            // —— env 打 TAG_ENV 后，rc 归零时析构级联按 count 释放捕获项
+            // （捕获项在创建时已 retain，env 成为共同持有者）。非 ARC
+            // 模式保持旧布局（产物逐字节不变）。
+            let arc_env = arc_emit_enabled();
             let struct_ty = if captures.is_empty() {
-                "{ ptr }".to_string()
+                if arc_env {
+                    "{ ptr, i64 }".to_string()
+                } else {
+                    "{ ptr }".to_string()
+                }
+            } else if arc_env {
+                format!(
+                    "{{ ptr, i64, {} }}",
+                    captures.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(", ")
+                )
             } else {
                 format!(
                     "{{ ptr, {} }}",
                     captures.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(", ")
                 )
             };
+            // 捕获项在 env 里的起始字段下标（ARC 模式让位给 count）。
+            let cap_base: usize = if arc_env { 2 } else { 1 };
 
             // 函数签名
             let mut param_strs: Vec<String> = vec!["ptr %env".to_string()];
@@ -2688,7 +3921,10 @@ fn emit_expr_val(
                 // 闭包体是**独立函数**：外层函数的 `alloca` 槽名在此不可用，
                 // 故回退表为空，未捕获的外层变量仍由既有捕获逻辑处理。
                 func_vars: HashMap::new(),
+                // 顶层全局符号表跨函数有效，需随子上下文一起带过去。
+                global_slots: ctx.global_slots.clone(),
                 func_aura_types: HashMap::new(),
+                global_aura_types: ctx.global_aura_types.clone(),
                 globals: Vec::new(),
                 global_const_map: ctx.global_const_map.clone(),
                 subprogram_meta: Vec::new(),
@@ -2717,7 +3953,20 @@ fn emit_expr_val(
                 var_aura_types: vec![HashMap::new()],
                 fn_index_map: ctx.fn_index_map.clone(),
                 func_ret_aura_types: ctx.func_ret_aura_types.clone(),
+                // 用户函数符号空间随子上下文带过去：闭包体内调用用户函数时
+                // 必须落到同一个 `aura_user_*` 符号，否则链接期 undefined。
+                user_fn_symbols: ctx.user_fn_symbols.clone(),
                 class_field_aura_types: ctx.class_field_aura_types.clone(),
+                // [P2/D4] 闭包体是独立函数：体局部量正常登记/释放；
+                // 形参与 env 捕获项不经 declare_var（直接插 var_scope），
+                // 不登记为持有量（env 捕获项的所有权归 env 析构级联）。
+                arc_scope_locals: vec![Vec::new()],
+                arc_track: true,
+                // [P3] 逃逸集随父函数带过去：闭包体虽是独立函数，但它看到的
+                // 名字同为这次扫描的判定对象（捕获项已在 env 侧 retain）。
+                arc_escaping: ctx.arc_escaping.clone(),
+                arc_owned_defs: ctx.arc_owned_defs.clone(),
+                arc_local_stats: (0, 0),
             };
 
             // 发射函数体
@@ -2758,7 +4007,7 @@ fn emit_expr_val(
                     "{} = getelementptr {}, ptr %env, i32 0, i32 {}",
                     addr,
                     struct_ty,
-                    i + 1
+                    i + cap_base
                 ));
                 sub_ctx.var_scope.last_mut().unwrap().insert(
                     cap.clone(),
@@ -2829,13 +4078,28 @@ fn emit_expr_val(
                     size_ptr, struct_ty
                 ));
                 cur.body.push(format!("{} = ptrtoint ptr {} to i64", size, size_ptr));
-                cur.body.push(format!("{} = call i8* @aura_malloc(i64 {})", raw, size));
+                if arc_env {
+                    // [P2/D4] ARC 模式：经带标签分配器创建 env（TAG_ENV +
+                    // count 字段）——rc 归零时析构级联释放捕获项。
+                    cur.body.push(format!(
+                        "{} = call i8* @aura_arc_alloc_env(i64 {}, i64 {})",
+                        raw,
+                        size,
+                        captures.len()
+                    ));
+                } else {
+                    cur.body.push(format!("{} = call i8* @aura_malloc(i64 {})", raw, size));
+                }
                 cur.body.push(format!("{} = bitcast i8* {} to ptr", closure_name, raw));
                 // 字段 0 = 函数指针（偏移 0）
                 cur.body.push(format!("store ptr @{}, ptr {}", func_name, closure_name));
             }
             for (i, (cap, _cap_ty)) in captures.iter().enumerate() {
                 let (val, vty) = emit_variable_load(ctx, blocks, cap)?;
+                // [P2/D4] env 成为捕获项的共同持有者 ⇒ retain（闭包逃逸
+                // 后捕获槽位可能先死；env 析构级联在 rc 归零时release 配对）。
+                let cap_aura_ty = ctx.lookup_var_aura_ty(cap);
+                ctx.arc_retain(blocks, &val, &vty, &cap_aura_ty);
                 let addr = ctx.fresh_var();
                 let cur = blocks.last_mut();
                 cur.body.push(format!(
@@ -2843,7 +4107,7 @@ fn emit_expr_val(
                     addr,
                     struct_ty,
                     closure_name,
-                    i + 1
+                    i + cap_base
                 ));
                 cur.body.push(format!("store {} {}, ptr {}", vty, val, addr));
             }
@@ -3021,11 +4285,106 @@ fn emit_variable_load(
         // 非单例的裸类型名被当作值使用（异常路径）：仍用 `null`（i8*）占位，
         // 避免生成 `sext i32 %TypeName to i64` 这类未定义值引用。
         Ok(("null".to_string(), "i8*".to_string()))
+    } else if let Some((field_ty, load_ir)) = try_emit_implicit_this_field(ctx, blocks, name)? {
+        // 隐式 `this.<field>`：方法体内直接写字段名（不带 `this.`）。
+        //
+        // 旧实现落到末尾的「未声明变量 → 外部引用」分支，发射 `%<name>`
+        // 并把类型当成 `i32` ⇒ `sext i32 %slotMethodNames to i64`
+        // ⇒ llc `use of undefined value '%slotMethodNames'`（自举 AOT 构建失败）。
+        //
+        // 常见的自举源码写法：`AucLoaderUtils` 的方法体里直接引用类字段
+        // `slotMethodNames`（声明在类顶部，不带 `this.`），正是此症。
+        Ok((load_ir, field_ty))
     } else {
         // 未声明变量：作为外部引用（可能是函数调用或全局变量）
         // 添加 % 前缀，确保 LLVM IR 语法正确
         Ok((format!("%{}", name), "i32".to_string()))
     }
+}
+
+/// 解析并加载**隐式 `this` 字段**：方法体内裸写的类字段名。
+///
+/// 仅当满足以下条件时生效（否则返回 `None`，保持既有「外部引用」兜底）：
+/// 1. 当前处于某个类的方法体内（`ctx.current_class` 已知）；
+/// 2. 该类确实声明了同名字段（`ctx.class_field_types`）；
+/// 3. 该名字**不是**局部变量（局部优先，已被上层 `lookup_var` 拦截）。
+///
+/// 返回 `(字段的 LLVM 类型, 加载结果的 IR 寄存器名)`。
+fn try_emit_implicit_this_field(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    name: &str,
+) -> Result<Option<(String, String)>, AotError> {
+    let Some(cls) = ctx.current_class.clone() else {
+        return Ok(None);
+    };
+    let Some((field_ty, idx)) = ctx
+        .class_field_types
+        .get(&cls)
+        .and_then(|m| m.get(name))
+        .cloned()
+    else {
+        return Ok(None);
+    };
+
+    // 取 self 指针：优先用已声明的 `self` / `this` 槽位；缺失时从函数形参取。
+    let (self_ir, self_llvm_ty) = if let Some(slot) = ctx.lookup_var("self").cloned() {
+        let tmp = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = load {}, {} {}",
+            tmp,
+            slot.llvm_ty,
+            slot_ptr_ty(&slot.llvm_ty),
+            slot.llvm_name
+        ));
+        (tmp, slot.llvm_ty)
+    } else if let Some(slot) = ctx.lookup_var("this").cloned() {
+        let tmp = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = load {}, {} {}",
+            tmp,
+            slot.llvm_ty,
+            slot_ptr_ty(&slot.llvm_ty),
+            slot.llvm_name
+        ));
+        (tmp, slot.llvm_ty)
+    } else {
+        // 方法一定带 self 形参；找不到说明是静态上下文 → 放弃隐式字段解析
+        return Ok(None);
+    };
+
+    // self 的 LLVM 类型可能是 `i8*`（不透明）或 `%struct.Cls*`。
+    // 统一转成 `%struct.Cls*` 再做 GEP。
+    let struct_name = format!("%struct.{}", sanitizellvm(&cls));
+    let self_ptr = if self_llvm_ty.trim_end_matches('*') == struct_name {
+        self_ir
+    } else {
+        let cast = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body
+            .push(format!("{} = bitcast {} {} to {}*", cast, self_llvm_ty, self_ir, struct_name));
+        cast
+    };
+
+    let gep = ctx.fresh_var();
+    let load = ctx.fresh_var();
+    {
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = getelementptr {}, {}* {}, i32 0, i32 {}",
+            gep, struct_name, struct_name, self_ptr, idx
+        ));
+        cur.body.push(format!(
+            "{} = load {}, {}* {}",
+            load,
+            field_ty,
+            field_ty,
+            gep
+        ));
+    }
+    Ok(Some((field_ty, load)))
 }
 
 fn is_string_type(ty: &str) -> bool {
@@ -3064,6 +4423,96 @@ fn element_aura_ty(ty: &str) -> String {
 ///
 /// 只做保守推断：变量（声明类型）、已知函数/原生函数的返回类型、
 /// 集合取值 `__get` 的元素类型、字符串字面量。
+/// 从赋值右值推断 concurrent 类型名（仅当右值是 concurrent 静态工厂调用时）。
+///
+/// 供 `HirStmt::Assign` 补登目标变量类型；只认 `Atomic.new(0)` 这类工厂，
+/// 其他表达式一律返回 `None`（不覆盖既有类型）。
+fn concurrent_factory_ty_of_value(value: &HirExpr) -> Option<String> {
+    match value {
+        HirExpr::Call { callee, .. } => concurrent_factory_ty(callee),
+        _ => None,
+    }
+}
+
+/// `aura.lang.concurrent.<Type>.<factory>(...)` → 该 concurrent 类型名。
+///
+/// 与 HIR 的 `concurrent_factory_type` 同源（同一份方法名清单），但这里输入的是
+/// **已拼好的** callee（`Atomic.new` / `aura.lang.concurrent.Atomic.new`），
+/// 因此只做「末两段 + 工厂名」判定。返回 `String`（非 `&'static str`）是因为
+/// 类型名要从 callee 里切片出来。
+fn concurrent_factory_ty(callee: &str) -> Option<String> {
+    // callee 未做 sanitizellvm，形如 `Atomic.new` / `aura.lang.concurrent.Atomic.new`
+    //（点分）；`__` 形式（如 `Atomic__new`）不做处理，交由既有路径。
+    if callee.contains("__") {
+        return None;
+    }
+    let (owner, method) = callee.rsplit_once('.')?;
+    let bare = owner.rsplit('.').next().unwrap_or(owner);
+    let is_factory = matches!(
+        method,
+        "new" | "create" | "spawn" | "currentThread" | "tryLock" | "readLock" | "writeLock"
+            | "acquire" | "tryAcquire" | "all" | "any" | "then" | "thenMap"
+    );
+    if !is_factory {
+        return None;
+    }
+    let known = matches!(
+        bare,
+        "Atomic"
+            | "Mutex"
+            | "RwLock"
+            | "Condvar"
+            | "Barrier"
+            | "Semaphore"
+            | "Thread"
+            | "Future"
+            | "Promise"
+            | "Channel"
+            | "Actor"
+            | "Coroutine"
+    );
+    if known {
+        Some(bare.to_string())
+    } else {
+        None
+    }
+}
+
+/// 接收者 Aura 类型 → 候选的 concurrent 全名前缀（按优先级）。
+///
+/// `aura.lang.concurrent.*` 的实现在 `aura_std_cffi.c` 里，其调用点符号形如
+/// `aura.lang.concurrent.Atomic.store`（经 `translate_to_legacy_c` 落到
+/// `aura_lang_concurrent_Atomic_store`）。HIR 侧这些类型**不在 `CLASS_TABLE`**，
+/// 因此方法调用会降级成裸名；发射器需要这张前缀表把裸名拼回全名。
+///
+/// 返回多个候选是为了兼容「类型名可能带包前缀」的写法
+///（`aura.lang.concurrent.Atomic` 与裸 `Atomic` 都出现在不同来源里）。
+fn concurrent_dispatch_types(recv_ty: &str) -> Vec<String> {
+    let bare = recv_ty.rsplit('.').next().unwrap_or(recv_ty);
+    let is_known = matches!(
+        bare,
+        "Atomic"
+            | "Mutex"
+            | "RwLock"
+            | "Condvar"
+            | "Barrier"
+            | "Semaphore"
+            | "Thread"
+            | "Future"
+            | "Promise"
+            | "Channel"
+            | "Actor"
+            | "Coroutine"
+    );
+    if !is_known {
+        return Vec::new();
+    }
+    vec![
+        format!("aura.lang.concurrent.{}", bare),
+        bare.to_string(),
+    ]
+}
+
 fn aura_ty_of_expr(ctx: &EmitCtx, e: &HirExpr) -> String {
     use crate::ast::Literal;
     match e {
@@ -3088,6 +4537,18 @@ fn aura_ty_of_expr(ctx: &EmitCtx, e: &HirExpr) -> String {
             callee,
             args,
         } => {
+            // concurrent 静态工厂：`Atomic.new(0)` 的**值**是一个 `Atomic` 句柄。
+            //
+            // 不能靠 `func_ret_aura_types`：`Atomic.new` 在 Aura 里声明返回 `Int`
+            //（句柄就是堆地址），因此返回类型查表给出的是 `Int`，无法据此把
+            // 接收者的类型标成 `Atomic`。这里按「`<Type>.<factory>` 且 `<Type>`
+            // 是已知 concurrent 类型」直接给出类型名。
+            //
+            // 这是 `b.store(0)` 能改派到 `aura_lang_concurrent_Atomic_store`
+            // 的关键（见下方 concurrent 裸名改派块）。
+            if let Some(ty) = concurrent_factory_ty(callee) {
+                return ty;
+            }
             if callee == "__get" || callee == "__list_get" {
                 if let Some(src) = args.first() {
                     let src_ty = aura_ty_of_expr(ctx, src);
@@ -3750,8 +5211,46 @@ fn emit_binary(
                 l_ty = target.clone();
                 r_ty = target;
             }
-            // 字符串内容比较：任一侧是 `i8*`（String）时，按指针比较语义不对，
-            // 统一降级为 runtime 内容比较 `aura_lang_std_String_equals`。
+            // 与 `null` 字面量的比较 → **指针判空**，不是字符串内容比较。
+            //
+            // 此前落到下方字符串分支（Any/String 的 LLVM 类型都是 i8*）：
+            // `Any.hashCode` 的 `if (this == null)` 被发射成
+            // `String_equals(this, null)` —— self 是装箱整数（`(v<<1)|1`
+            // 的伪指针）时按字符串解引用 → 段错误（实测 AOT 载体
+            // `HashMap<Int,Any>.get` 首次取桶即崩）。判空与内容无关。
+            if matches!(op, HirBinOp::Eq | HirBinOp::Ne) && (l_ir == "null" || r_ir == "null") {
+                if l_ir == "null" && r_ir == "null" {
+                    let v = if *op == HirBinOp::Eq { "true" } else { "false" };
+                    return Ok((v.to_string(), "i1".to_string()));
+                }
+                let (val_ir, val_ty) = if r_ir == "null" {
+                    (l_ir.clone(), l_ty.clone())
+                } else {
+                    (r_ir.clone(), r_ty.clone())
+                };
+                let pred = if *op == HirBinOp::Eq { "eq" } else { "ne" };
+                // 值侧是指针（i8*/%struct.X*/ptr）→ 指针判空；非指针
+                //（数值/结构体值/字符串结构体值）恒非 null。
+                if is_ptr_ty(&val_ty) || val_ty == "i8*" {
+                    let cmp = ctx.fresh_var();
+                    let cur = blocks.last_mut();
+                    cur.body.push(format!(
+                        "{} = icmp {} {} {}, null",
+                        cmp, pred, val_ty, val_ir
+                    ));
+                    return Ok((cmp, "i1".to_string()));
+                }
+                let v = if *op == HirBinOp::Eq { "false" } else { "true" };
+                return Ok((v.to_string(), "i1".to_string()));
+            }
+            // i8* 通用值比较：统一走 **Plan A 感知**的 `aura_any_equals`。
+            //
+            // 操作数可能是真实字符串指针（偶数）也可能是装箱整数
+            //（`(v<<1)|1`，奇数伪指针）。旧实现无条件 String_equals：
+            // `HashMap.valuesEqual` 的 `a == b`（Any 接收者）在键是装箱
+            // 整数时按字符串解引用 → 段错误（AOT 载体 HashMap.get 即崩）。
+            // aura_any_equals 按低位标记分派：奇数比标记、偶数比内容，
+            // 对纯 String 操作数与 String_equals 语义一致（无回归）。
             {
                 let is_str_like = |t: &str| t == "i8*";
                 if matches!(op, HirBinOp::Eq | HirBinOp::Ne)
@@ -3761,7 +5260,7 @@ fn emit_binary(
                     let eq = ctx.fresh_var();
                     let cur = blocks.last_mut();
                     cur.body.push(format!(
-                        "{} = call i32 @aura_lang_std_String_equals(i8* {}, i8* {})",
+                        "{} = call i32 @aura_any_equals(i8* {}, i8* {})",
                         eq, l_ir, r_ir
                     ));
                     if *op == HirBinOp::Eq {
@@ -3774,11 +5273,51 @@ fn emit_binary(
                     return Ok((cmp, "i1".to_string()));
                 }
                 // 混合类型：一侧是字符串结构体，另一侧不是字符串类型。
-                // 字符串与整数/浮点等永远不会相等，直接返回编译期常量。
+                //
+                // ⚠ 另一侧是**数值**时不能折叠为常量不等：i8* 侧可能是持有
+                // 装箱数值的 `Any`（Plan A `(v<<1)|1`）—— 实测
+                // `VmLocals.getSlot` 的 `marks.get(k) == this.gen` 被折叠成
+                // 常量 false → 所有局部槽恒判未初始化 → AOT 载体死循环。
+                // 走 Plan A 比较 ptrtoint + `aura_to_int_any` 拆箱后再比较；
+                // 真字符串 vs 数值在拆箱后仍几乎恒不等（与旧折叠行为一致）。
                 if matches!(op, HirBinOp::Eq | HirBinOp::Ne)
                     && (is_str_like(&l_ty) || is_str_like(&r_ty))
                     && !(is_str_like(&l_ty) && is_str_like(&r_ty))
                 {
+                    let other_ty = if is_str_like(&l_ty) { r_ty.clone() } else { l_ty.clone() };
+                    if is_int_ty(&other_ty) || other_ty == "i64" {
+                        let (p_ir, p_ty) = if is_str_like(&l_ty) {
+                            (l_ir.clone(), l_ty.clone())
+                        } else {
+                            (r_ir.clone(), r_ty.clone())
+                        };
+                        let (n_ir, n_ty) = if is_str_like(&l_ty) {
+                            (r_ir.clone(), r_ty.clone())
+                        } else {
+                            (l_ir.clone(), l_ty.clone())
+                        };
+                        let pi = ctx.fresh_var();
+                        let cur = blocks.last_mut();
+                        cur.body.push(format!("{} = ptrtoint {} {} to i64", pi, p_ty, p_ir));
+                        let ub = ctx.fresh_var();
+                        cur.body.push(format!(
+                            "{} = call i64 @aura_to_int_any(i64 {})",
+                            ub, pi
+                        ));
+                        let ni = ctx.fresh_var();
+                        if n_ty == "i64" {
+                            cur.body.push(format!("{} = {}", ni, n_ir));
+                        } else {
+                            cur.body.push(format!("{} = sext {} {} to i64", ni, n_ty, n_ir));
+                        }
+                        let pred = if *op == HirBinOp::Eq { "eq" } else { "ne" };
+                        let cmp = ctx.fresh_var();
+                        cur.body.push(format!(
+                            "{} = icmp {} i64 {}, {}",
+                            cmp, pred, ub, ni
+                        ));
+                        return Ok((cmp, "i1".to_string()));
+                    }
                     if *op == HirBinOp::Eq {
                         return Ok(("false".to_string(), "i1".to_string()));
                     }
@@ -3979,7 +5518,20 @@ fn emit_bool_convert(
 ///   * `lastIndexOf` / `countChar`                     → i64
 /// `indexOf` / `charCodeAt` / `toInt` / `toFloat` 由 emit_call 内的既有手写分支
 /// 处理（返回类型为 Aura 语义的 i32/double），不在此重复改派。
-fn string_method_symbol(name: &str) -> Option<String> {
+///
+/// `arg_count` 为**不含接收者**的实参数：
+///   * `substring` 按 1 参/2 参分派——1 参 `substring(start)` 此前按双参 C 符号
+///     发射、缺失的 `to` 落成未初始化寄存器（HatParser.parseRet 注记的
+///     「1 参得到空串，VM 正常」，2026-10-02 起由 `substringFrom` 承载）；
+///   * `substringAt(from, len)` 此前不在表内，调用点发射裸名
+///     `@substringAt` → `llc: use of undefined value`。
+fn string_method_symbol(name: &str, arg_count: usize) -> Option<String> {
+    // ⚠️ 1 参 `substring(start)` → substringFrom 的分派已实证会触发新 seed
+    // 宿主的漂移型内存踩踏（P121 驱动：isBoolExpr/splitStr 路径 String 收到
+    // 装箱 1 → strlen/indexOf 崩，2026-10-06），暂缓启用——Aura 侧调用点
+    // 一律显式 2 参规避（SsaBuilder 回填处已改）。根因待「ra1+canary 定位
+    // 首次越界写」主线解决后再放开。
+    let _ = arg_count;
     match name {
         "contains" | "startsWith" | "endsWith" | "toUpperCase" | "toLowerCase" | "trim"
         | "substring" | "charAt" | "replace" | "replaceAll" | "padStart" | "substringBefore"
@@ -4142,6 +5694,14 @@ fn emit_call(
     callee: &str,
     args: &[HirExpr],
 ) -> Result<(String, String), AotError> {
+    if std::env::var_os("AURA_DEBUG_EMITCALL").is_some() {
+        eprintln!("[EMITCALL] callee={} args={}", callee, args.len());
+        if callee.contains("add") || callee.contains("Add") || callee.starts_with("__list") {
+            for (i, a) in args.iter().enumerate() {
+                eprintln!("[EMITCALL]   arg{}: {:.300?}", i, a);
+            }
+        }
+    }
     // Phase D: __throw 异常桥 — 存储异常值并 longjmp 到最近的 try 块
     if callee == "__throw" {
         if let Some(exc_expr) = args.first() {
@@ -4157,6 +5717,33 @@ fn emit_call(
             cur.body.push("call void @aura_longjmp(i8* null, i32 1)".to_string());
         }
         return Ok(("%void".to_string(), "void".to_string()));
+    }
+
+    // `Process.run(cmd)` / `ProcessNative.run(cmd)` → UCRT `system`（Windows）。
+    //
+    // Aura 侧的 `run` 用 `fork`/`execve` 组合（POSIX），Windows 下 `fork` 不存在。
+    // AOT 发射器必须内置映射到 `system()`，否则 `spawn` 的返回值 0 被误判为子进程
+    // 并 `exit(1)`，整个编译器进程静默退出。
+    //
+    // HIR 将 `Process.run(cmd)` 降级为 `Call("Process.run", [Var("Process"), Var("cmd")])`，
+    // args[0] 是接收者（幽灵首参），args[1] 是真正的命令字符串。
+    // Aura 字符串在 AOT 中是 `{ i8*, i64 }` 结构体，通过 `extractvalue` 提取数据指针。
+    if callee == "Process.run" || callee == "ProcessNative.run" {
+        if args.len() >= 2 {
+            let (cmd_val, cmd_ty) = emit_expr_val(ctx, blocks, &args[1])?;
+            let cur = blocks.last_mut();
+            // cmd_val 是 `{ i8*, i64 }` 结构体，提取第一个元素（数据指针）
+            let mut data_ptr = ctx.fresh_var();
+            if cmd_ty.starts_with('{') {
+                cur.body.push(format!("{} = extractvalue {} {}, 0", data_ptr, cmd_ty, cmd_val));
+            } else {
+                // 已经是 i8*，直接使用
+                data_ptr = cmd_val.clone();
+            }
+            let ret = ctx.fresh_var();
+            cur.body.push(format!("{} = call i32 @aura_system(i8* {})", ret, data_ptr));
+            return Ok((ret, "i32".to_string()));
+        }
     }
 
     // P9: 检查是否为结构体构造函数。
@@ -4258,8 +5845,8 @@ fn emit_call(
         return Ok((val_ir, val_ty));
     }
 
-    // typeOf：AOT 中由静态类型在编译期折叠为字符串常量
-    if callee == "typeOf" && args.len() == 1 {
+    // typeOf / typeof：AOT 中由静态类型在编译期折叠为字符串常量
+    if (callee == "typeOf" || callee == "typeof") && args.len() == 1 {
         let (_val_ir, val_ty) = emit_expr_val(ctx, blocks, &args[0])?;
         let type_name = llvm_ty_to_aura_name(&val_ty).unwrap_or("Any");
         return emit_literal(
@@ -4278,7 +5865,10 @@ fn emit_call(
     if let Some(cls_seg) = callee.split('.').rev().nth(1) {
         let is_phantom = match effective_args.first() {
             Some(HirExpr::Var(v)) => {
-                v == cls_seg && !ctx.var_scope.iter().any(|scope| scope.contains_key(v.as_str()))
+                v == cls_seg
+                    && !ctx.var_scope.iter().any(|scope| scope.contains_key(v.as_str()))
+                    && !ctx.func_aura_types.contains_key(v.as_str())
+                    && !ctx.func_vars.contains_key(v.as_str())
             }
             _ => false,
         };
@@ -4295,7 +5885,22 @@ fn emit_call(
         && effective_args.first().is_some()
     {
         let phantom_recv: Option<String> = match effective_args.first() {
-            Some(HirExpr::Var(v)) if !ctx.var_scope.iter().any(|s| s.contains_key(v.as_str())) => {
+            // ⚠ 判据必须同时排除 **模块级全局量**：`var_scope` 只覆盖帧内局部量，
+            // 顶层 `val`/`var`（如 `val WORKER_DONE = -1`）落在 `func_vars`
+            // / `func_aura_types`（由 `emit_function` 从 `global_slots` 注入），
+            // 不在 `var_scope` 里。
+            //
+            // 只看 `var_scope` 会把这些全局名误判成「幽灵类型名」，进而在下方
+            // `is_type_like`（首字母大写）兜底里**把真正的接收者当幽灵首参剔除**：
+            //   `WORKER_DONE.store(0)` → `store(0)`
+            // 于是接收者丢失 → 与形参错位 → AOT 报
+            //   `use of undefined value '@store'`
+            //（integration.aura 场景 6 实测；VM 侧同样丢接收者，但会静默忽略调用）。
+            Some(HirExpr::Var(v))
+                if !ctx.var_scope.iter().any(|s| s.contains_key(v.as_str()))
+                    && !ctx.func_aura_types.contains_key(v.as_str())
+                    && !ctx.func_vars.contains_key(v.as_str()) =>
+            {
                 Some(v.clone())
             }
             _ => None,
@@ -4448,7 +6053,9 @@ fn emit_call(
     // 仅覆盖**字符串专有**方法名：`contains`/`indexOf` 等与集合重名者不在此表
     //（它们在 HIR 中已带 `aura.lang.std.Collections.` 前缀，含 `.` 不会被改派）。
     if !callee_owned.contains('.') && effective_args.first().is_some() {
-        if let Some(cand) = string_method_symbol(&callee_owned) {
+        // effective_args[0] 是接收者（裸名形态 `endsWith(ty, "?")`），
+        // 映射分派按**不含接收者**的实参数（1 参/2 参 substring 分派依据）。
+        if let Some(cand) = string_method_symbol(&callee_owned, effective_args.len() - 1) {
             if ctx.func_ret_types.contains_key(&cand) {
                 callee_owned = cand;
             } else {
@@ -4491,6 +6098,40 @@ fn emit_call(
             }
         }
     }
+    // ── 裸名 + concurrent 接收者 → `aura.lang.concurrent.<Type>.<m>` 改派 ──
+    //
+    // HIR 的 `resolve_method_owner` 对 `aura.lang.concurrent.*` 接收者**故意**返回
+    // None（并发实现的源码不参与 AOT 内联，拼 `Atomic.store` 会得到不存在的符号），
+    // 于是调用点降级成裸名 `store(obj, 0)`。这里按接收者**静态类型**把裸名拼回
+    // concurrent 调用点，随后签名解析会把它翻译成
+    // `aura_lang_concurrent_Atomic_store` 并带上正确的 `i64` 签名。
+    //
+    // 判据用 `cffi_signature`（C 运行时实现表）而非 `func_ret_types`：
+    // concurrent 的方法**不来自 Aura 源码**，因此只登记在 CFFI 表里。
+    //
+    // 只在接收者类型**确实是某个 concurrent 类型**时才改派（`recv_ty` 由
+    // HIR 的 `infer_decl_type` 经 `concurrent_factory_type` 标注，如
+    // `val b = Atomic.new(0)` → `b: Atomic`），因此不会误伤普通的同名方法
+    //（`map.store(k,v)` / `list.add(x)` 等）。
+    //
+    // 缺这段时 `integration.aura` 场景 6 的 `WORKER_DONE.store(0)` 会发射
+    // `call void @store(i64 %h, i32 %v)` → llc 报 `use of undefined value '@store'`。
+    if !callee_owned.contains('.') && !ctx.func_ret_types.contains_key(&callee_owned) {
+        if let Some(a0) = effective_args.first() {
+            let recv_ty = aura_ty_of_expr(ctx, a0);
+            if !recv_ty.is_empty() {
+                for ty in concurrent_dispatch_types(&recv_ty) {
+                    let cand = format!("{}.{}", ty, callee_owned);
+                    let legacy =
+                        crate::codegen::aot::runtime::translate_to_legacy_c(&sanitizellvm(&cand));
+                    if crate::codegen::aot::runtime::cffi_signature(&legacy).is_some() {
+                        callee_owned = cand;
+                        break;
+                    }
+                }
+            }
+        }
+    }
     // ── 字符串实例方法 → legacy C 运行时符号（`aura_string_<m>`）──
     //
     // `record.substring(i, i + 1).charCodeAt(0)` 这类调用在 HIR 里可能是
@@ -4526,16 +6167,31 @@ fn emit_call(
                 callee_owned = "aura_string_length".to_string();
             }
         }
-        if let Some(std_sym) = string_method_symbol(&bare_name) {
-            let legacy = crate::codegen::aot::runtime::translate_to_legacy_c(&sanitizellvm(&std_sym));
-            // 签名表有两张：`runtime_signature`（内置 runtime 函数）与
-            // `cffi_signature`（aura_std_cffi.c 的 C 实现）。
+        // ⚠ 只对「裸名」或「owner 确为 String」的调用改派。
+        //
+        // 无限定条件时，**任何**末段撞名的点分调用都会被劫持：
+        // `VmOps.split(ft, "\n")` 曾被改写成
+        //   `aura_string_split(VmOps_instance, ft, "\n")`
+        // —— 单例对象指针被当字符串切分（实测 AOT 载体 funcTable 解析
+        // 全错 → "Unknown function: fibonacci"）。与程序内类方法同名的
+        // 字符串方法（split/trim/replace/charAt/…）必须先让位给类分派。
+        let str_owner = match callee_owned.rfind('.') {
+            Some(pos) => callee_owned[..pos].to_string(),
+            None => String::new(),
+        };
+        let owner_is_string = str_owner == "String" || str_owner.ends_with(".String");
+        if str_owner.is_empty() || owner_is_string {
+            if let Some(std_sym) = string_method_symbol(&bare_name, effective_args.len().saturating_sub(1)) {
+                let legacy = crate::codegen::aot::runtime::translate_to_legacy_c(&sanitizellvm(&std_sym));
+                // 签名表有两张：`runtime_signature`（内置 runtime 函数）与
+                // `cffi_signature`（aura_std_cffi.c 的 C 实现）。
 
-            // 字符串族只登记在**后者**里（`aura_string_substring` / `trim` /
-            // `split` …），只查前者会全部落空 ⇒ 返回 `NO-SIG`，符号与返回类型
-            // 都无法修正。
-            if runtime_lookup_sig(&legacy).is_some() {
-                callee_owned = legacy;
+                // 字符串族只登记在**后者**里（`aura_string_substring` / `trim` /
+                // `split` …），只查前者会全部落空 ⇒ 返回 `NO-SIG`，符号与返回类型
+                // 都无法修正。
+                if runtime_lookup_sig(&legacy).is_some() {
+                    callee_owned = legacy;
+                }
             }
         }
     }
@@ -4804,6 +6460,47 @@ fn emit_call(
                 cur.body.push(format!("call void @aura_free(i8* {})", p));
                 return Ok(("0".to_string(), "i32".to_string()));
             }
+            // [R91] 区域管理原语 → CFFI PascalCase 符号
+            if bare == "regionEnter" || bare == "regionReset" {
+                let r = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!(
+                    "{} = call i64 @{}()",
+                    r,
+                    if bare == "regionEnter" { "RegionEnter" } else { "RegionReset" }
+                ));
+                return Ok((r, "i64".to_string()));
+            }
+            if bare == "regionScratchTarget" || bare == "regionRetainTarget" {
+                let r = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!(
+                    "{} = call i64 @{}()",
+                    r,
+                    if bare == "regionScratchTarget" { "RegionScratchTarget" } else { "RegionRetainTarget" }
+                ));
+                return Ok((r, "i64".to_string()));
+            }
+            if bare == "scratchMark" {
+                let r = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!("{} = call i64 @ScratchMark()", r));
+                return Ok((r, "i64".to_string()));
+            }
+            if bare == "scratchRewind" {
+                let (mark, _) = arg(0);
+                let r = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!("{} = call i64 @ScratchRewind(i64 {})", r, mark));
+                return Ok((r, "i64".to_string()));
+            }
+            if bare == "strdupRetain" {
+                let (s, _) = arg(0);
+                let p = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!("{} = call i8* @StrdupRetain(i8* {})", p, s));
+                return Ok((p, "i8*".to_string()));
+            }
         }
     }
 
@@ -4907,6 +6604,35 @@ fn emit_call(
         }
     }
 
+    // __is_tagged_int(v)：Plan A 低位标记检测（原始表示为奇数 = 装箱整数）。
+    //
+    // 必须用**原始** ptrtoint，不能走 coerce_int_width——那会插入
+    // `aura_to_int_any` 拆箱，奇偶性随即丢失（实测 isTaggedInt 恒 false，
+    // VmOps.isString 对装箱整数误真 → `100 + 23` 拼接成 "10023"）。
+    // 种子 VM 侧（mir.rs）降级为常量 false：那里 typeof 给出真实类型名，
+    // 该检测不被依赖（isString 在 typeof 短路后才调用它）。
+    if callee == "__is_tagged_int" && args_ir.len() == 1 {
+        let (v, v_ty) = &args_ir[0];
+        let cur = blocks.last_mut();
+        if is_ptr_ty(v_ty) || v_ty == "i8*" {
+            let pi = ctx.fresh_var();
+            cur.body.push(format!("{} = ptrtoint {} {} to i64", pi, v_ty, v));
+            let t = ctx.fresh_var();
+            cur.body.push(format!("{} = and i64 {}, 1", t, pi));
+            let r = ctx.fresh_var();
+            cur.body.push(format!("{} = icmp ne i64 {}, 0", r, t));
+            return Ok((r, "i1".to_string()));
+        }
+        // 非指针（已是标量）：整数视奇偶，浮点恒 false
+        if is_int_ty(v_ty) {
+            let t = ctx.fresh_var();
+            cur.body.push(format!("{} = and {}, 1", t, v));
+            let r = ctx.fresh_var();
+            cur.body.push(format!("{} = icmp ne {} {}, 0", r, v_ty, t));
+            return Ok((r, "i1".to_string()));
+        }
+        return Ok(("false".to_string(), "i1".to_string()));
+    }
     if callee == "__list_len" && args_ir.len() == 1 {
         let (l, _) = &args_ir[0];
         let c = ctx.fresh_var();
@@ -4919,6 +6645,46 @@ fn emit_call(
         let cur = blocks.last_mut();
         cur.body.push(format!("{} = trunc i64 {} to i32", r, c));
         return Ok((r, "i32".to_string()));
+    }
+    // __list_is_empty(x) → count(x) == 0（HIR 的 `l.isEmpty()` 拦截分支）
+    if callee == "__list_is_empty" && args_ir.len() == 1 {
+        let (l, _) = &args_ir[0];
+        let c = ctx.fresh_var();
+        blocks.last_mut().body.push(format!(
+            "{} = call i64 @aura_lang_std_Collections_count(i8* {})",
+            c, l
+        ));
+        let r = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = icmp eq i64 {}, 0", r, c));
+        return Ok((r, "i1".to_string()));
+    }
+    // __list_contains(l, v) → Collections.contains（HIR 的 `l.contains(v)` 拦截分支；
+    // 缺此分支时 `__list_contains` 被当裸名发射 → 链接期 undefined symbol，
+    // 实测 ArrayList.distinct 内联体）
+    if callee == "__list_contains" && args_ir.len() == 2 {
+        let (l, _) = &args_ir[0];
+        let (v, v_ty) = &args_ir[1];
+        let v_ptr = coerce_val_to_i8ptr(ctx, blocks, v, v_ty);
+        let r = ctx.fresh_var();
+        blocks.last_mut().body.push(format!(
+            "{} = call i32 @aura_lang_std_Collections_contains(i8* {}, i8* {})",
+            r, l, v_ptr
+        ));
+        return Ok((r, "i32".to_string()));
+    }
+    // __list_index_of(l, v) → Collections.indexOf（同上）
+    if callee == "__list_index_of" && args_ir.len() == 2 {
+        let (l, _) = &args_ir[0];
+        let (v, v_ty) = &args_ir[1];
+        let v_ptr = coerce_val_to_i8ptr(ctx, blocks, v, v_ty);
+        let r = ctx.fresh_var();
+        blocks.last_mut().body.push(format!(
+            "{} = call i64 @aura_lang_std_Collections_indexOf(i8* {}, i8* {})",
+            r, l, v_ptr
+        ));
+        let r32 = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = trunc i64 {} to i32", r32, r));
+        return Ok((r32, "i32".to_string()));
     }
     if callee == "__size" && args_ir.len() == 1 {
         let (it, _) = &args_ir[0];
@@ -4953,14 +6719,65 @@ fn emit_call(
         return Ok((tmp, "i8*".to_string()));
     }
     if callee == "__list_push" && args_ir.len() == 2 {
-        let (l, _) = &args_ir[0];
+        // 接收者若是**类实例指针**（`%struct.ArrayList*` / `%struct.HashMap*`），
+        // 不能直接当 `AuraDynList*` 传给 `listAppend`：那会把整个对象指针当列表读，
+        // 读到的是对象的第一个字段。`%struct.ArrayList`（16 B）下越界 segfault，
+        // `%struct.HashMap`（40 B）下错位读写。取第 0 号字段（`items`/`buckets`）再传，
+        // 与 `ArrayList_add` 函数体的写法保持一致。
+        let (l_raw, l_ty) = &args_ir[0];
+        let l_field = if l_ty.starts_with("%struct.") {
+            let gep = ctx.fresh_var();
+            blocks.last_mut().body.push(format!(
+                "{} = getelementptr {}, {}* {}, i32 0, i32 0",
+                gep, l_ty.trim_end_matches("*"), l_ty.trim_end_matches("*"), l_raw
+            ));
+            let ld = ctx.fresh_var();
+            blocks.last_mut().body.push(format!("{} = load i8*, i8** {}", ld, gep));
+            ld
+        } else {
+            l_raw.clone()
+        };
         let (e, e_ty) = &args_ir[1];
         let e_ptr = coerce_val_to_i8ptr(ctx, blocks, e, e_ty);
         let tmp = ctx.fresh_var();
-        let cur = blocks.last_mut();
-        cur.body.push(format!(
+        blocks.last_mut().body.push(format!(
             "{} = call i8* @aura_lang_std_Collections_listAppend(i8* {}, i8* {})",
-            tmp, l, e_ptr
+            tmp, l_field, e_ptr
+        ));
+        return Ok((tmp, "i8*".to_string()));
+    }
+    if callee == "__list_remove_at" && args_ir.len() == 2 {
+        // 2026-10-02 补齐：`remove(i)`/`removeAt(i)` 经 HIR 重路由为
+        // `__list_remove_at`，此前 AOT 侧没有降级分支 → 链接期
+        // `undefined symbol: __list_remove_at`（实测 PhotonHatCompile 驱动构建）。
+        // 接收者若是类实例指针，取第 0 号字段（与 `__list_push` 分支一致）。
+        let (l_raw, l_ty) = &args_ir[0];
+        let l_field = if l_ty.starts_with("%struct.") {
+            let gep = ctx.fresh_var();
+            blocks.last_mut().body.push(format!(
+                "{} = getelementptr {}, {}* {}, i32 0, i32 0",
+                gep, l_ty.trim_end_matches("*"), l_ty.trim_end_matches("*"), l_raw
+            ));
+            let ld = ctx.fresh_var();
+            blocks.last_mut().body.push(format!("{} = load i8*, i8** {}", ld, gep));
+            ld
+        } else {
+            l_raw.clone()
+        };
+        let (idx, idx_ty) = &args_ir[1];
+        // 下标可能是**装箱指针**（Plan A `(v<<1)|1` 的 i8*）也可能是 i32/i64 ——
+        // 统一经 `coerce_int_width` 规整到 i64（ptr 分支内做 ptrtoint +
+        // `aura_to_int_any` 拆箱）。直接 zext 会在 idx 为 i8* 时产生
+        // `call ...(i64 %ptr)` 的类型失配（llc: defined with type 'ptr' but
+        // expected 'i64'，实测 RegisterAllocator_callStackPop）。
+        let idx_val = match coerce_int_width(ctx, blocks, idx, idx_ty, "i64") {
+            Some(v) => v,
+            None => idx.clone(),
+        };
+        let tmp = ctx.fresh_var();
+        blocks.last_mut().body.push(format!(
+            "{} = call i8* @aura_lang_std_Collections_listRemoveAt(i8* {}, i64 {})",
+            tmp, l_field, idx_val
         ));
         return Ok((tmp, "i8*".to_string()));
     }
@@ -4968,14 +6785,27 @@ fn emit_call(
     // 对 `var x = arrayListOf<T>()` 等局部泛型变量返回 None）。此处按方法调用原样处理：
     // callee 裸名 "add"，首参是列表接收者。
     if callee == "add" && args_ir.len() == 2 && !callee_owned.contains('.') && !callee_owned.contains("__") {
-        let (l, _) = &args_ir[0];
+        // 兜底：接收者若是类实例指针，取第 0 号字段（`items`/`buckets`）再传，
+        // 与 `__list_push` 分支一致（见上方注释）。
+        let (l_raw, l_ty) = &args_ir[0];
+        let l_field = if l_ty.starts_with("%struct.") {
+            let gep = ctx.fresh_var();
+            blocks.last_mut().body.push(format!(
+                "{} = getelementptr {}, {}* {}, i32 0, i32 0",
+                gep, l_ty.trim_end_matches("*"), l_ty.trim_end_matches("*"), l_raw
+            ));
+            let ld = ctx.fresh_var();
+            blocks.last_mut().body.push(format!("{} = load i8*, i8** {}", ld, gep));
+            ld
+        } else {
+            l_raw.clone()
+        };
         let (e, e_ty) = &args_ir[1];
         let e_ptr = coerce_val_to_i8ptr(ctx, blocks, e, e_ty);
         let tmp = ctx.fresh_var();
-        let cur = blocks.last_mut();
-        cur.body.push(format!(
+        blocks.last_mut().body.push(format!(
             "{} = call i8* @aura_lang_std_Collections_listAppend(i8* {}, i8* {})",
-            tmp, l, e_ptr
+            tmp, l_field, e_ptr
         ));
         return Ok((tmp, "i8*".to_string()));
     }
@@ -5190,7 +7020,11 @@ fn emit_call(
         }
 
         // Map.getOrDefault(map, key, default) → i8*
-        if bare == "getOrDefault" && args_ir.len() == 3 {
+        // 当 callee 是 `HashMap.getOrDefault` 时跳过：有真实 Aura 类方法实现
+        // （`HashMap_getOrDefault`），不能走 C 运行时 `getOrDefault`。
+        if bare == "getOrDefault" && args_ir.len() == 3
+            && !(callee.starts_with("HashMap.") && bare == "getOrDefault")
+        {
             let (m, _) = &args_ir[0];
             let (k, k_ty) = &args_ir[1];
             let (d, d_ty) = &args_ir[2];
@@ -5228,7 +7062,14 @@ fn emit_call(
                 | "EnvOps"
                 | "MathOps"
         );
-        if !platform_qual && (bare == "put" || bare == "set") && args_ir.len() == 3 {
+        // Map.put/map_set：仅对**裸名**（如接口 `Map`/`MutableMap` 上的 `.put()`）或
+        // 非平台接口限定名生效。当 callee 是 `HashMap.put` / `HashMap.set` 时，
+        // 存在真实的 Aura 类方法实现（`HashMap_put`），应走正常调用路径，
+        // 不能走 C 运行时 `mapSet`（其接收 `AuraDynMap*`，与 `%struct.HashMap`
+        // 布局不兼容）。同理 `getOrDefault` 也有 `HashMap_getOrDefault` 实现。
+        let is_aura_map_method = callee.starts_with("HashMap.")
+            && (bare == "put" || bare == "set" || bare == "getOrDefault");
+        if !platform_qual && !is_aura_map_method && (bare == "put" || bare == "set") && args_ir.len() == 3 {
             let (m, _) = &args_ir[0];
             let (k, k_ty) = &args_ir[1];
             let (v, v_ty) = &args_ir[2];
@@ -5246,31 +7087,66 @@ fn emit_call(
         }
     }
 
-    let cur = blocks.last_mut();
-
+    // [P2/D4] 瞬态闭包交还：filter/map/take 的闭包实参若是**新建的
+    // lambda 字面量**（非常量槽拷贝），C 侧只在调用期间借用 ⇒ 调用后
+    // release 归还 env（否则 env 与其捕获项随每次调用泄漏）。槽位来的
+    // 闭包是借用，不 release（所有权仍在槽位）。release 在调用指令
+    // **之后**发射（C 侧调用期间 env 必须有效）。
+    let mut closure_release_after: Vec<(String, String)> = Vec::new();
+    if arc_emit_enabled() && arc_release_enabled() {
+        let bare_c = callee.rsplit('.').next().unwrap_or(callee);
+        if matches!(bare_c, "filter" | "map" | "take") {
+            for (i, a) in effective_args.iter().enumerate() {
+                let is_fresh_lambda = matches!(a, HirExpr::Lambda { .. });
+                if !is_fresh_lambda || i >= args_ir.len() {
+                    continue;
+                }
+                let (v, t) = &args_ir[i];
+                if is_ptr_ty(t) {
+                    closure_release_after.push((v.clone(), t.clone()));
+                }
+            }
+        }
+    }
     let callee_sym_raw = sanitizellvm(callee);
-    // 将新命名转换为旧 C 符号名（与 aura_std_cffi.c 一致）
-    let callee_sym = crate::codegen::aot::runtime::translate_to_legacy_c(&callee_sym_raw);
+    // 用户函数走 `aura_user_` 符号空间（与 define 一致）；其余走 legacy C 映射
+    //（与 aura_std_cffi.c 一致）。`user_fn_symbols` 命中 ⇒ 该 callee 是本模块
+    // 定义的用户函数，绝不能落到运行时 C 符号上。
+    let callee_is_user = ctx.user_fn_symbols.contains_key(callee);
+    let callee_sym = if callee_is_user {
+        ctx.fn_symbol(callee)
+    } else {
+        crate::codegen::aot::runtime::translate_to_legacy_c(&callee_sym_raw)
+    };
+    // [P2/D4] 实参传递**不做 retain**（借用语义，与被调方「形参不 release」
+    // 配对）。原因见 emit_function 形参注释：调用点发射路径数十条（内建
+    // 特化/方法改派/幽灵首参/构造器直调），逐条配平不可靠；本方向最坏
+    // 只漏 release（泄漏），不会产生悬空引用。
     // 处理 void / 空返回类型：不能赋值给寄存器（LLVM IR 语法限制）
-    if ret_ty.is_empty() || ret_ty == "void" {
-        cur.body.push(format!(
+    let call_result = if ret_ty.is_empty() || ret_ty == "void" {
+        blocks.last_mut().body.push(format!(
             "call void @{}({})",
             callee_sym,
             args_str.join(", ")
         ));
         // 返回一个虚拟 i32 0 值，保持调用者接口兼容
-        Ok(("0".to_string(), "i32".to_string()))
+        ("0".to_string(), "i32".to_string())
     } else {
         let tmp = ctx.fresh_var();
-        cur.body.push(format!(
+        blocks.last_mut().body.push(format!(
             "{} = call {} @{}({})",
             tmp,
             ret_ty,
             callee_sym,
             args_str.join(", ")
         ));
-        Ok((tmp, ret_ty))
+        (tmp, ret_ty)
+    };
+    // [P2/D4] 瞬态闭包 env 交还（调用之后）。
+    for (v, t) in closure_release_after.iter() {
+        ctx.arc_release(blocks, v, t, "");
     }
+    Ok(call_result)
 }
 
 /// 判断两个 LLVM 类型是否属于同一「数值类别」（as? 的基本类型匹配语义）
@@ -5488,6 +7364,9 @@ fn coerce_arg(
             "{} = call i64 @aura_string_length(i8* {})",
             len, sptr
         ));
+        if arc_emit_enabled() {
+            body.push(format!("call void @aura_arc_retain(i8* {})", sptr));
+        }
         body.push(format!(
             "{} = insertvalue {} undef, i8* {}, 0",
             with_ptr, to, sptr
@@ -5526,7 +7405,17 @@ fn coerce_arg(
             return (val, from.to_string());
         }
         let t = ctx.fresh_var();
-        let op = if fb < tb { "zext" } else { "trunc" };
+        // Aura 整型**有符号**：宽化必须 `sext`（仅布尔 `i1` 用 `zext`）。
+        // 用 `zext` 会把负数扩成无符号大数，例如 `result == -100` 里
+        // `%int = add i32 0, -100` → `zext` 得 4294967196，
+        // 与 i64 的真值 -100 比较恒为假（promise_test 测试 2 实测）。
+        let op = if fb > tb {
+            "trunc"
+        } else if from == "i1" {
+            "zext"
+        } else {
+            "sext"
+        };
         emit(
             &mut blocks.last_mut().body,
             format!("{} = {} {} {} to {}", t, op, from, val, to),
@@ -5802,7 +7691,14 @@ fn emit_numeric_convert(
         if fb == tb {
             return val.to_string();
         }
-        let op = if fb < tb { "zext" } else { "trunc" };
+        // 同 coerce_arg：Aura 整型有符号，宽化用 `sext`（`i1` 除外）。
+        let op = if fb > tb {
+            "trunc"
+        } else if from == "i1" {
+            "zext"
+        } else {
+            "sext"
+        };
         cur.body.push(format!("{} = {} {} {} to {}", t, op, from, val, to));
     } else {
         return val.to_string();
@@ -5967,7 +7863,32 @@ fn emit_coerce_to(
             return val.to_string();
         }
         let v = ctx.fresh_var();
-        let op = if int_bits(from) < int_bits(to) { "zext" } else { "trunc" };
+        // 同 coerce_arg：Aura 整型有符号，宽化用 `sext`（`i1` 除外）。
+        let op = if int_bits(from) > int_bits(to) {
+            "trunc"
+        } else if from == "i1" {
+            "zext"
+        } else {
+            "sext"
+        };
+        insert_before_terminator(
+            blocks,
+            block,
+            format!("{} = {} {} {} to {}", v, op, from, val, to),
+        );
+        return v;
+    }
+    // 浮点互转：`float` ↔ `double`（`fpext` 加宽 / `fptrunc` 收窄）。
+    //
+    // 缺此分支时 if/else 两侧分别为 `double` / `float` 会直接落到末尾原样返回，
+    // PHI 节点两个操作数类型不一致 ⇒ llc
+    //   `'%var.N' defined with type 'float' but expected 'double'`。
+    // 实测触发点在自举编译器的
+    //   `val signed: Float = if (neg) (0.0 - scaled) else scaled`
+    // ——`then` 侧因 `0.0`（double 字面量）参与运算升为 `double`，`else` 侧仍是 `float`。
+    if is_float_ty(from) && is_float_ty(to) {
+        let v = ctx.fresh_var();
+        let op = if to == "double" { "fpext" } else { "fptrunc" };
         insert_before_terminator(
             blocks,
             block,
@@ -6076,10 +7997,19 @@ fn try_emit_ctor(
                 let (v, _vty) = coerce_arg(ctx, blocks, val, &ty, want);
                 call_args.push(format!("{} {}", want, v));
             }
+            let ctor_sym = ctx.fn_symbol(&ctor_name);
+            // [P2/D4] self 形参配平：构造器是 Aura 函数，其 self 形参在出口
+            // 会被 release；本调用点是**直调**（不经 emit_call 的实参 retain
+            // 路径）⇒ 先 retain 这个新实例（rc 1→2），构造器出口 release
+            // 后回到 1，调用方（构造表达式结果）的引用得以存活。
+            // 缺这条曾导致新生对象在构造器内被释放 ⇒ 堆损坏（0xC0000374）。
+            if arc_emit_enabled() {
+                ctx.arc_retain(blocks, &raw, "i8*", "");
+            }
             let cur = blocks.last_mut();
             cur.body.push(format!(
                 "call void @{}({})",
-                sanitizellvm(&ctor_name),
+                ctor_sym,
                 call_args.join(", ")
             ));
             // Phase A.1：返回 alloca 地址（指针），而非加载的结构体值
@@ -6241,6 +8171,11 @@ fn emit_member_access(
     }
 
     // 内建属性：动态列表（不透明指针）的 size / length / isEmpty → runtime 计数
+    // ⚠ 2026-10-02 曾尝试把 `List<…>`/`Map<…>` 类型名也纳入本分支（让
+    // `pendingNames.size()` 走 Collections.count），结果引入新的段错误 ——
+    // 该调用点（零参方法调用被降级为成员访问）obj_ty 实为退化占位（"Basic"），
+    // 与「模糊字段扫描按方法名误配 VmFrameStack.size 槽位」两个缺陷叠加，
+    // 需在 emit 成员解析层统一重做（见 aura-vm-profile 文档专项）。
     if obj_ty == "i8*" || obj_ty == "ptr" {
         if name == "size" || name == "length" || name == "isEmpty" {
             let cnt = ctx.fresh_var();
@@ -6396,6 +8331,14 @@ fn resolve_member_field_owner(
                 candidates.push(cls.clone());
                 obj_type_resolved = true;
             }
+        } else if ctx.singleton_structs.contains(var) {
+            // `object X` 单例的字段访问（`PhotonRuntime.RUNTIME_SYMBOLS`）：
+            // emit_variable_load 把单例名发射成 i8*（不透明指针），具体类型
+            // 在这里已丢失；若不补回单例类名，下面的 i8* 守卫直接返回 None，
+            // 调用方兜底成「i32 @ 偏移 0」并按 int→ptr 装箱 —— 实测
+            // RUNTIME_SYMBOLS 被读成装箱整数 0x171 → strlen 崩（2026-10-03）。
+            candidates.push(var.clone());
+            obj_type_resolved = true;
         } else if let Some(cls) = ctx
             .var_scope
             .iter()
@@ -6429,12 +8372,35 @@ fn resolve_member_field_owner(
     if obj_type_resolved {
         return None;
     }
+    // 2026-10-02：i8*/ptr 不透明句柄的接收者 → **不做模糊字段匹配**。
+    // 句柄可能是 String/List/Map 或任何对象 —— 按字段名全局扫描会误配到
+    // 无关类的同名字段/方法（实测 `.size()` 被配到 VmFrameStack 的 sp 槽位
+    // → List 句柄被 bitcast 后读偏移垃圾 → AucLoader 全链损坏）。
+    // 方法名应由 `__list_len` / `Collections.count` 等 runtime 调用处理
+    // （mapStdlibFuncName / 内建属性分支已覆盖）。
+    if obj_ty.map(|t| t == "i8*" || t == "ptr").unwrap_or(false) {
+        return None;
+    }
     // 兜底：按字段名全局扫描。⚠️ 必须**确定性**选择 —— 直接迭代 `HashMap`
     // 的语义（顺序随 `RandomState` 变化）会让**同一份源码在不同构建下发射出不同
     // 的 IR**：`Hir` / `Mir` 等类都有同名字段时，取到的类随机，
     // 于是自举产物行为随机（实测 `bitcast %struct.Hir* → %struct.Mir*` 交替出现，
     // Phi 回填读到错误结构体的字段 ⇒ 循环变量永不更新、产物死循环）。
     // 这里按类名字典序固定顺序，保证「同源码 → 同 IR」。
+    //
+    // 2026-10-02：排除方法名（size/length/isEmpty/…）—— `.size()` 零参方法调用
+    // 被前端降为 Member 后，模糊扫描会误配到任何类的 `size` 字段/方法，
+    // 把 List 句柄 bitcast 成那个类的指针并读偏移垃圾（实测 Vm.aura 的
+    // `pendingNames.size()` 读到 VmFrameStack 的 sp 字段 → AucLoader 全链损坏）。
+    // 这些名字应由 `__list_len` / `Collections.count` 等 runtime 调用处理。
+    const METHOD_ONLY_NAMES: &[&str] = &[
+        "size", "length", "isEmpty", "contains", "indexOf",
+        "keys", "values", "add", "get", "set", "remove",
+        "substring", "toString", "equals", "hashCode",
+    ];
+    if METHOD_ONLY_NAMES.contains(&name) {
+        return None;
+    }
     let mut classes: Vec<&String> = ctx.class_field_types.keys().collect();
     classes.sort();
     for class in classes {
@@ -6746,6 +8712,15 @@ fn emit_if_expr(
             &else_actual_block,
             format!("{} = call i64 @aura_string_length(i8* {})", len_var, sptr),
         );
+        // [P2/D4] 包装体持有该字符串（逃逸引用）→ 先 retain 计数，
+        // 否则产生它的临时量释放后包装体悬空。
+        if arc_emit_enabled() {
+            insert_before_terminator(
+                blocks,
+                &else_actual_block,
+                format!("call void @aura_arc_retain(i8* {})", sptr),
+            );
+        }
         insert_before_terminator(
             blocks,
             &else_actual_block,
@@ -6780,6 +8755,13 @@ fn emit_if_expr(
             &then_actual_block,
             format!("{} = call i64 @aura_string_length(i8* {})", len_var, sptr),
         );
+        if arc_emit_enabled() {
+            insert_before_terminator(
+                blocks,
+                &then_actual_block,
+                format!("call void @aura_arc_retain(i8* {})", sptr),
+            );
+        }
         insert_before_terminator(
             blocks,
             &then_actual_block,
@@ -6906,7 +8888,14 @@ fn emit_block_expr(
             match stmt {
                 HirStmt::Expr(e) => {
                     let (v, t) = emit_expr_val(ctx, blocks, e)?;
-                    ctx.exit_scope();
+                    // [P2/D4] 块表达式值成为调用方的新持有者：复制类
+                    // （Var/字段/下标/别名 C 调用）先 retain；随后作用域
+                    // 退出释放本块局部量（块值已是独立 SSA 寄存器，不受
+                    // 槽位释放影响）。
+                    if is_copy_expr(ctx, e) {
+                        ctx.arc_retain(blocks, &v, &t, "");
+                    }
+                    ctx.emit_arc_scope_exit(blocks);
                     return Ok((v, t));
                 }
                 HirStmt::Return(Some(e)) => {
@@ -6919,13 +8908,21 @@ fn emit_block_expr(
                     // （自举编译 `VmOps.add` 等 Any 运算函数时必现）。
                     let want = ctx.current_ret_ty.clone();
                     if want.is_empty() || want == "void" {
+                        // [P2/D4] 出口：释放本函数全部打开作用域（终止符前）。
+                        ctx.arc_release_all_scopes(blocks);
                         blocks.set_terminator("ret void");
-                        ctx.exit_scope();
+                        ctx.emit_arc_scope_exit(blocks);
                         return Ok((v, t));
                     }
+                    // [P2/D4] 复制类返回值先 retain（所有权转移给调用方），
+                    // 再释放全部打开作用域，最后 coerce + 终止符。
+                    if is_copy_expr(ctx, e) {
+                        ctx.arc_retain(blocks, &v, &t, "");
+                    }
+                    ctx.arc_release_all_scopes(blocks);
                     let converted = coerce_return_value(ctx, blocks, v.clone(), &t, &want);
                     blocks.set_terminator(&format!("ret {} {}", converted.1, converted.0));
-                    ctx.exit_scope();
+                    ctx.emit_arc_scope_exit(blocks);
                     return Ok((v, t));
                 }
                 _ => {
@@ -6937,7 +8934,7 @@ fn emit_block_expr(
         }
     }
 
-    ctx.exit_scope();
+    ctx.emit_arc_scope_exit(blocks);
     Ok(("0".to_string(), "i32".to_string()))
 }
 
@@ -7162,6 +9159,7 @@ fn is_builtin(name: &str) -> bool {
             | "pow"
             | "toInt"
             | "toFloat"
+            | "toLong"
             | "toStr"
             | "toString"
             | "clock"
@@ -7408,22 +9406,17 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
         call_args.push(format!("{} {}", llvm_ty, val_var));
     }
 
-    // 6b. 调用真实函数
+    // 6b. 调用真实函数（包装器名保持 HIR 名 `aura_aot_<name>`，供 blob 描述符/
+    //     JIT 按名查表；被调用的是 `aura_user_*` 符号空间的真实函数）
+    let call_sym = ctx.fn_symbol(&func.name);
     let call_var = ctx.fresh_var();
     let args_str = call_args.join(", ");
     if ret_llvm_ty == "void" || ret_llvm_ty.is_empty() {
-        s.push_str(&format!(
-            "  call void @{}({})\n",
-            sanitizellvm(&func.name),
-            args_str
-        ));
+        s.push_str(&format!("  call void @{}({})\n", call_sym, args_str));
     } else {
         s.push_str(&format!(
             "  {} = call {} @{}({})\n",
-            call_var,
-            ret_llvm_ty,
-            sanitizellvm(&func.name),
-            args_str
+            call_var, ret_llvm_ty, call_sym, args_str
         ));
     }
 
@@ -7574,20 +9567,15 @@ fn emit_c_abi_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, A
         .collect::<Vec<_>>()
         .join(", ");
 
+    // C ABI 包装名保持 `aura_c_<name>`（对外导出契约），被调用的是 `aura_user_*`。
+    let call_sym = ctx.fn_symbol(&func.name);
     let call_var = ctx.fresh_var();
     if ret_llvm_ty == "void" || ret_llvm_ty.is_empty() {
-        s.push_str(&format!(
-            "  call void @{}({})\n",
-            sanitizellvm(&func.name),
-            args_str
-        ));
+        s.push_str(&format!("  call void @{}({})\n", call_sym, args_str));
     } else {
         s.push_str(&format!(
             "  {} = call {} @{}({})\n",
-            call_var,
-            ret_llvm_ty,
-            sanitizellvm(&func.name),
-            args_str
+            call_var, ret_llvm_ty, call_sym, args_str
         ));
     }
 

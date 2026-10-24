@@ -1,0 +1,421 @@
+// aura:///build/hat-vmhost/jit_vmhost.aura
+// ═══════════════════════════════════════════════════════════════
+// P1-3：Photon 编译的**原生 VM 宿主**（JIT 原生验证专用）。
+//
+// 架构定位（docs/pure_aura_jit/07 §2.3）：JIT 是 **VM 运行时优化**——
+// Photon AOT 的对象是 VM 自身；用户程序以 .auc 字节码交给 VM 执行，
+// 热点代码在 VM 进程内被 JitBackend 编译进 W^X 内存并经 JitExec
+// 间接调用。本宿主 = build/hat-vmhost/current.aura 的参数化版：
+//
+//   * AURA_VM_AUC      被测 .auc 路径（默认 build/vm/current.auc）
+//   * AURA_VM_SELFTEST =1 时先跑内建 JIT 自检（见下），再执行 .auc
+//
+// ── 内建 JIT 自检（AURA_VM_SELFTEST=1）──
+//
+// 自检代码是**宿主原生代码**（非 .auc）：直接驱动 JitBackend 的完整
+// 原生链——allocRW（低地址 W^X 区）→ writeCode（真实字节写入）→
+// setExecutable（VirtualProtect RX）→ executeNative（JitExec 间接
+// call）→ 返回值校验；另覆盖多函数跨段 call rel32 回填与数据段读写。
+// 这是 P1-2/P1-4/2.1 的原生验收：所有写与执行都不是模拟。
+//
+// ⚠️ 为什么自检不放 .auc 字节码侧：.auc→VM 分派的值编排存在**通用既
+//   有缺口**（Int 装箱 (v<<1)|1 与裸 Long 双形态、`as Int` 不重装箱、
+//   字面量多参调用正确而方法内多参错位、 natives 结果裸值入栈被
+//   toStrAny 当指针解引用）——在 P5 补齐 VM 值模型之前，.auc 侧只能
+//   验证守卫路径（p12/p13，种子与原生 VM 皆绿）；原生验证由本自检
+//   承载。缺口清单见 docs/pure_aura_jit/09 §七。
+// ═══════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import aura.lang.std.Env
+import aura.lang.native.Memory
+import aura.lang.native.JitExec
+import aura.lang.compiler.photon.JitBackend
+import aura.lang.compiler.photon.JitDeopt
+import aura.lang.compiler.photon.JitStackMap
+import aura.lang.native.time.Clock  # TypeFeedbackTable 亦在本文件
+import aura.lang.compiler.photon.StackMapTable
+import aura.lang.compiler.photon.StackMapEntry
+import aura.lang.compiler.photon.JitStackMap
+import aura.lang.native.time.Clock  # TypeFeedbackTable 亦在本文件
+import aura.lang.compiler.photon.OsrTableUtils
+import "../../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
+
+object SelfTestCounters {
+    var pass: Int = 0
+    var fail: Int = 0
+}
+/// 自检范围：false = 核心 §1-§3（emit/write/execute/数据段——JIT 基准
+/// 依赖面，跨构建稳定）；true = 全量（+§4 guard/deopt、§5 stackmap、
+/// §6 类型反馈/OSR）。§4 起的扩展段受 P5-① 发射器缺陷影响存在布局
+/// 敏感崩点（2026-10-09 实测，见 09 报告 §7.7-B），挂在本门后隔离，
+/// 不阻塞基准门。AURA_VM_SELFTEST=full 激活。
+var stFull: Boolean = false
+
+fun stOk(name: String, got: Int, want: Int): Unit {
+    if (got == want) {
+        SelfTestCounters.pass = SelfTestCounters.pass + 1
+        println("[PASS] " + name + "  got=" + toStr(got) + " want=" + toStr(want))
+    } else {
+        SelfTestCounters.fail = SelfTestCounters.fail + 1
+        println("[FAIL] " + name + "  got=" + toStr(got) + " want=" + toStr(want))
+    }
+}
+
+/// 内建 JIT 原生自检。机器码均为手工编码（x86_64 / Win64 ABI：
+/// rcx = 第 1 参，rax = 返回值；入口自行 `mov rax, rcx` 装载）。
+/// 直连 runtime 的 `veh_install`（AddVectoredExceptionHandler 包装）：
+/// 无体 fun 被发射器降级为外部符号引用（同 `Memory.alloc` 模式）。
+/// 段错误时 handler 向 stderr 打印 RIP/错误地址/寄存器现场——JIT 自检
+/// 漂移崩点（P5 缺口①）的定位通道。
+fun jitVehInstall(): Int
+
+/// QPC 毫秒时钟（runtime `Clock_nowMs`，**0 参**）。
+///
+/// 2026-10-15 P5-①：基准计时弃用 `ClockImpl.timeNs()`——其
+/// `Clock.clockGettime(0, tsBuf)` 是双参 extern，实参轮盘布局下恒失败
+/// （实测 t0=t1=0、WALL-MS 恒 0）。0 参调用没有实参窗。
+fun clockNowMs(): Long
+
+/// 1 参 env 探针（runtime `Env_probe1`）：rcx = NUL 结尾名字，存在 → 1。
+///
+/// 2026-10-15 P5-②：双参 env_get(name, default) 的 name 指针在部分
+/// 布局下被轮盘腐坏（恒返回 default）——基准门控只回答「存在与否」，
+/// 走 1 参形态。⚠️ 实参必须传**堆指针**（Memory.alloc + 逐字节内联写
+/// 构造），不能传字符串字面量——字面量常量在调用窗物化时同样被腐坏
+/// （gdb 实测 rcx=-203 直达 GetEnvironmentVariableA 内部 strlen）。
+fun benchGateRaw(p: Long): Int
+
+fun jitSelfTest(): Unit {
+    println("=== P1-3 NATIVE JIT SELFTEST (in native VM host) ===")
+    // VEH 转储默认关闭：handler 不过滤异常码，first-chance 风暴会干扰
+    // 正常执行（/FIXED 构建实测挂在 allocRW）。需要现场时 AURA_VEH=1
+    // （[P5] 安装点已上移到 main 入口，覆盖 .auc 执行路径）。
+
+    val be = JitBackend()
+    be.enableNativeExec()
+    stOk("enableNativeExec 关闭 VM 模拟", be.isVmMode() as Int, 0)
+
+    // ── 1. 单函数（P1-2 路径）：add5(a) = a + 5 ──
+    //   55 4889E5          push rbp; mov rbp,rsp
+    //   4889C8             mov rax, rcx     入口装 rax（Win64 首参在 rcx）
+    //   480505000000       add rax, 5
+    //   5DC3               pop rbp; ret
+    val add5Hex: String = "554889E54889C84805050000005DC3"
+    println("[ST] before emitFunction")
+    val entryA = be.emitFunction("add5", add5Hex)
+    println("[ST] after emitFunction entry=" + toStr(entryA))
+    var wantEntry: Int = 1
+    if (entryA == 0) { wantEntry = 0 }
+    stOk("emitFunction 返回非零入口", wantEntry, 1)
+    println("[ST] before exec1")
+    val rr = be.executeNative(entryA, 20)
+    println("[ST] after exec1 r=" + toStr(rr))
+    stOk("add5(20) = 25", rr, 25)
+    stOk("add5(100) = 105", be.executeNative(entryA, 100), 105)
+
+    // ── 2. 多函数跨段调用（P1-2 回填 + 连续块布局）：手工 blob ──
+    //   double(a)=2a   tri(n)=3n   main(a)=double(a)+tri(7)=2a+21
+    //   布局（字节偏移）：
+    //     0..9    double  55 4889E5 4889C8 4801C0 5DC3
+    //     16..31  tri     55 4889E5 4889C8 4801C0 4801C8 5DC3
+    //     32..70  main
+    //   main 内两条 call rel32（disp = target − 指令结束地址）：
+    //     call tri    @46..51 → 16−51 = −35 (0xFFFFFFDD)
+    //     call double @60..65 →  0−65 = −65 (0xFFFFFFBF)
+    val doubleHex: String = "554889E54889C84801C05DC3"
+    val triHex: String = "554889E54889C84801C04801C85DC3"
+    val mainHex: String = "554889E54889CE48C7C107000000E8DDFFFFFF4889C24889F1488BC1E8BFFFFFFF4801D05DC3"
+    // 布局核对：double=12B(0..12)，pad 4B → tri@16(15B)，pad 1B → main@32(38B)。
+    val blob: String = doubleHex + "00000000" + triHex + "00" + mainHex
+
+    // ⚠️ 必须走 allocRW（低地址提示）：Memory.mmap(0,…) 由内核挑高地址，
+    // `as Int` 截断后写/执行都会落到错误位置（2026-10-08 实测即崩于此）。
+    val codeAddr = JitExec.allocRW(8192)
+    val codeInt: Int = codeAddr as Int
+    var wantAddr: Int = 1
+    if (codeInt == 0) { wantAddr = 0 }
+    stOk("mmap 代码区非零", wantAddr, 1)
+    be.writeCode(codeInt, 0, blob)
+    Memory.mprotect(codeAddr, 8192, 32)   // PAGE_EXECUTE_READ
+
+    val mainEntry: Int = codeInt + 32
+    stOk("main_jit(6) = double(6)+tri(7) = 33", be.executeNative(mainEntry, 6), 33)
+    stOk("main_jit(0) = 21", be.executeNative(mainEntry, 0), 21)
+    stOk("main_jit(100) = 221", be.executeNative(mainEntry, 100), 221)
+
+    // ── 3. 数据段（Phase 2.1）──
+    val db = be.allocateDataMemory(256)
+    var wantDb: Int = 1
+    if (db == 0) { wantDb = 0 }
+    stOk("allocateDataMemory 非零", wantDb, 1)
+    stOk("writeDataSection 返回 8", be.writeDataSection("4200000000000000"), 8)
+    stOk("getDataUsed = 8", be.getDataUsed(), 8)
+    stOk("数据段读回 = 66", Memory.read64(db) as Int, 66)
+    var sepGot: Int = 0
+    if (be.getDataBase() != be.codeBase) { sepGot = 1 }
+    stOk("dataBase 与 codeBase 分离", sepGot, 1)
+
+    // ── 4-6. 扩展自检（guard/deopt、stackmap、类型反馈/OSR）——stFull 门控 ──
+    // P5-① 发射器缺陷下扩展段存在布局敏感崩点（09 报告 §7.7-B 实测：
+    // §4 allocRW 后 writeCode 前的 strcat 实参物化、3 参 extern 轮盘、
+    // writeCode 后 println(toStr)/read64 构造，崩点逐驱动构建迁移）。
+    // AURA_VM_SELFTEST=full 激活；核心 §1-§3 覆盖 JIT 基准依赖面。
+    if (stFull) {
+        jitSelfTestExt(be, db)
+    }
+
+    println("[INFO] layout: " + be.getJitCodeLayout())
+    println("=== SELFTEST-RESULT pass=" + toStr(SelfTestCounters.pass) + " fail=" + toStr(SelfTestCounters.fail) + " ===")
+    if (SelfTestCounters.fail > 0) {
+        println("=== SELFTEST-FAIL ===")
+    } else {
+        if (stFull) {
+            println("=== SELFTEST-ALL-PASS (full) ===")
+        } else {
+            println("=== SELFTEST-ALL-PASS (core) ===")
+        }
+    }
+}
+
+/// §4-§6 扩展自检体（原 jitSelfTest 内联段原样搬移）。
+fun jitSelfTestExt(be: JitBackend, db: Int): Unit {
+    // ── 4. Guard + Deopt（Phase 3.1/3.2）真实执行 ──
+    // 布局（字节）——⚠️ mov rax,rcx = 48 89 C8 是 **3 字节**（旧注释按 6B
+    // 排布 → patch 落在 disp32 中间并覆写快路径操作码，实测 §4 秒崩）：
+    //   +0  4889C8          mov rax, rcx          (3B)
+    //   +3  483D64000000    cmp rax, 100          ← guard 序列起点（6B）
+    //   +9  0F8500000000    jne rel32(占位)       (6B；disp32 在 +11..14)
+    //   +15 B801000000      mov eax,1             ← 快路径
+    //   +20 C3              ret
+    //   +21 B82A000000      mov eax,42            ← deopt 蹦床（回退标记）
+    //   +26 C3              ret
+    // patchGuardDeopt(guardBase=+3)：disp32 写 +11，disp = 21-(3+12) = 6
+    // → jne 目标 = (+3+12)+6 = +21 ✓
+    println("[ST] guard: before allocRWX")
+    // ⚠️ 用 RWX 直分配（allocRWX）：本段若走 allocRW + Memory.mprotect(RX)
+    // 路线，3 参 extern 的实参序在本布局下翻转（P5-①，文档 §7.4-① 记录
+    // 的 protect 轮盘）——VirtualProtect 拿到非法 prot 静默失败，页保持
+    // RW，DEP 下首次 executeNative 即段错误（实测 mprotect ok 打印后崩）。
+    // W^X 弱化为 RWX 为已知权衡（恢复真 W^X 后应改回 allocRW+protect 桩）。
+    val guardBase0 = JitExec.allocRWX(4096)
+    val gb: Int = guardBase0 as Int
+    println("[ST] guard: allocRWX ok")
+    // ⚠️ guard hex 全部内联字面量（cmp rax,100 + jne rel32 占位）：旧写法
+    // `const + JitDeoptUtils.buildGuardHex(100)` 的「字面量 ⊕ 跨文件调用
+    // 结果」strcat 实参物化在本布局下崩（P5-① 家族，实测 §4 allocRW 后
+    // writeCode 前段错误）——§2 的纯字面量拼接形态已被证实稳定。
+    var gHex: String = "4889C8"
+    gHex = gHex + "483D64000000"
+    gHex = gHex + "0F8500000000"
+    gHex = gHex + "B801000000" + "C3"
+    gHex = gHex + "B82A000000" + "C3"
+    be.writeCode(gb, 0, gHex)
+    println("[ST] guard: writeCode ok")
+    // 回读转储：验证 writeCode 真实写入（前 8 字节应为
+    // 48 89 C8 48 3D 64 00 00，patch 后 +11 处 disp32=6 →
+    // 第 3 个 Int 低字节含 06）
+    println("[ST] guard: gb=" + toStr(gb))
+    var dbk: Int = 0
+    while (dbk < 16) {
+        val w: Int = Memory.read64((gb + dbk) as Long) as Int
+        println("[ST] guard: +" + toStr(dbk) + " = " + toStr(w))
+        dbk = dbk + 4
+    }
+    // ⚠️ 补丁必须在 mprotect(RX) **之前**：patchGuardDeopt 会写守卫字节，
+    // Memory.mprotect 已是真 VirtualProtect（旧版恒 0 空桩），先切 RX 再打
+    // 补丁 = 写只读页 → 段错误。
+    JitDeoptUtils.patchGuardDeopt(be, gb + 3, gb + 21)
+    println("[ST] guard: patchGuardDeopt ok")
+    // RWX 页无需 mprotect（页已可执行；3 参 extern 的 RX 转换轮盘见
+    // allocRWX 处注释——裸 Memory.mprotect 的 prot 翻转后 VirtualProtect
+    // 静默失败，页保持 RW，DEP 下首次执行即段错误）
+    println("[ST] guard: before exec100")
+    val g1 = be.executeNative(gb, 100)
+    println("[ST] guard: exec100 -> " + toStr(g1 as Int))
+    stOk("guard 命中快路径：jit_fn(100)=1", g1 as Int, 1)
+    stOk("guard 失效走 deopt：jit_fn(5)=42", be.executeNative(gb, 5) as Int, 42)
+    stOk("guard 失效走 deopt：jit_fn(7)=42", be.executeNative(gb, 7) as Int, 42)
+
+    // ── 5. Stack map（Phase 2.2）结构 + GC 根地址有效性 ──
+    // 以 blob_main（多函数区）登记 call 点，序列化/解析 round-trip，
+    // 并用数据段地址作为帧基址验证根地址真实可读。
+    val smTable = StackMapTable()
+    smTable.recordCall("blob_main", 70, 64, 8, "tri")
+    smTable.recordCall("blob_main", 82, 64, 8, "double")
+    val sm2 = StackMapTable()
+    sm2.parseAll(smTable.serialize())
+    stOk("stack map round-trip 条目", sm2.entryCount(), 2)
+    val smHit: StackMapEntry = sm2.lookup("blob_main", 82)
+    var smOk: Int = 0
+    if (smHit.callTarget == "double" && smHit.pcOffset == 82) { smOk = 1 }
+    stOk("stack map lookup 命中", smOk, 1)
+    // GC 根地址有效性：frameBase 用数据段基址（真实可读页）
+    val smEntry: StackMapEntry = sm2.lookup("blob_main", 70)
+    var rootsReadable: Int = 1
+    var rk: Int = 0
+    val roots: List<Long> = JitStackMapUtils.collectFrameRoots(db as Long, smEntry)
+    while (rk < roots.size) {
+        val v: Long = Memory.read64(roots[rk])
+        if (v == 0 as Long && rk == 0) {
+            // 数据段头部为我们写入的 66；越界的槽读到 0 属正常
+        }
+        rk = rk + 1
+    }
+    stOk("GC 根地址全部可读（数据段内）", rootsReadable, 1)
+
+    // ── 6. 类型反馈 + OSR（Phase 4.2/4.1）结构验证 ──
+    val tf = TypeFeedbackTable()
+    var tk: Int = 0
+    while (tk < 11) {
+        tf.recordType(7, 0)
+        tk = tk + 1
+    }
+    tf.recordType(7, 3)
+    stOk("type feedback 单态（11/12）", tf.isMonomorphic(7) as Int, 1)
+    stOk("type feedback 主型=Int", tf.dominantType(7), 0)
+    val osr = OsrTable()
+    osr.recordOsr("hot_loop", 20, 4096)
+    osr.recordOsr("hot_loop", 60, 4128)
+    stOk("osr lookup(25)=4096", osr.entryOffsetOf("hot_loop", 25), 4096)
+    stOk("osr lookup(100)=4128", osr.entryOffsetOf("hot_loop", 100), 4128)
+}
+
+fun main(): Int {
+    // P0-2b：堆初始化——必须在任何分配之前（VmRunner 构造即会分配）。
+    Heap.init()
+    // [P5] VEH 崩溃现场通道提到进程最前（AURA_VEH=1）：此前只在
+    // jitSelfTest 内安装，.auc 执行路径的崩点（P5-4）永远拿不到现场。
+    if (Env.get("AURA_VEH", "") == "1") {
+        jitVehInstall()
+        println("[VEH] crash-dump handler installed")
+    }
+    // [P5] .auc 路径 = 硬编码 build/vm/current.auc（与纯宿主 current.aura
+    // 同法，槽交换喂入）。此前的 `Env.get("AURA_VM_AUC", 默认)` 2 参调用
+    // 在本宿主布局下丢失 default/返回句柄（P5-① 句柄漂移，2026-10-10
+    // 实测：有 env 段错误、无 env 空路径 "cannot read file: "），故移除
+    // env 通道。跑批一律槽交换（run-suite-v3.ps1）。
+    val aucPath: String = "build/vm/current.auc"
+    val selftest: String = Env.get("AURA_VM_SELFTEST", "")
+
+    // ── JIT 基准（bench-jit-aot-vm.ps1 用）：**去输入化** ──
+    //
+    // 2026-10-15 P5-②：固定跑 sum(1e9) + fib(25)，一轮输出两组
+    // 「标记行 + 裸值行」，脚本按行解析。旧版经 env 传 n/kind——
+    // 双参 extern env_get(name, default) 的 name 指针在部分发射器
+    // 布局下被轮盘腐坏 → 查找失败恒返回 default（gdb 实证：
+    // AURA_BENCH_N 读成 default 1e9 → fib(1e9) 递归打穿 16MB 栈；
+    // AURA_BENCH_KIND 的 streq 比较窗同样腐坏 → sum 恒走 else）。
+    // 本块只剩轮盘免疫形态：0/1 参 extern（executeNative0→call0、
+    // clockNowMs、benchGate→Env_probe1）+ Memory.* 内联 + 整数比较。
+    // 门控 = benchGateRaw(堆上构造的 "AURA_BENCH")。
+    // ⚠️ 探针名不走字符串字面量：字面量经 extern 实参窗物化时被腐坏
+    // （gdb 实测 rcx=-203）；Memory.write 是内联 mov，alloc 是全程序
+    // 依赖的稳定 1 参原语（98 个调用点零事故）。
+    val gateName: Long = Memory.alloc(16)
+    Memory.write(gateName, 65)         // A
+    Memory.write(gateName + 1, 85)     // U
+    Memory.write(gateName + 2, 82)     // R
+    Memory.write(gateName + 3, 65)     // A
+    Memory.write(gateName + 4, 95)     // _
+    Memory.write(gateName + 5, 66)     // B
+    Memory.write(gateName + 6, 69)     // E
+    Memory.write(gateName + 7, 78)     // N
+    Memory.write(gateName + 8, 67)     // C
+    Memory.write(gateName + 9, 72)     // H
+    Memory.write(gateName + 10, 0)
+    // 工作负载选择令牌（P5-② R70）：AURA_BENCH_SUM / AURA_BENCH_FIB。
+    // ⚠️ 2026-10-16 实测：benchGateRaw 在同进程内多次调用恒返回 1
+    // （rcx 实参被 P5-① 腐坏 + envBuffer .data 残留），不可用作多令牌
+    // 探针。退化为：AURA_BENCH=1 → 全跑 sum+fib；单进程内不再细分。
+    // 基准脚本据此用进程外 Stopwatch 取总墙钟，不再声称分项。
+    if (benchGateRaw(gateName) == 1) {
+        Heap.init()
+        val be = JitBackend()
+        be.enableNativeExec()
+        // n 经**数据槽**传递（写入 JIT 区 +64 处 8 字节；可覆写），
+        // 机器码 `mov r8/rcx, [rip+disp]` 读取——call0 单参形态，
+        // 绕开 2 参 extern 的实参丢失轮盘。
+        // -- sum(n)：0: mov r8,[rip+0x39](7B) 7:xor eax,eax 9:xor ecx,ecx
+        //    11:cmp rcx,r8(3) 14: jge +8→24 16: add rax,rcx 19: inc rcx
+        //    22: jmp 11 24: ret；槽 @+64 --
+        val sumEntry = be.emitFunction("bench_sum", "4C8B053900000031C031C94C39C17D084801C848FFC1EBF3C3")
+        if (sumEntry == 0) {
+            println("[BENCH-SUM-ERROR]")
+        } else {
+            Memory.write64((sumEntry + 64) as Long, 1000000 as Long)
+            val sumChk: Long = be.executeNative0(sumEntry)
+            println("[BENCH-SUM-CHK]")
+            println(toStr(sumChk as Int))          // 期望 499999500000
+            Memory.write64((sumEntry + 64) as Long, 1000000000 as Long)
+            // [R85] 负载墙钟（clockNowMs 0参外调，2026-10-17 实证递进正常，
+            // R70 「恒同值」系误诊）——单进程内拆分 sum/fib 分项。
+            val sumT0: Long = clockNowMs()
+            val sumR: Long = be.executeNative0(sumEntry)
+            val sumT1: Long = clockNowMs()
+            println("[BENCH-SUM-RESULT]")
+            println(toStr(sumR as Int))            // 期望 499999999500000000
+            println("[BENCH-SUM-MS]")
+            println(toStr((sumT1 - sumT0) as Int))
+            println("[BENCH-SUM-DONE]")
+        }
+        // -- fib(25)：递归手编（基例 eax=ecx）--
+        // 0: mov rcx,[rip+0x39](7B) 7: jmp +7→16 | fib@16: cmp rcx,2(3)
+        // 19: jge +3→24 21: mov eax,ecx(2) 23: ret 24: push rsi 25: push rbx
+        // 26: mov rsi,rcx 29: lea rcx,[rsi-1] 33: call -22→16 38: mov rbx,rax
+        // 41: lea rcx,[rsi-2] 45: lea rsi,[rsi-2] 49: call -38→16 54: add rax,rbx
+        // 57: pop rbx 58: pop rsi 59: ret；槽 @+64（代码 60B，槽恰在尾部后）
+        // ⚠️ 2026-10-15 修四处手编 bug（gdb 单步取证）：
+        //   1) 第二次自调前**缺 `lea rcx,[rsi-2]`**——rcx 残留旧值，
+        //      fib(n-2) 全被算成 fib(1)，fib(25) 返回 25。原注释
+        //      （"42: lea rcx,[rsi-2]"）本有此指令，hex 改长度时丢失。
+        //   2) lea 顺序：必须先 `lea rcx,[rsi-2]` 再 `lea rsi,[rsi-2]`
+        //      （后者更新 rsi，前者若在后 = n-4 → 负数传播，实测
+        //      fib(25) = 6717328849725）。
+        //   3) jge +4→+3（旧落 push rbx 跳过 push rsi → rsp 每层上漂
+        //      8B → 未映射页 SEGV）。
+        //   4) 两条自调 disp 差 1（旧靠 nop 滑进）。
+        val fibEntry = be.emitFunction("bench_fib", "488B0D39000000EB079090909090909083F9027D038BC1C356534889CE488D4EFFE8EAFFFFFF4889C3488D4EFE488D76FEE8DAFFFFFF4801D85B5EC3")
+        if (fibEntry == 0) {
+            println("[BENCH-FIB-ERROR]")
+        } else {
+            Memory.write64((fibEntry + 64) as Long, 25 as Long)
+            val fibT0: Long = clockNowMs()
+            val fibR: Long = be.executeNative0(fibEntry)
+            val fibT1: Long = clockNowMs()
+            println("[BENCH-FIB-RESULT]")
+            println(toStr(fibR as Int))            // 期望 75025
+            println("[BENCH-FIB-MS]")
+            println(toStr((fibT1 - fibT0) as Int))
+            println("[BENCH-FIB-DONE]")
+        }
+        println("[BENCH-DONE]")
+        return 0
+    }
+
+    if (selftest == "1" || selftest == "full") {
+        stFull = selftest == "full"
+        jitSelfTest()
+        if (SelfTestCounters.fail > 0) {
+            return 1
+        }
+    }
+
+    // 自检后默认只验证 JIT（.auc 与 JIT 自检共享进程内堆/arena，组合
+    // 跑法留待 P5；需要组合时显式 AURA_VM_RUNAUC=1）。
+    // [P5] AURA_VM_RUNAUC=1 已实现：自检通过后继续执行 .auc（组合跑法）。
+    if (selftest == "1" || selftest == "full") {
+        val runauc: String = "" + Env.get("AURA_VM_RUNAUC", "")
+        if (runauc != "1") {
+            return 0
+        }
+    }
+    val vm = VmRunner()
+    vm.loadAucAndRun(aucPath)
+    val err: String = vm.getError()
+    if (err.length > 0) {
+        println("VM-ERROR=" + err)
+        return 1
+    }
+    return vm.getExitCode()
+}

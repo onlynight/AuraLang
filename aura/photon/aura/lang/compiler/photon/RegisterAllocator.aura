@@ -58,6 +58,16 @@ class RegisterAllocator {
     /// 并持续分配内存。键是整数节点 ID，直接下标即可。
     private var colors: List<String> = arrayListOf<String>()
 
+    /// [R96] 已着色节点 id 的**升序**索引（`buildIntervalInterference` 的扫描域）。
+    ///
+    /// ⚠️ 旧实现每次为节点构建干扰集都扫 `0..dag.nodeCount` 全部节点——自举实测
+    /// 149,547 节点 × 每个着色节点 ⇒ O(N²)，Phase D 的 step2 单项 92.9s（占总
+    /// RA 时间 94%）。而真正可能冲突的只有**已着色**节点，其余 `colorGet==""`
+    /// 的扫描纯属空转。这里在 `colorPut` 中维护升序表，扫描域从「全部节点」
+    /// 缩到「已着色节点」，且**遍历顺序与原 0..nodeCount 升序完全一致**
+    ///（干扰串内容与早停时机不变，着色结果逐位等价）。
+    private var coloredIds: List<Int> = arrayListOf<Int>()
+
     /// 溢出节点 id 列表（仅登记用；`isSpilled` 走 `colors` 里的 `spill_slot_*` 前缀）。
     ///
     /// ⚠️ 旧实现是**逗号分隔的字符串** `this.spilled = this.spilled + "," + id`：
@@ -137,6 +147,7 @@ class RegisterAllocator {
 
     init() {
         this.colors = arrayListOf<String>()
+        this.coloredIds = arrayListOf<Int>()
         this.spilledNodes = arrayListOf<Int>()
         this.callStack = arrayListOf<Int>()
         this.spillSlots = 0
@@ -211,9 +222,36 @@ class RegisterAllocator {
         var i: Int = 0
         while (i < d.nodeCount) {
             val node: DagNode = d.nodeOf(i)
-            if (node.kind == "Value" || node.kind == "Reg" || node.kind == "Const") {
-                val interference: String = this.buildIntervalInterference(i)
-                this.assignColor(i, interference)
+            // ⚠️ P231 实验记录：曾尝试 Phi 强制溢出栈槽（退出着色）——机制
+            // 本身成立（slotForNode 专属槽 + emitMovRR isStackRef 写槽），
+            // 但**布局位移重新激活了 readFromFile 段的已知「布局敏感」潜伏
+            // 缺陷**（stringToBuffer 的 path 串变 NULL，§10.34/§10.35），
+            // 不得不再先根治布局敏感家族。phi 正确路线维持「启发式配边 +
+            // P229 状态」，RA 专项（跨块 MOV 定义的区间合成）留待布局
+            // 根治后重启。
+            // ⚠️ P270 曾**全部值走栈槽**（禁用寄存器着色）——每值一个
+            // slotForNode 专属槽，读写家一致，彻底消除：
+            //   * 寄存器冲突的布局敏感性
+            //   * 跨块值被其他值覆写
+            //   * phi 合并值的 RA 区间不可靠
+            // 性能：全部经内存读写（比寄存器慢 ~2×），但**正确性优先**。
+            //
+            // ── P414（2026-10-07）**保守重启着色** ──
+            // 实测代价确认：生成代码 31~48% 是指令是栈往返，IPC≈2，
+            // 串行 store-forwarding 依赖链是与 Seed VM 差距（4.67×）的
+            // 结构性根因。此处按 P270 自己给出的路线重启，但**只对区间
+            // 完全落在单个基本块内、且长度受限的节点着色**：
+            //   * 不跨标签 ⇒ 天然避开「跨块覆写」与「phi 区间不可靠」
+            //   * 区间短 ⇒ 干扰集小，冲突概率低，布局敏感性影响面小
+            // 跨块值（含 phi）继续走 slotForNode 栈槽，行为与 P270 一致。
+            // P414e：**`Const` 完全排除**（含 span==0）。
+            // 二分依据：把 Const 从「跨指令」放开为「仅 span==0」当且仅当
+            // 其余条件已全绿时，反而重新破坏五门（fib28 段错误）⇒
+            // Const 无论跨度如何都不参与着色。
+            if (node.kind == "Value" || node.kind == "Reg") {
+                if (this.isColorableLocal(i)) {
+                    this.tryColorLocal(i)
+                }
             }
             // 每 4000 节点打一次点：OOM 时最后一行即「卡在第几个节点」。
             if (i % 4000 == 3999) {
@@ -260,10 +298,11 @@ class RegisterAllocator {
 
         // 递归处理子节点
         if (node.kind == "Value" || node.kind == "Reg") {
-            val args: List<String> = this.splitComma(node.args)
+            // [R95] 直接用解析好的 argIds（CSV → List），避免每次访问 split 整串。
+            val args: List<Int> = node.argIds
             var j: Int = 0
             while (j < args.size) {
-                val arg: Int = strToInt(args[j])
+                val arg: Int = args[j]
                 if (arg >= 0) {
                     this.dfs(arg)
                 }
@@ -272,6 +311,26 @@ class RegisterAllocator {
         }
 
         this.callStackPop()
+    }
+
+    /// P414：仅当**有空闲颜色**时着色；无空闲则**不着色**（`colors` 保持空 ⇒
+    /// `regOfNodeRaw` ③ 自动退回 `slotForNode` 专属栈槽，行为与 P270 一致）。
+    ///
+    /// ⚠️ **绝不调用 `spill()`**。原因：RA 的溢出区与 `slotForNode` 的额外槽区
+    /// 在帧布局里**同处 144 基线以下、逐 8 字节向下分配**，两者同时启用会
+    /// 互相覆写：
+    ///   * `getSpillOffset` → `144 + slotNum * 8`（用作 `-offset`）
+    ///   * `slotForNode`    → `-(144 + 8 + extraSlotCount * 8)`
+    /// 实测：直接启用带 `spill()` 的 `assignColor` ⇒ 宿主立刻段错误
+    /// （帧内两区互相踩踏）。P270 下 `spillSlots` 恒为 0，所以该冲突从未暴露。
+    /// 不溢出即可保证 `spillSlots == 0` ⇒ `getSpillOffset` 恒返回 0 ⇒ 无冲突。
+    private fun tryColorLocal(nodeId: Int): Unit {
+        val interference: String = this.buildIntervalInterference(nodeId)
+        val used: String = this.getUsedColors(interference)
+        val free: String = this.getFreeColor(used)
+        if (free != "") {
+            this.colorPut(nodeId, free)
+        }
     }
 
     /// 分配颜色（寄存器）。
@@ -293,10 +352,11 @@ class RegisterAllocator {
     private fun buildInterference(nodeId: Int): String {
         var result: String = ""
         val node: DagNode = this.dag.nodeOf(nodeId)
-        val args: List<String> = this.splitComma(node.args)
+        // [R95] CSV → List：干扰图按节点反复构建，旧的每次 split 是 O(N²) 分配源。
+        val args: List<Int> = node.argIds
         var i: Int = 0
         while (i < args.size) {
-            val arg: Int = strToInt(args[i])
+            val arg: Int = args[i]
             if (arg >= 0) {
                 val argColor: String = this.colorGet(arg)
                 if (argColor != "") {
@@ -447,8 +507,14 @@ class RegisterAllocator {
     /// live-out[i] = ∪ { live-in[k] | k ∈ succ(i) } - def(i) ∪ use(i)
     /// 使用控制流感知的前驱/后继关系，正确处理分支和合并。
     private fun computeLiveAtEnd(): List<String> {
-        val instrs: List<DagInstruction> = this.dag.instrs
-        val n: Int = instrs.size
+        // ⚠️ 跨对象字段读禁用：`this.dag.instrs`（RegisterAllocator 读 MachineDag
+        // 的 List 字段）在 seed-AOT 驱动下元素失真（instrs[0].template 读出 "0"，
+        // 而同一索引经 dag.instrOf() 读出 "label"）——种子 AOT 值模型已知的
+        // 「跨对象字段绑定失真」家族（与 HirLowerer this 失真同族）。这曾令
+        // buildBackEdges/buildNodeSpans/liveness **整体静默失效**（labels=0、
+        // edges=0），RA 的区间/回边机制自引入以来从未真正工作过。
+        // 一律走 dag.instrOf(i) 方法访问（自对象读，实测正确）。
+        val n: Int = this.dag.instrCount
         val liveAtEnd: List<String> = arrayListOf<String>()
 
         // 初始化：所有指令的 live-out 为空
@@ -459,7 +525,7 @@ class RegisterAllocator {
         }
 
         // 构建标签 → 指令索引映射
-        this.buildLabelIndexMap(instrs)
+        this.buildLabelIndexMap()
 
         // 反向定点迭代
         var changed: Boolean = true
@@ -470,7 +536,7 @@ class RegisterAllocator {
 
             var j: Int = n - 1
             while (j >= 0) {
-                val instr: DagInstruction = instrs[j]
+                val instr: DagInstruction = this.dag.instrOf(j)
 
                 // 计算 use 集合（指令使用的节点）
                 val useSet: String = this.getInstrUseSet(instr)
@@ -482,7 +548,7 @@ class RegisterAllocator {
                 }
 
                 // 获取后继指令的 live-in 并集
-                val succIndices: List<Int> = this.getSuccIndices(j, instrs)
+                val succIndices: List<Int> = this.getSuccIndices(j)
                 val succLiveIn: String = this.unionLiveIn(succIndices, liveAtEnd)
 
                 // live-out[j] = succLiveIn - def ∪ use
@@ -510,9 +576,9 @@ class RegisterAllocator {
     ///
     /// 扫描指令序列，找到每个基本块的入口点（第一条指令和每条终止指令后的下一条指令），
     /// 按顺序映射为 "bb0", "bb1", "bb2", ...
-    private fun buildLabelIndexMap(instrs: List<DagInstruction>): Unit {
+    private fun buildLabelIndexMap(): Unit {
         this.labelIndexIdxs = arrayListOf<Int>()
-        val n: Int = instrs.size
+        val n: Int = this.dag.instrCount
 
         // 收集基本块入口点
         val entryPoints: List<Int> = arrayListOf<Int>()
@@ -520,7 +586,7 @@ class RegisterAllocator {
 
         var i: Int = 0
         while (i < n - 1) {
-            val instr: DagInstruction = instrs[i]
+            val instr: DagInstruction = this.dag.instrOf(i)
             if (this.isTerminatorTemplate(instr.template)) {
                 entryPoints.add(i + 1)
             }
@@ -544,19 +610,19 @@ class RegisterAllocator {
     /// - jmp/br: 仅跳转到目标
     /// - jcc: 目标 + fall-through
     /// - 普通指令: fall-through
-    private fun getSuccIndices(index: Int, instrs: List<DagInstruction>): List<Int> {
+    private fun getSuccIndices(index: Int): List<Int> {
         val succs: List<Int> = arrayListOf<Int>()
-        val n: Int = instrs.size
-        val instr: DagInstruction = instrs[index]
+        val n: Int = this.dag.instrCount
+        val instr: DagInstruction = this.dag.instrOf(index)
         val template: String = instr.template
 
         if (template == "ret") {
             // 终止指令：无后继
         } else if (template == "jmp @target" || template == "br %label") {
             // 无条件跳转：仅跳转到目标
-            val nodes: List<String> = this.splitComma(instr.nodes)
-            if (nodes.size >= 1) {
-                val target: String = nodes[0]
+            // [R95] 只需首个 token（标签名）：原地取一次，不再 split 整串。
+            val target: String = this.firstCsvToken(instr.nodes)
+            if (target != "") {
                 val targetIdx: Int = this.labelToIndex(target)
                 if (targetIdx >= 0) {
                     succs.add(targetIdx)
@@ -564,9 +630,8 @@ class RegisterAllocator {
             }
         } else if (template == "jcc @target") {
             // 条件跳转：目标 + fall-through
-            val nodes: List<String> = this.splitComma(instr.nodes)
-            if (nodes.size >= 1) {
-                val target: String = nodes[0]
+            val target: String = this.firstCsvToken(instr.nodes)
+            if (target != "") {
                 val targetIdx: Int = this.labelToIndex(target)
                 if (targetIdx >= 0) {
                     succs.add(targetIdx)
@@ -606,7 +671,8 @@ class RegisterAllocator {
         }
         var v: Int = 0
         var i: Int = 2
-        while (i < label.length) {
+        val labelLen: Int = label.length
+        while (i < labelLen) {
             val c: Int = label.charCodeAt(i) as Int
             if (c < 48 || c > 57) { return -1 }
             v = v * 10 + (c - 48)
@@ -806,7 +872,13 @@ class RegisterAllocator {
         // 必须**以逗号开头**：`containsColor` 用 `,rbx,` 形式做成员判定，缺前导
         // 逗号会让第一个颜色永远判不出「已存在」而被重复加入（并让末尾的
         // `substring(1, len-1)` 切掉首个颜色名的一个字符）。
-        var seen: String = ","
+        // ⚠️ [MEM-FIX] 2026-10-10：成员判定改用 List<String>（指针比较），
+        // CSV 只在返回时拼一次。旧实现 `seen = seen + c + ","` 逐收逐拷贝
+        // 已累积串（O(重叠数²)/调用 × 每个着色节点调用一次本函数）——OOM
+        // 归因表 411MB×3936 次 ×6 相邻 RA ≈ 2.4GB 驻留的真身，且
+        // `containsColor` 对增长串的线性扫描是 RA 阶段耗时的主因。
+        // 返回契约不变：无首尾分隔符的 CSV（调用方自行加定界）。
+        var seenParts: List<String> = arrayListOf<String>()
         val firstN: Int = this.nodeFirstIdx(nodeId)
         val lastN: Int = this.nodeLastIdx(nodeId)
         if (firstN < 0) {
@@ -820,30 +892,49 @@ class RegisterAllocator {
         // 非易失寄存器 → 生成代码静默算错。
         val availCount: Int = this.availList.size
         var availSeen: Int = 0
+        // [R96] 只扫**已着色**节点（升序，与旧的全节点升序扫描同序）。
         var m: Int = 0
-        val total: Int = this.dag.nodeCount
+        val total: Int = this.coloredIds.size
         while (m < total) {
             if (availSeen >= availCount) { break }
-            if (m != nodeId) {
-                val c: String = this.colorGet(m)
-                if (c != "" && !this.containsColor(seen, c)) {
-                    val firstM: Int = this.nodeFirstIdx(m)
-                    val lastM: Int = this.nodeLastIdx(m)
+            val cand: Int = this.coloredIds[m]
+            m = m + 1
+            if (cand != nodeId) {
+                val c: String = this.colorGet(cand)
+                if (c != "" && !this.containsStringIn(seenParts, c)) {
+                    val firstM: Int = this.nodeFirstIdx(cand)
+                    val lastM: Int = this.nodeLastIdx(cand)
                     if (firstM >= 0 && firstN <= lastM && firstM <= lastN) {
-                        seen = seen + c + ","
+                        seenParts.add(c)
                         if (this.isAvailColor(c)) {
                             availSeen = availSeen + 1
                         }
                     }
                 }
             }
-            m = m + 1
         }
-        if (seen == ",") {
+        if (seenParts.size == 0) {
             return ""
         }
-        // 去掉首尾分隔符，保持「逗号分隔、无首尾分隔符」的既有返回契约
-        return seen.substring(1, seen.length - 1)
+        // CSV 只在返回时拼一次（结果 ~百字节级，非热点）
+        var out: String = ""
+        var k: Int = 0
+        while (k < seenParts.size) {
+            if (k > 0) { out = out + "," }
+            out = out + seenParts[k]
+            k = k + 1
+        }
+        return out
+    }
+
+    /// List 成员判定（指针比较，零分配；替代 CSV containsColor 扫描）。
+    private fun containsStringIn(parts: List<String>, c: String): Boolean {
+        var i: Int = 0
+        while (i < parts.size) {
+            if (parts[i] == c) { return true }
+            i = i + 1
+        }
+        return false
     }
 
     /// 是否为可用颜色池里的非易失寄存器（见 `availList`）。
@@ -872,11 +963,10 @@ class RegisterAllocator {
         this.backEdges = arrayListOf<String>()
         this.labelNames = arrayListOf<String>()
         this.labelInstrIdxs = arrayListOf<Int>()
-        val instrs: List<DagInstruction> = this.dag.instrs
         var i: Int = 0
-        while (i < instrs.size) {
-            if (instrs[i].template == "label") {
-                val parts: List<String> = this.splitPipe(instrs[i].nodes)
+        while (i < this.dag.instrCount) {
+            if (this.dag.instrOf(i).template == "label") {
+                val parts: List<String> = this.splitPipe(this.dag.instrOf(i).nodes)
                 if (parts.size >= 1 && parts[0] != "") {
                     this.labelNames.add(parts[0])
                     this.labelInstrIdxs.add(i)
@@ -885,10 +975,10 @@ class RegisterAllocator {
             i = i + 1
         }
         i = 0
-        while (i < instrs.size) {
-            val tpl: String = instrs[i].template
+        while (i < this.dag.instrCount) {
+            val tpl: String = this.dag.instrOf(i).template
             if (tpl == "jmp @target" || tpl == "jcc @target") {
-                val parts: List<String> = this.splitPipe(instrs[i].nodes)
+                val parts: List<String> = this.splitPipe(this.dag.instrOf(i).nodes)
                 if (parts.size >= 1 && parts[0] != "") {
                     val tgt: Int = this.labelInstrIndexOf(parts[0])
                     if (tgt >= 0 && tgt < i) {
@@ -935,10 +1025,9 @@ class RegisterAllocator {
         // 旧实现是「每个节点各扫一遍全部指令」（`rawFirstIdx` / `rawLastIdx`），
         // 且每次判定都要 `splitComma` 分配 —— O(节点数 × 指令数) 次循环叠加
         // 同量级字符串分配。这里改成对指令流只扫一遍：O(指令数 × 操作数)。
-        val instrs: List<DagInstruction> = this.dag.instrs
         var j: Int = 0
-        while (j < instrs.size) {
-            this.touchInstr(instrs[j], j)
+        while (j < this.dag.instrCount) {
+            this.touchInstr(this.dag.instrOf(j), j)
             j = j + 1
         }
 
@@ -1039,6 +1128,69 @@ class RegisterAllocator {
         return this.spanLast[nodeId]
     }
 
+    // ── P414：保守着色的可行性判定 ──
+
+    /// 单基本块内可着色节点的**最大区间长度**（指令索引跨度）。
+    ///
+    /// 区间越短 ⇒ 同时活着的节点越少 ⇒ 干扰集越小 ⇒ 冲突概率越低，
+    /// 且布局位移的影响面越小。刻意取保守值，先拿「短寿命临时量」这一块。
+    private val COLOR_MAX_SPAN: Int = 1000000
+
+    /// 基本块入口指令索引表（惰性构建一次）。
+    private var blockStarts: List<Int> = arrayListOf<Int>()
+    private var blockStartsReady: Int = 0
+
+    /// 构建基本块入口表：任何**终止指令**的**下一条**即新块入口。
+    /// 与 `buildLabelIndexMap` 同判据（`isTerminatorTemplate`），但**自带缓存**
+    /// ——后者只在 `computeLiveAtEnd()` 内被调用，时机不确定。
+    private fun ensureBlockStarts(): Unit {
+        if (this.blockStartsReady == 1) { return }
+        this.blockStartsReady = 1
+        this.blockStarts = arrayListOf<Int>()
+        val n: Int = this.dag.instrCount
+        var i: Int = 0
+        while (i < n) {
+            if (this.isTerminatorTemplate(this.dag.instrOf(i).template)) {
+                this.blockStarts.add(i + 1)
+            }
+            i = i + 1
+        }
+    }
+
+    /// P414：该节点是否可以参与着色。
+    ///
+    /// 三个必要条件（缺一即放弃着色，退回 `slotForNode` 栈槽，与 P270 同）：
+    ///   ① 有活跃区间信息（`first/last >= 0`）；
+    ///   ② 区间跨度 ≤ `COLOR_MAX_SPAN`（短寿命临时量）；
+    ///   ③ 区间内**不含基本块边界**——即不存在块入口 `b` 满足
+    ///      `first < b <= last`。这条是关键：它一次性排除
+    ///      「跨块值被覆写」与「phi 合并区间不可靠」两类 P270 记载的
+    ///      失效模式（phi 必然跨块）。
+    private fun isColorableLocal(nodeId: Int): Boolean {
+        val f: Int = this.nodeFirstIdx(nodeId)
+        val l: Int = this.nodeLastIdx(nodeId)
+        if (f < 0 || l < 0) { return false }
+        if (l - f > this.COLOR_MAX_SPAN) { return false }
+        this.ensureBlockStarts()
+        var k: Int = 0
+        val bs: Int = this.blockStarts.size
+        while (k < bs) {
+            val b: Int = this.blockStarts[k]
+            if (b > f && b <= l) { return false }
+            k = k + 1
+        }
+        // P414c：区间内**含调用**的节点一律不着色 —— 实测**必需**。
+        // 二分依据：其余条件不变、仅去掉本排除 ⇒ 立刻段错误。
+        // `call %func` 边界上除 ABI 易失寄存器外，还有发射器自身的实参装载
+        // （rcx/rdx/r8/r9）与返回值搬运（rax），跨调用保持的着色值会被踩。
+        var t: Int = f
+        while (t <= l) {
+            if (this.dag.instrOf(t).template == "call %func") { return false }
+            t = t + 1
+        }
+        return true
+    }
+
     // ── Phase D: 栈帧布局 ──
 
     /// 计算栈帧布局（Phase D spill slot 布局）。
@@ -1053,7 +1205,7 @@ class RegisterAllocator {
         }
 
         // 帧大小 = 影子空间 (32) + 溢出槽 × 8 + 对齐填充
-        val shadowSpace: Int = 32
+        val shadowSpace: Int = 144  // P301: 同基址
         val spillAreaSize: Int = this.spillSlots * 8
         var frameSize: Int = shadowSpace + spillAreaSize
         // 对齐到 16 字节
@@ -1096,7 +1248,7 @@ class RegisterAllocator {
         var s: String = "frameSize|" + toStr(this.frameSizeValue)
         var slot: Int = 0
         while (slot < this.spillSlots) {
-            s = s + "\nslot" + toStr(slot) + "|-0x" + this.toHexString(32 + slot * 8)
+            s = s + "\nslot" + toStr(slot) + "|-0x" + this.toHexString(144 + slot * 8)
             slot = slot + 1
         }
         return s
@@ -1131,10 +1283,24 @@ class RegisterAllocator {
         if (this.spillSlots == 0) { return 0 }
         // 从 color 中提取 slot 编号
         val slotNum: Int = strToInt(color.substring(11))
-        return 32 + slotNum * 8
+        return 144 + slotNum * 8  // P301: 基址 0x90=144，越过 decodeNumeric 等 11 参函数的参数局部槽 -0x30..-0x80
     }
 
     // ── 字符串工具（`String.split` 可用；`arrayListOf + add` 会丢元素）──
+
+    /// [R95] 取逗号串的首个 token（无逗号则整串），只分配一次。
+    private fun firstCsvToken(text: String): String {
+        if (text == "") { return "" }
+        val len: Int = text.length
+        var i: Int = 0
+        while (i < len) {
+            if ((text.charCodeAt(i) as Int) == 44) {
+                return text.substring(0, i)
+            }
+            i = i + 1
+        }
+        return text
+    }
 
     /// 按逗号分割字符串。
     private fun splitComma(text: String): List<String> {
@@ -1164,7 +1330,28 @@ class RegisterAllocator {
     private fun colorPut(nodeId: Int, color: String): Unit {
         if (nodeId < 0) { return }
         while (this.colors.size <= nodeId) { this.colors.add("") }
+        val had: Boolean = this.colors[nodeId] != ""
         this.colors[nodeId] = color
+        // [R96] 维护已着色节点的升序索引（见 `coloredIds` 字段说明）。
+        // 常见情形是「节点 id 递增地首次着色」⇒ 直接 append，O(1)。
+        if (!had && color != "") {
+            val n: Int = this.coloredIds.size
+            if (n == 0 || this.coloredIds[n - 1] < nodeId) {
+                this.coloredIds.add(nodeId)
+            } else {
+                var pos: Int = n
+                while (pos > 0 && this.coloredIds[pos - 1] > nodeId) {
+                    pos = pos - 1
+                }
+                this.coloredIds.add(nodeId)
+                var k: Int = this.coloredIds.size - 1
+                while (k > pos) {
+                    this.coloredIds[k] = this.coloredIds[k - 1]
+                    k = k - 1
+                }
+                this.coloredIds[pos] = nodeId
+            }
+        }
     }
 
     /// 读取颜色。

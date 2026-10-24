@@ -118,6 +118,7 @@ object ProcessNative {
     /// 启动新进程，返回子进程 PID。
     ///
     /// 在子进程中调用 execve 替换进程映像。
+    /// 命令字符串按空格切分为 argv，execve 只接收 argv[0] 作为程序路径。
     /// 如果 execve 失败，子进程以错误码 1 退出。
     fun spawn(command: String): Int {
         val result: Int = fork()
@@ -126,29 +127,78 @@ object ProcessNative {
         }
         if (result == 0) {
             // 子进程：执行命令
-            // 构造 argv: [command, null]
-            val cmdAddr: Long = stringToBuffer(command)
-            if (cmdAddr == 0) {
+            // 按空格切分命令字符串为 argv 条目
+            val tokens: List<String> = splitCommand(command)
+            if (tokens.isEmpty) {
                 exitGroup(1)
                 return -1
             }
-            val argvAddr: Long = Allocator.malloc(16)  // 2 * 8 bytes
+            // 为每个 token 分配缓冲区
+            val bufAddrs: List<Long> = mutableListOf<Long>()
+            val argvEntries: List<Long> = mutableListOf<Long>()
+            var allocFailed: Boolean = false
+            for (tok in tokens) {
+                val addr: Long = stringToBuffer(tok)
+                if (addr == 0) {
+                    allocFailed = true
+                    break
+                }
+                bufAddrs.add(addr)
+                argvEntries.add(addr)
+            }
+            if (allocFailed) {
+                for (a in bufAddrs) { Allocator.free(a) }
+                exitGroup(1)
+                return -1
+            }
+            // 构造 argv 指针数组: [buf[0], buf[1], ..., null]
+            val argc: Int = tokens.size
+            val argCount: Long = (argc + 1) as Long
+            val argvAddr: Long = Allocator.malloc(argCount * 8)
             if (argvAddr == 0) {
-                Allocator.free(cmdAddr)
+                for (a in bufAddrs) { Allocator.free(a) }
                 exitGroup(1)
                 return -1
             }
-            Memory.write64(argvAddr, cmdAddr)     // argv[0]
-            Memory.write64(argvAddr + 8, 0)       // argv[1] = NULL
-            execve(CString(command), argvAddr, 0)
+            var i: Int = 0
+            var offset: Long = 0
+            while (i < argc) {
+                Memory.write64(argvAddr + offset, argvEntries[i])
+                i = i + 1
+                offset = offset + 8
+            }
+            Memory.write64(argvAddr + offset, 0)  // NULL 终止
+            // execve 只接收 argv[0]（程序路径），不是整个命令字符串
+            val programPath: String = tokens[0]
+            execve(CString(programPath), argvAddr, 0)
             // 如果 execve 返回，说明失败
             Allocator.free(argvAddr)
-            Allocator.free(cmdAddr)
+            for (a in bufAddrs) { Allocator.free(a) }
             exitGroup(1)
             return -1
         }
         // 父进程：返回子进程 PID
         return result
+    }
+
+    /// 将命令字符串按空格切分为 token 列表。
+    fun splitCommand(command: String): List<String> {
+        val tokens: List<String> = mutableListOf<String>()
+        var i: Int = 0
+        val len: Int = command.length
+        while (i < len) {
+            // 跳过空白（空格 ASCII 32，制表符 ASCII 9）
+            while (i < len && (command.charCodeAt(i) as Int == 32 || command.charCodeAt(i) as Int == 9)) {
+                i = i + 1
+            }
+            if (i >= len) { break }
+            val start: Int = i
+            while (i < len && (command.charCodeAt(i) as Int) != 32 && (command.charCodeAt(i) as Int) != 9) {
+                i = i + 1
+            }
+            tokens.add(command.substringAt(start, i - start))
+        }
+        return tokens
     }
 
     // -- 命令行参数 --

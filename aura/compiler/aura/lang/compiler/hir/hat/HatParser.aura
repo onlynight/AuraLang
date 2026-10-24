@@ -626,7 +626,7 @@ class HatParser {
         // @ret @val : Type  或  @ret () : Unit
         //
         // ⚠️ 必须用**显式 2 参 substring** 并拆成两步赋值：
-        //   - `line.substring(4)`（1 参，走默认 `to`）在 rust AOT 下，当接收者是
+        //   - `line.substring(4, line.length())`（1 参，走默认 `to`）在 rust AOT 下，当接收者是
         //     类方法形参且绑定到 `val` 时会得到空串（VM 正常），导致 `@ret @t3`
         //     被解析成空操作数 → 函数永远返回 0。
         //   - `line.substring(4, line.length).trim()` 链式 + `var` 亦复现。
@@ -723,6 +723,17 @@ class HatParser {
         // 字符串常量：反转义 HAT 字面量（与 `HatSerializer.escapeHatText` 对称）
         if (opRaw == "const_str") {
             aux = this.unescapeHatConst(aux)
+        }
+
+        // null 常量：HAT 侧 `@t = @null : T`。序列化端（HatSerializer.constOp）
+        // 把前端 `Const aux="null"`（`zeroValueOf` / null 字面量）编码成 @null 时
+        // **不带值文本**，旧解析在这里留下 aux="" ⇒ 下游所有「按 aux 判 null」
+        // 的逻辑全部失效：SsaBuilder.buildBinary 的 null 守卫在**前端**已消费过
+        // aux（前端 OK），但 ISA Case-2 的 nullish 判定消费的是**重解析后**的
+        // aux ⇒ `if (s == null)` 被当成普通字符串比较发 streq + 反极性 setcc
+        //（实测 fs 探针 strlen(NULL) 0xC0000005，2026-10-03）。
+        if (opRaw == "null") {
+            aux = "null"
         }
 
         // 谓词内嵌：HAT 的 `@icmp @i32_sle` 需要还原成下游期望的 `ICmpSle`
@@ -838,6 +849,38 @@ class HatParser {
         if (name == "") {
             return ""
         }
+        // ⚠️ P228：phi 入边 `bb<pred>=@t<vid>` 形态 → 解析为 `pred:vid`。
+        // 逐字符扫 '='（46+13=61）：禁带 from 的 indexOf（红线②）。
+        var eqPos: Int = -1
+        var qi: Int = 0
+        val qlen: Int = name.length
+        while (qi < qlen) {
+            if ((name.charCodeAt(qi) as Int) == 61) {
+                eqPos = qi
+                qi = qlen
+            }
+            qi = qi + 1
+        }
+        if (eqPos > 0) {
+            // ⚠️ P229：`bb<pred>=@t<vid>` → `本管线块id:vid` 下传。Lowering 的
+            // lowerFunction Phi 拦截点（唯一 phi 路径）剥对 + 记 phiPredMap，
+            // ISel (a0) 精确配边。
+            // ⚠️ 标签里的数字是**前端 MIR 块 id**；本管线（HatParser）的块 id
+            // 是预登记顺序号（declareBlock addBlock 顺序分配）——必须经
+            // blockMap 把 `bb2988` 翻译成本管线 id，否则 (a0) 与 predFlat
+            // 永远失配（实测 decodeNumeric 的 name phi 全部落入启发式兜底）。
+            var lbl: String = HatParserUtils.safeSubstring(name, 0, eqPos).trim()
+            val rhs: String = this.resolveOperand(HatParserUtils.safeSubstringFrom(name, eqPos + 1).trim())
+            val mapped: Int = this.findBlockByName(lbl)
+            if (mapped >= 0) {
+                return HatParserUtils.toStr(mapped) + ":" + rhs
+            }
+            // 兜底：entry 等无数字标签或未预登记——剥 bb 前缀尽力解析
+            if (lbl.length >= 2 && lbl.startsWith("bb")) {
+                lbl = HatParserUtils.safeSubstringFrom(lbl, 2)
+            }
+            return lbl + ":" + rhs
+        }
         if (name.startsWith("@")) {
             name = HatParserUtils.safeSubstringFrom(name, 1)
         }
@@ -876,6 +919,23 @@ class HatParser {
             if (pos == len || args.charCodeAt(pos) == 44) {
                 if (pos > start) {
                     var token: String = HatParserUtils.safeSubstring(args, start, pos).trim()
+                    // ⚠️ P228：`pred:?name` 形态（phi 入边带前驱块）——先回填
+                    // 值占位，保留 `pred:` 前缀。
+                    var tokPrefix: String = ""
+                    var colonPos: Int = -1
+                    var pi2: Int = 0
+                    val tlen: Int = token.length
+                    while (pi2 < tlen) {
+                        if ((token.charCodeAt(pi2) as Int) == 58) {
+                            colonPos = pi2
+                            pi2 = tlen
+                        }
+                        pi2 = pi2 + 1
+                    }
+                    if (colonPos > 0) {
+                        tokPrefix = HatParserUtils.safeSubstring(token, 0, colonPos + 1).trim()
+                        token = HatParserUtils.safeSubstringFrom(token, colonPos + 1)
+                    }
                     if (token.startsWith("?")) {
                         val name: String = HatParserUtils.safeSubstringFrom(token, 1)
                         val vid: Int = this.lookupVal(name)
@@ -885,6 +945,9 @@ class HatParser {
                             this.addWarning("unresolved value: " + name)
                             token = "-1"
                         }
+                    }
+                    if (tokPrefix != "") {
+                        token = tokPrefix + token
                     }
                     if (first) {
                         first = false
@@ -1040,37 +1103,40 @@ class HatParser {
             body = HatParserUtils.safeSubstring(aux, 1, blen - 1)
             quoted = true
         }
-        var out: String = ""
+        // ⚠️ 2026-10-09（内存回合）：旧实现 `out = out + …` 逐字符拼接是
+        // O(len²) 拷贝——OOM 归因表 753 万次 concat / 6.8GB 的主力站点。
+        // 改为 StringBuilder 逐字节 appendByte（Aura String = NUL 结尾 i8*，
+        // charCodeAt 即字节值；全程 Int 无装箱），O(len)、零中间串。
+        val out: StringBuilder = StringBuilder()
         var i: Int = 0
         val len: Int = body.length
+        if (quoted) { out.appendByte(34) }
         while (i < len) {
             if (body.charCodeAt(i) == 92 && i + 1 < len) {
                 val n: Int = body.charCodeAt(i + 1)
                 if (n == 110) {
-                    out = out + "\n"
+                    out.appendByte(10)
                 } else if (n == 114) {
-                    out = out + "\r"
+                    out.appendByte(13)
                 } else if (n == 116) {
-                    out = out + "\t"
+                    out.appendByte(9)
                 } else if (n == 34) {
-                    out = out + "\""
+                    out.appendByte(34)
                 } else if (n == 92) {
-                    out = out + "\\"
+                    out.appendByte(92)
                 } else if (n == 124) {
-                    out = out + "|"
+                    out.appendByte(124)
                 } else {
-                    out = out + body.substring(i, i + 1)
+                    out.appendByte(body.charCodeAt(i))
                 }
                 i = i + 2
             } else {
-                out = out + body.substring(i, i + 1)
+                out.appendByte(body.charCodeAt(i))
                 i = i + 1
             }
         }
-        if (quoted) {
-            return "\"" + out + "\""
-        }
-        return out
+        if (quoted) { out.appendByte(34) }
+        return out.build()
     }
 
     /// 查找 `code` 字符，**跳过双引号字符串内部**。
@@ -1109,7 +1175,8 @@ class HatParser {
             return false
         }
         var i: Int = 0
-        while (i < s.length) {
+        val sLen2: Int = s.length
+        while (i < sLen2) {
             val c: Int = s.charCodeAt(i)
             if (c < 48 || c > 57) {
                 return false
@@ -1198,15 +1265,27 @@ class HatParser {
     }
 
     /// 添加警告。
+    ///
+    /// ⚠️ 2026-10-08 P1-3：HAT 前端解析**每一条**未解析值都会打一行 WARN；
+    /// 编译含完整编译器闭包的入口文件时，日志可达 130 MB、把进程推到 8 GB
+    /// 上限 OOM。默认静默，`AURA_HAT_TRACE=1` 打开。
     private fun addWarning(msg: String): Unit {
         this.warnCount = this.warnCount + 1
-        println("[WARN] hat_parse: " + msg)
+        if (Env.get("AURA_HAT_TRACE", "") == "1") {
+            println("[WARN] hat_parse: " + msg)
+        }
     }
 
     /// 添加错误。
+    ///
+    /// ⚠️ 2026-10-08 P1-3：错误必须保留（编译失败时诊断不可少），但为避免
+    /// 「错误路径本身把日志打爆」，同样只在 `AURA_HAT_TRACE=1` 下打印。
+    /// 调用方仍可查 `getErrCount()`。
     private fun addError(msg: String): Unit {
         this.errCount = this.errCount + 1
-        println("[ERROR] hat_parse: " + msg)
+        if (Env.get("AURA_HAT_TRACE", "") == "1") {
+            println("[ERROR] hat_parse: " + msg)
+        }
     }
 
     /// 获取警告计数。
@@ -1335,7 +1414,7 @@ object HatParserUtils {
         var len: Int = s.length
         if (start < 0) { start = 0 }
         if (start >= len) { return "" }
-        return s.substring(start)
+        return s.substring(start, s.length())
     }
 
     /// 把 0-9 的数字转换为单字符字符串。

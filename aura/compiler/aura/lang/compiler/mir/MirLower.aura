@@ -84,7 +84,7 @@ class MirLowerer {
         val rootId: Int = this.mir.add("MirProgram", "", "", src.spanOf(rootIdx), mirNoKids())
 
         // 递归降级子节点
-        val kids: String = src.kidsOf(rootIdx)
+        val kids: List<Int> = src.kidsOfList(rootIdx)
         val kCount: Int = hirKidsCount(kids)
         var newKids: String = mirNoKids()
         i = 0
@@ -117,7 +117,7 @@ class MirLowerer {
         this.curFnRet = retTy
 
         val sp: Span = src.spanOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = hirKidsCount(kids)
 
         // 收集参数名
@@ -138,7 +138,7 @@ class MirLowerer {
                 paramCount = paramCount + 1
             } else if (childKind == "HirParams") {
                 // 兼容带 HirParams 包装节点的 HIR 形态
-                val paramsKids: String = src.kidsOf(childId)
+                val paramsKids: List<Int> = src.kidsOfList(childId)
                 val pkCount: Int = hirKidsCount(paramsKids)
                 var j: Int = 0
                 while (j < pkCount) {
@@ -183,7 +183,7 @@ class MirLowerer {
         // 创建基本块
         val blockId: Int = this.mir.add("MirBlock", "", "", sp, mirNoKids())
 
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = hirKidsCount(kids)
         var i: Int = 0
         while (i < kCount) {
@@ -277,7 +277,7 @@ class MirLowerer {
         val name: String = src.textOf(id)
         val ty: String = src.tyOf(id)
         val sp: Span = src.spanOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = hirKidsCount(kids)
 
         if (kCount > 0) {
@@ -294,7 +294,7 @@ class MirLowerer {
     /// 降级 return 语句。
     fun lowerReturn(src: Hir, id: Int): Int {
         val sp: Span = src.spanOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = hirKidsCount(kids)
 
         if (kCount > 0) {
@@ -309,7 +309,7 @@ class MirLowerer {
     fun lowerBinary(src: Hir, id: Int): Int {
         val op: String = src.textOf(id)
         val sp: Span = src.spanOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = hirKidsCount(kids)
 
         if (kCount >= 2) {
@@ -349,7 +349,7 @@ class MirLowerer {
     fun lowerUnary(src: Hir, id: Int): Int {
         val op: String = src.textOf(id)
         val sp: Span = src.spanOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
 
         // 降级操作数
         if (hirKidsCount(kids) > 0) {
@@ -374,7 +374,7 @@ class MirLowerer {
     fun lowerCall(src: Hir, id: Int): Int {
         val name: String = src.textOf(id)
         val sp: Span = src.spanOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = hirKidsCount(kids)
 
         // 实参：HIR 未生成 HirArgs 包装节点，直接子节点即为实参。
@@ -385,7 +385,7 @@ class MirLowerer {
             val childId: Int = hirKidsAt(kids, i)
             val childKind: String = src.kindOf(childId)
             if (childKind == "HirArgs") {
-                val argsKids: String = src.kidsOf(childId)
+                val argsKids: List<Int> = src.kidsOfList(childId)
                 val ac: Int = hirKidsCount(argsKids)
                 var j: Int = 0
                 while (j < ac) {
@@ -408,7 +408,7 @@ class MirLowerer {
     fun lowerMember(src: Hir, id: Int): Int {
         val text: String = src.textOf(id)
         val sp: Span = src.spanOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
 
         // 降级对象
         if (hirKidsCount(kids) > 0) {
@@ -422,7 +422,7 @@ class MirLowerer {
     fun lowerAssign(src: Hir, id: Int): Int {
         val text: String = src.textOf(id)
         val sp: Span = src.spanOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = hirKidsCount(kids)
 
         if (kCount >= 2) {
@@ -439,7 +439,7 @@ class MirLowerer {
     /// 结构：`cond; JUMP_IF_FALSE L_else; then; JUMP L_end; LABEL L_else; else; LABEL L_end`
     fun lowerIf(src: Hir, id: Int): Int {
         val sp: Span = src.spanOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = hirKidsCount(kids)
 
         if (kCount >= 2) {
@@ -476,7 +476,7 @@ class MirLowerer {
     /// 结构：`LABEL L_start; cond; JUMP_IF_FALSE L_end; body; JUMP L_start; LABEL L_end`
     fun lowerWhile(src: Hir, id: Int): Int {
         val sp: Span = src.spanOf(id)
-        val kids: String = src.kidsOf(id)
+        val kids: List<Int> = src.kidsOfList(id)
         val kCount: Int = hirKidsCount(kids)
 
         if (kCount >= 2) {
@@ -530,7 +530,7 @@ class MirLowerer {
             return this.lowerBlock(src, id)
         }
         if (kind == "HirExprStmt") {
-            val kids: String = src.kidsOf(id)
+            val kids: List<Int> = src.kidsOfList(id)
             if (hirKidsCount(kids) > 0) {
                 return this.lowerExpr(src, hirKidsAt(kids, 0))
             }

@@ -227,11 +227,25 @@ const void *aura_collections_linkedHashMapLastKey(const void *map);
 // Runtime 运行时函数（ARC / 内存 / 协程 / 字符串）
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** ARC 引用计数 +1（原子操作） */
+/** [P0/D2] ARC 引用计数 +1（门控：时代闸门/.rdata/magic，见 .c 中说明）。
+ *  传入指针低位为 1 时视为 Plan A 装箱整数，安全跳过。 */
+void aura_arc_retain(const void *ptr);
+
+/** [P0/D2] ARC 引用计数 -1，归零时释放（同上门控）。
+ *  返回递减后的引用计数（<=0 表示本次已释放；被闸门拦截时返回 0）。 */
+int aura_arc_release(const void *ptr);
+
+/** [P2] 闭包 env 的带标签分配：分配 `{ ptr fn; i64 count; caps… }` 布局的
+ *  块、写 count、打 TAG_ENV（rc 归零时析构级联释放捕获项）。
+ *  发射器仅在 AURA_ARC=1 时使用；旧路径（aura_malloc + 手写字段）不变。 */
+void *aura_arc_alloc_env(int64_t size, int64_t count);
+
+/** ARC 引用计数 +1（兼容入口，语义 = aura_arc_retain）。 */
 void aura_arc_increment(const void *ptr);
 
-/** ARC 引用计数 -1，归零时释放（原子操作） */
-void aura_arc_decrement(const void *ptr);
+/** ARC 引用计数 -1，归零时释放（兼容入口，语义 = aura_arc_release，
+ *  返回递减后的引用计数）。 */
+int aura_arc_decrement(const void *ptr);
 
 /** 协程挂起（AOT 下为 no-op，VM 运行时处理） */
 void aura_coroutine_yield(const void *ctx);

@@ -196,10 +196,14 @@ fun main(): Int {
         val t1 = Thread.spawn(semWorker, s6)
         val t2 = Thread.spawn(semWorker, s6)
         val t3 = Thread.spawn(semWorker, s6)
+        // ⚠ 必须先释放主线程持有的唯一许可证再 `join`：3 个工作者阻塞在
+        // `Semaphore.acquire` 上，主线程若先 `join` 则双方互等 —— 设计性死锁
+        // （实测运行 25s 无进展、进程挂死）。释放顺序调换后仍满足
+        // 「3 线程依次获取许可证」的断言。
+        Semaphore.release(s6)
         Thread.join(t1)
         Thread.join(t2)
         Thread.join(t3)
-        Semaphore.release(s6)
         Mutex.lock(SEM_LOCK)
         val totalWork = SEM_COUNT
         Mutex.unlock(SEM_LOCK)

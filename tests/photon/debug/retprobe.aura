@@ -1,0 +1,29 @@
+// 定向：方法返回 Any 的三种形态是否保真。
+import aura.lang.std.String
+import aura.lang.native.Heap
+import aura.lang.native.Memory
+
+fun retStr(): Any {
+    val s: String = "hello"
+    return s
+}
+
+fun retLongAsAny(addr: Long): Any {
+    return Memory.read64(addr) as Any
+}
+
+fun main(): Int {
+    Heap.init()
+    val mc: Long = Memory.alloc(64)
+    val s0: String = "world"
+    Memory.write64(mc, s0 as Long)
+    println("[a] retStr=" + retStr())
+    val a1: Any = retStr()
+    println("[b] a1=" + a1)
+    println("[c] retLongAsAny=" + retLongAsAny(mc))
+    val a2: Any = retLongAsAny(mc)
+    println("[d] a2=" + a2)
+    val t: String = retStr() as String
+    println("[e] t=" + t)
+    return 0
+}

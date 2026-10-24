@@ -30,6 +30,8 @@
 //   AURA_HAT_TRACE=1        HAT 解析器心跳（长任务区分「慢」与「卡死」）
 //   AURA_PHOTON_DEBUG_HIR=1 SSA / LIR / DAG 全量转储
 //   AURA_PHOTON_STOP=A|B|C|D  阶段短路（性能二分）
+//   AURA_PHOTON_TIME=1       逐阶段耗时（`[time] link= ssa= hatSerialize=
+//                            compileHat= total=`，供耗时归因用）
 //
 // 输出标记（供构建脚本解析）:
 //   ===COFF-MAIN===<hex>
@@ -39,8 +41,9 @@
 //   ===ERR===<message>
 import aura.lang.std.String
 import aura.lang.std.fs.FileUtils
+import aura.lang.std.string.StringBuilder
 import aura.lang.std.Env
-import aura.lang.std.Process
+import aura.lang.native.time.Clock
 
 
 // ── 自举前端（源码 → HIR）的模块闭包 ──
@@ -67,99 +70,477 @@ import aura.lang.compiler.aot.ModuleLink
 import "PhotonPipeline.aura"
 import "PhotonRuntime.aura"
 
-fun main() {
-    val srcPath = Env.get("AURA_HAT_AURA", "")
-    val outDir = Env.get("AURA_HAT_OUT", "build/hat_test")
-    val moduleName = Env.get("AURA_HAT_MODULE", "program")
-    var hatPath = Env.get("AURA_HAT_SRC", "")
-    if (hatPath == "") {
-        hatPath = outDir + "/" + moduleName + ".hat"
+/// 单调纳秒时钟（`clock_gettime(CLOCK_REALTIME)`，Windows 上走
+/// `GetSystemTimeAsFileTime`）。`Time.getNow()` 返回 Float 且从未调用
+/// `ClockImpl.init()`，差值恒为 0 —— 这里直接用 `ClockImpl.timeNs()`
+/// （Long 差值精确），供 AURA_PHOTON_TIME=1 的逐阶段计时用。
+/// 每次调用前 `init()`：`tsBuf` 未初始化时 `now()` 会静默返回 0。
+fun tNs(): Long {
+    ClockImpl.init()
+    return ClockImpl.timeNs()
+}
+
+fun secOf(deltaNs: Long): String {
+    val sec: Long = deltaNs / 1000000000
+    val ms: Long = (deltaNs % 1000000000) / 1000000
+    val mss: String = toStr(ms)
+    val pad: String = if (mss.length == 1) { "00" } else if (mss.length == 2) { "0" } else { "" }
+    return toStr(sec) + "." + pad + mss
+}
+
+/// 读环境变量，为空时回退 `default`。
+///
+/// 只用 `Env.get` + `length == 0` 判定，不触碰 `FileUtils`（源码读取仍由
+/// `linker.link()` 内部完成）——见上方「输入通道」注释的共存性说明。
+fun readPathEnv(name: String, default: String): String {
+    val v: String = Env.get(name, "")
+    if (v.length == 0) {
+        return default
+    }
+    return v
+}
+
+// ── 输入通道：环境变量优先，固定路径兜底 ──
+//
+// ⚠ 历史：2026-10-03 探针矩阵曾观察到「`Env.get` / `FileUtils.exists+readText`
+// 之后进入 `link()` 会稳定段错误」（最小复现见
+// docs/photon/photon-bootstrap-link-benchmark.md），因此旧实现完全忽略
+// `AURA_HAT_AURA`，走固定路径 `build/hat-vmhost/current.aura`。
+//
+// 但该注释只覆盖了「读文件类调用」，并未覆盖 `Env.get` 本身——本文件
+// `AURA_HAT_SKIP_FRONT` 分支一直依赖 `Env.get`，且
+// `scripts/photon/photon-hat-native-suite.ps1` 一直在用它驱动，实测共存安全。
+// 2026-10-08 因此补上 `AURA_HAT_AURA/_OUT/_MODULE/_SRC` 的读取：
+// `readPathEnv` 只用 `Env.get` + 字符串判空，不触碰 `FileUtils.readText`
+// （源码读取仍由 `linker.link()` 内部完成），风险面与原注释所述的最小复现
+// 不同。读不到时一律回退默认路径，行为不劣于旧实现。
+
+    fun fnvFile(path: String): String {
+        val text: String = FileUtils.readText(path)
+        var h: Int = 0x811c9dc5
+        var i: Int = 0
+        // [R96] `text.length` = `strlen`：放进循环条件 ⇒ 每个字符都把整个
+        // 文件重扫一遍（O(n²)）。.hat 落盘前要对上百个源文件做 FNV 哈希，
+        // 实测 hatWrite 单项 55s 的主体就在这里。取一次长度即可。
+        val tlen: Int = text.length
+        while (i < tlen) {
+            h = h * 0x01000193
+            h = h ^ text.charCodeAt(i)
+            i = i + 1
+        }
+        var out: String = ""
+        var v: Int = h
+        var k: Int = 0
+        while (k < 8) {
+            val d: Int = v & 15
+            val ch: Int = if (d < 10) { 48 + d } else { 87 + d }
+            out = out + String.fromCharCode(ch)
+            v = v >> 4
+            k = k + 1
+        }
+        return out
     }
 
-    if (srcPath == "" || !FileUtils.exists(srcPath)) {
-        println("===RESULT===fail")
-        println("===ERR===source not found: " + srcPath)
-        Process.exit(1)
+    fun joinSb(pieces: List<String>): String {
+        val sb: StringBuilder = StringBuilder()
+        var i: Int = 0
+        while (i < pieces.size) {
+            sb.append(pieces[i])
+            i = i + 1
+        }
+        return sb.build()
     }
 
-    // ── 前端：源码（含递归 import）→ 合并 HIR ──
+/// [MEM-FIX] 构建清单落盘:v1 + M/R 缓存 hex 路径 + F 行(源文件+内容哈希)。
+/// L 行由后端完成后追加(见缓存写尾段)。命中判定见 main 的缓存检查块。
+fun writeBuildManifest(seenList: String, cacheMain: String, cacheRt: String, cacheManifest: String): Unit {
+    var mf: String = "v1\nM " + cacheMain + "\nR " + cacheRt + "\n"
+    var fi: Int = 0
+    val seenListLen: Int = seenList.length
+    while (fi < seenListLen) {
+        var nl: Int = -1
+        var sc: Int = fi
+        while (sc < seenListLen) {
+            if (seenList.charCodeAt(sc) == 10) { nl = sc; break }
+            sc = sc + 1
+        }
+        if (nl < 0) { break }
+        val path: String = seenList.substring(fi, nl)
+        if (path != "" && FileUtils.exists(path)) {
+            mf = mf + "F " + fnvFile(path) + " " + path + "\n"
+        }
+        fi = nl + 1
+    }
+    FileUtils.writeText(cacheManifest, mf)
+}
+
+fun main(): Int {
+    // 输入通道：**优先读环境变量**（AURA_HAT_AURA / _OUT / _MODULE / _SRC），
+    // 未设置时回退到固定路径约定（build/hat-vmhost/current.{aura,hat}）。
     //
-    // `AURA_HAT_SKIP_FRONT=1` 跳过前端与 .hat 序列化，直接复用已有的 `hatPath`。
-    // 自举 `Main.aura` 的前端要 ~2 分钟，只调后端时用它迭代。
+    // ⚠ 历史背景与回退原因：宿主主流程早期刻意**只使用已验证安全**的设施
+    // （FileUtils.mkdirP / writeText / link 内部的源码读取），因为 2026-10-03
+    // 探针矩阵实测 `Env.get` 与 `link()` 共存会段错误。后来实测证明
+    // `Env.get("AURA_HAT_SKIP_FRONT")` 与 `link()` 在同一 main 内共存是
+    // **安全**的（`AURA_HAT_SKIP_FRONT` 分支就依赖它，且 native 套件
+    // photon-hat-native-suite.ps1 一直在用它驱动），因此按文件头文档承诺
+    // 补上其余三个变量的读取。读不到时一律回退默认值，不会比旧行为更差。
+    //
+    // ⚠ 2026-10-08 修复：旧实现完全忽略 `AURA_HAT_AURA`，导致脚本传入的
+    // 入口源文件被静默丢弃——驱动恒编译固定的 `current.aura`（一个 VM
+    // 自举宿主，运行时读 `build/vm/current.auc` 并打印 `fib(28)` 探针），
+    // 表现为「换任何入口源文件，输出都逐字节相同」。这是 P1-3「原生运行时
+    // 验证」被误判为「自举链阻塞」的真根因。
+    val srcPath = readPathEnv("AURA_HAT_AURA", "build/hat-vmhost/current.aura")
+    val outDir = readPathEnv("AURA_HAT_OUT", "build/hat-vmhost")
+    val moduleName = readPathEnv("AURA_HAT_MODULE", "current")
+    val hatPath = readPathEnv("AURA_HAT_SRC", outDir + "/current.hat")
+
     FileUtils.mkdirP(outDir)
+    // ── [MEM-FIX] 产物缓存（2026-10-10）──────────────────────────────
+    // 编译的固定大头 = 前端对整个闭包源码（~45K 行）的词法/解析/SSA 字符串
+    // 风暴（阶段归因：concat 1917 万次 / 7.7GB，见 09 报告 §A·补充五）。
+    // 闭包+入口源全部未变时，直接回放缓存 COFF（前端+后端全跳过，
+    // 编译内存 ~0）。任何源新增/修改/删除（内容哈希校验）→ 回退全量构建。
+    // AURA_BUILD_CACHE=0 关闭；AURA_HAT_SKIP_FRONT=1 时不参与缓存。
+    val cacheMain: String = outDir + "/" + moduleName + ".cache-main.hex"
+    val cacheRt: String = outDir + "/" + moduleName + ".cache-rt.hex"
+    val cacheManifest: String = outDir + "/" + moduleName + ".cache-manifest.txt"
+    val cacheOn: Boolean = Env.get("AURA_BUILD_CACHE", "1") == "1"
 
-    // 阶段进度/心跳默认关闭：stdout 只保留 ===...=== 协议标记（脚本逐行解析）。
-    // Env.get 每次调用都重读 environ 缓冲，这里只算一次。
-    val verboseOn = Env.get("AURA_PHOTON_VERBOSE", "") == "1"
-            || Env.get("AURA_PHOTON_TRACE", "") == "1"
-
-    if (Env.get("AURA_HAT_SKIP_FRONT", "") == "1") {
-        if (verboseOn) { println("[hat-front] skipped (reuse " + hatPath + ")") }
-    } else {
+    // ── AURA_HAT_SKIP_FRONT=1：跳过前端，直接复用现成 .hat ──
+    //（文档承诺过此开关但一直没实现；「bash 侧补桩 .hat + SKIP_FRONT 重编」
+    // 两段式工作流必需它，2026-10-06。跳过段不调 link()，Env.get 安全。）
+    val skipFront: Boolean = Env.get("AURA_HAT_SKIP_FRONT", "") == "1"
+    // 命中判定:清单存在 → 每个列出的源文件哈希一致 → 缓存 hex 文件存在
+    if (cacheOn && !skipFront) {
+        val mf: String = FileUtils.readText(cacheManifest)
+        if (mf != "") {
+        val mlines: List<String> = mf.split("\n")
+            var ok: Boolean = mlines[0] == "v1"
+            var mainHexPath: String = ""
+            var rtHexPath: String = ""
+            var linkCmdCached: String = ""
+            var fi: Int = 1
+            while (fi < mlines.size && ok) {
+                val line: String = mlines[fi]
+                if (line.startsWith("M ")) {
+                    mainHexPath = line.substring(2, line.length)
+                    ok = FileUtils.exists(mainHexPath)
+                } else if (line.startsWith("R ")) {
+                    rtHexPath = line.substring(2, line.length)
+                    ok = FileUtils.exists(rtHexPath)
+                } else if (line.startsWith("L ")) {
+                    linkCmdCached = line.substring(2, line.length)
+                } else if (line.startsWith("F ")) {
+                    // [PLAN3-FIX] 哈希定长 8 nibble,按偏移直切。此前
+                    // `indexOf(" ", 2)` 的**起点参数被运行时吞掉**
+                    // (aura_lang_std_String_indexOf 只有 (s,sub) 两参),
+                    // 恒返回首空格(idx 1) ⇒ wantHash="" ⇒ 每个 F 行必判
+                    // 失败 ⇒ 缓存命中路径自 F 行引入起从未生效(提交态
+                    // 12:20 驱动对拍实证同样 MISS)。
+                    if (line.length < 11) {
+                        ok = false
+                    } else {
+                        val wantHash: String = line.substring(2, 10)
+                        val path: String = line.substring(11, line.length)
+                        if (!FileUtils.exists(path) || fnvFile(path) != wantHash) { ok = false }
+                    }
+                }
+                fi = fi + 1
+            }
+            if (ok && mainHexPath != "" && rtHexPath != "") {
+                val mainHex: String = FileUtils.readText(mainHexPath)
+                val rtHex: String = FileUtils.readText(rtHexPath)
+                if (mainHex != "" && rtHex != "") {
+                    println("===COFF-MAIN===")
+                    print(mainHex)
+                    println("")
+                    println("===COFF-RUNTIME===")
+                    print(rtHex)
+                    println("")
+                    println("===LINK===" + linkCmdCached)
+                    println("===RESULT===success")
+                    return 0
+                }
+            }
+        }
+    }
+    var seenList: String = ""   // link 实际读取的源文件清单（缓存清单用）
+    // [PLAN3-FIX] 时代幸存者判定：hatFixed==hatText 的比较**必须在
+    // RegionReset 之前**完成——reset 后两者是悬空区域指针，strcmp 读
+    // 已 unmap 的页 = AV（2026-10-10 sum 冒烟实证，崩在
+    // String_equals→strlen）。布尔结果跨边界安全；SKIP_FRONT 时恒 false
+    //（直连本就需要前端 SSA 存活，与区域互斥，此处仅参与守卫）。
+    var sameHat: Boolean = false
+    if (!skipFront) {
+        // ── 前端：源码（含递归 import）→ 合并 HIR → SSA → HAT 文本 ──
+        val tAll0: Long = tNs()
+        val tLink0: Long = tNs()
+        // [MEM-FIX] 前端阶段区域进入(退出点 = HAT 落盘后的 Memory.regionReset)
+        Memory.regionEnter()
         val linker = AotModuleLinker()
         val hir: Hir = linker.link(srcPath)
-        if (verboseOn) {
-            println("[hat-front] modules=" + toStr(linker.loadedCount()) +
-                    " hirNodes=" + toStr(hir.count))
-        }
+        seenList = linker.seen
         if (linker.missing != "") {
-            // 注意：不要用 String.replace — VM 路径下类方法调用未链接。
-            // 缺失 import 会直接变成链接期 undefined symbol，因此始终报出来。
             println("[hat-front] missing imports: " + linker.missing)
         }
 
-        // ── 前端阶段短路：AURA_PHOTON_STOP=FRONT 在前端完成后停止 ──
-        if (Env.get("AURA_PHOTON_STOP", "") == "FRONT") {
-            println("===STOPPED_AFTER_FRONTEND===")
-            Process.exit(0)
-        }
-
-        // ── HIR → SSA MIR → HAT 文本（HAT 是这条链路的中间表示）──
-        if (verboseOn) { println("[hat-front] ssa start (nodes=" + toStr(hir.count) + ")") }
+        val tSsa0: Long = tNs()
         val ssa: MirSsaProgram = SsaBuilderUtils.build(hir)
-        if (verboseOn) {
-            println("[hat-front] ssa done")
-            println("[hat-front] ssa functions=" + toStr(ssa.functionCount) +
-                    " values=" + toStr(ssa.valueCount) +
-                    " blocks=" + toStr(ssa.blockCount))
-        }
 
+        val tHat0: Long = tNs()
         val hatText: String = HatSerializerUtils.serializeHat(ssa, moduleName)
-        FileUtils.writeText(hatPath, hatText)
-        if (verboseOn) {
-            println("[hat-front] .hat = " + hatPath + " (" + toStr(hatText.length) + " 字符)")
+        val tSer1: Long = tNs()
+        val tPatch0: Long = tNs()
+        // ── 溶解对象 getter 桩补写（2026-10-06）──
+        //
+        // 前端对部分 `object X`（实测 MirUtils，aura/lang/compiler/mir/Mir.aura）
+        // 采用「方法限定名 + 体提升」的降级形态：方法以 `X_m` 顶层函数进入 HIR、
+        // 方法体被注入 `X_getInstance()` 调用，但对象声明节点不进 HIR ⇒
+        // SsaBuilder 的单例登记（buildClassIndex 只认四类声明节点）捕不到 X ⇒
+        // getter 未合成 ⇒ 链接期 `undefined symbol: X_getInstance`。
+        // 前端根因（Hir.aura 为何溶解、为何四类扫描看不到）留待下轮；此处按
+        // 「.hat 文本后处理」兜底：引用了 `@call @X_getInstance(` 却没有
+        // `@fn X_getInstance` 定义 ⇒ 追加一个 Memory_alloc 桩 getter
+        //（每次调用分配 64 字节零块；被溶解对象当前都是无字段纯静态单例，
+        // 实例值实际不被使用，泄漏可忽略）。
+        val hatFixed: String = HatGetPatchUtils.patchMissingGetters(hatText)
+        sameHat = (hatFixed == hatText)
+        val tPatch1: Long = tNs()
+        // [MEM-FIX] 构建清单落盘(前端 era 内写磁盘,不受区域重置影响):
+        // v1 + M/R 缓存 hex 路径 + F 行(每个 link 实际读取的源文件+内容哈希)。
+        writeBuildManifest(seenList, cacheMain, cacheRt, cacheManifest)
+        FileUtils.writeText(hatPath, hatFixed)
+        if (Env.get("AURA_COMPILE_DIRECT", "") != "1") {
+            // [MEM-FIX] 前端区域重置:回收 link/parse/SSA1 全部分配(≈6GB)。
+            // 后端 compileHat 从磁盘重读 .hat(区域外新分配)。区域指针自此
+            // 悬空但不再被触碰(区域惯用法)。直连模式(AURA_COMPILE_DIRECT=1)
+            // 与区域互斥——SSA1 存活于区域,保留到直连编译完成后再兜底重置。
+            Memory.regionReset()
         }
-
-        // ── 前端阶段短路：AURA_PHOTON_STOP=HAT 在 HAT 序列化后停止 ──
-        if (Env.get("AURA_PHOTON_STOP", "") == "HAT") {
-            println("===STOPPED_AFTER_HAT===")
-            Process.exit(0)
+        if (Env.get("AURA_PHOTON_TIME", "") == "1") {
+            println("[time] link=" + secOf(tSsa0 - tLink0)
+                    + " ssaBuild=" + secOf(tHat0 - tSsa0)
+                    + " hatSerialize=" + secOf(tSer1 - tHat0)
+                    + " getterPatch=" + secOf(tPatch1 - tPatch0)
+                    + " hatWrite=" + secOf(tNs() - tPatch1))
         }
     }
 
     // ── HAT 文本 → SSA MIR → LIR → DAG → RegAlloc → X86 → COFF ──
+    val tBack0: Long = tNs()
     val pipeline = PhotonPipelineUtils.emptyPipeline()
     pipeline.outDir = outDir
     pipeline.moduleName = moduleName
-    val result = pipeline.compileHat(hatPath)
+    // [MEM-FIX] 直连判定：getter 桩补写**无改动**（hatFixed == hatText）⇒
+    // SSA 与落盘文本语义等价 ⇒ compileSsaDirect 跳过「落盘+重解析」
+    // （HatParser 4700 万次 substring/dup + SSA2 双份驻留，2026-10-09）。
+    // 补丁触发时自动回退旧路径（补丁只存在于文本层面，必须走重解析）。
+    // AURA_COMPILE_ROUNDTRIP=1 强制旧路径（对照/调试）。
+    // ⚠️ 默认关闭：实测直连与回环产物存在语义差异（sum .text 0xac8 起
+    // 编码不同——回环序列化会把部分调用结果物化进文本，直连保留调用），
+    // 等价性工作完成前不可默认启用。
+    val directCompile: Boolean = sameHat
+            && Env.get("AURA_COMPILE_DIRECT", "") == "1"
+    val result: BackendResult
+    if (directCompile) {
+        result = pipeline.compileSsaDirect(ssa)
+    } else {
+        result = pipeline.compileHat(hatPath)
+    }
+    if (Env.get("AURA_PHOTON_TIME", "") == "1") {
+        println("[time] backend=" + secOf(tNs() - tBack0))
+    }
 
-    // 输出 COFF hex（主对象）
+    // 输出 COFF hex（主对象 / runtime 对象）与链接信息
+    // ⚠️ 分片输出（2026-10-09 内存回合）：result.coffPieces /
+    // buildRuntimeObjectPieces 不做单串归并（134M 字符级 = 内容 ×
+    // log₂(片段数) 的成对中间层，无 GC 全驻留 ~1.3-2 GB）。协议要求
+    // hex 是 marker 后的**单行**——用无换行 print 逐片拼接，行尾 println("")。
     println("===COFF-MAIN===")
-    println(result.coffHex)
-
-    // 输出 COFF hex（runtime 对象）
-    val rtHex: String = PhotonRuntime.buildRuntimeObject()
+    // ⚠️ 分片逐片 print（无换行）——绝不可先拼回单串：134M 字符级
+    // O(N²) 拼接 = 数十 GB 驻留（2026-10-09 BISECT-A 残留实测 20GB+）。
+    val coffPieces: List<String> = result.coffPieces
+    var cp: Int = 0
+    while (cp < coffPieces.size) {
+        print(coffPieces[cp])
+        cp = cp + 1
+    }
+    println("")
+    val rtPieces: List<String> = PhotonRuntime.buildRuntimeObjectPieces()
     println("===COFF-RUNTIME===")
-    println(rtHex)
-
-    // 输出链接信息
+    var rp: Int = 0
+    while (rp < rtPieces.size) {
+        print(rtPieces[rp])
+        rp = rp + 1
+    }
+    println("")
     println("===LINK===")
     println(result.linkCommand)
 
-    println("===RESULT===" + (if (result.success) "success" else "fail"))
+    var resultTag: String = "fail"
+    if (result.success) { resultTag = "success" }
+    println("===RESULT===" + resultTag)
+    // [MEM-FIX] 构建成功 → 写产物缓存清单（源文件清单+内容哈希+缓存 hex 路径）。
+    // 下次构建源全部未变 → 直接回放缓存（前端+后端全跳过）。
+    // [PLAN3-FIX] reset 后**绝不读区域字符串**：seenList 随 RegionReset 悬空
+    // （strcmp→AV）。F 行已在 reset 前 writeBuildManifest 落盘；此处只对
+    // L 行做磁盘读改写（linkCommand 后端结束才可知）。
+    if (resultTag == "success" && cacheOn) {
+        val mf: String = FileUtils.readText(cacheManifest)
+        if (mf != "") {
+            var out: String = ""
+            var fi: Int = 0
+            var wroteL: Boolean = false
+            val mfLen: Int = mf.length
+            while (fi < mfLen) {
+                var nl: Int = -1
+                var sc: Int = fi
+                while (sc < mfLen) {
+                    if (mf.charCodeAt(sc) == 10) { nl = sc; break }
+                    sc = sc + 1
+                }
+                if (nl < 0) { break }
+                val line: String = mf.substring(fi, nl)
+                if (line.startsWith("L ")) {
+                    out = out + "L " + result.linkCommand + "\n"
+                    wroteL = true
+                } else {
+                    out = out + line + "\n"
+                }
+                fi = nl + 1
+            }
+            if (!wroteL) {
+                out = out + "L " + result.linkCommand + "\n"
+            }
+            FileUtils.writeText(cacheManifest, out)
+        }
+        FileUtils.writeText(cacheMain, joinSb(coffPieces))
+        FileUtils.writeText(cacheRt, joinSb(rtPieces))
+    }
     if (!result.success) {
         println("===ERR===" + result.errorMessage)
+        return 1
     }
+    return 0
+}
 
-    Process.exit(0)
+// ─────────────────────────────────────────────────────────────
+// HatGetPatchUtils — 溶解对象 getter 的 .hat 文本桩补写
+// （背景与动机见 main 内「getter 桩补写」注释，2026-10-06）
+// ─────────────────────────────────────────────────────────────
+object HatGetPatchUtils {
+
+    /// 扫描 .hat 文本：引用了 `@call @X_getInstance(` 却没有 `@fn X_getInstance`
+    /// 定义 ⇒ 为每个缺失的 X 追加一个 Memory_alloc 桩 getter。
+    fun patchMissingGetters(hat: String): String {
+        // 1) 收集被调的 X（去重 CSV；禁 ArrayList.add——红线①）。
+        var calledCsv: String = ""
+        // [SLOW-FIX] 2026-10-10：已判定 X 的记忆（无论有无定义）。
+        // 原实现只记忆「确认缺失」的 X——**有定义的 X 不进 calledCsv**，
+        // 同名 X 的每个调用点都对全文做一次 `indexOf("@fn X_getInstance(")`
+        // （纯 charCodeAt 循环，6.2MB 文本 ~150ms/次）。vmhost 闭包实测
+        // 928 个 `_getInstance` 调用点 × 全文扫 = 151.8s（AURA_PHOTON_TIME
+        // 实测，占全构建一半）；[getPatch] 全程 0 次触发——绝大多数 X 有
+        // 定义。加 resolvedCsv 后每个 distinct X 只扫一次全文。
+        var resolvedCsv: String = ""
+        var i: Int = 0
+        // 诊断计数器（AURA_PHOTON_TIME=1 时输出）：定位 getterPatch 实测
+        // 150-200s 与部件估算（全文扫 4ms×928 + 外层扫 30ms）的 25 倍缺口。
+        var dbgOuter: Int = 0
+        var dbgCalls: Int = 0
+        var dbgSites: Int = 0
+        val dbgOn: Boolean = Env.get("AURA_PHOTON_TIME", "") == "1"
+        val n: Int = hat.length
+        // 诊断探针（按需打开）：println("[getPatch0] len=" + toStr(n))
+        while (i + 7 <= n) {
+        dbgOuter = dbgOuter + 1
+            // 手工匹配 "@call @"（7 字符）：禁带 from 的 indexOf（红线②）。
+            // ⚠️ charCodeAt 必须 `as Int` 再比较（裸比较在 seed AOT 下恒假，
+            // 实测 P136 桩补写静默不触发，2026-10-06）。
+            if ((hat.charCodeAt(i) as Int) == 64 && (hat.charCodeAt(i + 1) as Int) == 99 &&
+                (hat.charCodeAt(i + 2) as Int) == 97 && (hat.charCodeAt(i + 3) as Int) == 108 &&
+                (hat.charCodeAt(i + 4) as Int) == 108 && (hat.charCodeAt(i + 5) as Int) == 32 &&
+                (hat.charCodeAt(i + 6) as Int) == 64) {
+                dbgCalls = dbgCalls + 1
+                // [SLOW-FIX] 2026-10-10：名字提取改两遍切片。
+                // 原实现逐字符 `name = name + hat.substring(j, j+1)`——每个
+                // 字符 2 次小分配（substring + concat），实测 43.9 万字符 =
+                // 88 万次分配。无 free 运行时下分配成本随堆驻留劣化（微基
+                // 准：同循环 50MB 堆 244ms → 4.3GB 堆 166s，~700×），本函数
+                // 在 7GB 堆上实测 152-240s、占全构建一半。改为：先扫到终
+                // 结符，再一次 substring（每站点 1 次分配）；后缀判定走
+                // charCodeAt 零分配（95,101,99,110,97,116,115,110,73,116,
+                // 101,103 = "_getInstance" 逆序）。语义等价：原「遇空白弃
+                // 名」= 新「终结符必须为 '('」。
+                var j: Int = i + 7
+                while (j < n) {
+                    val c: Int = hat.charCodeAt(j) as Int
+                    if (c == 40 || c == 10 || c == 32) { break }
+                    j = j + 1
+                }
+                if (j > i + 19 && j < n && (hat.charCodeAt(j) as Int) == 40 &&
+                    (hat.charCodeAt(j - 1) as Int) == 101 &&
+                    (hat.charCodeAt(j - 2) as Int) == 99 &&
+                    (hat.charCodeAt(j - 3) as Int) == 110 &&
+                    (hat.charCodeAt(j - 4) as Int) == 97 &&
+                    (hat.charCodeAt(j - 5) as Int) == 116 &&
+                    (hat.charCodeAt(j - 6) as Int) == 115 &&
+                    (hat.charCodeAt(j - 7) as Int) == 110 &&
+                    (hat.charCodeAt(j - 8) as Int) == 73 &&
+                    (hat.charCodeAt(j - 9) as Int) == 116 &&
+                    (hat.charCodeAt(j - 10) as Int) == 101 &&
+                    (hat.charCodeAt(j - 11) as Int) == 103 &&
+                    (hat.charCodeAt(j - 12) as Int) == 95) {
+                    dbgSites = dbgSites + 1
+                    val x: String = hat.substring(i + 7, j - 12)
+                    if (x != "" && calledCsv.indexOf("\n" + x + "\n") < 0 &&
+                        resolvedCsv.indexOf("\n" + x + "\n") < 0) {
+                        // 有定义则跳过（`@fn X_getInstance(` 全文检索——
+                        // 每个 distinct X 只做一次，见 resolvedCsv 说明）
+                        val defNeedle: String = "@fn " + x + "_getInstance("
+                        if (hat.indexOf(defNeedle) < 0) {
+                            println("[getPatch] " + x)
+                            calledCsv = calledCsv + "\n" + x + "\n"
+                        } else {
+                            resolvedCsv = resolvedCsv + "\n" + x + "\n"
+                        }
+                    }
+                }
+                i = j
+            }
+            i = i + 1
+        }
+        if (dbgOn) {
+            println("[getPatch-dbg] outer=" + toStr(dbgOuter)
+                    + " calls=" + toStr(dbgCalls)
+                    + " sites=" + toStr(dbgSites))
+        }
+        if (calledCsv == "") {
+            return hat
+        }
+        // 2) 逐个追加桩 getter（每次调用分配 64 字节零块）。
+        var out: String = hat
+        var p: Int = 0
+        val calledCsvLen: Int = calledCsv.length
+        while (p < calledCsvLen) {
+            var e: Int = p
+            while (e < calledCsvLen) {
+                if ((calledCsv.charCodeAt(e) as Int) == 10) { break }
+                e = e + 1
+            }
+            if (e > p) {
+                val x: String = calledCsv.substring(p, e)
+                out = out + "\n@fn " + x + "_getInstance() -> Long" +
+                      "\n  bb entry:" +
+                      "\n    @s0 = @i32_const 64 : Int" +
+                      "\n    @s1 = @call @Memory_alloc(@s0) : Long" +
+                      "\n    @ret @s1 : Long\n"
+            }
+            if (e >= calledCsvLen) { break }
+            p = e + 1
+        }
+        return out
+    }
 }

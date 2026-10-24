@@ -1,0 +1,522 @@
+// ═════════════════════════════════════════════════════════════
+// P1 验收测试：正确性内核（值模型 / 类继承 / 闭包 / 异常 / ARC / 尾调用）
+//
+// 对应 VM-PA-00 v3.1 P1（P1.7 协程已按 D5 取消）：
+//   * P1.1 值模型：Float/Bool/Null/String 装箱约定、boxAlloc 类型感知
+//   * P1.2 类/继承：DEF_CLASS 父类链方法分派、覆写、instanceOf is-a
+//   * P1.3 闭包：MAKE_CLOSURE 捕获、LOAD/STORE_UPVALUE（共享可变状态）
+//   * P1.4 异常：catch 类型过滤、多级过滤（内层优先）、帧截断、字符串自动包装
+//   * P1.5 内存：ARC 按注册类型释放、容器头部与元素释放、真弱引用、泄漏归零
+//   * P1.6 尾调用：CALL_TAIL 帧复用，10 万层递归调用深度恒为 1
+//
+// 运行：aura run tests/vm_p1_kernel_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
+
+// ═════════════════════════════════════════════════════════════
+// P1.1 值模型
+// ═════════════════════════════════════════════════════════════
+
+fun testValueModelFloat(): Int {
+    val t = TestRunner()
+    t.begin("P1.ValueModel.float")
+    // 2.5 + 1.5 == 4.0（Float 装箱与 ADD 类型分发）
+    val vm = VmRunner()
+    vm.loadBytecode(
+        "CONST_FLOAT 0\n" +
+        "CONST_FLOAT 1\n" +
+        "ADD\n" +
+        "CONST_FLOAT 2\n" +
+        "EQ\n" +
+        "RETURN\n",
+        "2.5\n1.5\n4.0\n", "")
+    vm.run()
+    t.assertEq(toStr(vm.getReturnValue()), "true", "2.5 + 1.5 == 4.0")
+    return t.report()
+}
+
+fun testValueModelBoolNullString(): Int {
+    val t = TestRunner()
+    t.begin("P1.ValueModel.boolNullString")
+
+    // Bool：true OR false == true
+    val vm1 = VmRunner()
+    vm1.loadBytecode("CONST_BOOL true\nCONST_BOOL false\nOR\nRETURN\n", "", "")
+    vm1.run()
+    t.assertEq(toStr(vm1.getReturnValue()), "true", "true OR false")
+
+    // Null：null == null
+    val vm2 = VmRunner()
+    vm2.loadBytecode("CONST_NULL\nCONST_NULL\nEQ\nRETURN\n", "", "")
+    vm2.run()
+    t.assertEq(toStr(vm2.getReturnValue()), "true", "null == null")
+
+    // String：stringConcat("foo","bar") == "foobar"
+    val vm3 = VmRunner()
+    vm3.loadBytecode(
+        "CONST_STRING 0\nCONST_STRING 1\nCALL stringConcat 2\nRETURN\n",
+        "foo\nbar\n", "")
+    vm3.run()
+    t.assertEq(toStr(vm3.getReturnValue()), "foobar", "string concat")
+
+    return t.report()
+}
+
+fun testValueModelBox(): Int {
+    val t = TestRunner()
+    t.begin("P1.ValueModel.box")
+
+    // 类型感知 boxAlloc：字符串装箱不再截断；装箱/释放后活跃计数归零
+    val vm1 = VmRunner()
+    vm1.loadBytecode(
+        "CONST_STRING 0\n" +     // "hello"（旧实现 write64 会截断字符串句柄）
+        "BOX_ALLOC\n" +
+        "DEC_REF\n" +            // rc 1→0：释放
+        "RETURN\n",
+        "hello\n", "")
+    val before1: Int = vm1.getActiveHeapObjects()
+    vm1.run()
+    t.assertEq(before1, 0, "heap empty before")
+    t.assertEq(vm1.getActiveHeapObjects(), 0, "box freed after DEC_REF")
+
+    // 整数 DEC_REF 透传（未注册值不得误释放/误判）
+    val vm2 = VmRunner()
+    vm2.loadBytecode("CONST_INT 0\nDEC_REF\nRETURN\n", "7\n", "")
+    vm2.run()
+    t.assertEq(toStr(vm2.getReturnValue()), "7", "DEC_REF passthrough for plain int")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// P1.2 类 / 继承 / 方法分派
+// ═════════════════════════════════════════════════════════════
+
+/// Dog 覆写 speak：CALL_METHOD 应命中 Dog.speak（子类优先）
+fun bcOverride(): String {
+    return "DEF_CLASS Animal -\n" +      // 0
+        "DEF_CLASS Dog Animal\n" +       // 1
+        "NEW_OBJECT Dog\n" +             // 2
+        "STORE_LOCAL 0\n" +              // 3
+        "LOAD_LOCAL 0\n" +               // 4: receiver
+        "CALL_METHOD speak\n" +          // 5 → Dog.speak
+        "RETURN\n" +                     // 6
+        "CONST_STRING 0\n" +             // 7: Animal.speak
+        "RETURN\n" +
+        "CONST_STRING 1\n" +             // 9: Dog.speak（覆写）
+        "RETURN\n"
+}
+
+/// Dog 未覆写 speak：应沿父类链命中 Animal.speak
+fun bcInherited(): String {
+    return "DEF_CLASS Animal -\n" +
+        "DEF_CLASS Dog Animal\n" +
+        "NEW_OBJECT Dog\n" +
+        "STORE_LOCAL 0\n" +
+        "LOAD_LOCAL 0\n" +
+        "CALL_METHOD speak\n" +
+        "RETURN\n" +
+        "CONST_STRING 0\n" +
+        "RETURN\n"
+    // 注意：无 Dog.speak 定义 → 解析到 Animal.speak（行 7）
+}
+
+fun testInheritanceOverride(): Int {
+    val t = TestRunner()
+    t.begin("P1.Inherit.override")
+
+    val vm = VmRunner()
+    vm.loadBytecode(bcOverride(), "animal sound\nwoof\n",
+        "main|0|0\nAnimal.speak|7|1\nDog.speak|9|1\n")
+    vm.run()
+    t.assertEq(vm.getError(), "", "no error (override)")
+    t.assertEq(toStr(vm.getReturnValue()), "woof", "Dog.speak overrides Animal.speak")
+
+    return t.report()
+}
+
+fun testInheritanceChain(): Int {
+    val t = TestRunner()
+    t.begin("P1.Inherit.chain")
+
+    // Dog 无 Dog.speak → 沿父类链命中 Animal.speak
+    val vm = VmRunner()
+    vm.loadBytecode(bcInherited(), "animal sound\n",
+        "main|0|0\nAnimal.speak|7|1\n")
+    vm.run()
+    t.assertEq(vm.getError(), "", "no error (chain)")
+    t.assertEq(toStr(vm.getReturnValue()), "animal sound", "inherited Animal.speak via chain")
+
+    return t.report()
+}
+
+fun testInstanceOfHierarchy(): Int {
+    val t = TestRunner()
+    t.begin("P1.Inherit.instanceOf")
+
+    // NEW_OBJECT Dog; INSTANCE_OF Animal → true（is-a，沿链判定）
+    val vm1 = VmRunner()
+    vm1.loadBytecode(
+        "DEF_CLASS Animal -\n" +
+        "DEF_CLASS Dog Animal\n" +
+        "NEW_OBJECT Dog\n" +
+        "INSTANCE_OF Animal\n" +
+        "RETURN\n", "", "")
+    vm1.run()
+    t.assertEq(toStr(vm1.getReturnValue()), "true", "Dog is-a Animal")
+
+    // 非祖先类型 → false
+    val vm2 = VmRunner()
+    vm2.loadBytecode(
+        "DEF_CLASS Animal -\n" +
+        "DEF_CLASS Dog Animal\n" +
+        "NEW_OBJECT Dog\n" +
+        "INSTANCE_OF Cat\n" +
+        "RETURN\n", "", "")
+    vm2.run()
+    t.assertEq(toStr(vm2.getReturnValue()), "false", "Dog is-not Cat")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// P1.3 闭包 / upvalue
+// ═════════════════════════════════════════════════════════════
+
+fun testClosureCapture(): Int {
+    val t = TestRunner()
+    t.begin("P1.Closure.capture")
+
+    // 捕获 42，闭包体 LOAD_UPVALUE 0 读取
+    val vm = VmRunner()
+    vm.loadBytecode(
+        "CONST_INT 0\n" +            // 0: 42
+        "MAKE_CLOSURE getCap 1\n" +  // 1: 捕获 1 个值
+        "STORE_LOCAL 0\n" +          // 2
+        "LOAD_LOCAL 0\n" +           // 3: closureId
+        "CALL_CLOSURE 0\n" +         // 4
+        "RETURN\n" +                 // 5
+        "LOAD_UPVALUE 0\n" +         // 6: getCap 入口
+        "RETURN\n",                  // 7
+        "42\n", "main|0|0\ngetCap|6|0\n")
+    vm.run()
+    t.assertEq(vm.getError(), "", "no error (capture)")
+    t.assertEq(toStr(vm.getReturnValue()), "42", "closure reads captured upvalue")
+    t.assertEq(vm.getClosureCount(), 1, "closure registered")
+    t.assertEq(vm.getUpvalueCount(), 1, "one upvalue captured")
+
+    return t.report()
+}
+
+fun testClosureMutableUpvalue(): Int {
+    val t = TestRunner()
+    t.begin("P1.Closure.mutableUpvalue")
+
+    // bump()：upvalue 原位 +1 并返回新值；调用两次 → 11、12
+    // （第二次调用结果验证 STORE_UPVALUE 的共享可变语义）
+    val vm = VmRunner()
+    vm.loadBytecode(
+        "CONST_INT 0\n" +            // 0: 10
+        "MAKE_CLOSURE bump 1\n" +    // 1
+        "STORE_LOCAL 0\n" +          // 2
+        "LOAD_LOCAL 0\n" +           // 3
+        "CALL_CLOSURE 0\n" +         // 4 → 11
+        "POP\n" +                    // 5
+        "LOAD_LOCAL 0\n" +           // 6
+        "CALL_CLOSURE 0\n" +         // 7 → 12
+        "RETURN\n" +                 // 8
+        "LOAD_UPVALUE 0\n" +         // 9: bump 入口
+        "CONST_INT 1\n" +            // 10: 1
+        "ADD\n" +                    // 11
+        "STORE_UPVALUE 0\n" +        // 12: 原位写回
+        "LOAD_UPVALUE 0\n" +         // 13
+        "RETURN\n",                  // 14
+        "10\n1\n", "main|0|0\nbump|9|0\n")
+    vm.run()
+    t.assertEq(vm.getError(), "", "no error (mutable)")
+    t.assertEq(toStr(vm.getReturnValue()), "12", "upvalue mutated in place across calls")
+
+    return t.report()
+}
+
+fun testClosureNoContextError(): Int {
+    val t = TestRunner()
+    t.begin("P1.Closure.noContext")
+
+    // 无闭包上下文时 LOAD_UPVALUE 必须明确报错，而非静默读错值
+    val vm = VmRunner()
+    vm.loadBytecode("LOAD_UPVALUE 0\nRETURN\n", "", "")
+    vm.run()
+    t.assertTrue(vm.getError().contains("no closure context"), "clear error outside closure")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// P1.4 异常
+// ═════════════════════════════════════════════════════════════
+
+fun testExceptionTypeFilter(): Int {
+    val t = TestRunner()
+    t.begin("P1.Exception.typeFilter")
+
+    // 内层 catch IOException 不匹配字符串异常（自动包装为 Exception），
+    // 外层 catch Exception 命中 → 返回异常消息
+    val vm = VmRunner()
+    vm.loadBytecode(
+        "PUSH_HANDLER 8 -1 Exception\n" +   // 0: 外层
+        "PUSH_HANDLER 4 -1 IOException\n" + // 1: 内层（不匹配）
+        "CONST_STRING 0\n" +                // 2: "disk on fire"
+        "THROW\n" +                         // 3
+        "CONST_STRING 1\n" +                // 4: 内层 catch（不应到达）
+        "RETURN\n" +                        // 5
+        "POP_HANDLER\n" +                   // 6 (填充行，保持行号清晰)
+        "RETURN\n" +                        // 7 (填充行)
+        "RETURN\n",                         // 8: 外层 catch → 返回 ex
+        "disk on fire\nwrong handler\n", "")
+    vm.run()
+    t.assertEq(vm.getError(), "", "no error (filtered)")
+    t.assertEq(toStr(vm.getReturnValue()), "disk on fire", "outer catch after inner filter miss")
+
+    return t.report()
+}
+
+fun testExceptionFrameUnwind(): Int {
+    val t = TestRunner()
+    t.begin("P1.Exception.frameUnwind")
+
+    // thrower 内部抛出，main 的 handler 捕获：帧截断回 main、异常落槽 1
+    val vm = VmRunner()
+    vm.loadBytecode(
+        "PUSH_HANDLER 10 1 Exception\n" +   // 0: target=10, slot=1
+        "CALL thrower 0\n" +                // 1
+        "CONST_STRING 2\n" +                // 2: 不应到达
+        "RETURN\n" +                        // 3
+        "CONST_STRING 0\n" +                // 4: thrower 入口
+        "THROW\n" +                         // 5
+        "CONST_STRING 3\n" +                // 6: 不应到达
+        "RETURN\n" +                        // 7
+        "POP_HANDLER\n" +                   // 8 (填充)
+        "RETURN\n" +                        // 9 (填充)
+        "LOAD_LOCAL 1\n" +                  // 10: catch → ex 落槽 1
+        "RETURN\n",                         // 11
+        "boom\nx\nnot reached\nnever\n",
+        "main|0|0\nthrower|4|0\n")
+    vm.run()
+    t.assertEq(vm.getError(), "", "no error (unwind)")
+    t.assertEq(toStr(vm.getReturnValue()), "boom", "exception caught in caller frame")
+    t.assertEq(vm.getCallDepth(), 1, "frames unwound to main")
+
+    return t.report()
+}
+
+fun testExceptionUncaught(): Int {
+    val t = TestRunner()
+    t.begin("P1.Exception.uncaught")
+
+    val vm = VmRunner()
+    vm.loadBytecode("CONST_STRING 0\nTHROW\nRETURN\n", "no handler here\n", "")
+    vm.run()
+    t.assertTrue(vm.getError().contains("Uncaught exception"), "uncaught → error")
+    t.assertTrue(vm.getError().contains("no handler here"), "message preserved")
+    t.assertFalse(vm.isRunning(), "vm halted")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// P1.5 内存 / ARC
+// ═════════════════════════════════════════════════════════════
+
+fun testArcLeakZero(): Int {
+    val t = TestRunner()
+    t.begin("P1.ARC.leakZero")
+
+    // 长循环创建/销毁对象：结束后活跃堆对象计数必须归零
+    // （10 轮 NEW_OBJECT + DEC_REF；字段表/类名表随对象一并摘除）
+    val vm = VmRunner()
+    vm.loadBytecode(
+        "DECL_LOCAL 0\n" +           // 0: i
+        "CONST_INT 0\n" +            // 1: 10
+        "STORE_LOCAL 0\n" +          // 2
+        "LOAD_LOCAL 0\n" +           // 3: 循环头
+        "JUMP_IF_FALSE 13\n" +       // 4
+        "NEW_OBJECT Dog\n" +         // 5: 压对象指针
+        "DEC_REF\n" +                // 6: 弹出并释放（rc 1→0），压 null
+        "POP\n" +                    // 7: 丢弃 null，保持栈平衡
+        "LOAD_LOCAL 0\n" +           // 8
+        "CONST_INT 1\n" +            // 9: 1
+        "SUB\n" +                    // 10
+        "STORE_LOCAL 0\n" +          // 11
+        "JUMP 3\n" +                 // 12
+        "LOAD_LOCAL 0\n" +           // 13: 退出路径：压 i
+        "RETURN\n",                  // 14
+        "10\n1\n", "")
+    vm.run()
+    t.assertEq(vm.getError(), "", "no error (loop)")
+    t.assertEq(vm.getActiveHeapObjects(), 0, "active heap count back to zero")
+    t.assertEq(toStr(vm.getReturnValue()), "0", "loop completed")
+
+    return t.report()
+}
+
+fun testArcContainerFree(): Int {
+    val t = TestRunner()
+    t.begin("P1.ARC.containerFree")
+
+    // 列表：创建（登记）→ DEC_REF → 头部+items 数组释放、登记摘除
+    val vm1 = VmRunner()
+    vm1.loadBytecode("NEW_LIST\nDEC_REF\nRETURN\n", "", "")
+    vm1.run()
+    t.assertEq(vm1.getActiveHeapObjects(), 0, "list header+items freed")
+
+    // Map：同理（keys+vals 数组）
+    val vm2 = VmRunner()
+    vm2.loadBytecode("NEW_MAP\nDEC_REF\nRETURN\n", "", "")
+    vm2.run()
+    t.assertEq(vm2.getActiveHeapObjects(), 0, "map header+keys+vals freed")
+
+    return t.report()
+}
+
+fun testWeakRef(): Int {
+    val t = TestRunner()
+    t.begin("P1.ARC.weakRef")
+
+    // 存活对象：weakRef → weakGet 升级成功（返回原值）
+    val vm1 = VmRunner()
+    vm1.loadBytecode(
+        "NEW_OBJECT Dog\n" +
+        "STORE_LOCAL 0\n" +
+        "LOAD_LOCAL 0\n" +
+        "WEAK_REF\n" +
+        "WEAK_GET\n" +
+        "RETURN\n", "", "")
+    vm1.run()
+    val alive: Any = vm1.getReturnValue()
+    t.assertTrue(alive != null, "weakGet upgrades live object")
+
+    // 已释放对象：weakGet 返回 null（不再读已释放内存）
+    val vm2 = VmRunner()
+    vm2.loadBytecode(
+        "NEW_OBJECT Dog\n" +
+        "WEAK_REF\n" +
+        "DEC_REF\n" +
+        "WEAK_GET\n" +
+        "RETURN\n", "", "")
+    vm2.run()
+    t.assertTrue(vm2.getReturnValue() == null, "weakGet returns null after free")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// P1.6 尾调用
+// ═════════════════════════════════════════════════════════════
+
+fun testTailCallDeep(): Int {
+    val t = TestRunner()
+    t.begin("P1.TailCall.deep")
+
+    // 10 万层尾递归：帧复用 → 调用深度恒为 1，结果正确
+    // countdown(n): n==0 → "done"，否则 CALL_TAIL countdown(n-1)
+    val vm = VmRunner()
+    vm.loadBytecode(
+        "CONST_INT 0\n" +             // 0: 100000
+        "CALL countdown 1\n" +        // 1
+        "RETURN\n" +                  // 2
+        "LOAD_LOCAL 0\n" +            // 3: countdown 入口
+        "JUMP_IF_FALSE 10\n" +        // 4
+        "LOAD_LOCAL 0\n" +            // 5
+        "CONST_INT 1\n" +             // 6: 1
+        "SUB\n" +                     // 7
+        "CALL_TAIL countdown 1\n" +   // 8: 帧复用
+        "RETURN\n" +                  // 9: 不可达（填充）
+        "CONST_STRING 2\n" +          // 10: "done"
+        "RETURN\n",                   // 11
+        "100000\n1\ndone\n",
+        "main|0|0\ncountdown|3|1\n")
+    vm.run()
+    t.assertEq(vm.getError(), "", "no error (tail recursion)")
+    t.assertEq(toStr(vm.getReturnValue()), "done", "100000-deep tail recursion completes")
+    t.assertEq(vm.getCallDepth(), 1, "frame reused: depth stays 1")
+
+    return t.report()
+}
+
+fun testTailCallArgBinding(): Int {
+    val t = TestRunner()
+    t.begin("P1.TailCall.argBinding")
+
+    // 尾调用实参绑定正确性：tailSum(10, 0) 累加 → 10+9+…+1 = 55
+    // tailSum(n, acc): n==0 → acc；否则 CALL_TAIL tailSum(n-1, acc+n)
+    // 实参绑定与 CALL 一致：slot0=n（先压）、slot1=acc（后压）
+    val vm = VmRunner()
+    vm.loadBytecode(
+        "CONST_INT 0\n" +             // 0: 10
+        "CONST_INT 1\n" +             // 1: 0（acc）
+        "CALL tailSum 2\n" +          // 2
+        "RETURN\n" +                  // 3
+        "LOAD_LOCAL 0\n" +            // 4: tailSum 入口
+        "JUMP_IF_FALSE 15\n" +        // 5
+        "LOAD_LOCAL 0\n" +            // 6: n
+        "CONST_INT 2\n" +             // 7: 1
+        "SUB\n" +                     // 8: n-1（实参 1）
+        "LOAD_LOCAL 1\n" +            // 9: acc
+        "LOAD_LOCAL 0\n" +            // 10: n
+        "ADD\n" +                     // 11: acc+n（实参 2）
+        "CALL_TAIL tailSum 2\n" +     // 12: 帧复用
+        "LOAD_LOCAL 0\n" +            // 13: 不可达（填充）
+        "RETURN\n" +                  // 14: 不可达（填充）
+        "LOAD_LOCAL 1\n" +            // 15: n==0 → acc
+        "RETURN\n",                   // 16
+        "10\n0\n1\n", "tailSum|4|2\n")
+    vm.run()
+    t.assertEq(vm.getError(), "", "no error (tail args)")
+    t.assertEq(toStr(vm.getReturnValue()), "55", "tailSum 10 with acc == 55")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 主函数
+// ═════════════════════════════════════════════════════════════
+
+fun main() {
+    println("=== P1 VM Kernel Correctness Tests ===")
+    println()
+
+    val f1 = testValueModelFloat()
+    val f2 = testValueModelBoolNullString()
+    val f3 = testValueModelBox()
+    val f4 = testInheritanceOverride()
+    val f5 = testInheritanceChain()
+    val f6 = testInstanceOfHierarchy()
+    val f7 = testClosureCapture()
+    val f8 = testClosureMutableUpvalue()
+    val f9 = testClosureNoContextError()
+    val f10 = testExceptionTypeFilter()
+    val f11 = testExceptionFrameUnwind()
+    val f12 = testExceptionUncaught()
+    val f13 = testArcLeakZero()
+    val f14 = testArcContainerFree()
+    val f15 = testWeakRef()
+    val f16 = testTailCallDeep()
+    val f17 = testTailCallArgBinding()
+
+    val totalFailures: Int = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9 + f10 + f11 + f12 + f13 + f14 + f15 + f16 + f17
+
+    println()
+    println("=== Summary ===")
+    println("Total failures: " + toStr(totalFailures))
+
+    if (totalFailures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(totalFailures) + ")")
+    }
+}

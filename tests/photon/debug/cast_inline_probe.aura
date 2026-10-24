@@ -1,0 +1,51 @@
+// aura:///tests/photon/debug/cast_inline_probe.aura
+// ═══════════════════════════════════════════════════════════════
+// P5-① 最小复现：`x as T` **内联当表达式操作数**时被译坏。
+//
+// 现象（Photon AOT，2026-10-22）：
+//
+//   val v: Any = "hello"
+//   val t: String = v as String
+//   println("ok=[" + t + "]")             → ok=[hello]        ✅
+//   println("bad=[" + (v as String) + "]") → bad=[<ref#-1>]    ❌
+//
+// 即：把 cast 的结果先落到局部再参与拼接是对的；**直接把 cast 表达式
+// 当作 `+` 的操作数（或调用实参）**时，拿到的不是字符串指针，而是一个
+// 让 `toStrAny` 归为「未知引用」的坏值。
+//
+// 同一形状也解释了 VM 宿主的 `.auc` 取值失败：
+//   `Memory.write64(addr, v as Long)`  ← cast 内联当实参
+// 实测把字符串常量压进 VM 栈后取回变成 0（`[CA] raw=1`，即装箱整数 0）。
+//
+// 期望输出（修好后）：
+//   [1] s=hello      [2] v1 direct=hello
+//   [3] t1=hello     [4] v2 direct=lit
+//   [5] t2=lit       [6] t3=hello
+//   [7] inline=[hello]        ← 当前为 <ref#-1>
+//   [8] inline2=[lit]         ← 当前为 <ref#-1>
+//
+// 构建（8 秒一轮）：
+//   powershell -File build\_vmhost_build.ps1 -Src tests\photon\debug\cast_inline_probe.aura -Tag cip
+// ═══════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import aura.lang.native.Heap
+
+fun main(): Int {
+    Heap.init()
+    val s: String = "hello"
+    println("[1] s=" + s)
+    val v1: Any = s
+    println("[2] v1 direct=" + v1)
+    val t1: String = v1 as String
+    println("[3] t1=" + t1)
+    val v2: Any = "lit"
+    println("[4] v2 direct=" + v2)
+    val t2: String = v2 as String
+    println("[5] t2=" + t2)
+    val t3: String = v1 as String
+    println("[6] t3=" + t3)
+    println("[7] inline=[" + (v1 as String) + "]")
+    println("[8] inline2=[" + (v2 as String) + "]")
+    return 0
+}

@@ -1,0 +1,10 @@
+// 分离实验：与 bench_loop1m 同构，但 acc 为 Int（无 Long 转换）
+fun main() {
+    var i: Int = 0
+    var acc: Int = 0
+    while (i < 1000000) {
+        acc = i * 2 - 1
+        i = i + 1
+    }
+    println("acc = " + toStr(acc))
+}

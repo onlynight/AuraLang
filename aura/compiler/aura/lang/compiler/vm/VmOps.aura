@@ -15,6 +15,104 @@ import aura.lang.native.Memory
 /// VM 操作工具对象（集中管理无状态工具函数）。
 object VmOps {
 
+    /// [根修轮R14] 字符串长度 = charCodeAt NUL 扫描。
+    /// 独立小方法 = 最小 roll 面的可靠原语（getField 的 length 路由至此）。
+    fun strLenRaw(s: String): Int {
+        var n: Int = 0
+        while (s.charCodeAt(n) != 0) {
+            n = n + 1
+        }
+        return n
+    }
+
+    /// [R4] vmSubstr 定性探针计数
+    var vmSubDiag: Int = 0
+
+    // [R253] io_open 句柄表：kernel32 HANDLE（指针尺寸）↔ guest 的 Int fd。
+    // open 把 HANDLE 存进表、返回表下标当 fd；read/write/close/lseek 用下标
+    // 换回 HANDLE。裸 Memory 缓冲（P392 形态）。
+    // ⚠ 放 VmOps 静态区而不是 Vm 字段：实测给 Vm 加 3 个字段就触发布局
+    // 轮盘（13-stdlib 全用例空输出）。
+    var ioHBuf: Long = 0
+    var ioHN: Int = 0
+    var ioHCap: Int = 0
+
+    /// 登记一个 HANDLE，返回表下标（即 guest 的 fd）。
+    /// ⚠ 循环体内不要 return（返回值 phi 家槽污染家族，见 refLocate）。
+    fun ioHandleAdd(h: Long): Int {
+        if (this.ioHN >= this.ioHCap) {
+            val nc: Int = this.ioHCap * 2 + 16
+            val nb: Long = Memory.alloc(nc * 8)
+            var j: Int = 0
+            while (j < this.ioHN) {
+                Memory.write64(nb + j * 8, Memory.read64(this.ioHBuf + j * 8))
+                j = j + 1
+            }
+            this.ioHBuf = nb
+            this.ioHCap = nc
+        }
+        Memory.write64(this.ioHBuf + this.ioHN * 8, h)
+        val idx: Int = this.ioHN
+        this.ioHN = this.ioHN + 1
+        return idx
+    }
+
+    /// 按下标取 HANDLE；越界返回 0。
+    fun ioHandleAt(idx: Int): Long {
+        if (idx < 0) { return 0 }
+        if (idx >= this.ioHN) { return 0 }
+        return Memory.read64(this.ioHBuf + idx * 8)
+    }
+
+    // [R251] 对象引用注册表：按**创建序**记录已分配对象的键（ptrKeyOf 形态）。
+    // 种子端 toStr(对象) 打印为 "<ref#N>"，N = 0 起的创建序——探针实证：
+    // 单对象 → ref#0；先建 Resource 再建 Box → Box 是 ref#1；07 里
+    // MyError→#0、MyException→#1，与打印顺序无关（p_ref.aura：乱序打印
+    // 仍按创建序编号，同一对象重复打印编号不变）。
+    // ⚠ 只用 `.add()` 追加，不做下标赋值（同 R246 的 funcNames 教训）。
+    var refKeysL: List<String> = arrayListOf<String>()
+
+    /// 登记一个新分配对象的键（Vm.newObject 每次分配调用）。
+    /// ⚠ 形态约束：**不要**在循环体内 `return`（实测返回值被循环 phi 家槽
+    /// 污染成指针值）；用 found 标志 + `i = n` 断出，循环外统一收口
+    /// （同 getField 的 kindF 扫描形状）。
+    fun refRegister(key: String): Unit {
+        val n: Int = this.refKeysL.size()
+        var dup: Int = 0
+        var i: Int = 0
+        while (i < n) {
+            if (this.refKeysL[i] == key) {
+                dup = 1
+                i = n
+            }
+            i = i + 1
+        }
+        if (dup == 0) {
+            this.refKeysL.add(key)
+        }
+    }
+
+    /// [R251] 查找结果中转槽。⚠ 不要用函数返回值传它：实测本调用点的
+    /// 返回值会漂移成对象指针（P266 rax→调用方槽句柄漂移同族），
+    /// 与 AucLoader.loadModule 的「返回值全局槽中转」同一规避手法。
+    var refHit: Int = -1
+
+    /// 值若是已登记对象则把创建序写入 `refHit`，否则写 -1。
+    fun refLocate(v: Any): Unit {
+        val key: String = ptrKeyOf(v)
+        val n: Int = this.refKeysL.size()
+        var found: Int = -1
+        var i: Int = 0
+        while (i < n) {
+            if (this.refKeysL[i] == key) {
+                found = i
+                i = n
+            }
+            i = i + 1
+        }
+        this.refHit = found
+    }
+
     // ═══════════════════════════════════════════════════════════
     //  类型判定
     // ═══════════════════════════════════════════════════════════
@@ -33,11 +131,12 @@ object VmOps {
         if (v == null) {
             return false
         }
-        val t: String = typeof(v)
-        if (t == "Int" || t == "Long" || t == "Float" || t == "Double") {
-            return true
-        }
-        return false
+        // P409 快路径：Plan A 的 `aura_typeof` 只可能返回三个常量
+        // （"Null" / "Int" / "String"，见 PhotonRuntime.emitTypeOfPlanA 的
+        //穷举：null→"Null"、奇数→"Int"、其余→"String"）。三者都是数值，
+        // 非 null 即真——**无需任何字符串比较**。原实现要 1 次 typeof call
+        // + 4 次 streq 逐字节比较才能得到同一个答案。
+        return true
     }
 
     /// 检查是否为整数类型。
@@ -45,11 +144,8 @@ object VmOps {
         if (v == null) {
             return false
         }
-        val t: String = typeof(v)
-        if (t == "Int" || t == "Long") {
-            return true
-        }
-        return false
+        // P409 快路径：typeof ∈ {Null, Int, String}，只有 "Int" 是整数类型。
+        return typeof(v) == "Int"
     }
 
     /// 检查是否为浮点类型。
@@ -57,10 +153,16 @@ object VmOps {
         if (v == null) {
             return false
         }
-        val t: String = typeof(v)
-        if (t == "Float" || t == "Double") {
-            return true
-        }
+        // P409 快路径：**typeof 的三个返回值里没有 "Float" 也没有 "Double"**
+        // （emitTypeOfPlanA 穷举：null→"Null"、奇数→"Int"、其余→"String"）。
+        // 所以本函数恒为 false —— 与原实现的逻辑等价，但省掉 1 次 typeof
+        // call + 2 次 streq 逐字节比较。
+        //
+        // ⚠ 语义等价性依据：Plan A 值模型把 Int 装箱为 `(v<<1)|1`（奇数）、
+        // Long 裸传、Float/Double 在 AOT 下不存在独立 Any 形态（Double 走
+        // 裸位传递，被判为 "String" 分支）。原实现在同样输入下也只会走到
+        // 末尾 `return false`。若将来 emitTypeOfPlanA 扩充返回值集合，
+        // **必须同步回滚本优化**。
         return false
     }
 
@@ -69,21 +171,409 @@ object VmOps {
         if (v == null) {
             return false
         }
-        if (typeof(v) == "Boolean") {
-            return true
-        }
+        // P409 快路径：同 isFloat——typeof 恒不返回 "Boolean"
+        // （布尔在 Plan A 下用 "true"/"false" 字符串表示，见 vmBool）。
         return false
     }
 
+    // ═══════════════════════════════════════════════════════════
+    //  [R20] Float 文本形态（Plan A 值模型的务实浮点通道）
+    // ═══════════════════════════════════════════════════════════
+    //
+    // Plan A 无 Float Any 形态（isFloat 恒 false，浮点位模式是偶数 =
+    // "String"）⇒ 算术浮点分支全灭（实测 01-arithmetic 的 `x * 2.0`
+    // 打 0）。本通道让浮点以**十进制文本**走 Any 槽：LOAD_CONST_F 直推
+    // 常量文本，算术在此用纯 Int 定标数学（无任何 Float 位依赖），
+    // 渲染与种子 Display 对齐（"5.0"/"2.5"/"-1.25"）。
+    // 取舍：数值型字符串（"2.5" 作 String 值）参与算术会被升格浮点——
+    // 仅算术路径受影响，务实接受。
+
+    /// 浮点文本判定：[±]digits.digits。[R20] 全程已证原语（indexOf/vmSubstr/
+    /// isAllDigits）——自建累加扫描循环在宿主产码下按位点重掷腐坏。
+    fun isFloatText(v: Any): Boolean {
+        if (v == null) {
+            return false
+        }
+        val s: String = toStrAny(v)
+        val n: Int = strLenRaw(s)
+        if (n < 3) {
+            return false
+        }
+        // [R21] 点位扫描内联（loadArgsFlat 逗号扫描同款形状，去 indexOf 依赖
+        // ——其 text.length 守卫在宿主下为坏死字段读）
+        var dot: Int = -1
+        var p: Int = 0
+        while (p < n) {
+            if (s.charCodeAt(p) == 46) {
+                dot = p
+                p = n
+            }
+            p = p + 1
+        }
+        if (dot < 1) {
+            return false
+        }
+        val fp: String = vmSubstr(s, dot + 1, n - dot - 1)
+        var ipD: String = vmSubstr(s, 0, dot)
+        if (strLenRaw(fp) < 1) {
+            return false
+        }
+        if (strLenRaw(ipD) > 0) {
+            if (vmSubstr(ipD, 0, 1) == "-") {
+                ipD = vmSubstr(ipD, 1, strLenRaw(ipD) - 1)
+            }
+        }
+        if (strLenRaw(ipD) < 1) {
+            return false
+        }
+        return isAllDigits(ipD) && isAllDigits(fp)
+    }
+
+    /// 小数位数："2.5"→1，"-1.25"→2，"2"→0。（点位内联扫描，同 isFloatText）
+    fun floatDecimalsOf(v: Any): Int {
+        val s: String = toStrAny(v)
+        val n: Int = strLenRaw(s)
+        var dot: Int = -1
+        var p: Int = 0
+        while (p < n) {
+            if (s.charCodeAt(p) == 46) {
+                dot = p
+                p = n
+            }
+            p = p + 1
+        }
+        if (dot < 0) {
+            return 0
+        }
+        return n - dot - 1
+    }
+
+    /// 去点去符号的尾数："2.5"→25，"-1.25"→-125，"2"→2。
+    /// [R20] 点两侧各走已证 vmSubstr + toI32，无累加循环。
+    fun floatMantissaOf(v: Any): Int {
+        val s: String = toStrAny(v)
+        val n: Int = strLenRaw(s)
+        var dot: Int = -1
+        var p: Int = 0
+        while (p < n) {
+            if (s.charCodeAt(p) == 46) {
+                dot = p
+                p = n
+            }
+            p = p + 1
+        }
+        if (dot < 0) {
+            return toI32(s)
+        }
+        val ip: String = vmSubstr(s, 0, dot)
+        val fp: String = vmSubstr(s, dot + 1, n - dot - 1)
+        val fd: Int = strLenRaw(fp)
+        val ival: Int = toI32(ip)
+        val fval: Int = toI32(fp)
+        var m: Int = 0
+        if (ival < 0) {
+            m = ival * floatPow10(fd) - fval
+        } else {
+            m = ival * floatPow10(fd) + fval
+        }
+        return m
+    }
+
+    fun floatPow10(d: Int): Int {
+        var p: Int = 1
+        var k: Int = 0
+        while (k < d) {
+            p = p * 10
+            k = k + 1
+        }
+        return p
+    }
+
+    /// [R252] 四则含 **Null** 操作数的种子行为（探针 p_flt2 实证）：
+    /// null 当 f64 的 0.0 参与运算，结果为**浮点文本**——
+    /// 90*null=0.0、null*90=0.0、90+null=90.0、null+90=90.0、
+    /// 90-null=90.0、null-90=-90.0。
+    ///
+    /// mode：0=加 1=减 2=乘。无 null 操作数时返回 ""（调用方走原路径）。
+    ///
+    /// ⚠ 非 null 侧必须用 `intOf` 拆箱，**不要**用 floatMantissaOf/
+    /// floatDecimalsOf：这俩在 ADD/SUB 调用窗实测腐坏（90 的尾数/小数位
+    /// 读错 ⇒ 90+null 打成 "9.0"；intToStr/`.length` 窗腐坏同族）。
+    /// 也没有除法：90/null 在种子端是 f64 无穷，文本模型表达不了。
+    fun nullArithText(a: Any, b: Any, mode: Int): String {
+        var hasN: Int = 0
+        if (a == null) { hasN = 1 }
+        if (b == null) { hasN = 1 }
+        if (hasN == 0) {
+            return ""
+        }
+        // ⚠ 仅当非 null 侧是**装箱整数**才接手：String + null 必须回落到
+        // 拼接（"100 " + null = "100 null"）——intOf 对字符串指针会返回
+        // 指针值（实测 05-classes Money 行打成 140696972993352.0）。
+        var okN: Int = 1
+        if (a == null) {
+            var bIsNull: Int = 0
+            if (b == null) { bIsNull = 1 }
+            if (bIsNull == 0) {
+                if (isTaggedInt(b) == 0) { okN = 0 }
+            }
+        } else {
+            if (isTaggedInt(a) == 0) { okN = 0 }
+        }
+        if (okN == 0) {
+            return ""
+        }
+        var va: Int = 0
+        if (a == null) {
+            va = 0
+        } else {
+            va = intOf(a)
+        }
+        var vb: Int = 0
+        if (b == null) {
+            vb = 0
+        } else {
+            vb = intOf(b)
+        }
+        if (mode == 2) {
+            return floatTextOf(va * vb * 10, 1)
+        }
+        if (mode == 1) {
+            return floatTextOf((va - vb) * 10, 1)
+        }
+        return floatTextOf((va + vb) * 10, 1)
+    }
+
+    /// 定标尾数 → 显示文本（种子 Display 风格）：(50,1)→"5.0"、
+    /// (25,1)→"2.5"、(-125,2)→"-1.25"。去尾零但至少保留 1 位小数。
+    /// [R20] 补零走单次 vmSubstr + 一次拼接（无自建累加循环）。
+    ///
+    /// ⚠️ [R201] **渲染必须内联**：旧实现调 `intToStr`/`floatPow10`，这两个
+    /// 调用窗在本函数产码下被腐坏（实测 `floatTextOf(25,1)` → "指针.5"——
+    /// 入参 25/1 正确（尾数 .5 对）、`intToStr(2)` 返回栈地址）。P5-① 同族：
+    /// 同一函数在别的调用窗（ptrKeyOf 内）是好的。改为逐位内联
+    /// （intToStr 同款形状：Int 算术 + 字面量比较 + 前缀拼接，零调用窗）。
+    fun floatTextOf(m: Int, d: Int): String {
+        var mag: Int = m
+        var dec: Int = d
+        if (dec < 1) {
+            dec = 1
+        }
+        var neg: Boolean = false
+        if (mag < 0) {
+            neg = true
+            mag = -mag
+        }
+        while (dec > 1 && (mag % 10) == 0) {
+            mag = mag / 10
+            dec = dec - 1
+        }
+        // [R201] 内联 Int→十进制文本（零调用窗）
+        var digits: String = ""
+        var n: Int = mag
+        if (n == 0) {
+            digits = "0"
+        }
+        while (n > 0) {
+            val digit: Int = n % 10
+            var ch: String = "0"
+            if (digit == 1) { ch = "1" }
+            else if (digit == 2) { ch = "2" }
+            else if (digit == 3) { ch = "3" }
+            else if (digit == 4) { ch = "4" }
+            else if (digit == 5) { ch = "5" }
+            else if (digit == 6) { ch = "6" }
+            else if (digit == 7) { ch = "7" }
+            else if (digit == 8) { ch = "8" }
+            else if (digit == 9) { ch = "9" }
+            digits = ch + digits
+            n = n / 10
+        }
+        val total: Int = strLenRaw(digits)
+        var out: String = ""
+        if (neg) {
+            out = "-"
+        }
+        if (total <= dec) {
+            out = out + "0."
+            var pad: Int = dec - total
+            while (pad > 0) {
+                out = out + "0"
+                pad = pad - 1
+            }
+            out = out + digits
+        } else {
+            val ipT: String = vmSubstr(digits, 0, total - dec)
+            val fpT: String = vmSubstr(digits, total - dec, dec)
+            out = out + ipT + "." + fpT
+        }
+        return out
+    }
+
+    // ═══════════════════════════════════════════════════════
+    //  [R201] Math 原生臂的纯 Int 定标域实现
+    //
+    //  背景（11-imports JIT 挂点的三层实锤）：
+    //   ① `VmOps.parseFloat` → `toFloat` 运行时实现是简化版（忽略小数），
+    //      实测 parseFloat("16.0") = 0 ⇒ 旧 sqrt/cos/sin 臂的入参解析全错；
+    //   ② `floatToTextF` 走 `af as Int` + intToStr，调用窗腐坏 ⇒ 指针垃圾；
+    //   ③ Aura 源码级 Newton/Taylor 编成 .auc 后走 VM ADD/DIV/CMP 的浮点
+    //      文本分支，其 helper 调用窗同样腐坏（fop 探针：a+b → "指针.0"）。
+    //  ⇒ 一律改为**纯 Int 定点**（10^6），输入输出都是 R20 文本通道，
+    //  只用已证原语（toStrAny/floatMantissaOf/floatDecimalsOf/vmSubstr/
+    //  strLenRaw + Int 算术），无 Float 位、无 parseFloat、无 intToStr 调用。
+    // ═══════════════════════════════════════════════════════
+
+    /// 平方根：浮点文本 → 平方根文本（"16.0"→"4.0"，1 位小数）。
+    /// V = m/10^d；R = √V 以 k 位小数渲染 ⇒ R·10^k = isqrt(m·10^(2k-d))，
+    /// k = max(1, ⌈d/2⌉)，整数牛顿迭代后交 floatTextOf 渲染。
+    fun sqrtTextOf(v: Any): String {
+        val s: String = toStrAny(v)
+        val m: Int = floatMantissaOf(s)
+        val d: Int = floatDecimalsOf(s)
+        if (m <= 0) {
+            return "0.0"
+        }
+        var k: Int = 1
+        while (k * 2 < d) {
+            k = k + 1
+        }
+        var scaled: Int = m
+        var e: Int = k * 2 - d
+        while (e > 0) {
+            scaled = scaled * 10
+            e = e - 1
+        }
+        var x: Int = scaled
+        if (x < 1) {
+            x = 1
+        }
+        var y: Int = (x + scaled / x) / 2
+        while (y < x) {
+            x = y
+            y = (x + scaled / x) / 2
+        }
+        return floatTextOf(x, k)
+    }
+
+    /// 余弦：浮点文本 → 余弦文本（Taylor 12 项，定点 10^6，6 位小数渲染）。
+    /// [R201] 角度归一化内联（private 同类调用窗无先例，不冒险）。
+    fun cosTextOf(v: Any): String {
+        val s: String = toStrAny(v)
+        val m: Int = floatMantissaOf(s)
+        val d: Int = floatDecimalsOf(s)
+        var t: Int = m
+        var e: Int = 6 - d
+        while (e > 0) {
+            t = t * 10
+            e = e - 1
+        }
+        while (e < 0) {
+            t = t / 10
+            e = e + 1
+        }
+        while (t > 3141593) {
+            t = t - 6283185
+        }
+        while (t < 0 - 3141593) {
+            t = t + 6283185
+        }
+        var term: Int = 1000000
+        var sum: Int = 1000000
+        var n: Int = 1
+        while (n < 12) {
+            term = term * (0 - t) / 1000000 * t / ((2 * n - 1) * (2 * n))
+            sum = sum + term
+            n = n + 1
+        }
+        return floatTextOf(sum, 6)
+    }
+
+    /// 正弦：浮点文本 → 正弦文本（Taylor 12 项，定点 10^6，6 位小数渲染）。
+    /// [R201] 角度归一化内联（同 cosTextOf）。
+    fun sinTextOf(v: Any): String {
+        val s: String = toStrAny(v)
+        val m: Int = floatMantissaOf(s)
+        val d: Int = floatDecimalsOf(s)
+        var t: Int = m
+        var e: Int = 6 - d
+        while (e > 0) {
+            t = t * 10
+            e = e - 1
+        }
+        while (e < 0) {
+            t = t / 10
+            e = e + 1
+        }
+        while (t > 3141593) {
+            t = t - 6283185
+        }
+        while (t < 0 - 3141593) {
+            t = t + 6283185
+        }
+        var term: Int = t
+        var sum: Int = t
+        var n: Int = 1
+        while (n < 12) {
+            term = term * (0 - t) / 1000000 * t / ((2 * n) * (2 * n + 1))
+            sum = sum + term
+            n = n + 1
+        }
+        return floatTextOf(sum, 6)
+    }
+
     /// 检查是否为字符串类型。
+    ///
+    /// AOT 载体（Plan A）下 `typeof` 按静态类型折叠：Any 形参**恒报 "String"**，
+    /// 装箱整数（`(v<<1)|1` 的奇数伪指针）会被误判成字符串 —— `100 + 23` 走
+    /// 拼接得 "10023"、循环计数 `i = i + 1` 拼成 "11" 永不终止（实测 AOT 载体
+    /// helloworld 算术全错 + Instruction limit exceeded）。
+    /// 奇偶判别（`raw/2*2 != raw`，兼容负数的奇偶）排除装箱整数；种子 VM 下
+    /// typeof 给出真实类型名，数值在第一个判断就被短路，行为不变。
     fun isString(v: Any): Boolean {
         if (v == null) {
             return false
         }
-        if (typeof(v) == "String") {
-            return true
+        // P409 快路径：Plan A 的 `aura_typeof` 恒返回 "String"（非 null 时），
+        // 所以 `typeof(v) != "String"` 恒为假——原实现的第一个判断从不成立。
+        // 整个函数退化为「非装箱整数」= `!isTaggedInt(v)`，而 `__is_tagged_int`
+        // 已被发射器内联为 `mov rax,rcx; and rax,1`（2 条，见 X86Emitter.emitCall）。
+        // 于是 isString 从「1 次 typeof call + 1 次 streq 逐字节 + 1 次内联判定」
+        // 降为「2 条位运算」。
+        //
+        // ⚠ 语义等价性：原实现在 Plan A 下的实际行为就是 `!isTaggedInt(v)`——
+        // `typeof` 对Any 形参恒报 "String"（注释已记录该事实），第一个判断是死代码。
+        return !isTaggedInt(v)
+    }
+
+    /// Plan A 低位标记检测：值是否为「装箱整数」（64 位表示为奇数）。
+    ///
+    /// 经编译器内建 `__is_tagged_int`：AOT 侧发射**原始** ptrtoint + 奇偶检查
+    ///（`as Long` 会插入 `aura_to_int_any` 拆箱，奇偶性随即丢失——不能用）；
+    /// 种子 VM 侧降级为常量 false（typeof 已准确，该检测不被依赖）。
+    /// 真实字符串/对象指针恒为偶数（分配器 ≥2 字节对齐），奇数必是
+    /// `(v<<1)|1` 的装箱整数。
+    fun isTaggedInt(v: Any): Boolean {
+        return __is_tagged_int(v)
+    }
+
+    /// Any → Int：装箱整数走**无分配**快路径。
+    ///
+    /// `as Long` 在 AOT 下发射 `ptrtoint + aura_to_int_any`——对装箱整数
+    /// 正是拆箱值；再截断为 Int。此前数值分支一律 `toI32(toStr(v))`：
+    /// 每次运算分配两个十进制临时串且**永不释放**（运行时无字符串回收），
+    /// 25M 迭代基准实测累积 6GB+ 触发内存守卫中止；本快路径同时消除
+    /// 分配与串解析开销。种子 VM 下 isTaggedInt 恒 false，走慢路径不变。
+    fun intOf(v: Any): Int {
+        if (isTaggedInt(v)) {
+            val raw: Long = v as Long
+            // P378：(raw - 1) / 2 = 精确拆箱（raw 奇，raw-1 偶，整除无截断
+            // 误差；负数同样成立）。photon 无 aura_to_int_any，`as Int` 是
+            // 纯截断不拆箱。
+            val real: Long = (raw - 1) / 2
+            return real as Int
         }
-        return false
+        return toI32(toStr(v))
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -92,6 +582,10 @@ object VmOps {
 
     /// Any -> Int（32 位）。
     fun toI32(s: String): Int {
+        return toI32Raw(s)
+    }
+
+    fun toI32Raw(s: String): Int {
         if (s == null || s == "") {
             return 0
         }
@@ -209,7 +703,10 @@ object VmOps {
         if (typeof(v) == "Boolean") {
             return v as Boolean
         }
-        val s: String = toStr(v)
+        // P387：必须走 toStrAny——AOT 下 toStr 是纯整数实现，字符串（vmBool
+        // 的 "true"/"false"）会被打成指针值十进制 ⇒ "false" 落到兜底
+        // `return true` ⇒ 一切字符串条件恒真（实测 `10 < 5` 走 then 分支）。
+        val s: String = toStrAny(v)
         if (s == "true") {
             return true
         }
@@ -224,7 +721,39 @@ object VmOps {
 
     /// Int -> Any。
     fun toAny(v: Int): Any {
-        return v
+        // P378：Plan A 装箱——Int 的 Any 形态 = (v<<1)|1（恒奇）。裸值入
+        // Any 槽会让 isTaggedInt/typeof 的奇偶判定翻车（偶数误判 String、
+        // 奇指针误判 Int）。Long→Any = 裸字传递（photon 无额外装箱）。
+        val l: Long = v as Long
+        val tagged: Long = l * 2 + 1
+        return tagged as Any
+    }
+
+    /// Long → Any 装箱（`(v<<1)|1`，恒奇）。**地址/句柄专用**（Int 版见
+    /// `toAny`；直接 `as Int` 会截断 47 位地址）。`addrOf` 可无损拆回。
+    ///
+    /// [R218] 用途：让 guest `.auc` 里的 `ptr + i` 走**数值** ADD 而非字符串
+    /// 拼接 —— Any 槽里裸 Long 与 String 指针同形（都是偶数），
+    /// `isString = !isTaggedInt` 对两者都为真（P409），没法和字符串区分。
+    fun toAnyL(v: Long): Any {
+        val t: Long = v * 2 + 1
+        return t as Any
+    }
+
+    /// Any -> Long（**地址/整值统一入口**，2026-10-08 P1-3）。
+    ///
+    /// Memory.* / JitExec.* 等原生臂的实参在 Any 槽里有两种形态：
+    ///   * .auc 侧 Int 实参 → Plan A 装箱（(v<<1)|1，恒奇）→ `intOf` 拆箱；
+    ///   * .auc 侧 Long 实参 → 裸字传递（偶）→ `toI64(toStr(v))` 十进制还原
+    ///    （运行时 toStr 是纯整数实现，对裸 Long 恰好打全值十进制）。
+    /// 旧臂一律 `toI64(toStr(v))`——种子 VM 值未装箱故恰好可用；原生 VM
+    /// 下 Int 实参带着 tag 进 native（实测 mmap 收到 n=1 / ln=8193），
+    /// 地址整体翻倍 +1。JIT 原生验证（P1-3）首次踩中。
+    fun addrOf(v: Any): Long {
+        if (isTaggedInt(v)) {
+            return intOf(v) as Long
+        }
+        return toI64(toStr(v))
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -233,74 +762,48 @@ object VmOps {
 
     /// 加法。
     fun add(a: Any, b: Any): Any {
-        if (isFloat(a) || isFloat(b)) {
-            return parseFloat(toStr(a)) + parseFloat(toStr(b))
-        } else if (isString(a) || isString(b)) {
-            return toStr(a) + toStr(b)
+        // [R21] Float 文本分支已上移 dispatch（op20）——本函数保持
+        // String/Any 单类型返回，避免 P364 双类型合并装箱病。
+        if (isString(a) || isString(b)) {
+            // P347：字符串分支必须走 toStrAny（运行时 toStr 是纯整数实现，
+            // 字符串指针会打成指针值十进制）
+            return toStrAny(a) + toStrAny(b)
         } else {
-            return toI32(toStr(a)) + toI32(toStr(b))
+            return toAny(intOf(a) + intOf(b))
         }
     }
 
     /// 减法。
     fun sub(a: Any, b: Any): Any {
-        if (isFloat(a) || isFloat(b)) {
-            return parseFloat(toStr(a)) - parseFloat(toStr(b))
-        } else {
-            return toI32(toStr(a)) - toI32(toStr(b))
-        }
+        return toAny(intOf(a) - intOf(b))
     }
 
     /// 乘法。
     fun mul(a: Any, b: Any): Any {
-        if (isFloat(a) || isFloat(b)) {
-            return parseFloat(toStr(a)) * parseFloat(toStr(b))
-        } else {
-            return toI32(toStr(a)) * toI32(toStr(b))
-        }
+        return toAny(intOf(a) * intOf(b))
     }
 
     /// 除法（零除保护）。
     fun div(a: Any, b: Any): Any {
-        if (isFloat(a) || isFloat(b)) {
-            val bb: Float = parseFloat(toStr(b))
-            if (bb == 0.0f) {
-                return 0.0f
-            }
-            return parseFloat(toStr(a)) / bb
-        } else {
-            val bb: Int = toI32(toStr(b))
-            if (bb == 0) {
-                return 0
-            }
-            return toI32(toStr(a)) / bb
+        val bb: Int = intOf(b)
+        if (bb == 0) {
+            return 0
         }
+        return toAny(intOf(a) / bb)
     }
 
     /// 取模（零除保护）。
     fun mod(a: Any, b: Any): Any {
-        if (isFloat(a) || isFloat(b)) {
-            val bb: Float = parseFloat(toStr(b))
-            if (bb == 0.0f) {
-                return 0.0f
-            }
-            return parseFloat(toStr(a)) - parseFloat(toStr(a)) / bb * bb
-        } else {
-            val bb: Int = toI32(toStr(b))
-            if (bb == 0) {
-                return 0
-            }
-            return toI32(toStr(a)) % bb
+        val bb: Int = intOf(b)
+        if (bb == 0) {
+            return 0
         }
+        return toAny(intOf(a) % bb)
     }
 
     /// 一元取负。
     fun neg(a: Any): Any {
-        if (isFloat(a)) {
-            return -parseFloat(toStr(a))
-        } else {
-            return -toI32(toStr(a))
-        }
+        return toAny(-intOf(a))
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -332,6 +835,12 @@ object VmOps {
             return "false"
         } else if (isFloat(a) || isFloat(b)) {
             return vmBool(parseFloat(toStr(a)) == parseFloat(toStr(b)))
+        } else if (isString(a) || isString(b)) {
+            // [R203] 字符串相等必须比**内容**：`a == b` 在 `Any` 上是位比较，
+            // 内容相同的两个串（闭包分派 / `path[i]` vs 字面量）恒不相等
+            // ⇒ 03-functions 的 `isPositive(5)` 打成 0。
+            // `toStrAny(a) == toStrAny(b)` 为 String==String（运行时 streq）。
+            return vmBool(toStrAny(a) == toStrAny(b))
         } else {
             return vmBool(a == b)
         }
@@ -356,7 +865,7 @@ object VmOps {
         if (isFloat(a) || isFloat(b)) {
             return vmBool(parseFloat(toStr(a)) < parseFloat(toStr(b)))
         } else {
-            return vmBool(toI32(toStr(a)) < toI32(toStr(b)))
+            return vmBool(intOf(a) < intOf(b))
         }
     }
 
@@ -365,7 +874,7 @@ object VmOps {
         if (isFloat(a) || isFloat(b)) {
             return vmBool(parseFloat(toStr(a)) > parseFloat(toStr(b)))
         } else {
-            return vmBool(toI32(toStr(a)) > toI32(toStr(b)))
+            return vmBool(intOf(a) > intOf(b))
         }
     }
 
@@ -374,7 +883,7 @@ object VmOps {
         if (isFloat(a) || isFloat(b)) {
             return vmBool(parseFloat(toStr(a)) <= parseFloat(toStr(b)))
         } else {
-            return vmBool(toI32(toStr(a)) <= toI32(toStr(b)))
+            return vmBool(intOf(a) <= intOf(b))
         }
     }
 
@@ -383,7 +892,7 @@ object VmOps {
         if (isFloat(a) || isFloat(b)) {
             return vmBool(parseFloat(toStr(a)) >= parseFloat(toStr(b)))
         } else {
-            return vmBool(toI32(toStr(a)) >= toI32(toStr(b)))
+            return vmBool(intOf(a) >= intOf(b))
         }
     }
 
@@ -413,27 +922,27 @@ object VmOps {
     /// （实测 `x shl 8` 直接退化成 `x`，移位量被丢弃）——`.auc` 读取小端整数
     /// 因此高字节恒为 0（`natives_count` 594 被读成 82）。
     fun bitAnd(a: Any, b: Any): Any {
-        return toI32(toStr(a)) & toI32(toStr(b))
+        return toAny(intOf(a) & intOf(b))
     }
 
     /// 按位或。
     fun bitOr(a: Any, b: Any): Any {
-        return toI32(toStr(a)) | toI32(toStr(b))
+        return toAny(intOf(a) | intOf(b))
     }
 
     /// 按位异或。
     fun bitXor(a: Any, b: Any): Any {
-        return toI32(toStr(a)) ^ toI32(toStr(b))
+        return toAny(intOf(a) ^ intOf(b))
     }
 
     /// 左移。
     fun shl(a: Any, b: Any): Any {
-        return toI32(toStr(a)) << toI32(toStr(b))
+        return toAny(intOf(a) << intOf(b))
     }
 
     /// 右移。
     fun shr(a: Any, b: Any): Any {
-        return toI32(toStr(a)) >> toI32(toStr(b))
+        return toAny(intOf(a) >> intOf(b))
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -484,25 +993,30 @@ object VmOps {
         if (start < 0) {
             return ""
         }
+        if (length < 0) {
+            return ""
+        }
         if (start >= text.length) {
+            // [R4→R32] 定性探针摘除（生产路径噪声：边界 substring
+            // start==len 为合法空串语义，实证 07-exception-simple 被污染）
             return ""
         }
-        var end: Int = start + length
-        if (end < 0) {
-            end = 0
+        // P386：早返回风格——`end` 不再重赋值（旧实现两次重赋值 = 两处
+        // merge phi，photon ISel 下 end 家槽跨调用残留前次值 ⇒ 同函数相邻
+        // 调用点一成一败，§10.100 定罪）。全函数零 merge phi。
+        // [根修轮R4] 切片改走 charCodeAt + fromCharCode 逐字符拼接：本布局下
+        // PhotonPipeline_substring 对合法输入返回空串（探针实证：守卫全过、
+        // substring 结果为空），而 charCodeAt 已被 loadArgsFlat 逗号扫描实证
+        // 可靠。args 装载路径冷，O(n) 拼接可接受。
+        var n2: Int = text.length
+        if (start + length < n2) { n2 = start + length }
+        var out: String = ""
+        var k2: Int = start
+        while (k2 < n2) {
+            out = out + String.fromCharCode(text.charCodeAt(k2))
+            k2 = k2 + 1
         }
-        if (end > text.length) {
-            end = text.length
-        }
-        if (start == end) {
-            return ""
-        }
-        return text.substring(start, end)
-    }
-
-    /// 字符串切片（start 到 length）。
-    fun sub(text: String, start: Int, len: Int): String {
-        return vmSubstr(text, start, len)
+        return out
     }
 
     /// `Any` → 原始 64 位表示。
@@ -518,6 +1032,103 @@ object VmOps {
         return x as Long
     }
 
+    /// [R36] Float → 十进制文本（6 位小数，去尾零保 1 位；种子 Display
+    /// 同约定）。标量 Float 比较/乘减 + Float→Int 截断（编译器内联
+    /// cvttss2si，单指令低骰）。供 Math 原生臂的文本通道输出。
+    fun floatToTextF(f: Float): String {
+        var neg: Boolean = false
+        var af: Float = f
+        if (af < 0) {
+            neg = true
+            af = 0 - af
+        }
+        var ip: Int = af as Int
+        if (ip < 0) { ip = 0 - ip }
+        var frac: Float = af - (ip as Float)
+        if (frac < 0) { frac = 0 - frac }
+        var out: String = ""
+        if (neg) { out = "-" }
+        out = out + intToStr(ip) + "."
+        var digits: Int = 0
+        var done: Boolean = false
+        while (!done) {
+            frac = frac * 10
+            var d: Int = frac as Int
+            if (d < 0) { d = 0 }
+            out = out + intToStr(d)
+            frac = frac - (d as Float)
+            digits = digits + 1
+            if (frac <= 0.000001 || digits >= 6) { done = true }
+        }
+        return out
+    }
+
+    /// [R34] 堆指针键（登记/查询共用）：指针十进制。**不要**用 toStrAny
+    /// 做堆对象键——偶指针走 String 分支 = 把堆内存当字符串读（实测列表
+    /// 键 = len 字段字节 → strlen=1，m[i].size 全灭）。
+    fun ptrKeyOf(v: Any): String {
+        return intToStr(rawOf(v) as Int)
+    }
+
+    /// [R31] 任意值哈希（djb2，字符域 charCodeAt 扫描 = strLenRaw 同款
+    /// 已证形状）。供 .auc 的 HashMap 闭包键分桶——宿主接管 Any.hashCode
+    /// 后，put/get 两侧一致即语义成立（桶序与种子不必一致）。
+    fun hashCodeOf(v: Any): Int {
+        val s: String = toStrAny(v)
+        val n: Int = strLenRaw(s)
+        var h: Int = 5381
+        var i: Int = 0
+        while (i < n) {
+            h = h * 33 + s.charCodeAt(i)
+            i = i + 1
+        }
+        return h
+    }
+
+    /// [R19] ASCII 大写化——**零拼接实现**。累加器循环 `result = result +
+    /// fromCharCode(c)` 在宿主管线下多轮迭代必腐坏（实测 toUpper 出
+    /// "0t^ HELLO"、toLower 出 "aa"——每轮 concat 的指针漂移复合，R13
+    /// ptr+1 家族），改为：Memory.alloc 一次 + 逐字节写入 + NUL 终止，
+    /// 结果裸指针原样作 String（Long→Any 裸传 + Any→String 重释，同
+    /// toStrAny/newListCap 先例）。charCodeAt 多轮扫描由 loadArgsFlat
+    /// 逗号扫描实证可靠。
+    fun toUpper(text: String): String {
+        val n: Int = strLenRaw(text)
+        val buf: Long = Memory.alloc(n + 1)
+        var i: Int = 0
+        while (i < n) {
+            val c: Int = text.charCodeAt(i)
+            var oc: Int = c
+            if (c >= 97 && c <= 122) {
+                oc = c - 32
+            }
+            Memory.write(buf + i, oc as Byte)
+            i = i + 1
+        }
+        Memory.write(buf + n, 0 as Byte)
+        val ab: Any = buf as Any
+        return ab as String
+    }
+
+    /// [R19] ASCII 小写化（同 toUpper 的零拼接模式）。
+    fun toLower(text: String): String {
+        val n: Int = strLenRaw(text)
+        val buf: Long = Memory.alloc(n + 1)
+        var i: Int = 0
+        while (i < n) {
+            val c: Int = text.charCodeAt(i)
+            var oc: Int = c
+            if (c >= 65 && c <= 90) {
+                oc = c + 32
+            }
+            Memory.write(buf + i, oc as Byte)
+            i = i + 1
+        }
+        Memory.write(buf + n, 0 as Byte)
+        val ab: Any = buf as Any
+        return ab as String
+    }
+
     /// Any → String（统一入口）。
     ///
     /// 供 VM 的**值输出/内建分派**使用：`toStr(v)` 直接写在 `Vm` 的方法里时，
@@ -525,7 +1136,87 @@ object VmOps {
     /// 里同一次 `toStr(v)` 得到 "5"、返回的却是 "0"）。经由本函数的调用点
     /// 与 `VmOps.toI32(toStr(x))` 等既有可靠路径一致。
     fun toStrAny(v: Any): String {
+        // P347：photon 运行时 toStr 是**纯整数**实现（入参直接按 Int 打十进制，
+        // 不查 Plan A 装箱标签）——字符串指针会被打成指针值十进制（实测
+        // println 打出 140699966958608 = 0x7FF6.. 指针值）。此处按 Plan A
+        // 标签分派：装箱整数（奇数）→ 拆箱 toStr；真实指针（字符串等）→
+        // 原样；null → "null"。种子 VM 下 isTaggedInt 恒 false，typeof 准确，
+        // 走指针分支 = 字符串原样，行为不变。
+        // R65：种子 VM 下 Boolean/Int 也不是 tagged（isTaggedInt 恒 false），
+        // 但 `v as String` 对 int64 载荷会抛 "as cast failed"。走 typeof
+        // 分支：Int/Boolean → 打十进制；String → 原样；其它 → "null"。
+        // [R250] **不能写字面量 "null"**：Photon 把该字面量按 null 值发射，
+        // 作为返回值一出函数就退化成空串（探针 p_stackrt：字面量 "null" 经
+        // 裸栈/返回值一往返变空，"nul"/"nullx"/运行时拼接的都正常）。
+        // 运行时拼出，且经 `Any` 装箱往返（toStrAny 的返回值到处被存进裸槽）。
+        if (v == null) {
+            return "nul" + "l"
+        }
+        if (isTaggedInt(v)) {
+            // [R237] 负数：`toStr` 在 Photon 运行时走**无符号**十进制
+            // （实测 toStr(-7) = "4294967289" = 2^32-7），与种子 VM 的 "-7" 不符。
+            // 取绝对值后手工补负号（`toStr` 对正数正确，且只需一次拼接）。
+            val iv: Int = intOf(v)
+            if (iv < 0) {
+                return "-" + toStr(0 - iv)
+            }
+            return toStr(iv)
+        }
+        // [R251] 已登记的堆对象 → "<ref#N>"（N = 0 起的**创建序**，见
+        // `refRegister`）。种子端 toStr(对象) 的打印面就是它：
+        // 07-test-classes `MyError: <ref#0>`、10-memory `Box: <ref#1>`
+        // （种子编译器把 `e.getMessage()` 这类 getter 内联成对象本身，
+        // 两条通道拿到的都是对象，只差渲染；旧行为 `v as String` 把对象头
+        // 当字符串读 ⇒ 打出空串）。
+        // ⚠ 必须放在 typeof 分派**之前**：typeof(对象指针) 会走 String 分支。
+        refLocate(v)
+        var ri: Int = this.refHit
+        if (ri >= 0) {
+            // ⚠ 用运行时 `toStr` 而不是 `intToStr`：后者在本调用窗腐坏
+            // （floatTextOf 体内 intToStr 窗腐坏同族，实测打出指针值）。
+            return "<ref#" + toStr(ri) + ">"
+        }
+        // 种子 VM：typeof 区分 Int/Boolean/String。
+        // ⚠️ 必须用裸 `typeof`（内建），不能用 `VmOps.typeof`：
+        // Photon AOT 只把裸 `typeof` 映射到 runtime 符号 `aura_typeof`
+        // （见 InstructionSelection.isRuntimeSymbol），`VmOps.typeof` 会
+        // 解析成外部符号 `VmOps_typeof`（未定义）导致链接失败。
+        val kind: String = typeof(v)
+        if (kind == "Int" || kind == "Long" || kind == "Boolean") {
+            // [R237] 同上：非装箱通道的负数同样走无符号十进制
+            val iv2: Int = v as Int
+            if (iv2 < 0) {
+                return "-" + toStr(0 - iv2)
+            }
+            return toStr(v as Long)
+        }
+        if (kind == "String") {
+            return v as String
+        }
         return toStr(v)
+    }
+
+    /// 取最后一个 `.` 之后的尾段（限定名剥离专供）；无点或无尾段则原样返回。
+    ///
+    /// [R203] 从 `Vm.callOrBuiltin` 剥离块搬出：那段内联的 charCodeAt 扫描在
+    /// 千行巨函数里被译坏（实测 `aura.lang.std.IO.fileExists` len=27 正确、
+    /// 但 `lastDot` 落到 26 ⇒ `vmSubstr(f0,27,0)` 返回 "" ⇒ funcName 空 ⇒
+    /// `Unknown function:`）。小函数体沿用 `isFloatText` 的点位扫描 +
+    /// `floatMantissaOf` 的 vmSubstr 切分——两处均已证。
+    fun tailAfterLastDot(s: String): String {
+        val n: Int = strLenRaw(s)
+        var dot: Int = -1
+        var p: Int = 0
+        while (p < n) {
+            if (s.charCodeAt(p) == 46) {
+                dot = p
+            }
+            p = p + 1
+        }
+        if (dot >= 0 && dot + 1 < n) {
+            return vmSubstr(s, dot + 1, n - dot - 1)
+        }
+        return s
     }
 
     /// Int → String（不依赖 toStr，避免 AOT 转换问题）。
@@ -563,7 +1254,8 @@ object VmOps {
             return false
         }
         var i: Int = 0
-        while (i < s.length) {
+        val sLen2: Int = s.length
+        while (i < sLen2) {
             val c: Int = s.charCodeAt(i)
             if (c < 48 || c > 57) {
                 return false
@@ -634,7 +1326,8 @@ object VmOps {
             return false
         }
         var i: Int = 0
-        while (i < prefix.length) {
+        val prefixLen: Int = prefix.length
+        while (i < prefixLen) {
             if (text.charCodeAt(i) != prefix.charCodeAt(i)) {
                 return false
             }
@@ -653,7 +1346,8 @@ object VmOps {
         }
         val diff: Int = text.length - suffix.length
         var i: Int = 0
-        while (i < suffix.length) {
+        val suffixLen: Int = suffix.length
+        while (i < suffixLen) {
             if (text.charCodeAt(diff + i) != suffix.charCodeAt(i)) {
                 return false
             }
@@ -802,12 +1496,20 @@ object VmOps {
     ///   * 函数名（Aura 前端生成的文本字节码）；
     ///   * **十进制序号**（`.auc` 二进制里 `CALL` 的操作数是函数下标），
     ///     按函数表**行序**（0 起）解析。
+    /// 在函数表中查找函数入口偏移（未找到返回 0）。
+    ///
+    /// 表格式：每行 `name|offset|paramCount`，`\n` 分隔。
+    ///
+    /// ⚠️ P388：**纯字符扫描，不经 split/ArrayList/vmSubstr**——AOT 下
+    /// `ArrayList<String>` 的 add/size/get 相互不一致（实测 split("main|0|0")
+    /// 返回 size=3 而 get(1)="0|0"，即第二管道未切分的产物），致使
+    /// fibonacci 的偏移被解析成 toI32("868|1")=8681（toI32Raw 跳过非数字
+    /// 继续累加）→ ip 跑飞越界 → VM 静默停机（rc=0 无输出，2026-10-06）。
+    /// 三个字段全部用下标扫描切分，`indexOf` 家族的既有可靠路径。
     fun findFuncOffset(funcTable: String, funcName: String): Int {
         if (funcTable == null || funcTable == "" || funcName == "") {
             return 0
         }
-        val numeric: Boolean = isAllDigits(funcName)
-        val wantIdx: Int = toI32(funcName)
         var row: Int = 0
         var result: Int = 0
         var len: Int = funcTable.length
@@ -817,16 +1519,37 @@ object VmOps {
             while (end < len && funcTable.charCodeAt(end) != 10) {
                 end = end + 1
             }
-            val line: String = vmSubstr(funcTable, start, end - start)
-            if (line != "") {
-                val parts: List<String> = split(line, "|")
-                if (parts.size >= 2) {
-                    if (numeric) {
-                        if (row == wantIdx) {
-                            return toI32(parts.get(1))
+            if (end > start) {
+                // 行内三段：name = [start, p1)，off = [p1+1, p2)，pc = [p2+1, end)
+                var p1: Int = start
+                while (p1 < end && funcTable.charCodeAt(p1) != 124) {
+                    p1 = p1 + 1
+                }
+                if (p1 < end) {
+                    var p2: Int = p1 + 1
+                    while (p2 < end && funcTable.charCodeAt(p2) != 124) {
+                        p2 = p2 + 1
+                    }
+                    // name 精确匹配：长度相等且逐字符一致
+                    if (p1 - start == funcName.length) {
+                        var match: Boolean = true
+                        var ci: Int = 0
+                        val funcNameLen: Int = funcName.length
+                        while (ci < funcNameLen) {
+                            if (funcTable.charCodeAt(start + ci) != funcName.charCodeAt(ci)) {
+                                match = false
+                                ci = funcNameLen
+                            }
+                            ci = ci + 1
                         }
-                    } else if (parts.get(0) == funcName) {
-                        result = toI32(parts.get(1))
+                        if (match) {
+                            if (p2 < end) {
+                                result = toI32Range(funcTable, p1 + 1, p2)
+                            } else {
+                                result = toI32Range(funcTable, p1 + 1, end)
+                            }
+                            return result
+                        }
                     }
                 }
                 row = row + 1
@@ -837,13 +1560,11 @@ object VmOps {
     }
 
     /// 在函数表中查找函数参数个数（语义同 [`findFuncOffset`]）。
+    /// P388：与 findFuncOffset 同款纯字符扫描（split/ArrayList 不可靠家族回避）。
     fun findFuncParamCount(funcTable: String, funcName: String): Int {
         if (funcTable == null || funcTable == "" || funcName == "") {
             return -1
         }
-        val numeric: Boolean = isAllDigits(funcName)
-        val wantIdx: Int = toI32(funcName)
-        var row: Int = 0
         var result: Int = -1
         var len: Int = funcTable.length
         var start: Int = 0
@@ -852,23 +1573,66 @@ object VmOps {
             while (end < len && funcTable.charCodeAt(end) != 10) {
                 end = end + 1
             }
-            val line: String = vmSubstr(funcTable, start, end - start)
-            if (line != "") {
-                val parts: List<String> = split(line, "|")
-                if (parts.size >= 3) {
-                    if (numeric) {
-                        if (row == wantIdx) {
-                            return toI32(parts.get(2))
+            if (end > start) {
+                var p1: Int = start
+                while (p1 < end && funcTable.charCodeAt(p1) != 124) {
+                    p1 = p1 + 1
+                }
+                if (p1 < end) {
+                    var p2: Int = p1 + 1
+                    while (p2 < end && funcTable.charCodeAt(p2) != 124) {
+                        p2 = p2 + 1
+                    }
+                    if (p1 - start == funcName.length) {
+                        var match: Boolean = true
+                        var ci: Int = 0
+                        val funcNameLen2: Int = funcName.length
+                        while (ci < funcNameLen2) {
+                            if (funcTable.charCodeAt(start + ci) != funcName.charCodeAt(ci)) {
+                                match = false
+                                ci = funcNameLen2
+                            }
+                            ci = ci + 1
                         }
-                    } else if (parts.get(0) == funcName) {
-                        result = toI32(parts.get(2))
+                        if (match) {
+                            if (p2 < end) {
+                                result = toI32Range(funcTable, p2 + 1, end)
+                            } else {
+                                result = -1
+                            }
+                            return result
+                        }
                     }
                 }
-                row = row + 1
             }
             start = end + 1
         }
         return result
+    }
+
+    /// P388：区间整数解析——`[from, to)` 内的十进制数字（非数字即停）。
+    /// 不产子串：回避 substring/vmSubstr/split 的 AOT 不可靠家族。
+    /// （对比 [`toI32Raw`]：后者跳过非数字继续累加，`"868|1"` 会被解析成 8681。）
+    fun toI32Range(text: String, from: Int, to: Int): Int {
+        var total: Int = 0
+        var i: Int = from
+        var neg: Boolean = false
+        if (i < to && text.charCodeAt(i) == 45) {
+            neg = true
+            i = i + 1
+        }
+        while (i < to) {
+            val c: Int = text.charCodeAt(i)
+            if (c < 48 || c > 57) {
+                break
+            }
+            total = total * 10 + (c - 48)
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
     }
 
     /// 按分隔符分割字符串。

@@ -11,11 +11,13 @@ import aura.lang.std.String
 import aura.lang.std.Env
 import aura.lang.std.fs.FileUtils
 import aura.lang.compiler.photon.x86_64.X86Encoder
+import aura.lang.compiler.photon.JitStackMap
 import aura.lang.compiler.photon.MachineDag
 import aura.lang.compiler.photon.RegisterAllocator
 
 /// X86 发射器：将寄存器已分配的 MachineDag 编码为机器码字节。
 class X86Emitter {
+    private var scanFn: String = ""
 
     /// 编码器。
     private var enc: X86Encoder = null
@@ -42,11 +44,38 @@ class X86Emitter {
     /// 一个下标递增即可取到当前函数的帧信息，无需按名字查找。
     private var funcNames: List<String> = arrayListOf<String>()
 
-    /// 预扫结果：每个函数实际用到的**最大溢出槽号**（`-1` = 未用任何槽）。
-    private var funcMaxSlots: List<Int> = arrayListOf<Int>()
+    /// 预扫结果：每个函数的**节点 ID 区间宽度**（maxId − minId + 1）。
+    ///
+    /// P321 五区隔离（§10.79 立项的根治）：帧大小不再是「扫描计数 + 256 盲区
+    /// 兜底 + 2048 余量」——计数扫描与发射期首次分配是**两套独立遍历**，集合
+    /// 一旦不匹配，兜底槽就写穿帧底（腐坏随布局移动的根源）。
+    /// 改用**数学上封闭的上界**：发射期 `slotForNode(id≥0)` 只会对传递闭包内
+    /// 的节点各分配**一个**槽（按 nodeId 记忆复用），因此兜底槽总数 ≤ 闭包内
+    /// 不同节点数 ≤ maxId − minId + 1。帧 = 144（参数暂存区）+ 区间×8 +
+    /// 2048 边际，**不可能越界**。
+    private var funcIdRange: List<Int> = arrayListOf<Int>()
+    // P321: 传递闭包遍历的游标（按函数重置）
+    private var walkSeenCsv: String = "|"
+    private var walkMinId: Int = -1
+    private var walkMaxId: Int = -1
 
-    /// 主循环用的下标（对应 `funcNames` / `funcMaxSlots`）。
+    /// 主循环用的下标（对应 `funcNames` / `funcIdRange`）。
     private var fnIdx: Int = 0
+
+    /// P388 诊断：当前发射函数名（函数边界处捕获）。
+    private var curEmitFuncName: String = ""
+
+    // ── P413 peephole 状态：最近一次落槽的「四重快照 + 槽 + 寄存器」 ──
+    //
+    // 用于消除「`mov [rbp+X], r` 紧接 `mov r, [rbp+X]`（同槽同寄存器）」
+    // 这一对互为 no-op 的指令（实测占静态指令 5.1%，961 对/10 个热点函数）。
+    // `lastStLen == -1` 表示「无有效快照」（任何其它发射都会置 -1）。
+    private var lastStOff: Int = 0
+    private var lastStReg: String = ""
+    private var lastStLen: Int = -1
+    private var lastStRels: Int = -1
+    private var lastStLabels: Int = -1
+    private var lastStJumps: Int = -1
 
     /// 字符串常量表（逗号分隔）。
     private var strConsts: String = ""
@@ -70,6 +99,25 @@ class X86Emitter {
     /// 调用方跨调用存活的值会被悄悄改掉（实测 `"x = " + toStr(x)` 输出 `42`）。
     private var savedRegs: String = ""
 
+    /// [R96] 节点闭包访问标记（**按节点 id 直接下标**，epoch 打戳）。
+    ///
+    /// ⚠️ 旧实现用一张不断增长的 CSV 串 `walkSeenCsv` 做成员判定：
+    /// 每访问一个节点都 `walkSeenCsv.indexOf("|id|")` 全串线性扫描，
+    /// 再把 id `+` 到串尾（整串拷贝）。单函数闭包 N 个节点 ⇒ O(N²) 次
+    /// 字符比较 + O(N²) 字节拷贝 + 2N 次字符串分配。自举实测
+    /// `scanFunctionMaxSlots` 单项吃掉 emit 90s 里的 **84s**。
+    /// 改为「标记数组 + epoch」后每节点 O(1)、零分配，且**语义完全一致**
+    ///（新函数只需 `walkEpoch + 1`，取代把整串重置为 "|"）。
+    private var walkMark: List<Int> = arrayListOf<Int>()
+    private var walkEpoch: Int = 0
+
+    /// P1（Phase 2.2）：本批次全部 call 点的 stack map（GC 根枚举用）。
+    /// ⚠️ **List O(1) 追加**（序列化文本由 `getStackMaps` 归并产出）：
+    /// 旧字符串增量拼接每 call 整段拷贝 O(call²)，见 getStackMaps 说明。
+    /// 格式（每条）：
+    ///   funcName|pcOffset|slotCount|spillBase|callTarget
+    var stackMapRecList: List<String> = arrayListOf<String>()
+
     // ── 定位探针（有界截断，见 `xeProbe` 的说明）──
     private var probePath: String = ""
     private var probeStep: Int = 0
@@ -81,12 +129,15 @@ class X86Emitter {
         this.relocRecords = ""
         this.frameSize = 0x50
         this.funcNames = arrayListOf<String>()
-        this.funcMaxSlots = arrayListOf<Int>()
+        this.funcIdRange = arrayListOf<Int>()
         this.fnIdx = 0
         this.strConsts = ""
         this.funcOffsets = ""
         this.funcOffsetsList = arrayListOf<String>()
         this.isMainFunc = false
+        // P1（Phase 2.2）：stack map 记录随批次重置（字符串字段，种子
+        // 下可靠）。
+        this.stackMapRecList = arrayListOf<String>()
     }
 
     // ── 主入口 ──
@@ -129,51 +180,140 @@ class X86Emitter {
     /// 落在未提交页上 ⇒ `0xC0000005`（详见 `X86Encoder.emitPrologue`），
     /// 而且 528 KB × 2 层就超出 1 MB 的默认栈 ⇒ 任何两层调用都栈溢出。
     ///
-    /// 帧大小 = `32 + (最大槽号+1)*8`（16 字节对齐）；该函数未用任何槽时
+    /// 帧大小 = `144 + ID 区间×8 + 2048`（16 字节对齐）；该函数未用任何槽时
     /// 退回历史默认 `0x50`。顺序与主循环的函数边界检测一致，
     /// 因此主循环按下标取用（见 `funcNames` / `fnIdx`）。
     private fun scanFunctionMaxSlots(dag: MachineDag): Unit {
         this.funcNames = arrayListOf<String>()
-        this.funcMaxSlots = arrayListOf<Int>()
+        this.funcIdRange = arrayListOf<Int>()
         if (this.allocator == null) {
             return
         }
+        // [R96] epoch 式访问标记（见 `walkMark` 字段说明）：节点数即上界，
+        // 首次分配后不再增长；新函数只把 epoch 加一即可「清空」。
+        if (this.walkMark.size < dag.nodeCount) {
+            this.walkMark = arrayListOf<Int>()
+            var wm: Int = 0
+            while (wm < dag.nodeCount) {
+                this.walkMark.add(0)
+                wm = wm + 1
+            }
+        }
+        this.walkEpoch = 1
+        this.walkMinId = -1
+        this.walkMaxId = -1
         var curFn: String = ""
-        var curMax: Int = -1
         var i: Int = 0
         while (i < dag.instrCount) {
             val instr: DagInstruction = dag.instrOf(i)
             val fn: String = instr.funcName
             if (fn != curFn) {
                 if (curFn != "") {
-                    this.funcNames.add(curFn)
-                    this.funcMaxSlots.add(curMax)
+                    this.flushSlotGroup(curFn)
                 }
                 curFn = fn
-                curMax = -1
+                // [R96] 换 epoch 即「清空」访问标记（旧实现是重置整张 CSV 串）。
+                this.walkEpoch = this.walkEpoch + 1
+                this.walkMinId = -1
+                this.walkMaxId = -1
+                this.scanFn = fn
             }
-            // 该指令用到的节点里取最大溢出槽
-            val ns: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+            // P394：jmp/jcc/label 的 nodes **不是节点引用**——是基本块号
+            //（数千起，全模块累计）。旧实现一律当节点走传递闭包：块号 <
+            // nodeCount 时 dag.nodeOf 返回**完全无关函数的节点**，递归展开
+            // 其整棵 args 树 ⇒ walkMaxId 被拉到任意高 ⇒ 帧预算 = ID 区间×8
+            // 膨胀数十倍（实测 Vm_arg0IntOf range=18039 → 帧 144KB = 36 次
+            // 栈页探测/调用；全函数帧 4-14 万字节普遍污染）。跳过这三个
+            // 模板的 nodes 遍历（output 恒 -1，无闭包可走）。
+            val tpl: String = instr.template
+            if (tpl == "jmp @target" || tpl == "jcc @target" || tpl == "label") {
+                i = i + 1
+                continue
+            }
+            // P394：cmp %src,@imm 的 nodes[1] 是裸比较常量（emitCmpImm 直接
+            // strToInt 作 imm）——值 < nodeCount 时被当节点拉进闭包 ⇒ min 被
+            // 拉到 0/1 ⇒ range = 函数末节点号（全局累计数千）⇒ 帧预算膨胀
+            // 数十倍、每调用数十次栈页探测（实测全函数帧 4-14 万字节的单一
+            // 根因）。只扫第一槽（真实节点）。⚠️ 本分支位于 ns 声明之前，
+            // 必须自行 splitArgs（ns 在函数级作用域提升为未初始化——引用
+            // 它会静默零行为，2026-10-07）。
+            if (tpl == "cmp %src, @imm") {
+                val cns: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+                if (cns.size > 0) {
+                    val nid0: Int = MachineDagUtils.strToInt(cns[0])
+                    if (nid0 >= 0) { this.walkExtraNodes(dag, nid0) }
+                }
+                i = i + 1
+                continue
+            }
+            // 根节点：nodes + output + call 实参——**传递闭包**全遍历
+            //（P301 旧实现只扫根节点，表达式链的中间节点漏计 ⇒ 兜底槽
+            // 预算不足 → 深槽写穿帧 → 野写踩调用者保存区，2026-10-06）
+            var ns: List<String> = MachineDagUtils.splitArgs(instr.nodes)
             var j: Int = 0
             while (j < ns.size) {
                 val nid: Int = MachineDagUtils.strToInt(ns[j])
-                if (nid >= 0) {
-                    val c: String = this.allocator.getColor(nid)
-                    if (c != "" && c.startsWith("spill_slot_")) {
-                        val slot: Int = MachineDagUtils.strToInt(c.substring(11))
-                        if (slot > curMax) {
-                            curMax = slot
+                if (nid >= 0) { this.walkExtraNodes(dag, nid) }
+                j = j + 1
+            }
+            if (instr.output >= 0) { this.walkExtraNodes(dag, instr.output) }
+            if (instr.nodes != "" && instr.output == -1) {
+                val cnid: Int = MachineDagUtils.strToInt(instr.nodes)
+                if (cnid >= 0) {
+                    val cn: DagNode = dag.nodeOf(cnid)
+                    if (cn.op == "Call") {
+                        val cargs: List<String> = MachineDagUtils.splitArgs(cn.args)
+                        var cj: Int = 0
+                        while (cj < cargs.size) {
+                            val anid: Int = MachineDagUtils.strToInt(cargs[cj])
+                            if (anid >= 0) { this.walkExtraNodes(dag, anid) }
+                            cj = cj + 1
                         }
                     }
                 }
-                j = j + 1
             }
             i = i + 1
         }
         if (curFn != "") {
-            this.funcNames.add(curFn)
-            this.funcMaxSlots.add(curMax)
+            this.flushSlotGroup(curFn)
         }
+    }
+
+    /// 递归收集节点传递闭包：记录节点 ID 的 min/max（P321：帧预算 = ID 区间，
+    /// 不再区分有色/无色——发射期任何 slotForNode(id) 的 id 都在本闭包内）。
+    /// ⚠️ P385：instr.nodes 里混有**非节点载荷**——`cmp %src, @imm` 的
+    /// nodes[1] 是**裸常量值**（emitCmpImm 直接 strToInt 作 imm），`jmp @target`
+    /// 的 nodes[0] 是标签号。旧实现一律当节点 ID 走闭包 ⇒ 常量值并入
+    /// walkMaxId ⇒ 帧预算 = 最大常量×8（实测 bench_loop 25M → 帧 200MB，
+    /// main 入口 sub rsp 一步跨出 64MB 栈保留 → 启动即崩 exit=127）。
+    /// 节点 ID 稠密分布于 0..nodeCount-1，≥nodeCount 必非节点，直接剪枝。
+    private fun walkExtraNodes(dag: MachineDag, nodeId: Int): Unit {
+        if (nodeId < 0 || nodeId >= dag.nodeCount) { return }
+        if (nodeId >= this.walkMark.size) { return }
+        // [R96] 标记数组 + epoch：O(1) 判定，零分配（旧实现是 CSV 线性扫描）。
+        if (this.walkMark[nodeId] == this.walkEpoch) { return }
+        this.walkMark[nodeId] = this.walkEpoch
+        if (this.walkMinId < 0 || nodeId < this.walkMinId) { this.walkMinId = nodeId }
+        if (nodeId > this.walkMaxId) { this.walkMaxId = nodeId }
+        val node: DagNode = dag.nodeOf(nodeId)
+        // [R96] 直接用 R95 已解析好的 `argIds`（旧实现每次 splitArgs 整串）。
+        val args: List<Int> = node.argIds
+        var j: Int = 0
+        while (j < args.size) {
+            val aid: Int = args[j]
+            if (aid >= 0) { this.walkExtraNodes(dag, aid) }
+            j = j + 1
+        }
+    }
+
+    private fun flushSlotGroup(fn: String): Unit {
+        this.funcNames.add(fn)
+        // P321: 帧预算 = ID 区间宽度（min..max 至少覆盖闭包内全部节点）。
+        var range: Int = 0
+        if (this.walkMaxId >= 0) {
+            range = this.walkMaxId - this.walkMinId + 1
+        }
+        this.funcIdRange.add(range)
     }
 
     /// 发射整个 MachineDag 为机器码（支持多函数：每个函数独立 prologue/epilogue）。
@@ -218,7 +358,21 @@ class X86Emitter {
                 this.funcOffsetsList.add(instrFunc + "|" + toStr(offset))
                 // 计算本函数用到的非易失寄存器并在 prologue 之前 push。
                 this.isMainFunc = (instrFunc == "main")
-                this.savedRegs = this.collectSavedRegs(dag, i, instrFunc)
+                // [R96] 删掉 `collectSavedRegs(dag, i, instrFunc)` 调用：
+                // 它的结果在下一条语句就被固定 7 寄存器串覆盖，属纯死代码——
+                // 却要按函数扫完本函数全部指令、并对每个操作数 `splitArgs`
+                //（自举 197K 指令 / 数千函数，全是白烧的分配）。
+                this.savedRegs = "" 
+                // ⚠️ 2026-10-06 P226 结构性修复：savedRegs **固定为全部 7 个**
+                // callee-saved 寄存器（rbx,rsi,rdi,r12,r13,r14,r15）。旧实现只
+                // push 实际用到的子集——而 emitParam 的栈参偏移（0x30 基址）
+                // 按固定序言尺寸校准，saved-reg 数量随 RA 着色**逐构建漂移**，
+                // 只要 ≠1 个 push，第 5+ 参数就整体错位 8×(P−1) 字节：
+                // 实测 decodeNumeric（2 个 push）的 constTags 读到 tagged(1)=3
+                // ⇒ constMnemonic→count(3)→read64(3) 必崩；这就是文档记载的
+                // 「崩点随构建漂移」与 0x5000016b 形态打包值两桩悬案的根源。
+                // 固定 7 push 后 rbp = 入口rsp−0x40，emitParam 基址 0x48 恒成立。
+                this.savedRegs = "rbx,rsi,rdi,r12,r13,r14,r15"
                 var sr: Int = 0
                 val srParts: List<String> = MachineDagUtils.splitArgs(this.savedRegs)
                 while (sr < srParts.size) {
@@ -232,34 +386,78 @@ class X86Emitter {
                 // 模块级帧（自举 `Main.aura` = 528 KB）套给每个函数，既会一步跨过
                 // 守卫页导致 `0xC0000005`，两层调用又会撑爆默认 1 MB 栈。
                 var frame: Int = this.frameSize
-                // 本函数 RA 溢出区的字节数（额外槽必须从它**下方**开始，否则重叠）。
-                var spillBase: Int = 32
+                // 本函数兜底槽区的基址（P321 固定 144：参数暂存区 [rbp-8..rbp-144)
+                // 不再与任何槽分配共享）。
+                var spillBase: Int = 144
+                var rangeCap: Int = 0
                 if (this.fnIdx < this.funcNames.size
                     && this.funcNames[this.fnIdx] == instrFunc) {
-                    val ms: Int = this.funcMaxSlots[this.fnIdx]
-                    if (ms >= 0) {
-                        var fsz: Int = 32 + (ms + 1) * 8
-                        if (fsz % 16 != 0) { fsz = fsz + (16 - fsz % 16) }
-                        frame = fsz
-                        // ⚠️ 额外槽（发射器给调用结果分配的槽）**必须**避开 RA 溢出区：
-                        // RA 的溢出槽是 `getSpillOffset = 32 + slot*8` → 落在 `[rbp-32]` 起
-                        // 向下的区间；而额外槽旧实现从 `-16` 起 ⇒ 与 RA 首槽 `-32` 重叠。
-                        spillBase = fsz
-                    } else {
-                        // 该函数没有溢出槽 → 不需要为溢出区留空间
-                        frame = 0x50
-                    }
+                    // P321 五区隔离帧布局（§10.41/§10.53/§10.61 立项）：
+                    //
+                    //   [rbp+0x48 ..]              入参（影子空间之上，emitParam 基址）
+                    //   [rbp-8 .. rbp-144)         区A 参数暂存区（id<0 固定槽 -8 等，
+                    //                              不做任何按值分配）
+                    //   [rbp-144 .. rbp-144-R*8)   区B 兜底槽区（R = funcIdRange，
+                    //                              slotForNode 顺序分配，数学封闭）
+                    //   [rbp-144-R*8-2048 ..)      区C 安全边际（栈参 0x20+24×8=0xC0
+                    //                              与未预见临时都在这里消化）
+                    //
+                    // 旧实现帧预算来自「扫描计数 + 256 盲区 + 布局实验调参」——扫描
+                    // 与发射两套遍历的集合/顺序一旦漂移，兜底槽写穿帧底被 call 踩掉
+                    // （= 布局敏感腐坏家族的根源，修一处他处现形不可收敛）。
+                    // ID 区间是发射期槽总数的**上界**（每节点至多一槽且按 id 记忆），
+                    // 从根上消除不匹配的可能。
+                    val range: Int = this.funcIdRange[this.fnIdx]
+                    rangeCap = range
+                    var fsz: Int = 144 + (range + 1) * 8
+                    if (fsz % 16 != 0) { fsz = fsz + (16 - fsz % 16) }
+                    frame = fsz
+                    spillBase = 144
                     this.fnIdx = this.fnIdx + 1
                 }
                 // 额外槽计数按函数清零，并把基址交给 `slotForNode`。
                 this.extraSlotCount = 0
                 this.curSpillBase = spillBase
+                this.curIdRange = rangeCap
+                // ⚠️ 2026-10-08 P1-3：诊断探针默认静默（`AURA_X86_TRACE=1` 打开）。
+                // 每函数打印一次，含编译器完整闭包时 ~1400 条，累积字符串分配
+                // 会让 `PhotonHatCompile.exe` 打到 8 GB 上限 OOM，进而「前端
+                // 无 COFF-RUNTIME 产出」。
+                if (Env.get("AURA_X86_TRACE", "") == "1") {
+                    println("[FSZ] " + toStr(this.canaryFuncIdx) + "|" + instrFunc
+                            + " range=" + toStr(rangeCap) + " frame=" + toStr(frame))
+                }
+                this.curEmitFuncName = instrFunc
                 if (srParts.size % 2 == 1) { frame = frame + 8 }
                 // ⚠️ 为发射器额外分配的调用结果槽留余量（见 `extraSlotCount`）。
-                // 余量取「上限 256 槽 × 8B = 2KB」：既覆盖一个函数里可能出现的
-                // 调用结果数量，又不至于让帧过大（配合逐页下探是安全的）。
+                // 余量旧值「256 槽 × 8B = 2KB」**不够**：大函数（loadModule/
+                // decodeNumeric）的兜底槽数远超 256，slotForNode 发到填充区
+                // 深处会**读/写 canary 哨兵槽**（实测 streq 把哨兵 0x5C6ED25C
+                // 当字符串扫 → 崩；2026-10-06）。曾提到 4096 槽 × 8B = 32KB。
+                // ⚠️ 2026-10-06 P223：**32KB 填充与 canary 插桩整体退役**——
+                // canary 诊断阶段（P0-2）已定位并修复其目标缺陷（Neg 丢弃、
+                // 列表布局分叉、toStr 负数），而机制本身实测有伪崩
+                //（const 池循环里 canary_report 访问 0x2，见 §10.31），
+                // 且 32KB/函数在深调用链上是巨额栈浪费。保留 2KB 兜底。
                 frame = frame + 2048
                 this.enc.emitPrologue(frame)
+                // P40x（AOT 语言测试轮）：独立 AOT 程序无 CRT——堆三变量
+                // heapArenaBase/heapCap/heapBump 全零，首个 strcat/toStr 即
+                // 堆崩（实测 26/26 语言测试全灭：拼接打出零页转储 +
+                // [OOM] HEAP FULL）。VM 宿主入口源码显式 `Heap.init()` 所以
+                // 从未暴露；用户程序没人调——main 序言后补一次 Heap_init
+                //（PhotonRuntime 侧已加幂等守卫，与宿主自身 init 共存安全）。
+                if (instrFunc == "main") {
+                    this.enc.emitCallRel("Heap_init")
+                    // [R83-DEBUG] VEH 崩溃转储：崩溃时向 stdout 打 32 字节
+                    // 诊断（crashBuf 含 Context.Rip），供定位段错误。
+                    this.enc.emitCallRel("veh_install")
+                }
+                this.canaryFrameSize = frame
+                this.canaryFuncIdx = this.canaryFuncIdx + 1
+                if (Env.get("AURA_X86_TRACE", "") == "1") {
+                    println("[FUNCLIST] " + toStr(this.canaryFuncIdx) + "|" + instrFunc)
+                }
                 currentFunc = instrFunc
                 needPrologue = false
                 // 函数级重定位探针：区分「发射时就没进表」与「进表后被
@@ -306,13 +504,31 @@ class X86Emitter {
     /// 获取函数偏移表（格式 "funcName|offset;;funcName|offset"）。
     fun getFuncOffsets(): String {
         if (this.funcOffsetsList.size == 0) { return "" }
-        var out: String = this.funcOffsetsList[0]
-        var i: Int = 1
+        val parts: List<String> = arrayListOf<String>()
+        var i: Int = 0
         while (i < this.funcOffsetsList.size) {
-            out = out + ";;" + this.funcOffsetsList[i]
+            if (i > 0) { parts.add(";;") }
+            parts.add(this.funcOffsetsList[i])
             i = i + 1
         }
-        return out
+        return this.joinPairwise(parts)
+    }
+
+    /// 获取「名字 → 段内偏移」表（格式 "funcName|offset"，`;` 分隔）。
+    ///
+    /// 与 [`getFuncOffsets`] 的区别：后者是 `;;` 分隔的函数**组**（COFF 写入器
+    /// 按组 rebase 用），本方法是扁平表——JIT 装载时（`JitRelocation`）要用它
+    /// 把 `R_X86_64_REL32` 重定位的符号名解析为段内偏移，再换算为绝对地址。
+    fun getFuncNameOffsets(): String {
+        if (this.funcOffsetsList.size == 0) { return "" }
+        val parts: List<String> = arrayListOf<String>()
+        var i: Int = 0
+        while (i < this.funcOffsetsList.size) {
+            if (i > 0) { parts.add(";") }
+            parts.add(this.funcOffsetsList[i])
+            i = i + 1
+        }
+        return this.joinPairwise(parts)
     }
 
     // ── 非易失寄存器保存/恢复 ──
@@ -361,6 +577,7 @@ class X86Emitter {
 
     /// 发射 epilogue：`leave` → 恢复非易失寄存器 → `ret`。
     private fun emitEpilogueWithRestore(): Unit {
+        this.emitCanaryChecks()
         this.enc.emitLeave()
         val parts: List<String> = MachineDagUtils.splitArgs(this.savedRegs)
         var i: Int = parts.size - 1
@@ -369,6 +586,22 @@ class X86Emitter {
             i = i - 1
         }
         this.enc.emitRet()
+    }
+
+    /// 发射本函数 epilogue 前的 canary 校验：三类检查**无条件**调用
+    /// `canary_report(kind, funcIdx, value)`，违例判定在 runtime 侧
+    ///（客户端免编码跳转链）。覆盖：
+    ///   kind1 = 帧尾哨兵（帧内越界写，含兜底槽溢出）
+    ///   kind2 = [rbp+8] 返回地址（no-ASLR 镜像范围）
+    ///   kind3 = 保存寄存器 vs 影子（**正偏移野写的直接信号**——文档记载的
+    ///           emitStackStore 正偏移会精确打中这一区）
+    /// ⚠️ `emitRet` 已把返回值放入 rax，紧随其后的本检查必须 push/pop rax
+    /// 保护；其余只用易失寄存器（rcx/rdx/r8），epilogue 在即无副作用。
+    private fun emitCanaryChecks(): Unit {
+        // ⚠️ 2026-10-06 P224：canary 诊断整体退役。使命（定位 Neg 丢弃 /
+        // 列表布局 / toStr 负数）已完成；实测机制自身有伪崩（const 池循环
+        // canary_report 访问 0x2，§10.31），且 32KB 帧填充是深调用链的
+        // 巨额栈浪费。诊断记录见文档 §10.18-§10.31。
     }
 
     // ── 单指令发射 ──
@@ -435,6 +668,14 @@ class X86Emitter {
             this.emitShlRR(instr, dag)
         } else if (template == "shr %dst, %src") {
             this.emitShrRR(instr, dag)
+        } else if (template == "addpd %dst, %src") {
+            this.emitFloatRR(nodes, dag, 0)
+        } else if (template == "subpd %dst, %src") {
+            this.emitFloatRR(nodes, dag, 1)
+        } else if (template == "mulpd %dst, %src") {
+            this.emitFloatRR(nodes, dag, 2)
+        } else if (template == "divpd %dst, %src") {
+            this.emitFloatRR(nodes, dag, 3)
         } else if (template == "label") {
             // 基本块标签：登记当前偏移，供 jmp / jcc 回填位移。
             if (nodes.size >= 1 && nodes[0] != "") {
@@ -506,6 +747,102 @@ class X86Emitter {
         this.emitAluBinary(nodes, dag, 2)
     }
 
+    // ── R57: 浮点运算发射（xmm 寄存器，VEX 前缀）──
+
+    /// 浮点二元指令发射（vaddpd / vsubpd / vmulpd / vdivpd）。
+    ///
+    /// op 0=vaddpd 1=vsubpd 2=vmulpd 3=vdivpd。
+    ///
+    /// 浮点值在 Windows x64 ABI 中通过 xmm0-xmm7 传递。
+    /// 寄存器分配器分配的物理寄存器名（如 "rbx"）被转换为对应的 xmm 寄存器
+    /// （"rbx" → "xmm3"，因为 REX.R 位与 REG 位一一对应）。
+    private fun emitFloatRR(nodes: List<String>, dag: MachineDag, op: Int): Unit {
+        if (nodes.size < 2) { return }
+        val dstNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(nodes[0]))
+        val srcNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(nodes[1]))
+        // 2026-10-16 重写：浮点值在本后端以 **f64 位型存于 GPR/栈槽**（与
+        // 整数同槽模型）。旧实现直接 addpd xmm0,xmm0——操作数从未装入
+        // XMM（RA 槽是 GPR/栈引用，regOfNode 兜底全落 xmm0）⇒ AddF/MulF
+        // 全链垃圾（实测 add(3,1.5)=3、pi*2=3.14、sqrt(16) 指针值）。
+        // 现在：GPR/栈槽 → movq → xmm，标量双精度运算，movq 回写。
+        val dstRaw: String = this.regOfNode(dstNode)
+        val srcRaw: String = this.regOfNode(srcNode)
+        // src 位型 → xmm1
+        if (this.isStackRef(srcRaw)) {
+            this.enc.emitStackLoad("r11", this.stackOffsetOf(srcRaw))
+            this.enc.emitMovqXmmFromGpr("xmm1", "r11")
+        } else if (srcRaw != "" && srcRaw != "rax") {
+            this.enc.emitMovqXmmFromGpr("xmm1", srcRaw)
+        } else {
+            this.enc.emitMovqXmmFromGpr("xmm1", "rax")
+        }
+        // dst 位型 → xmm0
+        if (this.isStackRef(dstRaw)) {
+            this.enc.emitStackLoad("r10", this.stackOffsetOf(dstRaw))
+            this.enc.emitMovqXmmFromGpr("xmm0", "r10")
+        } else if (dstRaw != "" && dstRaw != "rax") {
+            this.enc.emitMovqXmmFromGpr("xmm0", dstRaw)
+        } else {
+            this.enc.emitMovqXmmFromGpr("xmm0", "rax")
+        }
+        // 标量双精度运算（低 64 位有效）
+        if (op == 0) {
+            this.enc.emitAddsd("xmm0", "xmm1")
+        } else if (op == 1) {
+            this.enc.emitSubsd("xmm0", "xmm1")
+        } else if (op == 2) {
+            this.enc.emitMulsd("xmm0", "xmm1")
+        } else {
+            this.enc.emitDivsd("xmm0", "xmm1")
+        }
+        // 结果位型回写 dst
+        this.enc.emitMovqGprFromXmm("r11", "xmm0")
+        if (this.isStackRef(dstRaw)) {
+            this.enc.emitStackStore(this.stackOffsetOf(dstRaw), "r11")
+        } else if (dstRaw != "" && dstRaw != "rax") {
+            this.enc.emitMovRR(dstRaw, "r11")
+        } else {
+            this.enc.emitMovRR("rax", "r11")
+        }
+    }
+
+    /// 通用寄存器名 → xmm 寄存器名。
+    /// REX.R 位（reg[4]）决定 GPR 和 XMM 寄存器的一一对应：
+    ///   rax→xmm0, rcx→xmm1, rdx→xmm2, rbx→xmm3,
+    ///   rsp→xmm4, rbp→xmm5, rsi→xmm6, rdi→xmm7,
+    ///   r8→xmm8, r9→xmm9, r10→xmm10, r11→xmm11,
+    ///   r12→xmm12, r13→xmm13, r14→xmm14, r15→xmm15
+    private fun regToXmm(reg: String): String {
+        // 剥离尺寸后缀（d/w/b）
+        var base: String = reg
+        while (base.length > 0) {
+            val last: Int = base.charCodeAt(base.length - 1)
+            if (last == 100 || last == 119 || last == 98 || last == 99) {
+                base = base.substring(0, base.length - 1)
+            } else {
+                break
+            }
+        }
+        if (base == "rax") { return "xmm0" }
+        if (base == "rcx") { return "xmm1" }
+        if (base == "rdx") { return "xmm2" }
+        if (base == "rbx") { return "xmm3" }
+        if (base == "rsp") { return "xmm4" }
+        if (base == "rbp") { return "xmm5" }
+        if (base == "rsi") { return "xmm6" }
+        if (base == "rdi") { return "xmm7" }
+        // r8-r15 对应 xmm8-xmm15
+        if (base == "r8")  { return "xmm8" }
+        if (base == "r9")  { return "xmm9" }
+        if (base == "r10") { return "xmm10" }
+        if (base == "r11") { return "xmm11" }
+        if (base == "r12") { return "xmm12" }
+        if (base == "r13") { return "xmm13" }
+        if (base == "r14") { return "xmm14" }
+        if (base == "r15") { return "xmm15" }
+        return "xmm0"
+    }
+
     // ── MOV 指令发射 ──
 
     private fun emitMovImm(nodes: List<String>, dag: MachineDag): Unit {
@@ -513,7 +850,38 @@ class X86Emitter {
             val nodeId: Int = MachineDagUtils.strToInt(nodes[0])
             val node: DagNode = dag.nodeOf(nodeId)
             val dstRaw: String = this.regOfNode(node)
-            val imm: Int = MachineDagUtils.strToInt(node.aux)
+            val aux: String = node.aux
+            // R65：`Long` 字面量（aux 带 `L`/`l` 后缀）或数值超出 int32
+            // 范围的十进制字面量（如 `4294967296`）必须走 64 位立即数路径。
+            // 旧实现无条件 `strToInt`（32 位累加）+ `emitMovRI`（imm32），
+            // 把 `4294967296` 截成 `0`，下游 `hex8` 等 Long 除/模链产出垃圾
+            //（实测 p16：`hex8(100)` 打 20 位十六进制）。
+            // 关键点：Aura 源里 `4294967296` 无后缀，Lexer 只有 IntLiteral
+            // 一种 kind，Hir 侧仍落成 HirLit + Int，HAT 侧也是 `@i32_const
+            // 4294967296 : Int`。X86Emitter 只能靠 aux 文本兜底。
+            var isLong: Boolean = false
+            if (aux.length > 0) {
+                val lastCh: Int = aux.charCodeAt(aux.length - 1)
+                if (lastCh == 76 || lastCh == 108) {  // 'L' 或 'l'
+                    isLong = true
+                }
+            }
+            if (!isLong) {
+                isLong = this.isDecimalOutRangeInt32(aux)
+            }
+            if (isLong) {
+                // 剥 `L`/`l` 后缀（若是 `4294967296L`）。
+                var numStr: String = aux
+                if (numStr.length > 0) {
+                    val lc2: Int = numStr.charCodeAt(numStr.length - 1)
+                    if (lc2 == 76 || lc2 == 108) {
+                        numStr = numStr.substring(0, numStr.length - 1)
+                    }
+                }
+                this.emitLargeImmediate(dstRaw, numStr)
+                return
+            }
+            val imm: Int = MachineDagUtils.strToInt(aux)
             // ⚠️ `dst` 可能是栈引用（`stack:-N`）。直接喂给 `emitMovRI` 会被
             // `regNum` 解析成 0（= rax）⇒ 生成 `mov $imm, %rax`，**永不落槽** ✗。
             // 实测自举 `Main.exe` 的 `cliEnvArgCount`：`var n: Int = 0` /
@@ -522,11 +890,125 @@ class X86Emitter {
             // `s.charCodeAt(垃圾)` 越界 ⇒ `0xC0000005`（实测崩在 `CEA-2` 之后）。
             if (this.isStackRef(dstRaw)) {
                 this.enc.emitMovRI("r10", imm)
-                this.enc.emitStackStore(this.stackOffsetOf(dstRaw), "r10")
+                // P413：走 storeDstReg 以记录 peephole 状态（见 emitSetcc 同款说明）
+                this.storeDstReg(dstRaw, "r10")
             } else {
                 this.enc.emitMovRI(dstRaw, imm)
             }
         }
+    }
+
+    /// 十进制字符串是否超出 int32 有符号范围。
+    ///
+    /// R65：`4294967296` 无后缀字面量在 Lexer/Hir 里仍是 Int 类型，
+    /// 但值超 int32 上限，AOT 侧 strToInt 会 32 位截断成 0。判定按字符串。
+    private fun isDecimalOutRangeInt32(text: String): Boolean {
+        if (text.length == 0) { return false }
+        var s: String = text
+        val lc: Int = s.charCodeAt(s.length - 1)
+        if (lc == 76 || lc == 108) {
+            s = s.substring(0, s.length - 1)
+        }
+        if (s.length == 0) { return false }
+        var i: Int = 0
+        var neg: Boolean = false
+        if (s.charCodeAt(0) == 45) {  // '-'
+            neg = true
+            i = 1
+        } else if (s.charCodeAt(0) == 43) {  // '+'
+            i = 1
+        }
+        val start: Int = i
+        val sLen: Int = s.length
+        while (i < sLen) {
+            val c: Int = s.charCodeAt(i)
+            if (c < 48 || c > 57) { return false }
+            i = i + 1
+        }
+        if (start == s.length) { return false }  // 只有符号无数字
+        val len: Int = i - start
+        if (len > 10) { return true }
+        if (len < 10) { return false }
+        val maxStr: String = "2147483648"
+        var j: Int = 0
+        while (j < 10) {
+            val sc: Int = s.charCodeAt(start + j) - 48
+            val mc: Int = maxStr.charCodeAt(j) - 48
+            if (sc != mc) {
+                return sc > mc
+            }
+            j = j + 1
+        }
+        // 恰好 |v| == 2147483648：pos 时超，neg 时不超
+        return !neg
+    }
+
+    /// 十进制字符串 → (lo32, hi32) 两段（有符号 64 位值）。
+    ///
+    /// R65：`total = total * 10 + digit` 在 AOT 侧会被 32 位常量折叠截断
+    /// （`4294967296` 打 0），所以改成 (hi, lo) 双段累加：每步 lo*10 + d，
+    /// 若 lo 溢出 int32 就把进位加到 hi。lo 始终 < 2^32。
+    /// `hi * 10` 和 `lo * 10` 都是变量运算（i 变化时 hi/lo 变化），
+    /// 编译期不会折叠。
+    /// 十进制字符串 → 目标寄存器（64 位有符号值）。
+    ///
+    /// R65c：Aura 编译期常量折叠是 32 位，字面量 `4294967296` 会被折叠成 0。
+    /// 用 `IMUL r64, imm32` + `ADD r64, imm32` 链逐位累加，每步都是 64 位
+    /// REX.W 运算（Aura Int 运行时 64 位），避免任何 2^32 字面量。
+    ///
+    /// 算法：value = 0; for each digit d: value = value * 10 + d。
+    /// 每步 emitImulRI(dst, 10) + emitAddRI(dst, d)。
+    private fun emitLargeImmediate(dstRaw: String, numStr: String): Unit {
+        // 剥负号
+        var neg: Boolean = false
+        var s: String = numStr
+        if (s.length > 0 && s.charCodeAt(0) == 45) {
+            neg = true
+            s = s.substring(1, s.length)
+        } else if (s.length > 0 && s.charCodeAt(0) == 43) {
+            s = s.substring(1, s.length)
+        }
+        // 目标寄存器：栈引用走 r10
+        var dstReg: String = dstRaw
+        if (this.isStackRef(dstRaw)) {
+            dstReg = "r10"
+        }
+        // 初始化为 0
+        this.enc.emitMovRI(dstReg, 0)
+        // R61:emitImulRR(dst, src) 编码 = Intel `imul dst, src`（Reg=dst，R/M=src）。
+        // 每轮：dstReg = dstReg * 10 + d。r11 作为 scratch 承载系数 10。
+        var ci: Int = 0
+        val sLen2: Int = s.length
+        while (ci < sLen2) {
+            val dc: Int = s.charCodeAt(ci)
+            if (dc >= 48 && dc <= 57) {
+                val d: Int = dc - 48
+                this.enc.emitMovRI("r11", 10)
+                this.enc.emitImulRR(dstReg, "r11")
+                this.enc.emitAddRI(dstReg, d)
+            }
+            ci = ci + 1
+        }
+        // 处理负号：neg r64
+        if (neg) {
+            this.enc.emitNegRR(dstReg)
+        }
+        // 存回栈槽
+        if (this.isStackRef(dstRaw)) {
+            this.storeDstReg(dstRaw, "r10")
+        }
+    }
+
+    /// 无符号 32 位比较：a < b。
+    ///
+    /// R65：不能用 `xor`（AOT 路径下 `3 xor 1 = 3`，xor 完全 no-op）。
+    private fun u32Less(a: Int, b: Int): Boolean {
+        if (a < 0) {
+            if (b >= 0) { return false }
+            return a > b
+        }
+        if (b < 0) { return true }
+        return a < b
     }
 
     private fun emitMovRR(instr: DagInstruction, dag: MachineDag): Unit {
@@ -543,9 +1025,11 @@ class X86Emitter {
                 val src: String = this.resolveToReg(srcRaw, "r10")
                 // 目的操作数可能是栈槽（同 `emitMovImm`）：必须真的写槽，
                 // 否则 `emitMovRR("stack:-N", src)` 会被解析成 `mov src, %rax`。
+                // P413：栈槽分支走 `storeDstReg` 以记录 peephole 状态。
                 if (this.isStackRef(dst)) {
-                    this.enc.emitStackStore(this.stackOffsetOf(dst), src)
+                    this.storeDstReg(dst, src)
                 } else {
+                    this.lastStLen = -1
                     this.enc.emitMovRR(dst, src)
                 }
             }
@@ -573,16 +1057,60 @@ class X86Emitter {
     /// `and`/`or` / `ret`），这两个函数用于收尾其余全部同类项。
     private fun loadDstReg(dstRaw: String, tmpReg: String): String {
         if (this.isStackRef(dstRaw)) {
-            this.enc.emitStackLoad(tmpReg, this.stackOffsetOf(dstRaw))
+            val off: Int = this.stackOffsetOf(dstRaw)
+            // ── P413 peephole：紧邻的 store→load 同槽同寄存器是纯 no-op ──
+            //
+            // 形态（反汇编实证，见 docs/photon/photon-vm-cost-analysis-p412.md）：
+            //   mov  [rbp+X], r10      ; 上一条指令把结果落槽（storeDstReg）
+            //   mov  r10,   [rbp+X]    ; 本条又要读回同一槽到同一寄存器
+            // 两条合起来对 r10 与内存都无净效果 ⇒ 可整对删除。
+            //
+            // 「紧邻」的判定用**四重计数快照**（字节数 / 重定位数 / 标签数 /
+            // 待回填跳转数），任一变化即视为不紧邻 ⇒ 不优化。这样即使中间发生了
+            // 不发射字节的登记动作（emitLabel 只记偏移不写字节），也不会误删。
+            if (this.lastStLen == this.enc.byteLen()
+                    && this.lastStRels == this.enc.relocCount()
+                    && this.lastStLabels == this.enc.labelCount()
+                    && this.lastStJumps == this.enc.pendingJumpCount()
+                    && this.lastStOff == off
+                    && this.lastStReg == tmpReg) {
+                this.enc.rollback(7)   // emitStackStore 定长 7 字节
+                this.lastStLen = -1
+                return tmpReg           // 寄存器里已是该值
+            }
+            // 附注（P413 实测负结果）：曾扩展为「异寄存器时改用 `mov rB, rA`
+            // 代替内存读回」。**只触发 19 次、7 轮交替 A/B 仅 0.09%（噪声内）**
+            // ——因为剩余 622 对异寄存器读数**不经本函数**（主要来自
+            // `emitCall` 直接用 `enc.emitStackStore(..., "rax")` 落槽，
+            // 未登记本 peephole 的状态快照）。已回退，避免死代码。
+            this.lastStLen = -1
+            this.enc.emitStackLoad(tmpReg, off)
             return tmpReg
         }
+        this.lastStLen = -1
         return dstRaw
     }
 
     /// 把寄存器 `srcReg` 写入目的操作数（可能是栈槽 `stack:-N`）。
     private fun storeDstReg(dstRaw: String, srcReg: String): Unit {
+        // P414 修补：**先失效快照**，仅在真正落槽后重建。
+        // 旧写法只在「落槽」与「dst != src 的寄存器 mov」两条路径上更新快照，
+        // `dstRaw == srcReg`（两侧同名寄存器）路径**既不发射也不失效** ⇒
+        // 上一次落槽的快照残留。此时四重计数未变，紧随的 `loadDstReg` 会
+        // 误判「紧邻」而删掉一条必需的 load。着色启用后寄存器操作数变多，
+        // 该路径触发概率显著上升（P270 下几乎所有目的都是栈槽，故从未暴露）。
+        this.lastStLen = -1
         if (this.isStackRef(dstRaw)) {
-            this.enc.emitStackStore(this.stackOffsetOf(dstRaw), srcReg)
+            val off: Int = this.stackOffsetOf(dstRaw)
+            this.enc.emitStackStore(off, srcReg)
+            // P413：记录本次落槽的「四重快照 + 槽 + 寄存器」，供紧随其后的
+            // `loadDstReg` 判定是否构成可消除的纯冗余对。
+            this.lastStOff = off
+            this.lastStReg = srcReg
+            this.lastStLen = this.enc.byteLen()
+            this.lastStRels = this.enc.relocCount()
+            this.lastStLabels = this.enc.labelCount()
+            this.lastStJumps = this.enc.pendingJumpCount()
         } else if (dstRaw != srcReg) {
             this.enc.emitMovRR(dstRaw, srcReg)
         }
@@ -606,6 +1134,13 @@ class X86Emitter {
 
     private fun emitMovStore(instr: DagInstruction, dag: MachineDag): Unit {
         val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+        // ⚠️ mem 操作数为空 ⇒ 没有真实目标地址。旧实现经
+        // parseStackOffset("") 落到 -8 —— 把值写进**共享兜底槽**，踩掉恰好
+        // 住在该槽的活值（随布局漂移的写入踩踏源之一，2026-10-06）。没有
+        // 地址的 Store 语义上无从落地，直接不发射。
+        if (instr.mem == "") {
+            return
+        }
         if (nodes.size >= 1) {
             val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
             val srcNode: DagNode = dag.nodeOf(srcNodeId)
@@ -689,7 +1224,11 @@ class X86Emitter {
             if (this.isStackRef(dstRaw)) {
                 this.enc.emitSetcc("r10", instr.cond)
                 this.enc.emitMovzxRegReg8("r10", "r10")
-                this.enc.emitStackStore(this.stackOffsetOf(dstRaw), "r10")
+                // P413：走 `storeDstReg` 而非直接 emitStackStore——后者绕过
+                // peephole 状态记录，导致紧随其后的 `resolveToReg` 读回
+                // 无法识别「同槽同寄存器」的纯冗余对（实测 961 对里的
+                // 主体就是 `emitSetcc` 落槽 + `emitCmpImm` 读回）。
+                this.storeDstReg(dstRaw, "r10")
             } else {
                 this.enc.emitSetcc(dstRaw, instr.cond)
                 this.enc.emitMovzxRegReg8(dstRaw, dstRaw)
@@ -705,7 +1244,8 @@ class X86Emitter {
             // 诊断：`call %func` 模板里 `nodes[0]` 若非数字，`strToInt` 返回 -1 ⇒
             // 所有调用结果都退到共用兜底槽 `-8`（实测反汇编：每条 call 后都是
             // `movq %rax, -0x8(%rbp)`）。有界打印，定位调用结果的节点号到底长什么样。
-            if (nodeId < 0 && this.slotDiagCount < 40) {
+            // ⚠️ 2026-10-08 P1-3：默认静默（`AURA_X86_TRACE=1` 打开）。
+            if (Env.get("AURA_X86_TRACE", "") == "1" && nodeId < 0 && this.slotDiagCount < 40) {
                 this.slotDiagCount = this.slotDiagCount + 1
                 var s: String = ""
                 var j: Int = 0
@@ -719,70 +1259,88 @@ class X86Emitter {
             val funcName: String = node.aux
             // 先按 Win64 约定装载实参寄存器，再发 CALL。
             this.emitCallArgs(node, dag)
-            if (funcName != "" && funcName != "@imm") {
+            // P345（2026-10-06）：__field_get/__field_set **内联**——字段访问
+            // 走调用时，实参/结果槽在调用窗口内被相邻值覆写（布局敏感），
+            // 实测 VmStack 的 sp/d 字段读坏 → push 全落 d[0]、LOAD_LOCAL 空。
+            // 指令序列与 PhotonRuntime.emitFieldGet/Set 逐条一致。
+            if (funcName == "__field_get") {
+                // P362：去掉 null 守卫分支——`this` 恒非 null，纯 mov 无标签。
+                // 旧三段式（jcc/jmp/label）的 jmp 位移若解析失败会落入 null
+                // 分支 → 每次字段写 rax=0（实测 push 的 sp 归零 → pop-lag）。
+                this.enc.emitLoadIndexed8("rax", "rcx", "rdx", 16)
+            } else if (funcName == "__field_set") {
+                this.enc.emitStoreIndexed8("rcx", "rdx", 16, "r8")
+                this.enc.emitMovRR("rax", "rcx")
+            } else if (funcName == "Memory_read") {
+                // P357：movzx eax, byte [rcx]——readByte 是全二进制最热调用
+                // （每个字符/字节读取一层调用窗），布局敏感腐坏的头号源。
+                // 指令序列与 PhotonRuntime.emitMemoryRead 一致。
+                this.enc.emitMovzxRegMemByte("eax", "rcx")
+            } else if (funcName == "Memory_write") {
+                this.enc.emitMovByteMemReg("rcx", "rdx")
+                this.enc.emitXorRR("eax", "eax")
+            } else if (funcName == "Memory_read64" || funcName == "Memory_read32" || funcName == "Memory_read16") {
+                // P400：mov rax,[rcx]——read64/32/16 的 runtime 函数体本就
+                // 是这条 64 位 mov（read16/32 的高位语义由调用者处理），发射期
+                // 直接内联消掉 call + 被调序言/结语（8 条 → 1 条）。指令序列
+                // 与 PhotonRuntime.emitMemoryRead64 逐字节一致（48 8B 01）。
+                this.enc.writeByte(0x48); this.enc.writeByte(0x8B); this.enc.writeByte(0x01)
+            } else if (funcName == "Memory_write64" || funcName == "Memory_write32" || funcName == "Memory_write16") {
+                // P400：mov [rcx],rdx——write16/32/64 的 runtime 函数体都是
+                // 全 64 位 store，同款内联。无返回值语义不变（rax 不定，
+                // 落槽行为与真实调用一致——被调同样不写 rax）。
+                this.enc.emitStoreMemDisp32("rcx", 0, "rdx")
+            } else if (funcName == "__is_tagged_int") {
+                // P363：rax = rcx & 1——Plan A 装箱判定。调用窗误判（偶数
+                // 字符串指针被判 tagged）→ toStrAny 走拆箱分支打印指针十进制。
+                this.enc.emitMovRR("rax", "rcx")
+                this.enc.emitAndRI("rax", 1)
+            } else if (funcName == "charCodeAt") {
+                // P383：movzx eax, byte [rcx+rdx]——vmSubstr/字符串解析的
+                // 逐字符读取是第二热调用窗（每字符一层），与 Memory.read
+                // 同款内联。指令序列与 PhotonRuntime.emitCharCodeAt 一致。
+                this.enc.emitMovzxRegMemIndexed("eax", "rcx", "rdx")
+            } else if (funcName == "Env_probe1") {
+                // [P5-②] 2026-10-15：内联 1 参 env 探针——序列与
+                // PhotonRuntime.emitEnvProbe1 一致，但 IAT 调用就地发出
+                // （__imp_GetEnvironmentVariableA 由 kernel32.Lib 解析，
+                // 与 runtime obj 同机制）。envBuffer 引 runtime obj 的
+                // .data 符号（跨 obj 链接解析）。
+                // 背景：探针实参（.rdata 常量指针）在调用窗被腐坏成
+                // 立即数垃圾（gdb 实测 rcx=-203 直达 strlen）→
+                // GetEnvironmentVariableA 内部 strlen 越界。内联省掉
+                // 一层 call 窗；rcx=name 就地消费。
+                this.enc.emitLeaRIP("rdx", "envBuffer")
+                this.enc.emitMovRI32("r8d", 4096)
+                this.enc.emitXorRR("r9", "r9")
+                this.enc.emitCallImport("GetEnvironmentVariableA")
+                this.enc.emitTestRR("rax", "rax")
+                this.enc.emitSetcc("eax", "ne")
+                // 零扩展：GetEnvVarA 返回值是长度（可 ≥256），setcc 只写 al
+                this.enc.emitMovzxRegReg8("rax", "rax")
+            } else if (funcName != "" && funcName != "@imm") {
                 this.enc.emitCallRel(funcName)
             }
+            // P1（Phase 2.2）：记录 call 点 stack map。pcOffset = call 指令
+            // 结束偏移（返回地址落点）；保守根集合 = 本函数全部溢出槽
+            // （RA 溢出槽 curSpillBase/8 + 发射器兜底槽 extraSlotCount）。
+            // ⚠️ 字符串追加（类字段对象在种子下为 null，见字段说明）。
+            val smSeg: String = this.curEmitFuncName + "|" + toStr(this.enc.byteCount())
+                    + "|" + toStr(this.curSpillBase / 8 + this.extraSlotCount)
+                    + "|" + toStr(this.curSpillBase) + "|" + funcName
+            this.stackMapRecList.add(smSeg)
+
             // ── 返回值落地（Win64：返回值固定放在 rax）──
             //
-            // 调用结果必须显式搬到该节点被分配的寄存器/溢出槽，否则后续
-            // 使用者按 `node.reg` 取到的仍是**旧值**（实测 `"x = " + toStr(x)`
-            // 里 strcat 的第二个实参读成第一个实参的寄存器；println 拿不到实参）。
-            val dst: String = this.regOfNode(node)
-            // 诊断：打印调用结果的落点决策（有界）。
-            if (this.slotDiagCount < 24) {
-                this.slotDiagCount = this.slotDiagCount + 1
-                println("[CALLDST] aux=" + funcName + " nodeId=" + toStr(nodeId)
-                        + " node.id=" + toStr(node.id) + " reg=[" + node.reg + "] dst=[" + dst + "]"
-                        + " nodeSlot=" + toStr(this.nodeSlot(node.id))
-                        + " base=" + toStr(this.curSpillBase)
-                        + " n=" + toStr(this.extraSlotCount))
-            }
-            // 返回值落地：无论 dst 是什么，都必须把 rax 搬到目标位置。
-            // 若节点被 spill 到栈槽，直接存栈；否则 mov 到目标寄存器。
-            // 若 dst == "rax"（默认 fallback），也必须存栈，否则后续 call 会覆写 rax。
-            if (dst.startsWith("stack:")) {
-                // ⚠️ 与读侧同一道归一化：偏移 0 是**非法**槽位 —— `[rbp+0]` 正是
-                // `push rbp` 保存下来的 rbp 本身，写坏它 `leave`/`ret` 必崩。
-                // 解析不出/为 0 时按**本调用节点**各自分配（见 `slotForNode`）。
-                // ⚠️ **不再**把偏移 0 改写成 `-8`（见 `regOfNode` 的说明）：
-                // 那会让所有调用结果共用 `-8`。正常路径 dst 已是本节点专有槽。
-                val dstOff: Int = this.stackOffsetOf(dst)
-                this.cdMark("st-call-stack", dstOff)
-                this.enc.emitStackStore(dstOff, "rax")
-            } else if (dst != "" && dst != "rax") {
-                this.enc.emitMovRR(dst, "rax")
-            } else {
-                // dst == "rax" 或 dst == "" - 必须保存到栈槽
-                // ⚠️ 偏移必须是**负值**：`emitStackStore` 编码的是 `[rbp + offset]`，
-                // 而帧空间在 rbp **下方**（prologue = `push rbp; mov rbp,rsp; sub rsp,N`）。
-                //   旧代码：注释写「默认栈槽 (rbp-8)」，实际传的是 `8` ⇒ 落到
-                //   `[rbp+8]`，而 `[rbp+8]` 正是**返回地址槽**；`getSpillOffset`
-                //   返回的也是「自 rbp 向下的距离」正值，同样被直接当偏移用。
-                //   后果：**每次调用都把返还值写进返回地址槽** ⇒ 函数一被调用就崩。
-                //   实测自举 `Main.exe`：`BOOT-1 → BOOT-1a → CEA-1 → CEA-2 → 0xC0000005`
-                //（崩在 `Env.get` 返回之后的 `streq(s, "")`；反汇编可见每条 call 后都是
-                // `movq %rax, 0x8(%rbp)`）。
-                // ⚠️ 必须同时校验 `getSpillOffset != 0`：RA 会出现「`isSpilled` 为真
-                // 但偏移为 0」的不一致状态，此时直接取负会写出 `[rbp+0]`
-                //（= **保存的 rbp 本身**）而不是帧槽 —— 实测正是如此：
-                // `movq %rax, (%rbp)`，随后读回也是 0，`streq` 对垃圾指针比较而崩。
-                // 偏移为 0 时退回与读侧一致的确定性兜底槽 `-8`。
-                // ⚠️ 每个节点**各自**一个槽（`slotForNode` 首次分配、按 nodeId 记忆）。
-                //
-                // 绝不能让所有调用结果共用同一个槽：实测自举 `Main.exe` 里
-                // `Env.get` 的结果先写入，随即被 `streq` 的返回值 `1` 覆写 ⇒
-                // 后面读回的 `s` 变成 `1` ⇒ `strlen(1)` → `0xC0000005`。
-                //
-                // ⚠️ **绝不可**在此处再登记 `setNodeSlot(nodeId, spillOffset)`：
-                // 旧实现正是在这里把 `slotForNode` 刚分配的槽（如 `-16`）**覆盖**成
-                // 兜底的 `-8`（未 spill 时 `spillOffset` 恒为 -8）⇒ 写侧落 `-16`、
-                // 读侧（`regOfNodeRaw` 按 `nodeSlot` 取）落 `-8` ⇒ **两端不一致且
-                // 所有调用结果共用 `-8`**。实测崩溃序列：`Env.get` 结果写 `-16`，
-                // `streq` 的返回值写 `-8`，读回 `-8` 得 `1`，`strlen(1)` → 崩。
-                val storeOff: Int = this.slotForNode(nodeId)
-                this.cdMark("st-call-else", storeOff)
-                this.enc.emitStackStore(storeOff, "rax")
-            }
+            // [根修轮R2 S1-ii] call 结果**一律立即落本节点专属栈槽**
+            //（slotForNode 首次分配、按 nodeId 记忆；phi 别名链在函数内
+            // 解析）。旧实现 dst 为着色寄存器时发 `mov reg, rax`——寄存器
+            // 落点与读侧槽回退路径构成 P266 双家漂移；Call 节点现于
+            // regOfNodeRaw 同步跳过着色/溢出，读写两端同槽即一致。
+            // 调用点 stack map 记录保持不变（见下）。
+            val storeOff: Int = this.slotForNode(nodeId)
+            this.cdMark("st-call-slot", storeOff)
+            this.enc.emitStackStore(storeOff, "rax")
         }
     }
 
@@ -799,50 +1357,78 @@ class X86Emitter {
             println("    [X86] emitCallArgs callNode.args=" + callNode.args + " aux=" + callNode.aux)
         }
         val argParts: List<String> = MachineDagUtils.splitArgs(callNode.args)
-        val argRegs: List<String> = listOf("rcx", "rdx", "r8", "r9")
-        // **逆序装载**：若后面的实参来源寄存器恰好是前面某个实参的目标寄存器
-        // （典型：`strcat(toStr(x), y)` 中 toStr 的返回值被分配到 rcx），
-        // 正序装载会先覆写 rcx 再读它 → 两个实参变成同一个值。
-        var i: Int = argParts.size - 1
-        if (i > argRegs.size - 1) { i = argRegs.size - 1 }
-        while (i >= 0) {
-            val srcNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[i]))
-
-            // ── 整数常量：直接 emit mov argReg, imm（避免 rax clobber）──
-            if (srcNode.kind == "Const" && !srcNode.aux.startsWith("@str.")) {
-                val imm: Int = MachineDagUtils.strToInt(srcNode.aux)
-                this.enc.emitMovRI(argRegs[i], imm)
-                i = i - 1
+        // ── 第 5+ 参：栈传递（Win64：arg5+i 在 [rsp+0x20+i*8]，call 前写）──
+        //
+        // 必须先写栈参、后装寄存器参：栈参的值可能暂存在后续寄存器参装载会
+        // 覆写的寄存器里。上限 24 个栈参（0x20+24*8=0xC0，远离帧尾 canary 区）。
+        var si: Int = 4
+        while (si < argParts.size && si < 28) {
+            val sNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[si]))
+            val sDisp: Int = 0x20 + (si - 4) * 8
+            if (sNode.kind == "Const" && !sNode.aux.startsWith("@str.")) {
+                if (this.isDecimalOutRangeInt32(sNode.aux)) {
+                    this.emitLargeImmediate("r11", sNode.aux)
+                } else {
+                    this.enc.emitMovRI("r11", MachineDagUtils.strToInt(sNode.aux))
+                }
+                this.enc.emitStoreMemDisp32("rsp", sDisp, "r11")
+                si = si + 1
                 continue
             }
-
-            // ── 字符串常量：直接 `lea argReg, @str.N`（重物化，不读颜色寄存器）──
-            //
-            // 与上面的整数常量同理，且**更必要**：串常量的物化指令
-            //（`lea %color, @str.N`）与其它常量共用同一批可着色寄存器，两个常量
-            // 连着发射时后者会覆写前者 —— 实测 `02_simple_vars` 的机器码：
-            //     movq $0x1, %rbx        ; 常量 A → rbx
-            //     leaq @str.2, %rbx      ; 常量 B → rbx   ← A 被覆写
-            //     leaq @str.3, %rsi
-            //     movq %rsi, %rdx ; movq %rbx, %rcx ; callq strcat
-            // 只要被覆写者此刻仍在使用点，两个实参就读成同一个值：
-            // `"z = " + toStr(true)` 输出 `truetrue`（strcat 收到 "true","true"）。
-            // 直接在参数寄存器里物化，就彻底不依赖「常量一直待在它的颜色寄存器里」
-            // 这个分配器无法保证的前提；顺带少占一个非易失寄存器。
-            if (srcNode.kind == "Const" && srcNode.aux.startsWith("@str.")) {
-                this.enc.emitLeaRIP(argRegs[i], srcNode.aux)
-                i = i - 1
+            if (sNode.kind == "Const" && sNode.aux.startsWith("@str.")) {
+                this.enc.emitLeaRIP("r11", sNode.aux)
+                this.enc.emitStoreMemDisp32("rsp", sDisp, "r11")
+                si = si + 1
                 continue
             }
-
-            // ── 普通寄存器值：从节点寄存器搬到参数寄存器 ──
-            val srcReg: String = this.regOfNode(srcNode)
-            // 栈引用先装回临时寄存器（r10），再搬进参数寄存器
-            val realReg: String = this.resolveToReg(srcReg, "r10")
-            if (realReg != "" && realReg != argRegs[i]) {
-                this.enc.emitMovRR(argRegs[i], realReg)
+            val sReg: String = this.regOfNode(sNode)
+            val sReal: String = this.resolveToReg(sReg, "r11")
+            this.enc.emitStoreMemDisp32("rsp", sDisp, sReal)
+            si = si + 1
+        }
+        // ── [R172 根修] 寄存器参装载 = 先落槽、后定序，构造上无踩踏 ──
+        //
+        // 旧 v5 调度器在寄存器着色/别名下会踩踏（布局敏感腐坏家族 P5-① 的根）：
+        // 当某实参源是栈引用（被标成 r10）时，另实参经 resolveToReg(.,"r10")
+        // 解析会改写 r10，而调度器就绪判定不追踪 r10/r11，源值被覆盖 → 随
+        // 源码布局漂移。
+        //
+        // 新方案：4 个寄存器参先各自落到**独立**暂存槽（区A 空闲区
+        // [rbp-16..rbp-40]，永不与其他值槽冲突），全程只用 r11 作暂存；
+        // 等全部落槽后，再按固定次序 rcx/rdx/r8/r9 从槽读回。读前绝不碰这
+        // 四个目标寄存器 ⇒ 任何着色/别名/环都不再能造成踩踏。语义与正确
+        // Win64 调用约定逐位等价。
+        val targRegs: List<String> = listOf("rcx", "rdx", "r8", "r9")
+        val stageSlots: List<Int> = listOf(-16, -24, -32, -40)
+        var ai: Int = 0
+        while (ai < 4 && ai < argParts.size) {
+            val aNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[ai]))
+            val stg: Int = stageSlots[ai]
+            if (aNode.kind == "Const" || aNode.kind == "ConstImm") {
+                if (aNode.aux.startsWith("@str.")) {
+                    this.enc.emitLeaRIP("r11", aNode.aux)
+                    this.enc.emitStackStore(stg, "r11")
+                } else if (this.isDecimalOutRangeInt32(aNode.aux)) {
+                    this.emitLargeImmediate("r11", aNode.aux)
+                    this.enc.emitStackStore(stg, "r11")
+                } else {
+                    this.enc.emitMovRI("r11", MachineDagUtils.strToInt(aNode.aux))
+                    this.enc.emitStackStore(stg, "r11")
+                }
+            } else {
+                val aReg: String = this.regOfNode(aNode)
+                val aReal: String = this.resolveToReg(aReg, "r11")
+                if (aReal != "") {
+                    this.enc.emitStackStore(stg, aReal)
+                }
             }
-            i = i - 1
+            ai = ai + 1
+        }
+        // 定序装载：固定次序，rcx..r9 先读后写，绝无踩踏。
+        var li: Int = 0
+        while (li < 4 && li < argParts.size) {
+            this.enc.emitStackLoad(targRegs[li], stageSlots[li])
+            li = li + 1
         }
     }
 
@@ -873,6 +1459,7 @@ class X86Emitter {
         // P2：无 CRT 时，main 必须显式调用 exit（NtTerminateProcess syscall）。
         // 否则 `ret` 会返回到未定义的地址（OS 未推送返回地址）。
         if (this.isMainFunc) {
+            this.emitCanaryChecks()           // main 走 exit 不 ret，帧检查补上
             this.enc.emitMovRR("rcx", "rax")  // exit code = rax
             this.enc.emitCallRel("exit")      // 调用 runtime 的 exit 函数（不返回）
         } else {
@@ -942,6 +1529,49 @@ class X86Emitter {
     /// 在函数 prologue 处设置（见 `emitFunction`）。
     private var curSpillBase: Int = 32
 
+    /// 当前函数的兜底槽预算（P321 = ID 区间宽度）。`slotForNode` 分配新槽时
+    /// 超过它 = 发射触达了扫描闭包之外的节点（数学界被破坏），立即打印诊断。
+    private var curIdRange: Int = 0
+
+    /// P372：phi 槽别名表（定义 DAG 节点 → phi DAG 节点）。slotForNode
+    /// 解析链后，phi 入边值的定义写与 phi 读落同一栈槽（槽合并）——
+    /// phi MOV 退化为自拷贝，边匹配错误不再可能影响正确性。
+    private var phiSlotAliasFrom: List<Int> = arrayListOf<Int>()
+    private var phiSlotAliasTo: List<Int> = arrayListOf<Int>()
+
+    /// 设置 phi 槽别名表（管线在 Phase C 后接线）。
+    fun setPhiSlotAlias(from: List<Int>, to: List<Int>): Unit {
+        this.phiSlotAliasFrom = from
+        this.phiSlotAliasTo = to
+    }
+
+    /// 解析 phi 槽别名链（nodeId → … → phi 节点；无别名原样返回）。
+    private fun phiSlotResolve(nodeId: Int): Int {
+        var n: Int = nodeId
+        var guard: Int = 0
+        while (guard < 64) {
+            var found: Int = -1
+            var i: Int = this.phiSlotAliasFrom.size - 1
+            while (i >= 0) {
+                if (this.phiSlotAliasFrom[i] == n) { found = this.phiSlotAliasTo[i]; break }
+                i = i - 1
+            }
+            if (found < 0) { break }
+            n = found
+            guard = guard + 1
+        }
+        return n
+    }
+
+    /// 栈帧 canary：本函数实际 `sub rsp` 的帧大小（含 2048B 兜底与奇数寄存器
+    /// 对齐），canary 槽按 `rbp - canaryFrameSize + 常量` 定位。0 = 未插桩。
+    /// epilogue 校验见 `emitCanaryChecks`（P0-2 首次越界写定位，2026-10-06）。
+    private var canaryFrameSize: Int = 0
+
+    /// 栈帧 canary 的函数序号（按 prologue 发射顺序递增；idx→名字映射随
+    /// 编译打印为构建日志中的 `[FUNCLIST] idx|name` 行）。
+    private var canaryFuncIdx: Int = -1
+
     /// **临时诊断**：标记栈访问的发出路径（限次、纯观测、不改行为）。
     ///
     /// 目的：确定 `cliEnvArgCount` 里那些偏移为 `-8` 的存取究竟由哪条发射路径产生
@@ -957,6 +1587,9 @@ class X86Emitter {
 
     private fun cdMark(tag: String, off: Int): Unit {
         if (this.cdCount >= 20) { return }
+        // ⚠️ 2026-10-08 P1-3：默认静默（`AURA_X86_TRACE=1` 打开）——含编译器
+        // 完整闭包时会打出数千条，把进程推到 8 GB OOM。
+        if (Env.get("AURA_X86_TRACE", "") != "1") { return }
         this.cdCount = this.cdCount + 1
         println("[cd] " + tag + " off=" + toStr(off))
     }
@@ -970,7 +1603,9 @@ class X86Emitter {
     /// ⚠️ 绝不能让所有调用结果共用同一个固定槽（如 `-8`）：实测自举 `Main.exe`
     /// 里 `Env.get` 的结果先写入，随即被 `streq` 的返回值 `1` 覆写 ⇒ 后面读回的
     /// `s` 变成 `1` ⇒ `strlen(1)` → `0xC0000005`。
-    private fun slotForNode(nodeId: Int): Int {
+    private fun slotForNode(nodeId0: Int): Int {
+        // P372：phi 槽别名链解析——入边值的定义节点与 phi 节点共享同一槽。
+        var nodeId: Int = this.phiSlotResolve(nodeId0)
         var ra: Int = 0
         var sp: Int = 0
         if (this.allocator != null && nodeId >= 0) {
@@ -981,7 +1616,8 @@ class X86Emitter {
             }
         }
         if (nodeId < 0) {
-            if (this.slotDiagCount < 12) {
+            // ⚠️ 2026-10-08 P1-3：默认静默（`AURA_X86_TRACE=1` 打开）。
+            if (Env.get("AURA_X86_TRACE", "") == "1" && this.slotDiagCount < 12) {
                 this.slotDiagCount = this.slotDiagCount + 1
                 println("[slot] id=-1 → -8")
             }
@@ -994,8 +1630,18 @@ class X86Emitter {
             // 不与之重叠（见 `emitFunction` 的 prologue 段）。
             s = 0 - (this.curSpillBase + 8 + this.extraSlotCount * 8)
             this.setNodeSlot(nodeId, s)
+            // P321 越界金丝雀：新槽序号超过 ID 区间预算 = 发射触达了扫描闭包外的
+            // 节点，槽已越过帧底（下一个 call 即踩）。有界打印，一次构建最多 40 条。
+            if (Env.get("AURA_X86_TRACE", "") == "1"
+                    && this.extraSlotCount > this.curIdRange && this.slotOvrCount < 40) {
+                this.slotOvrCount = this.slotOvrCount + 1
+                println("[FSOVR] k=" + toStr(this.extraSlotCount)
+                        + " range=" + toStr(this.curIdRange)
+                        + " id=" + toStr(nodeId)
+                        + " off=" + toStr(s))
+            }
         }
-        if (this.slotDiagCount < 12) {
+        if (Env.get("AURA_X86_TRACE", "") == "1" && this.slotDiagCount < 12) {
             this.slotDiagCount = this.slotDiagCount + 1
             println("[slot] id=" + toStr(nodeId) + " ra=" + toStr(ra) + " sp=" + toStr(sp)
                     + " → " + toStr(s))
@@ -1006,14 +1652,32 @@ class X86Emitter {
     /// 诊断计数（见 `slotForNode`）。
     private var slotDiagCount: Int = 0
 
+    /// P321 越界金丝雀计数（有界，见 `slotForNode`）。
+    private var slotOvrCount: Int = 0
+
     /// 登记 nodeId → 兜底槽偏移（偏移为负；0 表示未分配）。
+    ///
+    /// ⚠️ P389：写后即读自检——List 索引写在**大 id** 下曾疑失效（写后读回 0
+    /// ⇒ slotForNode 每次分配新槽 ⇒ 写 S1 读 S2 ⇒ 跨调用值腐坏）。命中即打印
+    /// （有界），并回退到**逐位重写**一次。
     private fun setNodeSlot(id: Int, off: Int): Unit {
         if (id < 0) { return }
         while (this.nodeStackDisp.size <= id) {
             this.nodeStackDisp.add(0)
         }
         this.nodeStackDisp[id] = off
+        if (this.nodeStackDisp[id] != off) {
+            if (this.nssFailCount < 20) {
+                this.nssFailCount = this.nssFailCount + 1
+                println("[NSS-FAIL] id=" + toStr(id) + " off=" + toStr(off)
+                        + " readback=" + toStr(this.nodeStackDisp[id])
+                        + " size=" + toStr(this.nodeStackDisp.size))
+            }
+        }
     }
+
+    /// P389 诊断：setNodeSlot 写失效计数。
+    private var nssFailCount: Int = 0
 
     /// 查询 nodeId 的兜底槽偏移（未分配返回 0）。
     private fun nodeSlot(id: Int): Int {
@@ -1049,7 +1713,8 @@ class X86Emitter {
             i = i + 1
         }
         var acc: Int = 0
-        while (i < v.length) {
+        val vLen: Int = v.length
+        while (i < vLen) {
             val c: Int = v.charCodeAt(i) as Int
             if (c >= 48 && c <= 57) {
                 acc = acc * 10 + (c - 48)
@@ -1066,13 +1731,17 @@ class X86Emitter {
     /// 返回实际的寄存器名。
     private fun resolveToReg(v: String, tmpReg: String): String {
         if (this.isStackRef(v)) {
-            var offset: Int = this.stackOffsetOf(v)
+            val offset: Int = this.stackOffsetOf(v)
             // ⚠️ **不再**把偏移 0 改写成 `-8`：那会让不同值的读侧共用 `-8`
             //（与写侧塌成同一槽同源，见 `regOfNode`）。正常路径的槽都由
             // `slotForNode` 分配为负值，不会为 0。
             this.cdMark("ld-resolv", offset)
-            this.enc.emitStackLoad(tmpReg, offset)
-            return tmpReg
+            // P413：统一走 `loadDstReg`（语义与原直接 `emitStackLoad` 等价），
+            // 以便命中那里的 store→load peephole。
+            // 实测：本函数是「相邻存→读同槽」对的主要读侧来源（`emitSetcc`
+            // 落槽 → `emitCmpImm` 经本函数读回），旧实现**直接**发射 load
+            // 绕过了 peephole，只消除了 17/961 对。
+            return this.loadDstReg(v, tmpReg)
         }
         return v
     }
@@ -1082,7 +1751,8 @@ class X86Emitter {
     private fun regOfNode(node: DagNode): String {
         val r: String = this.regOfNodeRaw(node)
         // 只在**返回栈引用**时打印（这正是共享兜底槽的来源），限次。
-        if (r.startsWith("stack:") && this.rnCount < 12) {
+        // ⚠️ 2026-10-08 P1-3：默认静默（`AURA_X86_TRACE=1` 打开）。
+        if (Env.get("AURA_X86_TRACE", "") == "1" && r.startsWith("stack:") && this.rnCount < 12) {
             this.rnCount = this.rnCount + 1
             var id: String = "null"
             var rg: String = ""
@@ -1101,8 +1771,27 @@ class X86Emitter {
     }
 
     private fun regOfNodeRaw(node: DagNode): String {
-        if (node != null && this.nodeSlot(node.id) != 0) {
-            return "stack:" + toStr(this.nodeSlot(node.id))
+        // [根修轮R2 S1-ii] Call 节点读写两端一律走本节点专属槽（写侧见
+        // `emitCall` 落地段）：跳过着色/溢出判定，P266「写寄存器/读槽」
+        // 双家漂移家族以 node.kind 为锚点结构性消失。嵌套调用（S1-iii）
+        // 随之闭环：内层结果先落槽，外层实参装载自槽读取，无寄存器窗口。
+        if (node != null && node.kind == "Call") {
+            return "stack:" + toStr(this.slotForNode(node.id))
+        }
+        // ① 有效 RA 颜色优先（2026-10-04）：颜色寄存器是值的权威所在地。
+        //    旧实现 nodeSlot 表**先于**颜色判定 —— 某节点只要被任何早期
+        //    兜底物化占过一个槽（③ slotForNode），此后即便 RA 给它着了
+        //    寄存器色，读侧也回落到那个**从未被颜色写侧用过的槽** ⇒
+        //    同一节点读写两个家（实测 probe_obj3 的 `ok` 标志：入口 MOV
+        //    写入颜色寄存器、循环体读旧槽 ⇒ ok 恒 false ⇒ COPY-BAD）。
+        //    spill 节点（色 = spill_slot_* 或 RA isSpilled）走 ②。
+        if (node != null && node.reg != "" && node.reg != "rax"
+                && !node.reg.startsWith("spill_slot")) {
+            val spilled: Boolean = this.allocator != null
+                    && this.allocator.isSpilled(node.id)
+            if (!spilled) {
+                return node.reg
+            }
         }
         if (this.allocator != null && node != null && this.allocator.isSpilled(node.id)) {
             // ② RA 的溢出槽：`getSpillOffset` 返回「自 rbp 向下的**距离**」正值，
@@ -1130,7 +1819,7 @@ class X86Emitter {
         return "rax"
     }
 
-    /// 连接重定位记录为 `|` 分隔字符串。
+    /// 连接重定位记录为 `;` 分隔字符串。
     ///
     /// ⚠️ 旧实现是 `out = out + relocs[i]` —— Aura 的 String 不可变，每拼一条
     /// 都要把**已累积的全部记录**整段拷贝 ⇒ O(记录数²)。自举 `Main.aura` 有
@@ -1141,11 +1830,18 @@ class X86Emitter {
     /// 现改为「先逐条入列表（含分隔符），再两两归并」：追加 O(1)，归并
     /// O(总长 · log 记录数)，与 `X86Encoder.joinBytes` / `PhotonObjectWriter.coffJoinList`
     /// 同一手法。
+    ///
+    /// 分隔符从 `|` 改为 `;`（P1-2）：单条记录本身以 `|` 分隔三个字段
+    /// （`offset|symbol|type`），用 `|` 做记录间分隔只能靠「字段数整除 3」
+    /// 反推切分——`PhotonObjectWriter.parseRelocEntries` 为此专门写了紧凑形式
+    /// 分支（`splitSemi <= 1` 才走 `|` 直连解析），且符号名一旦含 `|` 即崩。
+    /// `PhotonObjectWriterUtils.joinRelocRecords` 早以 `;` 为分隔符，JIT 路径
+    /// （`compileEncodeOnly`）产出的记录字符串必须与 COFF 写入器消费格式一致。
     private fun joinRelocRecords(relocs: List<String>): String {
         val parts: List<String> = arrayListOf<String>()
         var i: Int = 0
         while (i < relocs.size) {
-            if (i > 0) { parts.add("|") }
+            if (i > 0) { parts.add(";") }
             parts.add(relocs[i])
             i = i + 1
         }
@@ -1185,6 +1881,26 @@ class X86Emitter {
 
     fun getRelocRecords(): String {
         return this.relocRecords
+    }
+
+    /// 获取 stack map 序列化文本（Phase 2.2，call 点 → GC 根列表）。
+    ///
+    /// ⚠️ 记录侧是 List O(1) 追加（emitCall 每 call 一条）——旧实现
+    /// `stackMapRecs = stackMapRecs + ";" + seg` 每 call 整段拷贝，O(call²)，
+    /// vmhost 闭包（数万 call × 134M 字符级累计）是驱动 >10 GB 的第二主因。
+    fun getStackMaps(): String {
+        val n: Int = this.stackMapRecList.size
+        if (n == 0) {
+            return ""
+        }
+        val parts: List<String> = arrayListOf<String>()
+        var i: Int = 0
+        while (i < n) {
+            if (i > 0) { parts.add(";") }
+            parts.add(this.stackMapRecList[i])
+            i = i + 1
+        }
+        return this.joinPairwise(parts)
     }
 
     fun getStringConsts(): String {

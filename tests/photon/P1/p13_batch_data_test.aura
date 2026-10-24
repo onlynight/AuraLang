@@ -1,0 +1,304 @@
+// tests/photon/P1/p13_batch_data_test.aura
+// ═══════════════════════════════════════════════════════════════
+// P1-3 单元测试：多函数编译时链接（Phase 1.4）+ 数据段（Phase 2.1）
+//
+// 接续 P1-2（重定位收集与单段回填），本阶段验证：
+//
+//   Phase 1.4  连续块布局 + 段间统一回填
+//     1. JitRelocBatchUtils.layoutSizes / segmentOffsets 的对齐与单调性
+//     2. applyBatch 的段内符号回填（含跨段调用，crossSegment 计数）
+//     3. applyBatch 的外部符号 → 调用存根兜底（stubbed 计数）
+//     4. applyBatch 无存根空间时的降级（skipped，不写错值）
+//     5. patchCallStubTarget 的写入语义与「target=0 不写」
+//     6. JitBackend.compileBatch 的整块装载 + 存根区地址
+//     7. CallStub.SIZE / IMM_OFFSET 与 buildCallStub 输出长度一致
+//
+//   Phase 2.1  数据段
+//     8. allocateDataMemory 的分配与「已有则不重复分配」幂等性
+//     9. writeDataSection 的段内偏移推进
+//    10. DATA_REF 在 dataBase != 0 时经 applyBatch 回填
+//    11. freeDataMemory 清空状态
+//
+// 与 P1-2 测试同属 VM 安全路径：JitBackend 默认 `vmMode=true`，
+// 全程不触碰 `Memory` / `JitExec`——所有回填/写入由 backend 守卫，
+// 统计与计数才是本测试的断言对象。
+//
+// 运行：aura run tests/photon/P1/p13_batch_data_test.aura
+// ═══════════════════════════════════════════════════════════════
+
+package tests.photon.P1
+
+import aura.lang.std.String
+import aura.lang.std.Process
+import aura.lang.compiler.photon.JitBackend
+import aura.lang.compiler.photon.JitRelocation
+import aura.lang.compiler.photon.JitRelocBatch
+
+var gPass: Int = 0
+var gFail: Int = 0
+
+fun check(name: String, ok: Boolean, detail: String): Unit {
+    if (ok) {
+        gPass = gPass + 1
+        println("[PASS] " + name + "  " + detail)
+    } else {
+        gFail = gFail + 1
+        println("[FAIL] " + name + "  " + detail)
+    }
+}
+
+/// 构造一个含 `n` 条记录的 RelocSegment（偏移 0,4,8,...，符号 cyclic）。
+fun makeSeg(name: String, off: Int, size: Int, reloc: String): RelocSegment {
+    val s: RelocSegment = RelocSegment()
+    s.name = name
+    s.offset = off
+    s.size = size
+    s.relocs = JitRelocationUtils.parseRelocs(reloc)
+    return s
+}
+
+fun main() {
+    println("=== P1-3 单元测试：多函数编译时链接 + 数据段 ===")
+
+    // ══════════════════════════════════════════════════════════
+    // Phase 1.4：布局
+    // ══════════════════════════════════════════════════════════
+
+    val names2: List<String> = arrayListOf<String>("main", "double")
+    val sizes2: List<Int> = arrayListOf<Int>(60, 50)
+    val offs2: List<Int> = JitRelocBatchUtils.segmentOffsets(sizes2)
+    check("segmentOffsets 首段起点=0", offs2[0] == 0, "got=" + toStr(offs2[0]))
+    check("segmentOffsets 单调递增", offs2[1] > offs2[0], "off1=" + toStr(offs2[1]))
+    check("segmentOffsets 段间 16 字节对齐", offs2[1] % 16 == 0,
+            "off1=" + toStr(offs2[1]))
+    check("segmentOffsets 返回等长", offs2.size == sizes2.size,
+            "n=" + toStr(offs2.size))
+
+    val total0: Int = JitRelocBatchUtils.layoutSizes(names2, sizes2, 0)
+    check("layoutSizes(无存根)=代码+对齐", total0 == 128, "got=" + toStr(total0))
+    val total8: Int = JitRelocBatchUtils.layoutSizes(names2, sizes2, 8)
+    check("layoutSizes 含存根区", total8 > total0,
+            "with=" + toStr(total8) + " without=" + toStr(total0))
+    check("layoutSizes 整体 16 字节对齐", total8 % 16 == 0,
+            "got=" + toStr(total8))
+
+    // ══════════════════════════════════════════════════════════
+    // Phase 1.4：批量回填 —— 段内 + 跨段
+    // ══════════════════════════════════════════════════════════
+
+    val be = JitBackend()
+    check("默认 VM 安全模式", be.isVmMode(), "vmMode")
+
+    // 两段：seg A（0..60）内含对 seg B（60..110）的调用；seg B 有自身调用。
+    // 记录 offset 是**模块内**偏移，段起点为 0 与 64（16 对齐）。
+    val segA: RelocSegment = makeSeg("main", 0, 64,
+            "40|double|R_X86_64_REL32;56|exit|R_X86_64_REL32")
+    val segB: RelocSegment = makeSeg("double", 64, 48,
+            "80|main|R_X86_64_REL32")
+    val segs: List<RelocSegment> = arrayListOf<RelocSegment>(segA, segB)
+    val symtab: String = "main|0;double|64"
+
+    // 无存根空间：外部符号 exit 只能跳过。
+    val rNoStub: BatchRelocResult = JitRelocBatchUtils.applyBatch(
+            be, 65536, segs, symtab, 0, 0, 0)
+    check("applyBatch 无存根：2 应用 + 1 跳过",
+            rNoStub.total == 3 && rNoStub.applied == 2 && rNoStub.skipped == 1,
+            JitRelocBatchUtils.formatBatchResult(rNoStub))
+    check("applyBatch 无存根：stubbed=0",
+            rNoStub.stubbed == 0 && rNoStub.stubCount == 0, "ok")
+    // 两条应用里有一条是跨段（segA→double 落在 segB 区间）。
+    check("applyBatch 无存根：跨段调用被计入",
+            rNoStub.crossSegment >= 1, "crossSeg=" + toStr(rNoStub.crossSegment))
+
+    // 有存根空间：exit 走调用存根。
+    val segs2: List<RelocSegment> = arrayListOf<RelocSegment>(
+            makeSeg("main", 0, 64, "40|double|R_X86_64_REL32;56|exit|R_X86_64_REL32"),
+            makeSeg("double", 64, 48, "80|main|R_X86_64_REL32"))
+    val rStub: BatchRelocResult = JitRelocBatchUtils.applyBatch(
+            be, 65536, segs2, symtab, 0, 65536 + 128, 4)
+    check("applyBatch 有存根：2 应用 + 1 存根化 + 0 跳过",
+            rStub.total == 3 && rStub.applied == 2 && rStub.stubbed == 1 &&
+                rStub.skipped == 0,
+            JitRelocBatchUtils.formatBatchResult(rStub))
+    check("applyBatch 有存根：stubCount=1",
+            rStub.stubCount == 1, "got=" + toStr(rStub.stubCount))
+
+    // 存根空间不足：超出部分跳过（不写错值）。
+    val rShort: BatchRelocResult = JitRelocBatchUtils.applyBatch(
+            be, 65536, segs2, symtab, 0, 65536 + 128, 0)
+    check("applyBatch 存根上限=0 时跳过",
+            rShort.stubbed == 0 && rShort.skipped == 1,
+            JitRelocBatchUtils.formatBatchResult(rShort))
+
+    // ══════════════════════════════════════════════════════════
+    // Phase 1.4：偏移越界与未知类型
+    // ══════════════════════════════════════════════════════════
+
+    val segBad: RelocSegment = makeSeg("bad", 0, 16,
+            "200|double|R_X86_64_REL32;4|helper|R_NA")
+    val rBad: BatchRelocResult = JitRelocBatchUtils.applyBatch(
+            be, 65536, arrayListOf<RelocSegment>(segBad), symtab, 0, 0, 0)
+    check("applyBatch 越界+未知类型 全跳过",
+            rBad.total == 2 && rBad.applied == 0 && rBad.skipped == 2,
+            JitRelocBatchUtils.formatBatchResult(rBad))
+
+    // ══════════════════════════════════════════════════════════
+    // Phase 1.4：调用存根目标回填
+    // ══════════════════════════════════════════════════════════
+
+    check("CallStub.SIZE=12", CallStub.SIZE == 12, "got=" + toStr(CallStub.SIZE))
+    check("CallStub.IMM_OFFSET=2", CallStub.IMM_OFFSET == 2,
+            "got=" + toStr(CallStub.IMM_OFFSET))
+
+    // 存根体长度必须与 buildCallStub 输出一致（回填按 SIZE 推进，漂移即错段）。
+    val stubHex: String = be.buildCallStub(0)
+    check("buildCallStub 输出长度 = CallStub.SIZE*2",
+            stubHex.length == CallStub.SIZE * 2,
+            "len=" + toStr(stubHex.length) + " hex=" + stubHex)
+
+    check("patchCallStubTarget(target=0) 不写",
+            JitRelocBatchUtils.patchCallStubTarget(be, 65536, 0, 0) == false, "ok")
+    check("patchCallStubTarget(stubBase=0) 不写",
+            JitRelocBatchUtils.patchCallStubTarget(be, 0, 0, 1) == false, "ok")
+    check("patchCallStubTarget 合法参数返回 true",
+            JitRelocBatchUtils.patchCallStubTarget(be, 65536, 0, 999) == true, "ok")
+
+    // ══════════════════════════════════════════════════════════
+    // Phase 1.4：compileBatch 整块装载
+    // ══════════════════════════════════════════════════════════
+
+    val be2 = JitBackend()
+    // 每段 16 字节，内含一条指向另一段的 call 占位符。
+    // 记录 offset 用**编码器视角的模块内偏移**：整批编译时 `enc.byteCount()`
+    // 从 0 累计（a 段 0..16，b 段 16..32），与 funcOffsets 的符号偏移一致。
+    val srcA: String = "00000000000000000000000000000000"
+    val srcB: String = "00000000000000000000000000000000"
+    val entries: List<Int> = be2.compileBatch(
+            arrayListOf<String>(srcA, srcB),
+            arrayListOf<String>("0|b|R_X86_64_REL32", "16|a|R_X86_64_REL32"),
+            "a|0;b|16",
+            arrayListOf<String>("a", "b"),
+            2)
+    check("compileBatch 返回两段入口", entries.size == 2,
+            "n=" + toStr(entries.size))
+    check("compileBatch 两段入口均非零", entries[0] != 0 && entries[1] != 0,
+            "e0=" + toStr(entries[0]) + " e1=" + toStr(entries[1]))
+    check("compileBatch 段间 16 字节对齐",
+            (entries[1] - entries[0]) == 16,
+            "delta=" + toStr(entries[1] - entries[0]))
+    check("compileBatch functionCount=2", be2.functionCount() == 2,
+            "n=" + toStr(be2.functionCount()))
+    check("compileBatch 跨段回填成功",
+            be2.lastBatchResult().applied == 2,
+            JitRelocBatchUtils.formatBatchResult(be2.lastBatchResult()))
+    check("compileBatch 跨段调用计数 >= 2",
+            be2.lastBatchResult().crossSegment >= 2,
+            "crossSeg=" + toStr(be2.lastBatchResult().crossSegment))
+    check("compileBatch 存根区地址已记录",
+            be2.lastBatchStubBase() != 0,
+            "stub=" + toStr(be2.lastBatchStubBase()))
+    check("compileBatch 存根区在代码区起点之后",
+            be2.lastBatchStubBase() > entries[0],
+            "stub=" + toStr(be2.lastBatchStubBase()) + " seg0=" + toStr(entries[0]))
+
+    // 外部符号 → 存根化（a 段额外一条 `call ext`）。
+    val be3 = JitBackend()
+    val entries2: List<Int> = be3.compileBatch(
+            arrayListOf<String>(srcA),
+            arrayListOf<String>("0|exit|R_X86_64_REL32"),
+            "a|0",
+            arrayListOf<String>("a"),
+            1)
+    check("compileBatch 外部符号被存根化",
+            be3.lastBatchResult().stubbed == 1 &&
+                be3.lastBatchResult().applied == 0,
+            JitRelocBatchUtils.formatBatchResult(be3.lastBatchResult()))
+
+    // patchCallStubTarget 经 backend 入口（vmMode 下为空操作，仅验证不崩）。
+    be3.patchCallStubTarget(0, 123456)
+
+    // 空批量返回空列表，不分配。
+    val be4 = JitBackend()
+    val entriesE: List<Int> = be4.compileBatch(
+            arrayListOf<String>(), arrayListOf<String>(), "",
+            arrayListOf<String>(), 0)
+    check("compileBatch 空输入返回空",
+            entriesE.size == 0 && be4.functionCount() == 0, "ok")
+
+    // ══════════════════════════════════════════════════════════
+    // Phase 2.1：数据段
+    // ══════════════════════════════════════════════════════════
+
+    val be5 = JitBackend()
+    check("初始无数据段", be5.getDataBase() == 0, "ok")
+    val d0: Int = be5.allocateDataMemory(256)
+    check("allocateDataMemory 返回非零", d0 != 0, "base=" + toStr(d0))
+
+    // 数据段推进模拟地址计数器，因此后续分配的代码段必须落在其之后
+    // （VM 模式用单一 `simNextAddr` 模拟连续地址空间；原生模式由
+    // `Memory.alloc` 独立分配，同样不会重叠）。
+    check("allocateDataMemory 推进模拟地址计数器",
+            be5.simNextAddr > d0,
+            "data=" + toStr(d0) + " next=" + toStr(be5.simNextAddr))
+
+    // 幂等：再次调用返回同一基址，不重复分配。
+    val d1: Int = be5.allocateDataMemory(512)
+    check("allocateDataMemory 幂等（已有则复用）", d0 == d1,
+            "d0=" + toStr(d0) + " d1=" + toStr(d1))
+    // 幂等：第二次分配返回同一基址，计数器不重复推进
+    // （delta = alignToPage(256+64) = 4096 恰好等于页对齐值）。
+    check("幂等分配不推进计数器",
+            be5.simNextAddr - d0 == 4096,
+            "delta=" + toStr(be5.simNextAddr - d0))
+
+    // 写入推进段内偏移。
+    val off1: Int = be5.writeDataSection("01020304")
+    check("writeDataSection 推进偏移=4", off1 == 4, "off=" + toStr(off1))
+    check("getDataUsed=4", be5.getDataUsed() == 4, "used=" + toStr(be5.getDataUsed()))
+    val off2: Int = be5.writeDataSection("0506")
+    check("writeDataSection 累加偏移=6", off2 == 6, "off=" + toStr(off2))
+
+    // 未分配数据段时写入静默返回 0。
+    val be5b = JitBackend()
+    check("未分配数据段时 writeDataSection 返回 0",
+            be5b.writeDataSection("0102") == 0, "ok")
+
+    // DATA_REF 在 dataBase != 0 时经 applyBatch 回填。
+    val segD: RelocSegment = makeSeg("main", 0, 32, "8|@str.0|R_X86_64_DATA")
+    val symData: String = "@str.0|0;main|0"
+    val rData: BatchRelocResult = JitRelocBatchUtils.applyBatch(
+            be5, 65536, arrayListOf<RelocSegment>(segD), symData, d0, 0, 0)
+    check("applyBatch DATA_REF + dataBase -> 应用",
+            rData.total == 1 && rData.applied == 1 && rData.skipped == 0,
+            JitRelocBatchUtils.formatBatchResult(rData))
+
+    // DATA_REF 无数据段时跳过（不写错值）。
+    val be5c = JitBackend()
+    val rNoData: BatchRelocResult = JitRelocBatchUtils.applyBatch(
+            be5c, 65536, arrayListOf<RelocSegment>(
+                    makeSeg("main", 0, 32, "8|@str.0|R_X86_64_DATA")),
+            symData, 0, 0, 0)
+    check("applyBatch DATA_REF 无数据段 -> 跳过",
+            rNoData.applied == 0 && rNoData.skipped == 1,
+            JitRelocBatchUtils.formatBatchResult(rNoData))
+
+    // freeDataMemory 清空状态。
+    be5.freeDataMemory()
+    check("freeDataMemory 清空基址", be5.getDataBase() == 0, "ok")
+    check("freeDataMemory 清空用量", be5.getDataUsed() == 0, "ok")
+
+    // 布局信息含数据段与批量统计。
+    val layout: String = be5c.getJitCodeLayout()
+    check("布局含 dataStart", layout.indexOf("dataStart") >= 0, layout)
+
+    // ══════════════════════════════════════════════════════════
+    // VM 安全守卫
+    // ══════════════════════════════════════════════════════════
+
+    check("executeNative 在 VM 模式下为空操作",
+            be2.executeNative0(entries[0]) == 0, "ok")
+
+    println("")
+    println("RESULT pass=" + toStr(gPass) + " fail=" + toStr(gFail))
+    Process.exit(gFail)
+}

@@ -1,0 +1,17 @@
+fun main() {
+    var i: Int = 0
+    var sum: Int = 0
+    while (i < 10) {
+        sum = sum + i
+        i = i + 1
+    }
+    println(sum)
+    if (sum > 40) {
+        println("big")
+    } else {
+        println("small")
+    }
+    for (k in 1..3) {
+        println(k)
+    }
+}

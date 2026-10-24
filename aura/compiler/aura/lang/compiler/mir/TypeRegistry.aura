@@ -36,6 +36,19 @@ class TypeRegistry {
     /// 类型名 → TypeID 去重表（扁平字符串："key|id\nkey|id\n..."）。
     private var dedup: String = ""
 
+    /// [R104] `dedup` 的并行索引（key / id 各一份 + 开放寻址表）。
+    ///
+    /// ⚠️ 旧 `dedupLookup` 每次调用都从行首线性扫到命中或表尾：`dbgScanned`
+    /// 实测累计 **11.9 亿字符**（25.5 万次调用 × 平均 ~4600 项），
+    /// 而 `register` 在 SSA 每个值上都要跑一次 ⇒ O(N²)，是 buildAllFunctions
+    /// 40.4s 与 synthSingletons/synthCtors 平方项的主体。
+    /// 改为「追加即插入 + 容量翻倍重哈希」后查询 O(1)，且与 CSV 同步维护
+    ///（CSV 仍照原样生成，序列化/调试输出不变）。
+    private var dedupKeys: List<String> = arrayListOf<String>()
+    private var dedupIds: List<Int> = arrayListOf<Int>()
+    private var dedupTable: List<Int> = arrayListOf<Int>()
+    private var dedupCap: Int = 0
+
     /// 已注册类型数。
     var count: Int = 0
 
@@ -47,6 +60,10 @@ class TypeRegistry {
         this.elems = arrayListOf<Int>()
         this.arrayLengths = arrayListOf<Int>()
         this.dedup = ""
+        this.dedupKeys = arrayListOf<String>()
+        this.dedupIds = arrayListOf<Int>()
+        this.dedupTable = arrayListOf<Int>()
+        this.dedupCap = 0
         this.count = 0
 
         // 预注册基本类型
@@ -113,34 +130,75 @@ class TypeRegistry {
     /// 只在**命中**时切片一次。
     private fun dedupLookup(key: String): Int {
         this.dbgCalls = this.dbgCalls + 1
-        this.dbgScanned = this.dbgScanned + this.dedup.length
-        if (this.dedup == "" || key == "") { return -1 }
-        val klen: Int = key.length
-        var lineStart: Int = 0
-        var pos: Int = 0
-        val len: Int = this.dedup.length
-        while (pos <= len) {
-            if (pos == len || this.dedup.charCodeAt(pos) == 10) {
-                // 行区间 [lineStart, pos)，格式 "key|id"
-                if (pos - lineStart > klen && this.dedup.charCodeAt(lineStart + klen) == 124) {
-                    var same: Boolean = true
-                    var i: Int = 0
-                    while (i < klen) {
-                        if (this.dedup.charCodeAt(lineStart + i) != key.charCodeAt(i)) {
-                            same = false
-                            break
-                        }
-                        i = i + 1
-                    }
-                    if (same) {
-                        return this.dedupStrToInt(this.dedup.substring(lineStart + klen + 1, pos))
-                    }
-                }
-                lineStart = pos + 1
-            }
-            pos = pos + 1
+        // [R104] 语义变更：从「累计扫描字符数」改为「表内条目数」——
+        // 查询已是 O(1)，字符数不再有诊断意义；条目数仍能反映表的增长。
+        this.dbgScanned = this.dbgScanned + this.dedupKeys.size
+        if (key == "" || this.dedupKeys.size == 0) { return -1 }
+        // [R104] 开放寻址哈希查询（同 `X86Encoder.labelTable` 范式）：O(1)。
+        // 语义与旧线性扫描一致 —— 返回**首次插入**的 id（重复 key 不会发生：
+        // `dedupAppend` 只在 lookup 未命中后调用）。
+        var h: Int = this.dedupSlot(key)
+        var probes: Int = 0
+        while (probes < this.dedupCap) {
+            val slot: Int = this.dedupTable[h]
+            if (slot == 0) { return -1 }
+            if (this.dedupKeys[slot - 1] == key) { return this.dedupIds[slot - 1] }
+            h = h + 1
+            if (h >= this.dedupCap) { h = 0 }
+            probes = probes + 1
         }
         return -1
+    }
+
+    /// [R104] key 的哈希槽（h*31 累加码点，模容量）。
+    private fun dedupSlot(key: String): Int {
+        var h: Int = 0
+        var c: Int = 0
+        while (c < key.length) {
+            h = (h * 31 + (key.charCodeAt(c) as Int)) % this.dedupCap
+            c = c + 1
+        }
+        return h
+    }
+
+    /// [R104] 把第 idx 条插入开放寻址表（同名保留先者，与旧扫描语义一致）。
+    private fun dedupInsertAt(idx: Int): Unit {
+        val nm: String = this.dedupKeys[idx]
+        var h: Int = this.dedupSlot(nm)
+        var probes: Int = 0
+        while (probes < this.dedupCap) {
+            val slot: Int = this.dedupTable[h]
+            if (slot == 0) {
+                this.dedupTable[h] = idx + 1
+                probes = this.dedupCap
+            } else if (this.dedupKeys[slot - 1] == nm) {
+                probes = this.dedupCap
+            } else {
+                h = h + 1
+                if (h >= this.dedupCap) { h = 0 }
+            }
+            probes = probes + 1
+        }
+    }
+
+    /// [R104] 容量翻倍并重插全部条目（摊还 O(1)/次插入）。
+    private fun dedupGrow(): Unit {
+        var cap: Int = 16
+        if (this.dedupCap > 0) { cap = this.dedupCap * 2 }
+        val want: Int = (this.dedupKeys.size + 1) * 2
+        while (cap < want) { cap = cap * 2 }
+        this.dedupCap = cap
+        this.dedupTable = arrayListOf<Int>()
+        var k: Int = 0
+        while (k < cap) {
+            this.dedupTable.add(0)
+            k = k + 1
+        }
+        var i: Int = 0
+        while (i < this.dedupKeys.size) {
+            this.dedupInsertAt(i)
+            i = i + 1
+        }
     }
 
     /// 检查字符串是否包含子串。
@@ -173,6 +231,14 @@ class TypeRegistry {
             this.dedup = entry
         } else {
             this.dedup = this.dedup + "\n" + entry
+        }
+        // [R104] 同步维护哈希索引：追加即插入；装载因子到 0.5 就扩容重哈希。
+        this.dedupKeys.add(key)
+        this.dedupIds.add(id)
+        if (this.dedupKeys.size * 2 >= this.dedupCap) {
+            this.dedupGrow()
+        } else {
+            this.dedupInsertAt(this.dedupKeys.size - 1)
         }
     }
 

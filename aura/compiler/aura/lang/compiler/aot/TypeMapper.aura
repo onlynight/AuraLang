@@ -27,7 +27,8 @@ object TypeMapperUtils {
     /// `use of undefined type named 'struct.HashMap_Int_Int_'`。
     fun stripGenericArgs(ty: String): String {
         var i: Int = 0
-        while (i < ty.length) {
+        val tyLen: Int = ty.length
+        while (i < tyLen) {
             if (aotSlice(ty, i, 1) == "<") {
                 return trimSpaces(aotSlice(ty, 0, i))
             }

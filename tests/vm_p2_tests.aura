@@ -1,0 +1,158 @@
+// ═════════════════════════════════════════════════════════════
+// P2 验收测试：极简指令集审计（§2.1 清单逐项）
+//
+// 对应 VM-PA-00 v3.1 P2.1：极简指令集（~30 条）全部实现。
+// 本文件审计在 P0/P1 测试中未覆盖的指令：HALT/SWAP/DUP/MOD/NEG/NOT/
+// 位运算组/NEW_ARRAY/GET_INDEX/SET_INDEX/CHECK_CAST/CONST_BOOL。
+//
+// 运行：aura run tests/vm_p2_tests.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
+
+fun runCode(code: String, consts: String): String {
+    val vm = VmRunner()
+    vm.loadBytecode(code, consts, "")
+    vm.run()
+    val err: String = vm.getError()
+    if (err.length > 0) {
+        return "ERR:" + err
+    }
+    return toStr(vm.getReturnValue())
+}
+
+fun testHaltStops(): Int {
+    val t = TestRunner()
+    t.begin("P2.Minimal.halt")
+    // HALT 立即终止：后续指令不执行
+    val vm = VmRunner()
+    vm.loadBytecode("CONST_INT 0\nHALT\nCONST_INT 1\nRETURN\n", "7\n8\n", "")
+    vm.run()
+    t.assertEq(vm.getError(), "", "no error before halt")
+    t.assertEq(vm.getInstructionCount(), 2, "halt stops at 2nd instruction")
+    return t.report()
+}
+
+fun testStackOps(): Int {
+    val t = TestRunner()
+    t.begin("P2.Minimal.swapDup")
+
+    // SWAP：栈顶两条互换 → 返回先压的
+    t.assertEq(runCode(
+        "CONST_INT 0\nCONST_INT 1\nSWAP\nRETURN\n", "11\n22\n"), "11", "SWAP")
+
+    // DUP：复制栈顶
+    t.assertEq(runCode(
+        "CONST_INT 0\nDUP\nADD\nRETURN\n", "21\n"), "42", "DUP")
+
+    return t.report()
+}
+
+fun testArithRem(): Int {
+    val t = TestRunner()
+    t.begin("P2.Minimal.modNegNot")
+
+    // MOD（Rem）
+    t.assertEq(runCode(
+        "CONST_INT 0\nCONST_INT 1\nMOD\nRETURN\n", "17\n5\n"), "2", "17 mod 5")
+
+    // NEG
+    t.assertEq(runCode(
+        "CONST_INT 0\nNEG\nRETURN\n", "9\n"), "-9", "NEG 9")
+
+    // NOT
+    t.assertEq(runCode(
+        "CONST_BOOL false\nNOT\nRETURN\n", ""), "true", "NOT false")
+
+    return t.report()
+}
+
+fun testBitOps(): Int {
+    val t = TestRunner()
+    t.begin("P2.Minimal.bitOps")
+
+    t.assertEq(runCode(
+        "CONST_INT 0\nCONST_INT 1\nBIT_AND\nRETURN\n", "12\n10\n"), "8", "12 & 10")
+    t.assertEq(runCode(
+        "CONST_INT 0\nCONST_INT 1\nBIT_XOR\nRETURN\n", "12\n10\n"), "6", "12 ^ 10")
+    t.assertEq(runCode(
+        "CONST_INT 0\nCONST_INT 1\nSHL\nRETURN\n", "3\n2\n"), "12", "3 << 2")
+    t.assertEq(runCode(
+        "CONST_INT 0\nCONST_INT 1\nSHR\nRETURN\n", "12\n2\n"), "3", "12 >> 2")
+
+    return t.report()
+}
+
+fun testArrayIndex(): Int {
+    val t = TestRunner()
+    t.begin("P2.Minimal.arrayIndex")
+
+    // NEW_ARRAY + SET_INDEX + GET_INDEX（§2.1 对象组）
+    // SET_INDEX 栈序：栈顶为下标、其下为引用、最下为值
+    val vm = VmRunner()
+    vm.loadBytecode(
+        "CONST_INT 0\n" +        // 0: 长度 3
+        "NEW_ARRAY\n" +          // 1
+        "STORE_LOCAL 0\n" +      // 2
+        "CONST_INT 2\n" +        // 3: 值 99（最底）
+        "LOAD_LOCAL 0\n" +       // 4: 引用
+        "CONST_INT 1\n" +        // 5: 下标 1（栈顶）
+        "SET_INDEX\n" +          // 6
+        "LOAD_LOCAL 0\n" +       // 7
+        "CONST_INT 1\n" +        // 8: 下标
+        "GET_INDEX\n" +          // 9
+        "RETURN\n",              // 10
+        "3\n1\n99\n", "")
+    vm.run()
+    t.assertEq(vm.getError(), "", "no error (array)")
+    t.assertEq(toStr(vm.getReturnValue()), "99", "array set/get roundtrip")
+
+    return t.report()
+}
+
+fun testCheckCast(): Int {
+    val t = TestRunner()
+    t.begin("P2.Minimal.checkCast")
+
+    // CHECK_CAST 对匹配类型透传
+    t.assertEq(runCode(
+        "CONST_STRING 0\nCHECK_CAST String\nRETURN\n", "hi\n"), "hi", "CheckCast String")
+
+    // CONST_BOOL 直读
+    t.assertEq(runCode(
+        "CONST_BOOL true\nRETURN\n", ""), "true", "CONST_BOOL true")
+
+    // CONST_NULL
+    val vm = VmRunner()
+    vm.loadBytecode("CONST_NULL\nRETURN\n", "", "")
+    vm.run()
+    t.assertTrue(vm.getReturnValue() == null, "CONST_NULL")
+
+    return t.report()
+}
+
+fun main() {
+    println("=== P2 VM Minimal Instruction Set Audit ===")
+    println()
+
+    val f1 = testHaltStops()
+    val f2 = testStackOps()
+    val f3 = testArithRem()
+    val f4 = testBitOps()
+    val f5 = testArrayIndex()
+    val f6 = testCheckCast()
+
+    val totalFailures: Int = f1 + f2 + f3 + f4 + f5 + f6
+
+    println()
+    println("=== Summary ===")
+    println("Total failures: " + toStr(totalFailures))
+
+    if (totalFailures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(totalFailures) + ")")
+    }
+}

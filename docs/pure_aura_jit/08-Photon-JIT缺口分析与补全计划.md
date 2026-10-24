@@ -46,6 +46,49 @@
 | `vmMode=true` 默认 | 种子 VM 无法解析 `Memory`/`JitExec` extern | 自举完成后调用 `enableNativeExec()` |
 | JIT 仅原生运行时可用 | `Memory.alloc`/`mprotect`/`JitExec.callI64` 需真实内存操作 | Stage-2+ 自举产物 |
 
+> **状态更新（2026-10-08，P1-3）**：缺口一～五已在 P1-2/P1-3 实现
+> （重定位收集/修正/跨段回填/数据段），且在原生运行时通过 14/14 断言
+> 验证——验证载体为「Photon 编译的原生 VM 宿主 + 内建 JIT 自检」
+> （`scripts/photon/jit-native-verify.ps1`），见 `09-P1-2实施报告.md`
+> §七。两条工程约束：
+>
+> 1. **JIT 代码区必须是独立低地址 mmap 区**（`JitExec_allocRW` 桩内
+>    完成 0x08000000–0x20000000 提示重试）——不能用堆 arena（地址
+>    超 Int32 截断 + 整页 mprotect 波及同页堆对象）。
+> 2. **P5 新增缺口**（原生验证暴露，阻塞 .auc 侧 JIT 集成）：
+>    ① 发射器实参装载顺序随布局漂移（同源码不同构建崩点迁移）；
+>    ② VM 值模型双形态（装箱 Int / 裸 Long）未统一，.auc 消费
+>    native 返回值不可靠；③ Aura 版 VmRunner 缺单例初始化
+>    （`create_singletons`/`run_singleton_initializers`）；④
+>    AucLoader 对宿主闭包尺寸脆弱；⑤ `compileBatch` 原生路径依赖
+>    `String.substring`（3 参方法调用接收者错位）。
+>    详见 `09-P1-2实施报告.md` §7.4。
+>
+> **P1/P2 补全（2026-10-09）**：Phase 2.2 Stack maps（`JitStackMap.aura`
+> 字符串增量表 + X86Emitter call 点记录 + `collectFrameRoots` GC 接口）、
+> Phase 2.3 安全集成测试（p15=19 断言）、Phase 3.1 Guards 与 3.2
+> Deoptimization（`JitDeopt.aura`：guard 编码/修补 + 真偏移蹦床 +
+> `readVmLocals` 帧映射；p16=27 断言；原生执行用例已入 jit_vmhost
+> 自检）全部完成。P3（OSR/类型反馈）未开始——guard 原语已就位。
+> 种子侧新增约束：3 函数源在种子 HirLowerer 下丢内容（测试用 2 函数
+> 形态）；跨两层对象边界传 Hir 丢内容（一跳直调 compileEncodeOnly）。
+> 详见 `09-P1-2实施报告.md` §七·五。
+>
+> **P3 补全 + P5 推进（2026-10-09 第二轮）**：Phase 4.1 OSR 入口表
+> （OsrTable.aura）与 Phase 4.2 类型反馈（TypeFeedbackTable.aura，
+> 平铺段格式）落地（p17=27 断言）；P5-⑤ substring 种子路径全消除
+> （JitStackMap/TypeFeedbackTable/JitRelocation 区间化）；P6 热点
+> 集成决策链验证就绪（p18，原生用例）。种子侧新增：类名须与文件名
+> 一致（否则构造 #65535）；跨文件 object 方法在 .auc 链接不稳定
+> （工具函数并入类内私有方法）。详见 `09-P1-2实施报告.md` §七·六。
+>
+> **P3-4.3 补全（2026-10-09 第三轮）**：optLevel=0 快速编译通道
+> （跳过窥孔，产出与默认通道一致）+ 编译延迟基准脚本
+> （jit-compile-bench.ps1，种子 VM 实测 med≈40s/整测）。**至此
+> P0–P3 全部完成**（Phase 4.3 为 P3 末项）。种子新增坑：导入
+> `aura.lang.native.time.Clock` 会使闭包损坏（funcNameOffsets 退化）。
+> 详见 `09-P1-2实施报告.md` §七·六-C·二。
+
 ---
 
 ## 二、逐项缺口详解

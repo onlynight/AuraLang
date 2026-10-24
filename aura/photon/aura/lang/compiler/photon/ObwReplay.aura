@@ -1,0 +1,98 @@
+// aura:///aura/lang/compiler/photon/ObwReplay.aura
+package aura.lang.compiler.photon
+// ─────────────────────────────────────────────────────────────
+// T3 离线复现器（诊断用，不参与编译器自举）
+//
+// 背景：COFF writer 段在整链自举里 ~128 s，而前端要 780 s。任何一处
+// 改动都要重跑全链才能测，迭代成本过高（T3 立项时因此没能一次做完）。
+//
+// 本程序只重放 writer：
+//   PhotonObjectWriter.buildSymbols → emitPieces → writeObjectFilePieces
+// 输入由 `PhotonPipeline` 在 AURA_OBJW_DUMP=<dir> 时转储：
+//   text.hex / relocs.txt / consts.txt / functions.txt / funcoffsets.txt
+//   datasym.txt / bsssym.txt
+//
+// ⚠️ 转储钩子（`PhotonObjectWriter.dumpInputs/dumpSymbols` + Pipeline 里的
+// `AURA_OBJW_DUMP` 分支）**不在主干**——它属于诊断插桩，和 writer 的
+// `wMark` 分段打点一起收在 `build/_t3_instr.patch` 里（R162 回退插桩的原因见
+// docs/photon/photon-aot-t3-writer-runtime-r162.md §6：插桩改变 region 分配
+// 布局会触发一个既有的越界读）。需要重新采集输入时：
+//     git apply build/_t3_instr.patch
+// 已采集的输入留在 `build/_obw/dump-t3a/`（自举规模：text 2.86 MB、
+// 63,692 条重定位、18,721 条符号），可直接用来做 A/B 与产物字节比对。
+//
+// 用法：
+//   set OBW_DIR=build\_obw\dump-t3a
+//   set OBW_OUT=build\_obw\replay\aura-compiler.obj
+//   ObwReplay.exe
+//
+// 判定口径：`OBW_OUT` 必须与真实自举产出的 `.obj` **逐字节一致**；
+// writer 内部改造（hex 片段 → 字节缓冲）不许改变产物。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.fs.FileUtils
+import aura.lang.std.Env
+import aura.lang.native.time.Clock
+import aura.lang.compiler.photon.PhotonObjectWriter
+import aura.lang.compiler.photon.PhotonNativeWriter
+
+fun obwMs(a: Long, b: Long): String {
+    return toStr((b - a) / 1000000)
+}
+
+fun main(): Int {
+    ClockImpl.init()
+    val dir: String = Env.get("OBW_DIR", "build/_obw/dump")
+    val outObj: String = Env.get("OBW_OUT", dir + "/replay.obj")
+
+    val t0: Long = ClockImpl.timeNs()
+    val w: PhotonObjectWriter = PhotonObjectWriter()
+    val tx: String = FileUtils.readText(dir + "/text.hex")
+    val rl: String = FileUtils.readText(dir + "/relocs.txt")
+    val cs: String = FileUtils.readText(dir + "/consts.txt")
+    val fn2: String = FileUtils.readText(dir + "/functions.txt")
+    val fo: String = FileUtils.readText(dir + "/funcoffsets.txt")
+    val ds: String = FileUtils.readText(dir + "/datasym.txt")
+    val bs: String = FileUtils.readText(dir + "/bsssym.txt")
+    w.textSection = tx
+    w.relocs = rl
+    w.stringConsts = cs
+    w.functions = fn2
+    w.functionOffsets = fo
+    w.dataSymbolName = ds
+    w.bssSymbolName = bs
+    val t1: Long = ClockImpl.timeNs()
+    println("[obw] load " + obwMs(t0, t1) + "ms textChars=" + toStr(tx.length) +
+            " relocChars=" + toStr(rl.length) +
+            " constChars=" + toStr(cs.length) +
+            " funcsChars=" + toStr(fn2.length) +
+            " offsChars=" + toStr(fo.length))
+
+    val t2: Long = ClockImpl.timeNs()
+    w.buildSymbols(fn2, cs)
+    val t3: Long = ClockImpl.timeNs()
+    val symTxt: String = w.symbols
+    println("[obw] buildSymbols " + obwMs(t2, t3) + "ms symChars=" + toStr(symTxt.length))
+
+    val t4: Long = ClockImpl.timeNs()
+    val pieces: List<String> = w.emitPieces()
+    val t5: Long = ClockImpl.timeNs()
+    var chars: Int = 0
+    var i: Int = 0
+    while (i < pieces.size) {
+        chars = chars + pieces[i].length
+        i = i + 1
+    }
+    println("[obw] emitPieces " + obwMs(t4, t5) + "ms pieces=" + toStr(pieces.size) +
+            " coffBytes=" + toStr(chars / 2))
+
+    val t6: Long = ClockImpl.timeNs()
+    val ok: Boolean = PhotonNativeWriter.writeObjectFilePieces(outObj, pieces)
+    val t7: Long = ClockImpl.timeNs()
+    val okTag: String = if (ok) "1" else "0"
+    println("[obw] writeObj " + obwMs(t6, t7) + "ms ok=" + okTag + " out=" + outObj)
+    println("[obw] total " + obwMs(t0, t7) + "ms")
+    if (ok) { return 0 }
+    return 1
+}

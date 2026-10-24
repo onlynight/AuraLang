@@ -17,7 +17,7 @@ import aura.lang.std.fs.FileUtils
 import aura.lang.compiler.serialize.AucSerializer
 
 /// 加载后的模块信息。
-class AucModule {
+        class AucModule {
     var name: String = ""
     var version: String = ""
     var headerFlags: Long = 0
@@ -47,6 +47,61 @@ class AucModule {
     /// 错误信息。
     var error: String = ""
 
+    // ── P2.2：完整区段解析 + 数值化字节码（取消文本翻译层）──
+
+    /// 数值模式标志：true 时 `numOpNames`/`numArgs` 为权威字节码表示，
+    /// `bytecode` 文本不再生成（二进制 → 结构化指令数组，无文本中间层）。
+    var numericMode: Boolean = false
+    /// 每条指令的助记符（Aura VM 命名，经 VM 侧 `Opcodes.fromName` 数值化）。
+    var numOpNames: List<String> = arrayListOf<String>()
+    /// P350：每条指令的 VM 数值 opcode（经 aucToVmOp 映射，与 numOpNames
+    /// 平行）。photon 下 fromName 的字符串比较布局敏感误配，执行流直接
+    /// 消费本表，文本名仅供诊断。
+    var numOpCodes: List<Int> = arrayListOf<Int>()
+    /// P359：常量池按行切分（**转义态**，VM 侧 getConstByIdx 反转义）。
+    /// 在 loadModule 内就地切分——poolAcc 局部槽在该帧内可读（[CP] 实证），
+    /// 传到 VM 侧再扫则调用窗漂移（split 收到空串/扫描器 445 长段）。
+    var constLines: List<String> = arrayListOf<String>()
+    /// 每条指令的操作数（加载期已解析：函数名/常量下标/全局行号）。
+    /// ⚠️ 2026-10-06 扁平化：每指令一条**逗号串**（"a0,a1[,a2]"，空段保序），
+    /// 取代每指令一个 List<String>——2MB 编译器 .auc ≈ 20 万指令 × List
+    /// （8KB 追加余量）= 1.6GB 堆耗尽（实测 buildLoadCaches alloc 返 NULL）。
+    var numArgsFlat: List<String> = arrayListOf<String>()
+    /// 显式依赖表（每行 `module|version`）。
+    var deps: String = ""
+    /// 外部模块签名 ID（每行一个）。
+    var sigIds: String = ""
+    /// 启用的 std 模块（每行一个）。
+    var enabledModules: String = ""
+    /// 虚方法槽位 → 方法名（`CALL_METHOD` 槽位操作数的解析表）。
+    var slotMethodNames: List<String> = arrayListOf<String>()
+    /// 类定义表：类名（下标 = 类 ID，与 Rust `class_id_map` 一致）。
+    var classNames: List<String> = arrayListOf<String>()
+    /// 类定义表：父类 ID（-1 = 无父类；Rust 端 0 = Any 且无自环）。
+    var classParentIds: List<Int> = arrayListOf<Int>()
+    /// 类定义表：本类的虚表下标（-1 = 无虚表）。
+    var classVtIdx: List<Int> = arrayListOf<Int>()
+    /// 虚表扁平槽位（各表槽位依次拼接；`65535` = 该槽无方法）。
+    var vtSlotFlat: List<Int> = arrayListOf<Int>()
+    /// 每个虚表的槽位数（与 `vtSlotFlat` 配合还原二维结构）。
+    var vtSlotCount: List<Int> = arrayListOf<Int>()
+    /// [R236] **按类**的虚表槽位 → 全限定函数名（"Dog.name"）。
+    /// 键 = `类ID * 4096 + 槽位`，值 = 函数名；沿父类链回落（子类覆写优先）。
+    /// 取代全局 `slotMethodNames`——后者在多个类共用同一槽位编号时
+    /// （05-classes：slot0 对 Point 是 manhattan、对 Animal 是 name）必然串号。
+    var clsSlotKey: List<Int> = arrayListOf<Int>()
+    var clsSlotName: List<String> = arrayListOf<String>()
+    /// 类字段名表（每类一行，逗号分隔；仅供诊断）。
+    var classFieldNames: String = ""
+    /// AOT 段数量（段数据不再解析——随 Photon 任务）。
+    var aotSegmentCount: Int = 0
+
+    /// [R4] 原生调用解码诊断计数
+    var nativeDiagCount: Int = 0
+
+    /// [R4] op78 诊断计数
+    var a78DiagCount: Int = 0
+
     fun isValid(): Boolean {
         return error == "" && funcsCount > 0
     }
@@ -66,13 +121,130 @@ class AucModule {
     }
 }
 
-/// .auc 加载器。
-object AucLoaderUtils {
+    /// .auc 加载器。
+        object AucLoaderUtils {
+
+        /// .auc 数值 opcode → VM 数值 opcode（P350：fromName 的字符串比较在
+        /// photon 下布局敏感误配——PRINT 误配成 STORE_LOCAL 之类，指令流
+        /// 整体错位。装载期直接携带数值，文本名仅供诊断）。
+        /// LoadConst（aucOp 0）按常量标签分派，由调用方特判。
+        fun aucToVmOp(aucOp: Int): Int {
+            // ⚠️ P3.2：`.auc` 的 LoadGlobal(110)/StoreGlobal(111) 与 VM 的
+            // INC_REF(110)/DEC_REF(111) **编号冲突**。旧代码直接 `return 110/111`
+            // 把全局变量读写误当成引用计数操作 ⇒ 顶层 val/var 在 JIT 宿主里
+            // 从不真正存取（16-script-mode 脚本模式 while 死循环的根因）。
+            // IncRef/DecRef 走 `.auc` 字节 34/35 → VM 110/111，与此不冲突。
+            if (aucOp == 110) { return 212 }
+            if (aucOp == 111) { return 213 }
+
+        if (aucOp == 0) { return 0 }
+        if (aucOp == 1) { return 10 }
+        if (aucOp == 2) { return 11 }
+        if (aucOp == 3) { return 20 }
+        if (aucOp == 4) { return 21 }
+        if (aucOp == 5) { return 22 }
+        if (aucOp == 6) { return 23 }
+        if (aucOp == 7) { return 24 }
+        if (aucOp == 8) { return 25 }
+        if (aucOp == 9) { return 42 }
+        if (aucOp == 10) { return 40 }
+        if (aucOp == 11) { return 41 }
+        if (aucOp == 12) { return 43 }
+        if (aucOp == 13) { return 44 }
+        if (aucOp == 14) { return 45 }
+        if (aucOp == 15) { return 46 }
+        if (aucOp == 16) { return 47 }
+        if (aucOp == 17) { return 30 }
+        if (aucOp == 18) { return 31 }
+        if (aucOp == 19) { return 32 }
+        if (aucOp == 20) { return 33 }
+        if (aucOp == 21) { return 34 }
+        if (aucOp == 22) { return 35 }
+        if (aucOp == 23) { return 50 }
+        if (aucOp == 24) { return 52 }
+        if (aucOp == 25) { return 51 }
+        if (aucOp == 26) { return 60 }
+        if (aucOp == 27) { return 63 }
+        if (aucOp == 28) { return 65 }
+        if (aucOp == 29) { return 66 }
+        if (aucOp == 30) { return 70 }
+        if (aucOp == 31) { return 73 }
+        if (aucOp == 32) { return 71 }
+        if (aucOp == 33) { return 72 }
+        if (aucOp == 34) { return 110 }
+        if (aucOp == 35) { return 111 }
+        if (aucOp == 36) { return 64 }
+        if (aucOp == 37) { return 53 }
+        if (aucOp == 38) { return 74 }
+        if (aucOp == 39) { return 75 }
+        if (aucOp == 40) { return 61 }
+        if (aucOp == 41) { return 76 }
+        if (aucOp == 42) { return 80 }
+        if (aucOp == 43) { return 81 }
+        if (aucOp == 44) { return 82 }
+        if (aucOp == 45) { return 83 }
+        if (aucOp == 46) { return 84 }
+        if (aucOp == 47) { return 85 }
+        if (aucOp == 48) { return 86 }
+        if (aucOp == 49) { return 87 }
+        if (aucOp == 53) { return 114 }
+        if (aucOp == 54) { return 112 }
+        if (aucOp == 55) { return 113 }
+        if (aucOp == 56) { return 115 }
+        if (aucOp == 57) { return 116 }
+        if (aucOp == 58) { return 117 }
+        if (aucOp == 59) { return 120 }
+        if (aucOp == 60) { return 121 }
+        if (aucOp == 61) { return 130 }
+        if (aucOp == 62) { return 131 }
+        if (aucOp == 63) { return 132 }
+        if (aucOp == 64) { return 133 }
+        if (aucOp == 65) { return 134 }
+        if (aucOp == 70) { return 67 }
+        if (aucOp == 71) { return 68 }
+        if (aucOp == 72) { return 91 }
+        if (aucOp == 73) { return 92 }
+        if (aucOp == 74) { return 200 }
+        if (aucOp == 75) { return 201 }
+        if (aucOp == 76) { return 202 }
+        if (aucOp == 77) { return 69 }
+        if (aucOp == 78) { return 62 }
+        if (aucOp == 80) { return 100 }
+        if (aucOp == 81) { return 101 }
+        if (aucOp == 82) { return 122 }
+        if (aucOp == 83) { return 123 }
+        if (aucOp == 84) { return 140 }
+        if (aucOp == 85) { return 141 }
+        if (aucOp == 86) { return 142 }
+        if (aucOp == 87) { return 143 }
+        if (aucOp == 88) { return 144 }
+        if (aucOp == 89) { return 150 }
+        if (aucOp == 90) { return 151 }
+        if (aucOp == 91) { return 152 }
+        if (aucOp == 92) { return 153 }
+        if (aucOp == 93) { return 170 }
+        if (aucOp == 94) { return 171 }
+        if (aucOp == 95) { return 172 }
+        if (aucOp == 96) { return 173 }
+        if (aucOp == 97) { return 174 }
+        if (aucOp == 98) { return 180 }
+        if (aucOp == 99) { return 181 }
+        if (aucOp == 100) { return 182 }
+        if (aucOp == 101) { return 183 }
+        if (aucOp == 102) { return 184 }
+        if (aucOp == 103) { return 160 }
+        if (aucOp == 104) { return 161 }
+        if (aucOp == 105) { return 162 }
+        if (aucOp == 106) { return 190 }
+        if (aucOp == 107) { return 191 }
+        if (aucOp == 108) { return 192 }
+        if (aucOp == 109) { return 193 }
+            return -1
+        }
 
     /// 从文件加载 .auc 模块。
-    fun loadModule(path: String): AucModule {
+        fun loadModule(path: String): AucModule {
         val mod: AucModule = AucModule()
-
         val reader: AucReader = AucReader()
         if (!reader.readFromFile(path)) {
             mod.error = "cannot read file: " + path
@@ -111,23 +283,46 @@ object AucLoaderUtils {
 
         // 5. 常量池（不含标签，VM 从操作码推断类型）
         // 用 `as Int` 而不是 `.toInt()`（Long.toInt() 在自举 AOT 下同 `Int.toLong()` 一样不可靠）
-        val constsCountL: Long = reader.readU32()
-        mod.constsCount = constsCountL as Int
+        // ⚠️ P253：Long↔Int 截断在 photon AOT 下不可信（readU32 的 `as Long`
+        // 扩展同样存疑），凡 Int 消费一律 readU32Int 直出。
+        // 5. 常量池（不含标签，VM 从操作码推断类型）
+        // 用 `as Int` 而不是 `.toInt()`（Long.toInt() 在自举 AOT 下同 `Int.toLong()` 一样不可靠）
+        // ⚠️ P253：Long↔Int 截断在 photon AOT 下不可信（readU32 的 `as Long`
+        // 扩展同样存疑），凡 Int 消费一律 readU32Int 直出。
+        mod.constsCount = reader.readU32Int()
         // 常量**类型标签**要单独记录：`.auc` 里 `LoadConst` 是类型无关的单操作码
         //（整数/字符串/布尔共用 0），而文本字节码的 `CONST_INT`/`CONST_STRING`
         // 是有类型的 —— 加载期按标签把它翻译成对应的类型化助记符。
         val constTags: List<Int> = arrayListOf<Int>()
+        // P354：池串改局部累加——mod.constPool 字段读拼接链的 field_get
+        // 调用窗会返回陈旧池（条目漂移）。局部槽累加 + 循环后一次赋字段。
+        // P358：每条**无条件**追加 "\n"（含末尾）——`if (ci > 0)` 的体内
+        // ci 读是循环携带计数器陈旧读（§10.89 总根），分隔符被整段跳过。
+        // 尾随空段被 Vm 侧 split 扫描的 `if (cs < cn)` 自然忽略。
+        var poolAcc: String = ""
         var ci: Int = 0
         while (ci < mod.constsCount) {
             val tag: Int = reader.readByte()
             constTags.add(tag)
             val value: String = readConstValue(reader, tag)
-            if (mod.constPool != "") {
-                mod.constPool = mod.constPool + "\n"
-            }
-            mod.constPool = mod.constPool + value
+            val esc: String = escapeConstValue(value)
+            poolAcc = poolAcc + esc
+            poolAcc = poolAcc + "\n"
+            // P360：常量循环本身是可靠循环（[LP] 实证 offset/count 推进正确）——
+            // 转义值直接入 constLines，消灭一切事后扫描（扫描器循环计数器
+            // 陈旧读是 §10.89 总根，loadModule/Vm 两侧扫描全部漂移实证）。
+            mod.constLines.add(esc)
             ci = ci + 1
         }
+        mod.constPool = poolAcc
+        // P358（2026-10-08 删除）：此处曾有一个「池本体测量」诊断窗（池长度 +
+        // 换行数 + 前 60 字节），用于确认常量池未被漏写的裸换行打穿——打穿后
+        // 所有常量下标整体错位（P331/P360 家族）。P360 起 constLines 改在
+        // 常量循环内就地构建，此窗失去断言对象，已随装载期探针一并清除。
+        // 若日后 constPool 再现「下标错位 / 循环条件恒假」，先按上述口径补回
+        // 该窗再定位（勿改成事后扫描器，扫描器循环在 photon 下同样漂移）。
+        // P360：constLines 改在常量循环内直接构建（转义态）——本函数与
+        // VM 侧的扫描器循环均漂移（§10.89 总根），已全部废弃。
 
         // 6. Native 函数（布局对齐 Rust `to_bytes`）：
         //    write_str(name) + u16 param_count + u8 ffi_abi
@@ -160,12 +355,15 @@ object AucLoaderUtils {
             ni = ni + 1
         }
 
-        // 7. 函数
+        // 7. 函数（两遍扫描：P2.2 取消文本翻译）
         //
-        // 必须还原「函数边界」：VM 用 `# func name:` 注释行占位（不计入执行，
-        // 但计入行号）来对齐 `funcTable` 的起始行；`funcTable` 为
-        // `name|起始行|参数个数`。此前这里只把各函数字节码首尾相接、且
-        // `funcTable` 留空 → 入口恒为第 0 行、`CALL` 无法解析任何用户函数。
+        // 第 1 遍：只读函数头（name/params/locals/aot 标记/codeLen），记录代码段
+        //   起始位置；此时不解码 —— 因为 `CALL <函数下标>` 要解析成函数名，而
+        //   被调函数可能定义在后面（前向引用），且 `CALL_METHOD <槽位>` 的解析
+        //   需要 vtable（位于文件更后）。
+        // 第 2 遍：读取 entry/exports/imports/deps/sigIds/enabledModules/
+        //   vtables/classes/sourceIndex/aotSegments 之后，回跳到各函数代码段
+        //   逐一数值化解码（`numOpNames`/`numArgs`，无文本中间层）。
         mod.funcsCount = reader.readU16()
         // 合理性校验：函数数为 0 / 异常巨大说明前面某段（常量或原生）消费字节数
         // 与写入端不一致，读指针已失步。早失败并带上下文，胜过继续读出垃圾。
@@ -175,8 +373,11 @@ object AucLoaderUtils {
             reader.dispose()
             return mod
         }
+        val funcNames: List<String> = arrayListOf<String>()
+        val funcParams: List<Int> = arrayListOf<Int>()
+        val codeStarts: List<Long> = arrayListOf<Long>()
+        val codeLens: List<Int> = arrayListOf<Int>()
         var fi: Int = 0
-        var lineNo: Int = 0
         while (fi < mod.funcsCount) {
             val fname: String = reader.readStr()
             val params: Int = reader.readU16()
@@ -185,21 +386,33 @@ object AucLoaderUtils {
             reader.readByte()             // is_native
             reader.readByte()             // aot_mode
             reader.readU32()              // aot_desc_idx（u32）
-            val codeLenL: Long = reader.readU32()
-            val codeLen: Int = codeLenL as Int
-
-            // 函数表条目记录注释行自身的行号（与 Codegen 的 `# func` 占位一致）
-            mod.funcTable = mod.funcTable + fname + "|" + toStr(lineNo) + "|"
-                + toStr(params) + "\n"
-            mod.bytecode = mod.bytecode + "# func " + fname + ":\n"
-            lineNo = lineNo + 1
-
-            val code: String = readBytecode(reader, codeLen, nativeNames, nativeParams,
-                constTags, lineNo)
-            if (code != "") {
-                mod.bytecode = mod.bytecode + code + "\n"
-                lineNo = lineNo + countTextLines(code)
+            // ⚠️ P253：readU32Int 直接产出 Int——`codeLenL as Int` 在 photon
+            // AOT 下产出垃圾（实测 codeLens 全变 1-3 ⇒ 每函数只解 1 条指令）。
+            val codeLen: Int = reader.readU32Int()
+            // [R245] 重载消歧：**.auc 的 CALL 操作数是函数下标**，重载的同名
+            // 函数下标不同（17-function-overload：4 个 `add`、3 个 `greet`）。
+            // 旧径把下标翻成函数名 ⇒ 所有重载调用串到第一个同名项（实测
+            // `add(1,2,3)=5`、`greet('Aura')=Hello`）。首个名字保持原样
+            // （13-stdlib 的 319 个函数里只有 2 组重名），后续重名追加
+            // "@<下标>"。⚠ 不要用 `funcNames[i] = ...` 事后改写：那段索引
+            // 赋值在本函数里实测把整个加载器搞坏（r246 全用例空输出）。
+            var dup9: Int = 0
+            var mj9: Int = 0
+            while (mj9 < fi) {
+                if (funcNames[mj9] == fname) {
+                    dup9 = 1
+                }
+                mj9 = mj9 + 1
             }
+            if (dup9 == 1) {
+                funcNames.add(fname + "@" + toStr(fi))
+            } else {
+                funcNames.add(fname)
+            }
+            funcParams.add(params)
+            codeStarts.add(reader.pos)
+            codeLens.add(codeLen)
+            reader.skip(codeLen as Long)
             fi = fi + 1
         }
 
@@ -210,8 +423,7 @@ object AucLoaderUtils {
         // 9. 导出符号表（CALL_EXPORT 解析需要）
         //    格式：u16 count, 每条: name(str) + kind(u8) + sig_id(str)
         //          + has_func_idx(u8) + func_idx(u16)? + type_table_idx(u16) + const_idx(u16)
-        val nExportsL: Long = reader.readU16()
-        val nExports: Int = nExportsL as Int
+        val nExports: Int = reader.readU16()
         var ei: Int = 0
         while (ei < nExports) {
             val expName: String = reader.readStr()
@@ -220,8 +432,7 @@ object AucLoaderUtils {
             val hasFunc: Int = reader.readByte()
             val expFuncIdx: Int = 0
             if (hasFunc != 0) {
-                val fiL: Long = reader.readU16()
-                expFuncIdx = fiL as Int
+                expFuncIdx = reader.readU16()
             }
             reader.readU16()              // type_table_idx
             reader.readU16()              // const_idx
@@ -232,8 +443,7 @@ object AucLoaderUtils {
         // 10. 导入符号表（CALL_EXTERNAL 解析需要）
         //     格式：u16 count, 每条: name(str) + kind(u8) + module(str)
         //           + symbol(str) + sig_id(str) + func_idx(u16)
-        val nImportsL: Long = reader.readU16()
-        val nImports: Int = nImportsL as Int
+        val nImports: Int = reader.readU16()
         var ii: Int = 0
         while (ii < nImports) {
             val impName: String = reader.readStr()
@@ -248,16 +458,305 @@ object AucLoaderUtils {
             ii = ii + 1
         }
 
-        // 说明：其后还有依赖/签名/vtable/类表/段表等区段。
-        // VM 执行只需要 `bytecode` / `constPool` / `funcTable` / `exports` / `imports`，
-        // 故**不再继续解析**后续区段。
+        // 11. 显式依赖表（P2.2a：此前跳过）
+        //     u16 count, 每条: module(str) + uuid(16) + version(str)
+        val nDepsL: Long = reader.readU16()
+        var di: Int = 0
+        while (di < (nDepsL as Int)) {
+            val depModule: String = reader.readStr()
+            reader.skip(16)               // uuid
+            val depVersion: String = reader.readStr()
+            mod.deps = mod.deps + depModule + "|" + depVersion + "\n"
+            di = di + 1
+        }
+
+        // 12. 外部模块签名 ID（P2.2a）
+        val nSigsL: Long = reader.readU16()
+        var si2: Int = 0
+        while (si2 < (nSigsL as Int)) {
+            mod.sigIds = mod.sigIds + reader.readStr() + "\n"
+            si2 = si2 + 1
+        }
+
+        // 13. 启用的 std 模块（P2.2a）
+        val nModsL: Long = reader.readU16()
+        var mi2: Int = 0
+        while (mi2 < (nModsL as Int)) {
+            mod.enabledModules = mod.enabledModules + reader.readStr() + "\n"
+            mi2 = mi2 + 1
+        }
+
+        // 14. v5: 虚方法表（P2.2a/P2.2c）
+        //     u16 count, 每表: type_tag(u16) + u16 nslots + nslots × u16(func_idx)
+        //     槽位 → 方法名的解析表：取任一非空槽的函数名（"Class.method"）
+        //     的方法名部分；覆写只改函数、不改槽位语义，故任取即安全。
+        val noMethodSentinel: Int = 65535
+        var slotNames: List<String> = arrayListOf<String>()
+        var vtFlat: List<Int> = arrayListOf<Int>()
+        var vtCounts: List<Int> = arrayListOf<Int>()
+        if (version >= 5 && reader.pos < reader.dataLen) {
+            val nVtL: Long = reader.readU16()
+            var vi: Int = 0
+            while (vi < (nVtL as Int)) {
+                reader.readU16()          // type_tag
+                val nSlotsL: Long = reader.readU16()
+                val nSlots: Int = nSlotsL as Int
+                vtCounts.add(nSlots)
+                var sj: Int = 0
+                while (sj < nSlots) {
+                    val fidxL: Long = reader.readU16()
+                    val fidx: Int = fidxL as Int
+                    vtFlat.add(fidx)
+                    if (fidx != noMethodSentinel) {
+                        // 扩容 slotNames 到 sj+1
+                        while (slotNames.size() <= sj) {
+                            slotNames.add("")
+                        }
+                        if (slotNames.get(sj) == "") {
+                            val mname: String = methodNameOf(nameAt(funcNames, fidx))
+                            slotNames.set(sj, mname)
+                        }
+                    }
+                    sj = sj + 1
+                }
+                vi = vi + 1
+            }
+        }
+        mod.slotMethodNames = slotNames
+        mod.vtSlotFlat = vtFlat
+        mod.vtSlotCount = vtCounts
+
+        // 15. v6: 类定义表（P2.2a/P2.2c）
+        //     仅当 version >= 6 且 headerFlags 含 HEADER_HAS_CLASS_DEFS(1<<4=16)
+        //     u16 count, 每类: name(str) + parent_id(u16) + field_count(u16)
+        //       + vtable_idx(u16) + interfaces(u16 count + u16 each)
+        //       + is_builtin(u8) + is_singleton(u8) + field_names(u16 count + str each)
+        val hasClassDefs: Boolean = hasHeaderFlag(mod.headerFlags, 16)
+        if (version >= 6 && hasClassDefs && reader.pos < reader.dataLen) {
+            val nClsL: Long = reader.readU16()
+            var ci2: Int = 0
+            while (ci2 < (nClsL as Int)) {
+                mod.classNames.add(reader.readStr())
+                mod.classParentIds.add(reader.readU16() as Int)
+                reader.readU16()          // field_count
+                mod.classVtIdx.add(reader.readU16() as Int)
+                val nIfL: Long = reader.readU16()
+                var ii2: Int = 0
+                while (ii2 < (nIfL as Int)) {
+                    reader.readU16()      // interface id
+                    ii2 = ii2 + 1
+                }
+                reader.readByte()         // is_builtin
+                reader.readByte()         // is_singleton
+                val nFnL: Long = reader.readU16()
+                var fnLine: String = ""
+                var fi2: Int = 0
+                while (fi2 < (nFnL as Int)) {
+                    if (fnLine != "") { fnLine = fnLine + "," }
+                    fnLine = fnLine + reader.readStr()
+                    fi2 = fi2 + 1
+                }
+                mod.classFieldNames = mod.classFieldNames + fnLine + "\n"
+                ci2 = ci2 + 1
+            }
+        }
+
+        // 15b. [R236] **按类**的虚表槽位 → 全限定函数名（"Dog.name"）。
+        //      语义对齐 Rust VM `do_call_method`：槽位编号只在**同一个类**的
+        //      虚表内有意义；此前用全局 `slotMethodNames`（任取首个非空槽）
+        //      在多类程序里必然串号（05-classes 实测 slot0 解析成 "manhattan"）。
+        //      遍历顺序 子类 → 父类，先登记者胜（子类覆写优先）。
+        var ci4: Int = 0
+        while (ci4 < mod.classNames.size()) {
+            var cur4: Int = ci4
+            var d4: Int = 0
+            while (cur4 >= 0 && cur4 < mod.classNames.size() && d4 < 64) {
+                val vt4: Int = mod.classVtIdx[cur4]
+                if (vt4 >= 0 && vt4 < vtCounts.size()) {
+                    var base4: Int = 0
+                    var k4: Int = 0
+                    while (k4 < vt4) {
+                        base4 = base4 + vtCounts[k4]
+                        k4 = k4 + 1
+                    }
+                    var s4: Int = 0
+                    while (s4 < vtCounts[vt4]) {
+                        val f4: Int = vtFlat[base4 + s4]
+                        if (f4 != noMethodSentinel && f4 < funcNames.size()) {
+                            val key4: Int = ci4 * 4096 + s4
+                            var qi: Int = 0
+                            val qn: Int = mod.clsSlotKey.size()
+                            var had4: Int = 0
+                            while (qi < qn) {
+                                if (mod.clsSlotKey[qi] == key4) {
+                                    had4 = 1
+                                    qi = qn
+                                }
+                                qi = qi + 1
+                            }
+                            if (had4 == 0) {
+                                mod.clsSlotKey.add(key4)
+                                mod.clsSlotName.add(funcNames[f4])
+                            }
+                        }
+                        s4 = s4 + 1
+                    }
+                }
+                val p4: Int = mod.classParentIds[cur4]
+                if (p4 == cur4 || p4 < 0 || p4 >= mod.classNames.size()) {
+                    cur4 = -1
+                } else {
+                    cur4 = p4
+                }
+                d4 = d4 + 1
+            }
+            ci4 = ci4 + 1
+        }
+
+        // 16. v6: 源码索引段（LSP 专用，跳过其字节）
+        val hasSourceIndex: Boolean = hasHeaderFlag(mod.headerFlags, 32)
+        if (version >= 6 && hasSourceIndex && reader.pos < reader.dataLen) {
+            val jsonLen: Long = reader.readU32()
+            reader.skip(jsonLen)
+        }
+
+        // 17. v4: AOT 段表 + 段数据区（P2.2a：解析段表，段数据随 Photon 任务）
+        if (version >= 4 && reader.pos < reader.dataLen) {
+            val nSegL: Long = reader.readU16()
+            mod.aotSegmentCount = nSegL as Int
+            var gi: Int = 0
+            while (gi < mod.aotSegmentCount) {
+                reader.readU32()          // id
+                reader.readU32()          // offset
+                reader.readU32()          // size
+                reader.readU32()          // flags
+                gi = gi + 1
+            }
+            // 段数据区（剩余字节）不再消费——随 Photon 任务
+        }
+
+        // ═══ 第 2 遍：数值化解码（P2.2b，取消文本翻译层）═══
+        mod.numericMode = true
+        var lineNo2: Int = 0
+        var startLines: List<Int> = arrayListOf<Int>()
+        var fi3: Int = 0
+        while (fi3 < mod.funcsCount) {
+            startLines.add(lineNo2)
+            reader.pos = codeStarts.get(fi3)
+            val startOpCount: Int = mod.numOpNames.size()
+            val decoded: Int = decodeNumeric(reader, codeLens.get(fi3), nativeNames,
+                nativeParams, constTags, funcNames, funcParams, mod.slotMethodNames,
+                mod.classNames, lineNo2, mod)
+            // P331：decoded 返回值在 photon 下不可靠（循环 phi 家槽被陈旧 MOV
+            // 污染，实测恒 1/2）——但 flat 追加本身全对（1194 行实证）。
+            // 起始行改用 **flat 实际增量** 计算，绕开坏计数器。
+            val realDecoded: Int = mod.numOpNames.size() - startOpCount
+            lineNo2 = lineNo2 + realDecoded
+            fi3 = fi3 + 1
+        }
+        // 函数表：起始行 = 指令下标（无数值注释占位行）
+        // P340：多操作数拼接链摊平（同 constPool 修复）；P354 局部累加。
+        var ftAcc: String = ""
+        var fi4: Int = 0
+        while (fi4 < mod.funcsCount) {
+            ftAcc = ftAcc + funcNames.get(fi4)
+            ftAcc = ftAcc + "|"
+            ftAcc = ftAcc + toStr(startLines.get(fi4))
+            ftAcc = ftAcc + "|"
+            ftAcc = ftAcc + toStr(funcParams.get(fi4))
+            ftAcc = ftAcc + "\n"
+            fi4 = fi4 + 1
+        }
+        mod.funcTable = ftAcc
 
         reader.dispose()
+        AucLoaderUtils.lastLoaded = mod
         return mod
     }
 
+    /// ⚠️ P266：返回值全局槽中转——绕开 RA 返回值通路（rax→调用方槽的
+    /// 句柄漂移，§10.50/P250）。loadModule 将结果写入此静态字段，
+    /// loadAucAndRun 从此字段读取（.data 槽不受 RA 区间/干扰影响）。
+    var lastLoaded: AucModule = AucModule()
+
+    /// headerFlags 位检测（避免跨包位运算依赖：正整数用除法/取模实现）。
+        private fun hasHeaderFlag(flags: Long, bit: Int): Boolean {
+        if (flags < 0 || bit <= 0) { return false }
+        val f: Long = flags
+        val b: Long = bit as Long
+        return ((f / b) % 2L) == 1L
+    }
+
+    /// 常量值换行转义：值内 `\` → `\\`、换行(10) → `\n` 两字符序列。
+    ///
+    /// 维持常量池「一行一常量」不变式：值内裸换行会把一行打穿成两行，
+    /// 之后**所有**常量下标错位（实测 stdlib 的 `"\n"` 字符串常量让
+    /// loop50 的 const[41]（Int 50）读成 `}` → 循环条件恒假 → 循环整段
+    /// 被跳过）。反转义在 VM 侧 `Vm.getConst`。
+        private fun escapeConstValue(v: String): String {
+        var hasSpecial: Boolean = false
+        var i0: Int = 0
+        val n0: Int = v.length
+        while (i0 < n0) {
+            val c0: Int = v.charCodeAt(i0)
+            if (c0 == 92 || c0 == 10) {
+                hasSpecial = true
+                i0 = n0
+            }
+            i0 = i0 + 1
+        }
+        if (!hasSpecial) {
+            return v
+        }
+        // P389：单字符 "
+        // "" / "\" 快速路径——直接返回预转义常量，
+        // 不进 concat 循环（.auc 常量池里含特殊字符的值几乎全是这三种）。
+        if (v.length == 1) {
+            if (v.charCodeAt(0) == 10) { return "\n" }
+            if (v.charCodeAt(0) == 92) { return "\\" }
+        }
+        // P388：改用**字面量反斜杠**——String.fromCharCode(92) 的调用窗在
+        // fib28.auc 装载期崩（escape 体从未被 banner 走过，此处首次执行）。
+        // 语义等价：92 = '\'。
+        val bs: String = "\\"
+        var out: String = ""
+        var i: Int = 0
+        val n: Int = v.length
+        while (i < n) {
+            val c: Int = v.charCodeAt(i)
+            if (c == 92) {
+                out = out + bs
+                out = out + bs
+            } else if (c == 10) {
+                out = out + bs
+                out = out + "n"
+            } else {
+                out = out + String.fromCharCode(c)
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 文件读取的安全终点（AucReader 越界读返回 -1/0，这里防御性判断）。
+        private fun endOfModules(reader: AucReader): Long {
+        return reader.dataLen
+    }
+
+    /// 从 "Class.method" 形态的函数名提取方法名部分（无点号返回原名）。
+        private fun methodNameOf(funcName: String): String {
+        var i: Int = funcName.length - 1
+        while (i >= 0) {
+            if (funcName.charCodeAt(i) == 46) {  // '.'
+                return funcName.substring(i + 1, funcName.length)
+            }
+            i = i - 1
+        }
+        return funcName
+    }
+
     /// 读取魔数。
-    private fun readMagic(reader: AucReader): String {
+        private fun readMagic(reader: AucReader): String {
         var result: String = ""
         var i: Int = 0
         while (i < 4) {
@@ -274,7 +773,7 @@ object AucLoaderUtils {
     /// 不用 `magic == AucConstants.MAGIC`：Aura AOT 下字符串字面量比较会走
     /// 指针比较路径，且 `object` 常量取值不稳定；按字符码逐个比较与
     /// 字符串内容比较的实现细节无关，最稳。
-    private fun isAuraMagic(magic: String): Boolean {
+        private fun isAuraMagic(magic: String): Boolean {
         if (magic == null) { return false }
         if (magic.length != 4) { return false }
         if (magic.charCodeAt(0) != 65) { return false }  // 'A'
@@ -285,36 +784,77 @@ object AucLoaderUtils {
     }
 
     /// 读取常量值。
-    private fun readConstValue(reader: AucReader, tag: Int): String {
+        private fun readConstValue(reader: AucReader, tag: Int): String {
         // 常量标签用字面量（同版本号：object 的 const val 在自举 AOT 下不可靠）
         if (tag == 0) {  // CONST_INT（i64）
             // 逐 32 位读取：写端是 `i64`，但字节码语义是 32 位 Int。
             // 高 32 位为 0（正）或 -1（负数）时，低 32 位的有符号值即真值
             //（实测 `-2` 若按无符号 Long 输出会变成 18446744073709551614）。
-            val low: Int = reader.readI32()
-            val high: Int = reader.readI32()
-            if (high == 0 || high == -1) {
-                return toStr(low)
+            // [R237] 两道失真叠加，必须各修一处：
+            //  ① **符号扩展**：`readI32` = `b0|(b1<<8)|(b2<<16)|(b3<<24)`，
+            //     Photon 的 Int 是 **64 位** ⇒ 0xFFFFFFFB 不会被符号扩展成
+            //     -5，而是 4294967291（实测 `[CI]` 诊断窗从不打印）。
+            //  ② **无符号打印**：`toStr` 在 Photon 运行时按无符号十进制输出
+            //     （toStr(-5) = "4294967291"），故取绝对值后手工补负号。
+            //
+            // 两处修正都用 **16 位分块** 表达，绕开整数字面量上限：
+            // ⚠️ 字面量 2147483648 / 4294967296 在种子前端按 i32 解析会溢出
+            // （2147483648 → -2147483648 ⇒ `cv >= 2147483648` 恒真 ⇒ 正数
+            //   被误减 2^32，实测 42 → "-4294967254"，26 个用例全线崩）。
+            val lo16: Int = reader.readU16()
+            val hi16: Int = reader.readU16()
+            reader.readU16()             // 高 32 位（符号扩展位，弃用）
+            reader.readU16()
+            if (hi16 >= 32768) {
+                // 负数：真值 = -(2^32 - u)，u = hi16*65536 + lo16
+                // 2^32 - u = (65536 - hi16) * 65536 - lo16（各量均 < 2^32）
+                val mag: Int = (65536 - hi16) * 65536 - lo16
+                return "-" + toStr(mag)
             }
-            return toStr(low)
-        } else if (tag == 1) {  // CONST_FLOAT
-            // `Const::Float(f64)` → tag(1) + f64（8 字节）
-            reader.skip(8)
-            return "0.0"
+            return toStr(hi16 * 65536 + lo16)
+        } else if (tag == 1) {  // CONST_FLOAT：[R22] 十进制**文本**（种子端直接写文本，线格式与 CONST_STR 同形）
+            // 旧实现 = 8 字节位模式 + f64BitsToText（纯 Aura 拆位）——该内核
+            //（52 次 Float 累加 + VmOps.pow + toStr(Float)，宿主 toStr =
+            // 纯整数打印机）在宿主产码下漂移（实测 2.5/2.0 → "-2000"）；
+            // 纯 Long 重写内核逻辑正确但该布局发射代码致命（exit=127 启动崩）。
+            // 文本编码 = 字符串已证路径（readStrN 与 CONST_STR 同款），宿主侧
+            // 零格式化。串长实际 < 65536，读两个 u16 与写端 u32 字节序兼容
+            //（同 tag 2）。
+            // P4.1（AOT 基底适配）：位模式改为逐字节构造。自举 AOT 下
+            // readU64 的 `(hi as Long) << 32` 路径不可靠（`as Long` 失真），
+            // 而标量 Long 的乘加在双基底均可靠（探针实测 2^52 精确）。
+            // 写端是小端：首字节为最低位，故按 b7..b0 逆序乘累加
+            //（v1 把首字节累到最高位，5.0 被读成 0x1440 → 0.0，差分当场抓住）。
+            // [R22] 位模式内核整体停置：f64BitsToText 保留但不再被调用
+            //（Float 常量已改文本编码，见上）。
+            val lenF: Int = reader.readU16()
+            val lenFHi: Int = reader.readU16()
+            return reader.readStrN(lenF + lenFHi * 65536)
         } else if (tag == 2) {  // CONST_STR
-            val len: Long = reader.readU32()
-            var result: String = ""
-            var i: Long = 0
-            while (i < len) {
-                val c: Int = reader.readByte()
-                if (c < 0) { break }
-                result = result + String.fromCharCode(c)
-                i = i + 1
-            }
-            return result
+            // P4.1（AOT 基底适配）：长度改为两次 readU16 的组合。
+            // 原实现 readU32 → `as Long` 在自举 AOT 下失真成巨值 → 常量区
+            // 被吃穿到 EOF（实测 helloworld.auc consts=52 后 natives/funcs=-1）。
+            // 组合用**乘法**（`lenHi * 65536`）而不是 `<< 16`：自举 AOT 下
+            // Int 移位失真（实测 lenHi=0 时 `<<16` 产出巨值 → 吃穿到 EOF；
+            // Long 移位与 Int 乘法均可靠，见 readU32 与 list_probe 探针）。
+            // 串长实际 < 65536，读两个 u16 与写端 u32 字节序兼容。
+            val lenLo: Int = reader.readU16()
+            val lenHi: Int = reader.readU16()
+            val len: Int = lenLo + lenHi * 65536
+            // P356：逐字节 while 的 `i = i + 1` 不推进（循环推进家族）→
+            // 每串读到 EOF → 常量条目=池后缀（[9len]=445 实证）。复用
+            // AucReader.readStrFrom 递归（funcNames 解码同款，已验证）。
+            return reader.readStrN(len)
         } else if (tag == 3) {  // CONST_BOOL
+            // [R223] 必须落 **"true"/"false"**（不是 "1"/"0"）：Bool 常量的
+            // 消费端是 Vm 的 `op == 3`，它按 `argStrOf(0) == "true"` 取值。
+            // 旧径 `toStr(v)` 给 "1"/"0" ⇒ 恒不相等 ⇒ 恒压裸 false ⇒
+            // `active.toString()` 打印 "0"（03-functions §3.4 命名参数）。
             val v: Int = reader.readByte()
-            return toStr(v)
+            if (v != 0) {
+                return "true"
+            }
+            return "false"
         }
         // NULL: 无数据
         return "null"
@@ -421,6 +961,338 @@ object AucLoaderUtils {
         return result
     }
 
+    /// 数值化解码单个函数的字节码（P2.2b：二进制 → 结构化指令数组）。
+    ///
+    /// 与 `readBytecode`（文本翻译，遗留）的语义一致，但不拼装文本行，直接
+    /// 向 `mod.numOpNames` / `mod.numArgs` 追加指令；操作数在加载期解析为
+    /// 「函数名 / 常量下标 / 全局行号」等最终形态。返回解码出的指令数。
+    ///
+    /// 关键翻译（相对文本版的两处强化）：
+    ///   * `CALL <函数下标>` → `CALL <函数名> <参数个数>`（文本版遗留为数字
+    ///     下标，VM 无法解析——这是 `.auc` 用户函数调用不可用的根因之一）；
+    ///   * `CALL_METHOD <vtable槽位>` → `CALL_METHOD <方法名>`（经槽位表解析；
+    ///     接收者副本/参数绑定由 VM 的 aucMode 方法调用约定处理）。
+    private fun decodeNumeric(reader: AucReader, codeLen: Int, nativeNames: List<String>,
+        nativeParams: List<Int>, constTags: List<Int>, funcNames: List<String>,
+        funcParams: List<Int>, slotNames: List<String>, classNames: List<String>,
+        baseLine: Int, mod: AucModule): Int {
+        val startPos: Long = reader.pos
+        val endPos: Long = startPos + (codeLen as Long)
+
+        var count: Int = 0
+        var offset: Int = 0
+        while (offset < codeLen && reader.pos < endPos) {
+            val opcode: Int = reader.readByte()
+            if (opcode < 0) { break }
+
+            val operandSize: Int = operandSizeLookup(opcode)
+
+            // =========== P235 派发链 PushHandler 化（decodeNumeric）===========
+            //
+            // 每个分支**内联** numOpNames/numArgsFlat 的追加后 continue——
+            // 分支局部值不再跨分支合并（彻底绕开 name/a0/a1 的 merge phi，
+            // 其合并值经 P230 二分实证会被 phi 缺陷串块）。opcodeName(opcode)
+            // 在每个内联点纯函数重算，无合并。
+
+            if (opcode == 0) {
+                // LoadConst：助记符由常量标签决定
+                val idx: Int = reader.readU16()
+                mod.numOpNames.add(constMnemonic(constTags, idx))
+                // P361：LoadConst 按常量标签分派数值 opcode——标签 0-4 →
+                // LOAD_CONST_I/F/S/B/N = 5-9 **线性映射 5+tag**（无分支——
+                // if/else 链的合并值在 photon 下陈旧读）。P366：idx 恒在
+                // constsCount 内（同文件 u16），去掉 if 表达式守卫
+                //（if 表达式赋值的 t0 亦 phi-web 陈旧读，numOpCodes 值错）。
+                val t0: Int = constTags.get(idx)
+                mod.numOpCodes.add(5 + t0)
+                mod.numArgsFlat.add(toStr(idx))
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (opcode == 23 || opcode == 24 || opcode == 25) {
+                // Jump/JumpIfTrue/JumpIfFalse：i32 字节偏移 → 全局行号
+                val target: Int = reader.readI32()
+                val li: Int = instrIndexAt(reader, startPos, target, codeLen)
+                mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                mod.numArgsFlat.add(toStr(baseLine + li))
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (opcode == 26) {
+                // CALL 函数下标 → 函数名 + 参数个数（前向引用已由两遍扫描解决）
+                val fidx: Int = reader.readU16()
+                val n0: String = nameAt(funcNames, fidx)
+                mod.numOpNames.add("CALL")
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                // P340：三操作数拼接链摊平（丢第二操作数家族）
+                val a26: String = n0 + ","
+                mod.numArgsFlat.add(a26 + toStr(paramAt(funcParams, fidx)))
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (opcode == 27) {
+                // CallNative: u16 idx（argc 取该原生的形参个数）
+                val idx: Int = reader.readU16()
+                var n0: String = nameAt(nativeNames, idx)
+                if (n0 == "") { n0 = toStr(idx) }
+                mod.numOpNames.add("CALL_NATIVE_ARGS")
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                val a27: String = n0 + ","
+                // [R4] 有界诊断：原生表尺寸与解析结果
+                if (nativeDiagCount < 10) {
+                    nativeDiagCount = nativeDiagCount + 1
+                    println("[A27] idx=" + toStr(idx) + " natives=" + toStr(nativeNames.size())
+                        + " n0=[" + n0 + "] params=" + toStr(paramAt(nativeParams, idx)))
+                }
+                mod.numArgsFlat.add(a27 + toStr(paramAt(nativeParams, idx)))
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (opcode == 78) {
+                // CallNativeArgs: u16 idx + u16 argc
+                val idx: Int = reader.readU16()
+                val argc: Int = reader.readU16()
+                var n0: String = nameAt(nativeNames, idx)
+                if (n0 == "") { n0 = toStr(idx) }
+                mod.numOpNames.add("CALL_NATIVE_ARGS")
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                val a78: String = n0 + ","
+                mod.numArgsFlat.add(a78 + toStr(argc))
+                // [R4] 有界诊断：op78 构造现场
+                if (a78DiagCount < 10) {
+                    a78DiagCount = a78DiagCount + 1
+                    println("[A78] idx=" + toStr(idx) + " natives=" + toStr(nativeNames.size())
+                        + " n0=[" + n0 + "] argc=" + toStr(argc) + " flat=[" + a78 + toStr(argc) + "]")
+                }
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (opcode == 30) {
+                // NewObject(类 ID) → [R236] 直接传 **类 ID**（VM 侧按 ID 查
+                // 虚表槽位；类名不唯一，见 Vm.newObject 注释）
+                val cid: Int = reader.readU16()
+                mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                mod.numArgsFlat.add(toStr(cid))
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (opcode == 32 || opcode == 33) {
+                // GetField/SetField：字段名哈希（内建成员翻译回名字）
+                val h: Int = reader.readU16()
+                val fname: String = fieldNameOf(h)
+                var a0: String = toStr(h)
+                if (fname != "") { a0 = fname }
+                mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                mod.numArgsFlat.add(a0)
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (opcode == 40) {
+                // CallMethod(vtable 槽位)
+                // [R236] 传**裸槽位号**：槽位→方法名由 VM 按接收者的类解析
+                // （`clsSlotKey/clsSlotName`）。旧径传全局槽位表里的名字，
+                // 多类程序里 slot0 会解析到别的类的方法（实测 "manhattan"）。
+                val slot: Int = reader.readU16()
+                var a0: String = toStr(slot)
+                mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                mod.numArgsFlat.add(a0)
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (opcode == 71) {
+                // CallExternal: u16 mod_idx + u16 sym_idx
+                val modIdx: Int = reader.readU16()
+                val symIdx: Int = reader.readU16()
+                mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                val a71: String = toStr(modIdx) + ","
+                mod.numArgsFlat.add(a71 + toStr(symIdx))
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (opcode == 70 || opcode == 77) {
+                // CallExport / CallAot：函数下标 → 函数名
+                val fidx: Int = reader.readU16()
+                var a0: String = nameAt(funcNames, fidx)
+                if (a0 == "") { a0 = toStr(fidx) }
+                mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                mod.numArgsFlat.add(a0)
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (opcode == 72) {
+                // MakeClosure: 函数下标 → 函数名（捕获经 CALL 侧语义，.auc 无捕获）
+                val fidx: Int = reader.readU16()
+                var a0: String = nameAt(funcNames, fidx)
+                if (a0 == "") { a0 = toStr(fidx) }
+                mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                mod.numArgsFlat.add(a0)
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (opcode == 80 || opcode == 81) {
+                // InstanceOf/CheckCast(类 ID) → 类名
+                val cid: Int = reader.readU16()
+                mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                mod.numArgsFlat.add(classNameAt(classNames, cid))
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (opcode == 82) {
+                // PushHandler: i32 目标偏移 → 行号 + u16 slot + u16 catchType(类 ID)
+                val target: Int = reader.readI32()
+                val slot: Int = reader.readU16()
+                val catchId: Int = reader.readU16()
+                val li: Int = instrIndexAt(reader, startPos, target, codeLen)
+                // catchType 作为第 3 个操作数单独追加；0xFFFF 哨兵 = 无类型过滤
+                var catchName: String = ""
+                if (catchId != 65535) {
+                    catchName = classNameAt(classNames, catchId)
+                }
+                mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                val a82a: String = toStr(baseLine + li) + ","
+                val a82b: String = a82a + toStr(slot) + ","
+                mod.numArgsFlat.add(a82b + catchName)
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (operandSize == 2) {
+                val v: Int = reader.readU16()
+                mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                mod.numArgsFlat.add(toStr(v))
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            } else if (operandSize == 4) {
+                val v0: Int = reader.readU16()
+                val v1: Int = reader.readU16()
+                mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
+                val a4a: String = toStr(v0) + ","
+                mod.numArgsFlat.add(a4a + toStr(v1))
+                count = count + 1
+                var adv: Int = 1 + operandSize
+                offset = offset + adv
+                continue
+            }
+            // operandSize == 0：无操作数（opcodeName 单点重算，无合并）
+            // ⚠️ P329：此臂必须显式 continue——它是 if/else 链中唯一无 continue
+            // 的臂，fall-through 会经 merge phi 链回连循环头，而链上 merge 的
+            // 前驱标签在 PushHandler 化后全部失配（陈旧边），运行期把上一轮
+            // 之前的陈旧 count/offset 写回循环 phi 家槽（实测 count 每逢本臂
+            // 回滚到 1，decoded 恒 1/2）。
+            mod.numOpNames.add(opcodeName(opcode))
+                mod.numOpCodes.add(aucToVmOp(opcode))
+            mod.numArgsFlat.add("")
+            count = count + 1
+            // 对齐函数边界（防操作数宽度判断漂移）
+            offset = offset + 1 + operandSize
+            continue
+        }
+
+        if (reader.pos < endPos) {
+            reader.pos = endPos
+        }
+        return count
+    }
+
+    /// IEEE-754 f64 位模式 → 可解析的十进制文本（纯 Aura 拆位实现）。
+    ///
+    /// value = (-1)^sign × (1.fraction) × 2^(exp-1023)；尾数位从高到低以
+    /// 0.5 步进累加（f32 精确表示 0.5^i 直至 i=149），指数经 pow 缩放。
+    /// 输出格式与 Rust f64 Display 一致的常见形态（"2.5"/"5.0"/"-1.25"）。
+        private fun f64BitsToText(bits: Long): String {
+        // Long 位运算在 Aura 侧不可靠，用除法/取模拆位。
+        // P4.1（AOT 基底适配）：不再用 2^51/2^52 级巨型 Long 字面量作除数
+        //（自举 AOT 下触发 0xC0000094 整除零，实测 arithmetic 样例必崩）——
+        // 指数用 52 次 `/2` 提取，2^52 用连乘构造；标量 Long 的 `/2`、`%2048`
+        // 与连乘在双基底均可靠（list_probe 探针实测）。
+        val neg: Boolean = bits < 0
+        val mag: Long = if (neg) (0 - bits) else bits
+        var hi: Long = mag
+        var hs: Int = 0
+        while (hs < 52) {
+            hi = hi / 2
+            hs = hs + 1
+        }
+        val exp: Int = (hi % 2048) as Int   // bits >> 52 & 0x7FF
+        var p52: Long = 1
+        var pt: Int = 0
+        while (pt < 52) {
+            p52 = p52 * 2
+            pt = pt + 1
+        }
+        val mantissa: Long = mag % p52       // bits & 0xFFFFFFFFFFFFF
+
+        // 零 / 特殊值
+        if (exp == 0 && mantissa == 0) {
+            return if (neg) "-0.0" else "0.0"
+        }
+        if (exp == 2047) {
+            if (mantissa == 0) {
+                return if (neg) "-inf" else "inf"
+            }
+            return "nan"
+        }
+
+        // 1 + Σ fraction bit_i × 0.5^i（i = 1..52）
+        var v: Float = 1.0
+        var bitVal: Float = 0.5
+        var div: Long = p52 / 2              // 2^51：从最高尾数位（i=1）向下
+        var i: Int = 0
+        while (i < 52) {
+            val bit: Int = ((mantissa / div) % 2) as Int
+            if (bit == 1) {
+                v = v + bitVal
+            }
+            bitVal = bitVal / 2.0
+            div = div / 2
+            i = i + 1
+        }
+        // 非规格化（exp == 0）：值 = 0.fraction × 2^-1022 —— 按规格化公式
+        // 减一个 2^-1022 的修正量在 f32 上不可表达，超小值一律退化为 0.0
+        var e: Int = exp - 1023
+        if (exp == 0) {
+            v = v - 1.0
+            e = -1022
+        }
+        val scaled: Float = VmOps.pow(v, 1.0) * VmOps.pow(2.0, e as Float)
+        val signed: Float = if (neg) (0.0 - scaled) else scaled
+        return toStr(signed)
+    }
+
+    /// 类 ID → 类名（越界回退：0 = "Any"，其余用数字串保持旧行为）。
+        private fun classNameAt(classNames: List<String>, id: Int): String {
+        if (id >= 0 && id < classNames.size()) {
+            return classNames.get(id)
+        }
+        if (id == 0) { return "Any" }
+        return toStr(id)
+    }
+
     /// 数出「函数内字节偏移 `target`」处指令的下标（从 0 起）。
     ///
     /// 从函数起点重新逐条跳过（每个操作数按 `operandSizeLookup` 的长度）直到
@@ -454,7 +1326,7 @@ object AucLoaderUtils {
     /// `length → 47589`、`size → 64764`、`isEmpty → 9133`、`first → 8387`、
     /// `last → 15355`。翻译回名字后 VM 才能按内建成员取值
     ///（旧实现把哈希当字段名查全局表 → 恒得 0，实测 `len=0`）。
-    private fun fieldNameOf(hash: Int): String {
+        private fun fieldNameOf(hash: Int): String {
         if (hash == 47589) { return "length" }
         if (hash == 64764) { return "size" }
         if (hash == 9133) { return "isEmpty" }
@@ -464,7 +1336,7 @@ object AucLoaderUtils {
     }
 
     /// 按常量标签选择类型化加载助记符（越界按字符串处理）。
-    private fun constMnemonic(tags: List<Int>, idx: Int): String {
+        private fun constMnemonic(tags: List<Int>, idx: Int): String {
         if (idx < 0 || idx >= tags.size()) {
             return "LOAD_CONST_S"
         }
@@ -477,21 +1349,21 @@ object AucLoaderUtils {
     }
 
     /// 按下标取原生函数名（越界返回 ""）。
-    private fun nameAt(names: List<String>, idx: Int): String {
+        private fun nameAt(names: List<String>, idx: Int): String {
         if (idx < 0) { return "" }
         if (idx >= names.size) { return "" }
         return names.get(idx)
     }
 
     /// 按下标取原生函数形参个数（越界返回 0）。
-    private fun paramAt(params: List<Int>, idx: Int): Int {
+        private fun paramAt(params: List<Int>, idx: Int): Int {
         if (idx < 0) { return 0 }
         if (idx >= params.size) { return 0 }
         return params.get(idx)
     }
 
     /// 统计文本行数（不含结尾换行；空串计 0 行）。
-    private fun countTextLines(text: String): Int {
+        private fun countTextLines(text: String): Int {
         if (text == "") { return 0 }
         var count: Int = 1
         var i: Int = 0
@@ -506,7 +1378,7 @@ object AucLoaderUtils {
     }
 
     /// 操作码名称映射（数字 → 助记符）。
-    private fun opcodeName(op: Int): String {
+        private fun opcodeName(op: Int): String {
         if (op == 0) return "CONST_INT"
         if (op == 1) return "LOAD_LOCAL"
         if (op == 2) return "STORE_LOCAL"
@@ -613,11 +1485,21 @@ object AucLoaderUtils {
         if (op == 107) return "CONDVAR_WAIT"
         if (op == 108) return "CONDVAR_SIGNAL"
         if (op == 109) return "CONDVAR_BROADCAST"
+        // ⚠️ 110-115：seed 的 .auc 在 ARC/集合扩展后使用（2026-10-06 补——
+        // 旧链止于 109，fn16 ArrayList.distinct 的 LIST_CONTAINS 落 default
+        // 的 "UNKNOWN_"+op.toString() 拼接 → toString 桩返回裸 Int → strcat
+        // 崩）。名称与宽度**镜像 seed codegen/opcode.rs**。
+        if (op == 110) return "LOAD_GLOBAL"
+        if (op == 111) return "STORE_GLOBAL"
+        if (op == 112) return "LIST_IS_EMPTY"
+        if (op == 113) return "LIST_CONTAINS"
+        if (op == 114) return "LIST_INDEX_OF"
+        if (op == 115) return "LIST_REMOVE_AT"
         return "UNKNOWN_" + op.toString()
     }
 
     /// 操作数字节数查找表。
-    private fun operandSizeLookup(op: Int): Int {
+        private fun operandSizeLookup(op: Int): Int {
         if (op == 0 || op == 1 || op == 2) return 2
         if (op == 30 || op == 32 || op == 33) return 2
         if (op == 23 || op == 24 || op == 25) return 4
@@ -630,11 +1512,12 @@ object AucLoaderUtils {
         if (op == 71) return 4  // CallExternal: 2×u16
         if (op == 84) return 2
         if (op == 72 || op == 74 || op == 76 || op == 77) return 2
+        if (op == 110 || op == 111) return 2  // LoadGlobal/StoreGlobal: u16 槽位（镜像 seed operand_size，2026-10-06 补）
         return 0
     }
 
     /// 验证 .auc 文件是否存在且有效。
-    fun validateAuc(path: String): Boolean {
+        fun validateAuc(path: String): Boolean {
         if (!FileUtils.exists(path)) {
             return false
         }

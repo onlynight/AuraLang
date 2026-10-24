@@ -1,0 +1,10 @@
+// 分离实验：每次迭代仅 1 次 Long 转换 + 1 次 store（量化单个装箱粒度）
+fun main() {
+    var i: Int = 0
+    var x: Long = 0
+    while (i < 1000000) {
+        x = i as Long
+        i = i + 1
+    }
+    println("x = " + toStr(x))
+}

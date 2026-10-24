@@ -61,7 +61,7 @@ object FfiAotUtils {
         if (start < 0 || start >= s.length) {
             return ""
         } else if (start + len > s.length) {
-            return s.substring(start)
+            return s.substring(start, s.length())
         } else {
             return s.substring(start, start + len)
         }

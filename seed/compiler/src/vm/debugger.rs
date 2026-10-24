@@ -1,3 +1,12 @@
+// ================================================================
+// 【冻结基线】Rust VM 双实现常驻（VM-PA-00 v3.2 / D6 / P4.3）
+// [FROZEN BASELINE] Rust VM dual-impl co-resident (D6/P4.3): bug-fix only, no new capabilities, never reference the Aura VM.
+// 本文件属于 Rust VM（只读冻结的兼容基线、第二实现）：
+//   - 禁止新增能力，仅允许修 bug 与安全修补；
+//   - 不得引用 Aura VM 实现（aura/compiler/aura/lang/compiler/vm/）；
+//   - 与 Aura VM 的唯一交集是 .auc 二进制格式（Rust 编译器产出，两侧各自执行）。
+// 依据：docs/vm_pure_aura/00-VM纯Aura化技术方案与达成路径.md 三-阶段P4 / 决策D6。
+// ================================================================
 //! Aura debugger core engine
 
 use crate::codegen::opcode::BytecodeModule;
@@ -1231,6 +1240,10 @@ pub fn format_instr(instr: &crate::vm::Instr) -> String {
         ListPush => "ListPush".into(),
         ListPop => "ListPop".into(),
         ListLen => "ListLen".into(),
+        ListIsEmpty => "ListIsEmpty".into(),
+        ListContains => "ListContains".into(),
+        ListIndexOf => "ListIndexOf".into(),
+        ListRemoveAt => "ListRemoveAt".into(),
         MapSet => "MapSet".into(),
         MapGet => "MapGet".into(),
         MapLen => "MapLen".into(),
@@ -1257,6 +1270,8 @@ pub fn format_instr(instr: &crate::vm::Instr) -> String {
         EnumConstruct(i) => format!("EnumConstruct({})", i),
         EnumTag => "EnumTag".into(),
         MakeFnRef(i) => format!("MakeFnRef({})", i),
+        LoadGlobal(i) => format!("LoadGlobal({})", i),
+        StoreGlobal(i) => format!("StoreGlobal({})", i),
         CallExport(i) => format!("CallExport({})", i),
         CallExternal(m, s) => format!("CallExternal({}, {})", m, s),
         CallAot(i) => format!("CallAot({})", i),

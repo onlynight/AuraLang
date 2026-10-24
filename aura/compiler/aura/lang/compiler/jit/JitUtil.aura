@@ -341,7 +341,8 @@ object JitUtil {
         if (nlen == 0) {
             return 0
         }
-        while (i + nlen <= haystack.length) {
+        val haystackLen: Int = haystack.length
+        while (i + nlen <= haystackLen) {
             if (jitSlice(haystack, i, nlen) == needle) {
                 count = count + 1
             }

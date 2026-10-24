@@ -68,7 +68,10 @@ fun lockedIncrement(id: Int): Int {
 // 向队列写入 id 个任务
 fun producer(id: Int): Int {
     val totalProduced = 0
-    for (i in 0..id) {
+    // `..` 在 Aura 中是**包含**端点的区间（见 `book/chapter-01.md` 的
+    // `in 90..100` 与 `ast::Range { inclusive }`），`0..id` 会迭代 id+1 次。
+    // 本用例期望「生产 id 个」，故用排他区间 `0..<id`。
+    for (i in 0..<id) {
         Mutex.lock(QUEUE_LOCK)
         // 写入队列（环形缓冲区）
         val idx = QUEUE_TAIL
@@ -113,9 +116,13 @@ fun consumer(count: Int): Int {
 
 // ── 4. 复杂数据传递：结构体字段交换 ──────────────────────
 // 使用多个全局变量模拟结构体字段，通过 Mutex 保护读写
-// val STRUCT_X = 0
-// val STRUCT_Y = 0
-// val STRUCT_LOCK = -1
+//
+// ⚠ 这三行原先被注释掉，但 `initStruct` / `swapStructFields` / `transformStruct`
+// 仍在引用它们 —— 裸名既非局部量也非已声明全局量时退化为「读槽 0」，
+// 于是测试 5 读到 `(null,null)`。此处恢复声明。
+val STRUCT_X = 0
+val STRUCT_Y = 0
+val STRUCT_LOCK = -1
 
 // 初始化：主线程设置结构体初始值
 fun initStruct(x: Int, y: Int): Int {

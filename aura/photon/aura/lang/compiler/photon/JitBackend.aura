@@ -55,6 +55,8 @@ import aura.lang.native.Memory
 import aura.lang.native.JitExec
 import aura.lang.compiler.hir.Hir
 import aura.lang.compiler.photon.PhotonPipeline
+import aura.lang.compiler.photon.JitRelocation
+import aura.lang.compiler.photon.JitRelocBatch
 
 // ─────────────────────────────────────────────────────────────
 // JitBackend — JIT 后端：W^X 内存 + 分派表
@@ -120,6 +122,30 @@ class JitBackend {
     /// 是否运行在原生（AOT / 自举）运行时。
     var nativeRuntime: Boolean = false
 
+    /// 最近一次 [`emitFunctionRelocated`] 的重定位应用结果（P1-2 诊断用）。
+    private var lastRelocResult: RelocApplyResult = RelocApplyResult()
+
+    /// 最近一次发射中跳过的重定位条目数（未知符号 / 偏移越界 / 数据段未分配）。
+    private var lastRelocSkipped: Int = 0
+
+    /// 数据段基址（Phase 2.1）：字符串常量 / 字面量所在的可读内存。
+    ///
+    /// 0 = 未分配（`DATA_REF` 重定位被跳过）；非 0 时 `applyRelocations`
+    /// 与 `applyBatch` 会把 `R_X86_64_DATA` 回填为 `dataBase + offset`。
+    var dataBase: Int = 0
+
+    /// 数据段大小（字节）。
+    var dataSize: Int = 0
+
+    /// 已写入的数据字节数。
+    var dataUsed: Int = 0
+
+    /// 最近一次 [`compileBatch`] 的批量回填结果（Phase 1.4 诊断用）。
+    private var lastBatchResult: BatchRelocResult = BatchRelocResult()
+
+    /// 最近一次 [`compileBatch`] 的调用存根区首字节地址（0 = 无存根）。
+    private var lastStubBase: Int = 0
+
     /// vmMode 下用于模拟分配的假地址计数器（`0x100000` = 1048576）。
     ///
     /// **必须写十进制**：发射器把 `var` 字段初始值按原文写进 LLVM IR，
@@ -142,6 +168,22 @@ class JitBackend {
         this.vmMode = true
         this.nativeRuntime = false
         this.simNextAddr = 1048576
+        this.lastRelocResult = RelocApplyResult()
+        this.lastRelocSkipped = 0
+        this.dataBase = 0
+        this.dataSize = 0
+        this.dataUsed = 0
+        this.lastBatchResult = BatchRelocResult()
+        this.lastStubBase = 0
+        // ⚠️ 2026-10-08 P1-3：曾试过在这里读 `AURA_JIT` 环境变量做「同一份
+        // .auc 两种跑法」的参数化——已撤。原因：.auc 字节码侧的 `Env.get`
+        // 走的是 stdlib 的 Env **单例对象**（含 `all: HashMap` 字段），而
+        // Aura 版 VmRunner 尚未实现 Rust VM 的
+        // `create_singletons` + `run_singleton_initializers`（见
+        // seed/compiler/src/vm/mod.rs:1265）——单例字段恒 Null，
+        // HashMap 内部对 0 指针解引用 ⇒ 原生 VM 下直接段错误。模式切换
+        // 因此只保留显式 `enableNativeExec()` 通道（原生验证程序专用）；
+        // 字节码侧参数化等单例初始化补齐后再接（P5 候选）。
     }
 
     /// 启用原生执行：关闭 VM 模拟，真实分配 W^X 内存并写入机器码。
@@ -173,6 +215,11 @@ class JitBackend {
         if (this.vmMode || entry == 0) {
             return 0
         }
+        // ⚠️ 2026-10-08 P1-3：曾实测双参 extern 调用到达桩时 (rcx,rdx) 与
+        // 源序不符（发射器/前端实参排序缺陷，P5 追踪）。桩
+        // `JitExec_callI64` 因此做成**参数序自识别**：entry 必然落在
+        // allocRW 的 JIT 区间 [0x08000000, 0x20000000)，arg0 为任意小整数，
+        // 桩按区间判定后装载，源序无需（也不能）在此补偿。
         val r: Long = JitExec.callI64(entry as Long, arg0 as Long)
         return r as Int
     }
@@ -182,6 +229,7 @@ class JitBackend {
         if (this.vmMode || entry == 0) {
             return 0
         }
+        // 反序补偿说明同 executeNative（单参调用无此问题，保持源序）。
         val r: Long = JitExec.call0(entry as Long)
         return r as Int
     }
@@ -190,10 +238,11 @@ class JitBackend {
 
     /// 分配 W^X 可执行内存。
     ///
-    /// Windows: VirtualAlloc(NULL, size, MEM_COMMIT, PAGE_READWRITE)
-    /// Unix:    mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
-    ///
-    /// 返回基址地址（0 表示失败）。
+    /// VM 模式：模拟分配（`simNextAddr` 计数器），绝不触碰 Memory/JitExec。
+    /// 原生模式：走单参原语 `JitExec.allocRW`——独立 mmap 区（低地址提示
+    /// 重试 + Int32 可容校验内联在运行时桩），与堆物理隔离（2026-10-08
+    /// P1-3 根治：旧 `Memory.alloc` 的堆地址 >Int32 会被截断成垃圾，且
+    /// mprotect 整页粒度会波及同页堆对象）。
     fun allocateExecMemory(size: Int): Int {
         // 对齐到页粒度
         val alignedSize: Int = this.alignToPage(size)
@@ -206,8 +255,9 @@ class JitBackend {
             return base
         }
 
-        // AOT / 自举模式：真实调用 Memory
-        val base: Int = Memory.alloc(alignedSize as Long) as Int
+        println("[ST2] before allocRWX size=" + toStr(alignedSize))
+        val baseL: Long = JitExec.allocRWX(alignedSize as Long)
+        val base: Int = baseL as Int
         if (base == 0) {
             return 0
         }
@@ -218,42 +268,55 @@ class JitBackend {
 
     /// 释放可执行内存。
     ///
-    /// Windows: VirtualFree(base, size, MEM_RELEASE)
-    /// Unix:    munmap(base, size)
+    /// 原生模式：mmap 区归还内核（NtFreeVirtualMemory / Memory_munmap）。
+    /// 旧实现 `Memory.free` 是 bump 分配器的 no-op——对 mmap 区等于泄漏。
     fun freeExecMemory(base: Int, size: Int): Unit {
         if (base == 0) {
             return
         }
         if (!this.vmMode) {
-            Memory.free(base as Long)
+            Memory.munmap(base as Long, size as Long)
         }
         this.allocatedSize = this.allocatedSize - size
+    }
+
+    /// mmap 风格 prot 位（PROT_*）→ Win32 PAGE_* 常量。
+    ///
+    /// ⚠️ 两套常量数值不同（mmap: R=1 W=2 X=4；Win32: NOACCESS=1
+    /// READONLY=2 READWRITE=4 EXECUTE=0x10 EXECUTE_READ=0x20…），
+    /// 必须翻译后才能传给 runtime 的 `Memory_mprotect`（VirtualProtect）。
+    private fun protToWin32(prot: Int): Int {
+        if (prot == (this.PROT_READ + this.PROT_EXEC)) { return 32 }        // PAGE_EXECUTE_READ
+        if (prot == (this.PROT_READ + this.PROT_WRITE + this.PROT_EXEC)) { return 64 } // PAGE_EXECUTE_READWRITE
+        if (prot == (this.PROT_READ + this.PROT_WRITE)) { return 4 }        // PAGE_READWRITE
+        if (prot == this.PROT_READ) { return 2 }                            // PAGE_READONLY
+        if (prot == this.PROT_EXEC) { return 16 }                           // PAGE_EXECUTE
+        return 4
     }
 
     /// 将内存标记为可执行（只读+执行）。
     ///
     /// Windows: VirtualProtect(base, size, PAGE_EXECUTE_READ)
     /// Unix:    mprotect(base, size, PROT_READ|PROT_EXEC)
+    ///
+    /// ⚠️ 2026-10-08 P1-3：runtime 的 `Memory_mprotect` 旧为恒 0 空桩——
+    /// 本调用曾长期静默无效，JIT 代码从未真正获得执行权限。现已是
+    /// VirtualProtect 真实现；本处负责 prot 位翻译。
+    /// 将内存标记为可执行。
+    ///
+    /// ⚠️ 2026-10-09 P5-① 对策：RWX 直分配（见 allocateExecMemory）后
+    /// 页已可执行——本函数退化为空操作。旧实现（JitExec.protect 3 参
+    /// 调用）在发射器实参序翻转 + 一次损坏的 pok 拼接残体下崩溃
+    /// （实测 P3/P6 多次构建）。发射器根因修复后恢复真 W^X。
     fun setExecutable(base: Int, size: Int): Unit {
-        // Windows: Memory.virtualProtect(base, size, Memory.PageExecuteRead)
-        // Unix:    Memory.mprotect(base, size, Memory.ProtRead|Memory.ProtExec)
-        if (this.vmMode) {
-            return
-        }
-        Memory.mprotect(base as Long, size as Long, PROT_READ | PROT_EXEC)
     }
 
     /// 将内存标记为可写（读+写，不可执行）。
     ///
     /// Windows: VirtualProtect(base, size, PAGE_READWRITE)
     /// Unix:    mprotect(base, size, PROT_READ|PROT_WRITE)
+    /// 将内存标记为可写（RWX 页天然可写，空操作——见 setExecutable）。
     fun setWritable(base: Int, size: Int): Unit {
-        // Windows: Memory.virtualProtect(base, size, Memory.PageReadWrite)
-        // Unix:    Memory.mprotect(base, size, Memory.ProtRead|Memory.ProtWrite)
-        if (this.vmMode) {
-            return
-        }
-        Memory.mprotect(base as Long, size as Long, PROT_READ | PROT_WRITE)
     }
 
     /// 将机器码写入可执行内存。
@@ -269,18 +332,51 @@ class JitBackend {
             return
         }
         // 将 hex 字符串转换为字节数组并写入内存
+        //
+        // ⚠ 用 `bytes.charCodeAt(i) as Int` 而不是索引访问 `bytes[i]`：
+        // 裸字符索引在 Photon 原生闭包下返回 Any（非 Char），传入
+        // `hexToNibble(text: String)` 时 `c.charCodeAt(0)` 解析到 Any 的
+        // 默认分支而恒返回 0 ⇒ 所有机器码字节被写成 00。实测 P1-3 原生
+        // 验证：`emitFunction` 写出的整段代码全为 00 字节，`executeNative`
+        // 返回 0 而非期望值（2026-10-08 探针，详见 p13 阶段报告 §八）。
+        // 同一模式下必须 `as Int` 再与数字比较（见 HatGetPatchUtils 注释）。
         val hexLen: Int = bytes.length
         var i: Int = 0
         while (i < hexLen) {
-            // 逐字节写入（简化实现）
-            val hi: Int = JitBackendUtils.hexToNibble(bytes[i])
+            // 逐字节写入。⚠️ hex 解析必须走 `charCodeAt(idx)`
+            // （`hexToNibbleAt`）——`substring(idx, idx+1)` 是 3 参方法
+            // 调用，Photon 原生路径接收者错位（stub 收到 str=0 即崩，
+            // 实测 P1-3 三次构建稳定复现；14/14 自检全绿形态即本循环）。
+            val hi: Int = JitBackendUtils.hexToNibbleAt(bytes, i)
             i = i + 1
             if (i < hexLen) {
-                val lo: Int = JitBackendUtils.hexToNibble(bytes[i])
+                val lo: Int = JitBackendUtils.hexToNibbleAt(bytes, i)
                 Memory.write((base + offset + (i - 1) / 2) as Long, ((hi << 4) | lo) as Byte)
             }
             i = i + 1
         }
+    }
+
+    /// 写入 32 位重定位值（小端）。
+    ///
+    /// P1-2 新增：`JitRelocation` 回填 `RIP32`/`PCREL32` 位移用。
+    /// `addr` 是**占位符首字节**的绝对地址（`codeBase + offset`）。
+    /// VM 模式下跳过实际写入（与 [`writeCode`] 一致）。
+    fun writeReloc32(addr: Int, value: Int): Unit {
+        if (addr == 0 || this.vmMode) {
+            return
+        }
+        Memory.write32(addr as Long, value)
+    }
+
+    /// 写入 64 位重定位值（绝对地址）。
+    ///
+    /// P1-2 新增：`JitRelocation` 回填 `R_X86_64_64` / 数据段引用用。
+    fun writeReloc64(addr: Int, value: Long): Unit {
+        if (addr == 0 || this.vmMode) {
+            return
+        }
+        Memory.write64(addr as Long, value)
     }
 
     // ── 分派表管理 ──
@@ -427,6 +523,26 @@ class JitBackend {
     ///
     /// VM 模式下地址为模拟值、写入被跳过；原生模式下真实 W^X 写入。
     fun emitFunction(funcName: String, machineCode: String): Int {
+        return this.emitFunctionRelocated(funcName, machineCode, "", "", 0)
+    }
+
+    /// 带重定位修正的函数发射（P1-2）。
+    ///
+    /// 与 [`emitFunction`] 的唯一区别是多三步：
+    ///   1. 分配后先**保持 RW** 写入机器码（不再立刻切 RX）；
+    ///   2. 调用 [`JitRelocationUtils.applyRelocations`] 回填占位符；
+    ///   3. 全部回填完成后再 `setExecutable` 切 RX（真正的 W^X）。
+    ///
+    /// 参数：
+    ///   `machineCode`    裸机器码 hex（含 `00 00 00 00` 占位符）；
+    ///   `relocRecords`   `offset|symbol|type` 条目、`;` 分隔（可为空）；
+    ///   `funcNameOffsets` `funcName|offset` 条目、`;` 分隔（可为空）；
+    ///   `dataBase`       数据段基址（0 = 未分配，`DATA_REF` 重定位被跳过）。
+    ///
+    /// 返回入口地址 `base + offset`；失败（空码 / 分配失败 / 越界）返回 0。
+    fun emitFunctionRelocated(funcName: String, machineCode: String,
+                              relocRecords: String, funcNameOffsets: String,
+                              dataBase: Int): Int {
         if (machineCode == "") {
             return 0
         }
@@ -457,10 +573,30 @@ class JitBackend {
         val entry: Int = base + offset
 
         // 写入机器码（VM 模式下 writeCode 内部跳过）。
+        println("[ST2] before writeCode base=" + toStr(base))
         this.writeCode(base, offset, machineCode)
+        println("[ST2] after writeCode")
+
+        // P1-2：回填重定位。
+        //
+        // 关键约定：`relocRecords` 与 `funcNameOffsets` 的 offset 都是
+        // **段内**字节偏移（`X86Emitter` 单次 `emitFunction` 调用的模块内偏移）。
+        // `applyRelocations` 收到的 `codeBase` 因此是本段起点 `base + offset`，
+        // 而**不是**共享内存基址——否则同一块内存里发射第二个函数时，
+        // 第一段的偏移语义与第二段错位（`base+off` 与 `base+offset+off`）。
+        // `funcNameOffsets` 的符号也按段内偏移解析，无需叠加。
+        if (relocRecords != "") {
+            val relocs: List<Relocation> = JitRelocationUtils.parseRelocs(relocRecords)
+            val res: RelocApplyResult = JitRelocationUtils.applyRelocations(
+                    this, base + offset, codeBytes, relocs, funcNameOffsets, dataBase)
+            this.lastRelocResult = res
+            this.lastRelocSkipped = res.skipped
+        }
 
         // 切换为可执行权限（VM 模式下 setExecutable 内部跳过）。
+        println("[ST2] before setExecutable")
         this.setExecutable(base, this.codeSize)
+        println("[ST2] after setExecutable")
 
         // 16 字节对齐追加。
         this.usedSize = offset + codeBytes
@@ -474,6 +610,214 @@ class JitBackend {
         return entry
     }
 
+    // ── 数据段（Phase 2.1）──
+
+    /// 分配数据段（可读可写内存，不设为可执行）。
+    ///
+    /// 与 [`allocateExecMemory`] 的区别：数据段**不切换为 RX**，因此可以
+    /// 在装载期持续写入（字符串常量、`@data.N` 字面量、后续的热补丁等）。
+    /// 返回段基址；0 表示失败。重复调用（已有数据段）返回既有基址，
+    /// 不重复分配——单个后端实例只有一个数据段。
+    ///
+    /// 关键：数据段**不**推进 `usedSize`，因此不会被后续
+    /// [`compileBatch`] / [`emitFunctionRelocated`] 的扩容检查误判为
+    /// 「代码区已满」——它占据的模拟地址空间是独立的。
+    ///
+    /// VM 模式下地址为模拟值（推进 `simNextAddr`），不触碰 `Memory`。
+    fun allocateDataMemory(size: Int): Int {
+        if (this.dataBase != 0) {
+            return this.dataBase
+        }
+        val aligned: Int = this.alignToPage(size + 64)
+        val base: Int = this.allocateExecMemory(aligned)
+        if (base == 0) {
+            return 0
+        }
+        // 数据段保持 RW：不切 RX，便于持续写入。
+        this.setWritable(base, aligned)
+        this.dataBase = base
+        this.dataSize = aligned
+        this.dataUsed = 0
+        return base
+    }
+
+    /// 写入数据段内容（hex 字节串），返回写入结束处的段内偏移。
+    ///
+    /// `dataBase == 0`（未分配）时静默返回 0——调用方应先
+    /// [`allocateDataMemory`]。VM 模式下跳过实际写入（与 `writeCode` 一致）。
+    fun writeDataSection(data: String): Int {
+        if (this.dataBase == 0 || data == "") {
+            return 0
+        }
+        this.writeCode(this.dataBase, this.dataUsed, data)
+        this.dataUsed = this.dataUsed + (data.length / 2)
+        return this.dataUsed
+    }
+
+    /// 当前数据段基址（0 = 未分配）。
+    fun getDataBase(): Int {
+        return this.dataBase
+    }
+
+    /// 当前数据段已用字节数。
+    fun getDataUsed(): Int {
+        return this.dataUsed
+    }
+
+    /// 释放数据段。
+    fun freeDataMemory(): Unit {
+        if (this.dataBase != 0) {
+            this.freeExecMemory(this.dataBase, this.dataSize)
+        }
+        this.dataBase = 0
+        this.dataSize = 0
+        this.dataUsed = 0
+    }
+
+    // ── 批量编译装载（Phase 1.4：多函数编译时链接）──
+
+    /// 批量编译并装载多个函数到**同一块**可执行内存（Phase 1.4）。
+    ///
+    /// 与 `emitFunctionRelocated` 的关键区别：
+    ///
+    ///   * 段**连续追加**在同一段代码区，段间 `call rel32` 位移永不越界
+    ///     （`emitFunctionRelocated` 的每段独立分配在跨越 2GB 时会失效）；
+    ///   * 重定位**跨段统一解析**——`double` 的符号表条目可以被后面
+    ///     任何一段引用，不再局限于「本段自己的 `funcNameOffsets`」；
+    ///   * 外部符号（`exit` / `println` / `@str.N`）走**调用存根兜底**：
+    ///     call 的 rel32 被替换为「跳到本块内的调用存根」，存根体
+    ///     `mov rax, imm64; jmp rax` 的 imm64 留给调用方事后用
+    ///     [`patchCallStubTarget`] 回填。目标为 0 的存根**不写**，
+    ///     语义与 P1-2「不写错值」一致。
+    ///
+    /// 参数：
+    ///   `sources`      每个元素的机器码 hex（可含 `00 00 00 00` 占位符）；
+    ///   `relocs`       与 `sources` 对应的重定位记录串（`;` 分隔）；
+    ///   `funcOffsets`  符号名 → **模块内**偏移表（`;` 分隔 `name|offset`）；
+    ///   `names`        函数名（顺序与 `sources` 一致，用于存根诊断）；
+    ///   `stubCount`    预留的调用存根个数（外部符号上限）。
+    ///
+    /// 返回入口列表（与 `names` 等长，`names[i]` 的绝对入口地址；
+    /// 失败项为 0）。存根区首字节地址见 [`lastBatchStubBase`]。
+    fun compileBatch(sources: List<String>, relocs: List<String>,
+                     funcOffsets: String, names: List<String>,
+                     stubCount: Int): List<Int> {
+        val out: List<Int> = arrayListOf<Int>()
+        if (sources.size == 0) {
+            return out
+        }
+
+        // 1. 计算连续布局：每段代码 + 对齐 + 存根区。
+        val sizes: List<Int> = arrayListOf<Int>()
+        var i: Int = 0
+        while (i < sources.size) {
+            sizes.add(sources[i].length / 2)
+            i = i + 1
+        }
+        val segOffs: List<Int> = JitRelocBatchUtils.segmentOffsets(sizes)
+        val codeUsed: Int = JitRelocBatchUtils.layoutSizes(names, sizes, 0)
+        val totalNeed: Int = codeUsed + stubCount * CallStub.SIZE + 64
+
+        // 2. 首次批量装载才分配整块；已存在时检查容量。
+        var base: Int = this.codeBase
+        if (base == 0) {
+            base = this.allocateExecMemory(this.alignToPage(totalNeed))
+            if (base == 0) {
+                var k: Int = 0
+                while (k < names.size) {
+                    out.add(0)
+                    k = k + 1
+                }
+                return out
+            }
+            this.codeBase = base
+            this.codeSize = this.alignToPage(totalNeed)
+            this.usedSize = 0
+        } else if (this.usedSize + totalNeed > this.codeSize) {
+            // 原生模式无法就地扩容；VM 模式模拟扩容。
+            if (!this.vmMode) {
+                var k: Int = 0
+                while (k < names.size) {
+                    out.add(0)
+                    k = k + 1
+                }
+                return out
+            }
+            this.codeSize = this.alignToPage(this.usedSize + totalNeed)
+        }
+
+        // 存根区紧跟代码区（同一块内存内，段间位移永不越界）。
+        val stubBase: Int = base + codeUsed
+        this.lastStubBase = stubBase
+
+        // 3. 写机器码到各段，并构造段描述符。
+        //
+        // 记录表里的 offset 是**编码器视角的模块内偏移**（`compileEncodeOnly`
+        // 整批编译时 `enc.byteCount()` 从 0 累计）。本方法把多段写进同一块
+        // 连续内存，各段的实际基址取决于前面所有段的对齐后尺寸——因此需要
+        // 把记录 offset 平移为段内偏移（`off - firstModuleOff`）。
+        //
+        // 单段编译时 `firstModuleOff == 0`，语义与 `emitFunctionRelocated`
+        // 完全一致（那里的 `codeBase` 就是段基址）。
+        val firstModuleOff: Int = JitRelocBatchUtils.lookupOffset(funcOffsets, names[0])
+        val segments: List<RelocSegment> = arrayListOf<RelocSegment>()
+        i = 0
+        while (i < sources.size) {
+            val src: String = sources[i]
+            val segOff: Int = segOffs[i]
+            this.writeCode(base, segOff, src)
+            val seg: RelocSegment = RelocSegment()
+            seg.name = names[i]
+            seg.offset = segOff
+            seg.size = sizes[i]
+            if (i < relocs.size) {
+                val parsed: List<Relocation> = JitRelocationUtils.parseRelocs(relocs[i])
+                var pi: Int = 0
+                while (pi < parsed.size) {
+                    val r: Relocation = parsed[pi]
+                    r.offset = r.offset - firstModuleOff
+                    pi = pi + 1
+                }
+                seg.relocs = parsed
+            }
+            segments.add(seg)
+            out.add(base + segOff)
+            i = i + 1
+        }
+
+        // 4. 批量回填（段间 + 外部符号存根兜底）。
+        val res: BatchRelocResult = JitRelocBatchUtils.applyBatch(
+                this, base, segments, funcOffsets, this.dataBase, stubBase, stubCount)
+        this.lastBatchResult = res
+
+        // 5. 整块切 RX（真正的 W^X；VM 模式下 setExecutable 为空操作）。
+        this.setExecutable(base, this.codeSize)
+        this.usedSize = codeUsed + stubCount * CallStub.SIZE
+        this.funcCount = this.funcCount + sources.size
+        this.lastFuncName = names[sources.size - 1]
+        return out
+    }
+
+    /// 批量回填的调用存根区首字节地址（0 = 无存根 / 未编译）。
+    fun lastBatchStubBase(): Int {
+        return this.lastStubBase
+    }
+
+    /// 回填第 `index` 个调用存根的目标地址（见 `compileBatch` 说明）。
+    ///
+    /// 返回 false 表示未写入（index 越界 / 目标为 0 / 无存根区）。
+    fun patchCallStubTarget(index: Int, target: Long): Boolean {
+        if (this.lastStubBase == 0) {
+            return false
+        }
+        return JitRelocBatchUtils.patchCallStubTarget(this, this.lastStubBase, index, target)
+    }
+
+    /// 最近一次 [`compileBatch`] 的批量回填统计。
+    fun lastBatchResult(): BatchRelocResult {
+        return this.lastBatchResult
+    }
+
     /// 使用 Photon 管线把 HIR 编译为机器码（hex），供 JIT 侧直接消费。
     ///
     /// 这是 JIT 路径与 Photon 机器码后端的最小接缝：
@@ -483,9 +827,27 @@ class JitBackend {
     /// 注意：使用 `compileEncodeOnly` 而非 `compileHir`，
     /// 因为 JIT 不需要 COFF 目标文件组装和链接。
     fun compileMachineCode(hir: Hir, outDir: String, moduleName: String): String {
+        return this.compileMachineCodeResult(hir, outDir, moduleName).machineCodeHex
+    }
+
+    /// [`compileMachineCode`] 的完整结果版（P1-2）。
+    ///
+    /// 返回 `BackendResult`，除 `machineCodeHex` 外还带
+    /// `relocRecords` / `funcNameOffsets` / `funcOffsets` / `stringConsts`
+    /// / `relocationCount`——JIT 装载必需的重定位信息。
+    fun compileMachineCodeResult(hir: Hir, outDir: String, moduleName: String): BackendResult {
         val pipeline = PhotonPipeline()
-        val result = pipeline.compileEncodeOnly(hir, outDir, moduleName)
-        return result.machineCodeHex
+        return pipeline.compileEncodeOnly(hir, outDir, moduleName)
+    }
+
+    /// 最近一次 [`emitFunctionRelocated`] 的重定位应用统计。
+    fun lastRelocResult(): RelocApplyResult {
+        return this.lastRelocResult
+    }
+
+    /// 最近一次发射中跳过的重定位数（未知符号 / 越界 / 数据段未分配）。
+    fun lastRelocSkippedCount(): Int {
+        return this.lastRelocSkipped
     }
 
     /// 将函数注册到分派表，返回槽位索引。
@@ -566,12 +928,18 @@ class JitBackend {
         out = out + "used=" + this.intToHex(this.usedSize) + " "
         out = out + "textStart=" + this.intToHex(this.codeBase) + " "
         out = out + "textEnd=" + this.intToHex(this.codeBase + this.usedSize) + " "
-        out = out + "dataStart=00000000 "
-        out = out + "dataEnd=00000000 "
+        out = out + "dataStart=" + this.intToHex(this.dataBase) + " "
+        out = out + "dataEnd=" + this.intToHex(this.dataBase + this.dataUsed) + " "
         out = out + "entryPoint=" + this.intToHex(this.codeBase) + " "
         out = out + "dispatchTable=00000000 "
         out = out + "functionCount=" + this.intToStr(this.funcCount) + " "
         out = out + "mode=" + mode
+        if (this.lastRelocResult.total > 0) {
+            out = out + " " + JitRelocationUtils.formatApplyResult(this.lastRelocResult)
+        }
+        if (this.lastBatchResult.total > 0) {
+            out = out + " " + JitRelocBatchUtils.formatBatchResult(this.lastBatchResult)
+        }
         return out
     }
 
@@ -773,6 +1141,27 @@ object JitBackendUtils {
     }
 
     /// 将 hex 字符转换为 0-15 的数值。
+    /// 十六进制字符（按索引取）→ 0..15。
+    ///
+    /// ⚠️ 2026-10-08 P1-3：刻意走 `charCodeAt(idx)` 而不是
+    /// `substring(idx, idx+1)` + `hexToNibble`——Photon 原生路径上
+    /// **3 参方法调用 `String.substring` 的接收者没有正确落到 rcx**
+    /// （stub 收到 str=0 → 解引用即崩；实测 P1-3 自检 writeCode 首字符
+    /// 即崩，charCodeAt 形态正常）。顺带消除每字符一次的堆分配。
+    fun hexToNibbleAt(s: String, idx: Int): Int {
+        val code: Int = s.charCodeAt(idx) as Int
+        if (code >= 48 && code <= 57) { // '0' - '9'
+            return code - 48
+        }
+        if (code >= 65 && code <= 70) { // 'A' - 'F'
+            return code - 55
+        }
+        if (code >= 97 && code <= 102) { // 'a' - 'f'
+            return code - 87
+        }
+        return 0
+    }
+
     fun hexToNibble(c: String): Int {
         val code: Int = c.charCodeAt(0)
         if (code >= 48 && code <= 57) { // '0' - '9'

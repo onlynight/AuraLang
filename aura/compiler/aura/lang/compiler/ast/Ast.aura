@@ -207,18 +207,35 @@ class Ast {
         // 无 GC 下是平方级分配 —— 解析阶段数百 MB 的主要来源之一）。
         var escaped: String = text
         if (text.contains("\n")) {
-            var buf: String = ""
-            var i: Int = 0
-            var len: Int = text.length
-            while (i < len) {
-                if (text.charCodeAt(i) == 10) {
-                    buf = buf + "\\n"
-                } else {
-                    buf = buf + text.substring(i, i + 1)
+            // [R93] 分块转义 + 两两归并（O(L·log k)）。逐字符 `buf = buf + ch`
+            // 是 O(L²)，多行长文本（IR 模板）在解析阶段即产生数百 MB 垃圾。
+            val tlen: Int = text.length
+            var segs: List<String> = arrayListOf<String>()
+            var segStart: Int = 0
+            var ci: Int = 0
+            while (ci < tlen) {
+                if (text.charCodeAt(ci) == 10) {
+                    segs.add(text.substring(segStart, ci))
+                    segStart = ci + 1
                 }
-                i = i + 1
+                ci = ci + 1
             }
-            escaped = buf
+            segs.add(text.substring(segStart, tlen))
+            while (segs.size > 1) {
+                val merged: List<String> = arrayListOf<String>()
+                var si: Int = 0
+                while (si < segs.size) {
+                    if (si + 1 < segs.size) {
+                        merged.add(segs[si] + "\\n" + segs[si + 1])
+                        si = si + 2
+                    } else {
+                        merged.add(segs[si])
+                        si = si + 1
+                    }
+                }
+                segs = merged
+            }
+            escaped = segs[0]
         }
         this.texts.add(escaped)
         this.tys.add(ty)

@@ -1,0 +1,12 @@
+fun add(a: Int, b: Int): Int {
+    return a + b
+}
+fun main() {
+    val s: Int = 0
+    var i: Int = 0
+    while (i < 10000) {
+        s = add(s, i)
+        i = i + 1
+    }
+    println("m3=" + toStr(s))
+}

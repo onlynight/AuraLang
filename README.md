@@ -635,6 +635,21 @@ The driver always emits machine-readable markers regardless of verbosity:
 > `&&` short-circuit does not protect you, because the bounds check lives in the Aura source of
 > `charCodeAt` and is dropped by the AOT inlining. Structure the loop so only valid indices are
 > ever passed in.
+>
+> **Hazard 2 (2026-10-02):** wrong call arity no longer compiles. `build --aot` now runs a semantic
+> gate that **hard-fails** on "no overload of … accepts …" diagnostics (derived from real symbol
+> signatures). Previously a missing argument silently became uninitialized memory in the generated
+> code (measured: `joinPieces(parts)` missing `sep` corrupted the `freeFuncs` table, which then
+> rewrote a user-function call `add(3,4)` into `ArrayList_add`).
+>
+> **Hazard 3 (2026-10-02):** under heavy AOT load avoid `List<List<T>>` and hot-path
+> `List<String>` accumulation. Inner temporaries of nested lists and `ArrayList<String>`
+> accumulators measurably corrupt / silently drop elements inside large compiled functions
+> (`slot.size` reads back a pointer value, then segfaults; the small probes in
+> `build/lstest*.aura` cannot reproduce it — likely a specific register-allocation shape).
+> Reliable alternatives: **flat arrays (CSR: counts → prefix offsets → fill)** and **direct string
+> accumulation** (InstructionSelection `analyzePhiPreds` and SsaBuilder `freeFuncs` were rewritten
+> accordingly).
 
 
 ---

@@ -19,7 +19,8 @@ use std::time::Duration;
 unsafe extern "C" {
     // Thread
     fn aura_thread_create(fn_ptr: usize, arg: i64) -> i64;
-    fn aura_thread_join(id: i64) -> i32;
+    // 返回工作线程的返回值（与 aura_syscalls.c 的 int64_t 签名一致）
+    fn aura_thread_join(id: i64) -> i64;
     fn aura_thread_sleep(ms: i64) -> i32;
     fn aura_thread_id() -> i64;
     fn aura_thread_available_parallelism() -> i64;

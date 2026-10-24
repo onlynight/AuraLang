@@ -1,0 +1,686 @@
+// aura:///aura/lang/compiler/photon/JitStackMap.aura
+// ═══════════════════════════════════════════════════════════════
+// P1（Phase 2.2）：JIT Stack Map —— call 点 → GC 根列表。
+//
+// 设计文档：docs/pure_aura_jit/08 §Phase 2.2。
+//
+// Photon 现实约束下的形态：
+//   * 运行时堆是**非移动 arena**（bump 分配、不压缩），因此 stack map
+//     的职责是「让将来的精确 GC 能枚举 JIT 帧里的根」，而不是支撑
+//     压缩式搬移。
+//   * 保守策略：把**整个溢出槽区**（RA 溢出槽 + 发射器兜底槽）列为
+//     候选根——值槽里只有 Int/Long/指针三类，整数可能是假根，精确
+//     GC 接入时再按类型反馈收紧（P3）。
+//   * 根地址换算：溢出槽 k 位于 `[rbp - (spillBase + k*8)]`，故
+//     `collectFrameRoots(frameBase)` 返回槽地址列表（frameBase = 进入
+//     函数后的 rbp 值），GC 对每个地址 read64 后 mark。
+//
+// 序列化格式（每条目一段，`;` 分隔）：
+//   funcName|pcOffset|slotCount|spillBase|callTarget
+// pcOffset 为 call 指令**结束**偏移（= 返回地址落点，GC 栈扫描语义）。
+//
+// 缺失表示：findFunc/lookup 未命中时返回共享的 EMPTY 单例（funcName
+// 为空串）——Aura 的可空类型在两种运行时下行为不一致，用哨兵更稳。
+// ═══════════════════════════════════════════════════════════════
+
+package aura.lang.compiler.photon
+
+import aura.lang.collection.ArrayList
+
+/// 单个 call 点的 stack map 条目。
+class StackMapEntry {
+    /// call 指令结束时的**函数内**字节偏移（= 返回地址落点）。
+    var pcOffset: Int = 0
+    /// 溢出槽总数（RA 溢出槽 + 发射器兜底槽）。
+    var slotCount: Int = 0
+    /// 溢出区字节基址（槽 k 的地址 = frameBase - (spillBase + k*8)）。
+    var spillBase: Int = 0
+    /// 被调名（诊断 / GC 策略用）。
+    var callTarget: String = ""
+}
+
+/// 一个 JIT 函数的 stack map 视图。
+///
+/// ⚠️ **不持有 List 字段**：类类型泛型的 `arrayListOf<T>()` 字段初始化器
+/// 在种子 VM 下被降级成未链接的 `emptyList` extern（call ignored →
+/// 字段恒 null，实测 p15-B DAG 随之被破坏）。函数组的条目由
+/// StackMapTable 在 `recs` 字符串上直接扫描（findFunc/lookup）。
+class FunctionStackMap {
+    var funcName: String = ""
+    /// 本函数帧的溢出区基址（prologue 时确定）。
+    var frameSpillBase: Int = 0
+}
+
+/// Stack map 表：全部 JIT 函数的 call 点 → 根集合。
+///
+/// ⚠️ **字符串增量存储**（2026-10-09）：不用 List 字段——种子 VM 下
+/// 类字段的 `arrayListOf<T>()` 初始化器被降级成未链接的 `emptyList`
+/// extern（call ignored → 字段恒 null），`init()` 在种子构造路径里
+/// 也不可靠（实测 p15-B 全空）。字符串拼接/扫描在两种运行时下都
+/// 语义稳定，记录/查询直接在 `recs` 上进行：
+///   recs = `funcName|pcOffset|slotCount|spillBase|callTarget(;...)*`
+class StackMapTable {
+    /// 增量记录（每条 `funcName|pc|slotCount|spillBase|target`，`;` 分隔）。
+    var recs: String = ""
+
+    /// 函数边界（prologue）时调用：字符串表无需预分组，保留 API 兼容。
+    fun beginFunc(funcName: String, frameSpillBase: Int): Unit {
+    }
+
+    /// 记录一个 call 点（X86Emitter 在每条 call 发射后调用）。
+    fun recordCall(funcName: String, pcOffset: Int, spillBase: Int,
+                   slotCount: Int, callTarget: String): Unit {
+        val seg: String = funcName + "|" + JitStackMapUtils.intToStr(pcOffset)
+                + "|" + JitStackMapUtils.intToStr(slotCount)
+                + "|" + JitStackMapUtils.intToStr(spillBase)
+                + "|" + callTarget
+        if (this.recs == "") {
+            this.recs = seg
+        } else {
+            this.recs = this.recs + ";" + seg
+        }
+    }
+
+    /// 查找函数的 map；未命中返回**新建**空 map（funcName == ""）。
+    /// ⚠️ 不用类类型哨兵常量——种子 VM 下 object 内的类类型字段
+    /// 初始化为 null（p15-A1 全线 [null] 的根因）。
+    fun findFunc(funcName: String): FunctionStackMap {
+        val m: FunctionStackMap = FunctionStackMap()
+        m.funcName = funcName
+        m.frameSpillBase = 0
+        return m
+    }
+
+    private fun findOrAdd(funcName: String): FunctionStackMap {
+        return this.findFunc(funcName)
+    }
+
+    /// 查 pcOffset（返回地址偏移）命中的条目：取 ≤ pc 的**最近**一条。
+    /// 未命中返回新建空 entry（callTarget == ""）。
+    /// 纯整数版 lookup（P5-⑤ 安全形态）：返回 ≤ pc 的最近条目 pc；
+    /// 未命中 -1。
+    fun lookupPc(funcName: String, pcOffset: Int): Int {
+        var best: Int = 0 - 1
+        var found: Int = 0
+        var i: Int = 0
+        val n: Int = this.recs.length
+        val prefix: String = funcName + "|"
+        while (i < n) {
+            var e: Int = i
+            while (e < n) {
+                if (this.recs.charCodeAt(e) as Int == 59) { break }
+                e = e + 1
+            }
+            if (e > i && JitStackMapUtils.startsWithRange(this.recs, i, prefix)) {
+                var p1: Int = 0 - 1
+                var p2: Int = 0 - 1
+                var p3: Int = 0 - 1
+                var k: Int = i
+                while (k < e) {
+                    if (this.recs.charCodeAt(k) as Int == 124) {
+                        if (p1 < 0) { p1 = k }
+                        else if (p2 < 0) { p2 = k }
+                        else if (p3 < 0) { p3 = k; break }
+                    }
+                    k = k + 1
+                }
+                if (p2 > 0 && p3 > p2) {
+                    val pc: Int = JitStackMapUtils.parseIntRange(this.recs, p1 + 1, p2)
+                    if (pc <= pcOffset && (found == 0 || pc > best)) {
+                        best = pc
+                        found = 1
+                    }
+                }
+            }
+            i = e + 1
+        }
+        if (found == 0) { return 0 - 1 }
+        return best
+    }
+
+    /// 完整条目版 lookup（含 callTarget 字符串）。⚠️ 原生路径按构建
+    /// 漂移（substring 接收者），种子路径可用。
+    fun lookup(funcName: String, pcOffset: Int): StackMapEntry {
+        var best: StackMapEntry = StackMapEntry()
+        best.pcOffset = -2147483647
+        var found: Int = 0
+        var i: Int = 0
+        val n: Int = this.recs.length
+        val prefix: String = funcName + "|"
+        while (i < n) {
+            var e: Int = i
+            while (e < n) {
+                if (this.recs.charCodeAt(e) as Int == 59) { break }  // ';'
+                e = e + 1
+            }
+            if (e > i) {
+                val seg: String = JitStackMapUtils.substr(recs, i, e)
+                if (seg.startsWith(prefix)) {
+                    val ent: StackMapEntry = JitStackMapUtils.parseEntry(seg)
+                    if (ent.pcOffset <= pcOffset
+                            && (found == 0 || ent.pcOffset > best.pcOffset)) {
+                        best = ent
+                        found = 1
+                    }
+                }
+            }
+            i = e + 1
+        }
+        return best
+    }
+
+    /// 序列化（即增量记录本身）。
+    fun serialize(): String {
+        return this.recs
+    }
+
+    /// 从序列化文本还原（追加进本表；round-trip 用）。
+    fun parseAll(text: String): Unit {
+        if (text == "") { return }
+        if (this.recs == "") {
+            this.recs = text
+        } else {
+            this.recs = this.recs + ";" + text
+        }
+    }
+
+    /// 条目总数（诊断/测试）：段数。
+    fun entryCount(): Int {
+        if (this.recs == "") { return 0 }
+        var total: Int = 1
+        var i: Int = 0
+        val n: Int = this.recs.length
+        while (i < n) {
+            if (this.recs.charCodeAt(i) as Int == 59) { total = total + 1 }
+            i = i + 1
+        }
+        return total
+    }
+}
+
+/// Stack map 工具：整数/字符串转换、根地址换算。
+object JitStackMapUtils {
+
+    /// Int → 十进制（含负数；不依赖 stdlib toStr，两种运行时均可用）。
+    fun intToStr(v: Int): String {
+        if (v == 0) { return "0" }
+        var neg: Boolean = false
+        var n: Int = v
+        if (n < 0) { neg = true; n = 0 - n }
+        var out: String = ""
+        while (n > 0) {
+            val d: Int = n % 10
+            n = n / 10
+            var ch: String = "0"
+            if (d == 1) { ch = "1" } else if (d == 2) { ch = "2" } else if (d == 3) { ch = "3" }
+            else if (d == 4) { ch = "4" } else if (d == 5) { ch = "5" } else if (d == 6) { ch = "6" }
+            else if (d == 7) { ch = "7" } else if (d == 8) { ch = "8" } else if (d == 9) { ch = "9" }
+            out = ch + out
+        }
+        if (neg) { out = "-" + out }
+        return out
+    }
+
+    /// 十进制 → Int（容错：非数字返回 0）。
+    fun parseInt(s: String): Int {
+        if (s == "") { return 0 }
+        var i: Int = 0
+        var neg: Boolean = false
+        if (s.charCodeAt(0) as Int == 45) { neg = true; i = 1 }  // '-'
+        var total: Int = 0
+        val sLen: Int = s.length
+        while (i < sLen) {
+            val c: Int = s.charCodeAt(i) as Int
+            if (c < 48 || c > 57) { return 0 }
+            total = total * 10 + (c - 48)
+            i = i + 1
+        }
+        if (neg) { total = 0 - total }
+        return total
+    }
+
+    /// 原生安全的子串：`text[start, endEx)`（charCodeAt 逐字符拼接）。
+    /// ⚠️ String.substring 是「接收者 + 2 参」方法调用，Photon 原生路径
+    /// 实测接收者会错位（P5-⑤）——JIT 路径的字符串切片一律走本函数。
+    fun substr(text: String, start: Int, endEx: Int): String {
+        return JitStackMapUtils.rangeText(text, start, endEx)
+    }
+
+    /// 解析单条 `funcName|pc|slotCount|spillBase|target` → StackMapEntry。
+    fun parseEntry(seg: String): StackMapEntry {
+        val e: StackMapEntry = StackMapEntry()
+        var field: Int = 0
+        var start: Int = 0
+        var i: Int = 0
+        val segLen: Int = seg.length
+        while (i <= segLen) {
+            var ch: Int = 124
+            if (i < segLen) { ch = seg.charCodeAt(i) as Int }
+            if (ch == 124) {
+                if (field == 0) { e.callTarget = seg.substring(start, i) }
+                else if (field == 1) { e.pcOffset = JitStackMapUtils.parseIntRange(seg, start, i) }
+                else if (field == 2) { e.slotCount = JitStackMapUtils.parseIntRange(seg, start, i) }
+                else if (field == 3) { e.spillBase = JitStackMapUtils.parseIntRange(seg, start, i) }
+                else if (field == 4) { e.callTarget = seg.substring(start, i) }
+                field = field + 1
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return e
+    }
+
+    /// Int → 8 位十六进制（小端 imm32；负数按 32 位补码归一）。
+    fun hex8(v: Int): String {
+        var n: Long = v as Long
+        if (n < 0) { n = n + 4294967296 }
+        val b0: Int = (n / 16777216) % 256
+        val b1: Int = (n / 65536) % 256
+        val b2: Int = (n / 256) % 256
+        val b3: Int = (n % 256) as Int
+        return JitStackMapUtils.hex2(b3) + JitStackMapUtils.hex2(b2) + JitStackMapUtils.hex2(b1) + JitStackMapUtils.hex2(b0)
+    }
+
+    /// Int → 2 位十六进制。
+    fun hex2(v: Int): String {
+        val hi: Int = (v / 16) % 16
+        val lo: Int = v % 16
+        return JitStackMapUtils.hexDigit(hi) + JitStackMapUtils.hexDigit(lo)
+    }
+
+    fun hexDigit(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        if (d == 9) { return "9" }
+        if (d == 10) { return "A" }
+        if (d == 11) { return "B" }
+        if (d == 12) { return "C" }
+        if (d == 13) { return "D" }
+        if (d == 14) { return "E" }
+        return "F"
+    }
+
+    /// 区间转字符串：经 fromCharCode（种子 VM 与原生 runtime 均以
+    /// String.fromCharCode / String_fromCharCode 双名链接，实测可用）。
+    fun rangeText(seg: String, start: Int, endEx: Int): String {
+        // 裸名 fromCharCode：种子 std_string.rs:91 与 Photon runtime 均以
+        // 该名链接（实测 P3：p15/p17 全绿）。全限定 String.fromCharCode
+        // 反而外链名不匹配，勿改。
+        var out: String = ""
+        var i: Int = start
+        while (i < endEx) {
+            out = out + fromCharCode(seg.charCodeAt(i) as Int)
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 区间解析整数：text[start,endEx) 十进制（容错 0；支持负号）。
+    fun parseIntRange(text: String, start: Int, endEx: Int): Int {
+        if (start >= endEx) { return 0 }
+        var i: Int = start
+        var neg: Boolean = false
+        if (text.charCodeAt(i) as Int == 45) { neg = true; i = i + 1 }
+        var total: Int = 0
+        while (i < endEx) {
+            val c: Int = text.charCodeAt(i) as Int
+            if (c < 48 || c > 57) { return 0 }
+            total = total * 10 + (c - 48)
+            i = i + 1
+        }
+        if (neg) { total = 0 - total }
+        return total
+    }
+
+    /// 区间等值：text[start,endEx) 与 target 逐码比较。
+    fun equalsRange(text: String, start: Int, endEx: Int, target: String): Boolean {
+        val len: Int = endEx - start
+        if (len != target.length) { return false }
+        var i: Int = 0
+        while (i < len) {
+            if (text.charCodeAt(start + i) as Int != target.charCodeAt(i) as Int) { return false }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 区间前缀：text[start..] 是否以 prefix 开头。
+    fun startsWithRange(text: String, start: Int, prefix: String): Boolean {
+        val plen: Int = prefix.length
+        if (text.length - start < plen) { return false }
+        var i: Int = 0
+        while (i < plen) {
+            if (text.charCodeAt(start + i) as Int != prefix.charCodeAt(i) as Int) { return false }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 溢出槽 k 的**地址**：frameBase - (spillBase + k*8)。
+    ///
+    /// frameBase = 进入函数后的 rbp；槽从高地址向低地址排（RA 槽在
+    /// spillBase 区间，发射器兜底槽在其下）。
+    fun slotAddress(frameBase: Long, spillBase: Int, k: Int): Long {
+        val off: Long = (spillBase + k * 8) as Long
+        return frameBase - off
+    }
+
+    /// 枚举一个 call 点的全部候选根地址（GC mark 入口）。
+    ///
+    /// 返回槽地址列表（长度 = entry.slotCount）；GC 对每个地址
+    /// `Memory.read64` 取值后按对象头判定是否为真根（保守集合）。
+    fun collectFrameRoots(frameBase: Long, entry: StackMapEntry): List<Long> {
+        val out: List<Long> = arrayListOf<Long>()
+        var k: Int = 0
+        while (k < entry.slotCount) {
+            out.add(JitStackMapUtils.slotAddress(frameBase, entry.spillBase, k))
+            k = k + 1
+        }
+        return out
+    }
+}
+
+// ═════
+// P3（Phase 4.2）：类型反馈向量（并入本文件：AOT 闭包对独立新文件的
+// 类构造解析在本机曾出现 ctor 外链化（undefined symbol），并入已验证
+// 闭包成员文件后消失——P5 闭包解析脆弱性一例）。
+// ═════
+
+class TypeFeedbackTable {
+    var recs: String = ""
+
+    /// 记录一次站点观察：`site|tag|` 段存在则 count+1，否则新段。
+    fun recordType(siteId: Int, typeTag: Int): Unit {
+        var i: Int = 0
+        val n: Int = this.recs.length
+        val prefix: String = JitStackMapUtils.intToStr(siteId) + "|"
+        val tagPrefix: String = prefix + JitStackMapUtils.intToStr(typeTag) + "|"
+        while (i < n) {
+            var e: Int = i
+            while (e < n) {
+                if (this.recs.charCodeAt(e) as Int == 59) { break }
+                e = e + 1
+            }
+            if (e > i && JitStackMapUtils.startsWithRange(this.recs, i, tagPrefix)) {
+                // count 字段 = 第二 '|' 之后到段尾
+                var cnt: Int = 0
+                var last: Int = 0 - 1
+                var kk: Int = i
+                while (kk < e) {
+                    if (this.recs.charCodeAt(kk) as Int == 124) { last = kk }
+                    kk = kk + 1
+                }
+                if (last > 0) {
+                    cnt = JitStackMapUtils.parseIntRange(this.recs, last + 1, e)
+                }
+                val newCnt: String = JitStackMapUtils.intToStr(cnt + 1)
+                this.recs = JitStackMapUtils.substr(this.recs, 0, last + 1) + newCnt
+                        + JitStackMapUtils.substr(this.recs, e, this.recs.length)
+                return
+            }
+            i = e + 1
+        }
+        val seg: String = JitStackMapUtils.intToStr(siteId) + "|" + JitStackMapUtils.intToStr(typeTag) + "|1"
+        if (this.recs == "") {
+            this.recs = seg
+        } else {
+            this.recs = this.recs + ";" + seg
+        }
+    }
+
+    /// 主导 typeTag（count 最大的段）；无记录 -1。
+    fun dominantType(siteId: Int): Int {
+        var bestTag: Int = 0 - 1
+        var bestCnt: Int = 0 - 1
+        var i: Int = 0
+        val n: Int = this.recs.length
+        val prefix: String = JitStackMapUtils.intToStr(siteId) + "|"
+        while (i < n) {
+            var e: Int = i
+            while (e < n) {
+                if (this.recs.charCodeAt(e) as Int == 59) { break }
+                e = e + 1
+            }
+            if (e > i && JitStackMapUtils.startsWithRange(this.recs, i, prefix)) {
+                // tag = 第一 '|' 到第二 '|'；count = 第二 '|' 之后
+                var p1: Int = 0 - 1
+                var p2: Int = 0 - 1
+                var k: Int = i
+                while (k < e) {
+                    if (this.recs.charCodeAt(k) as Int == 124) {
+                        if (p1 < 0) { p1 = k }
+                        else { p2 = k; break }
+                    }
+                    k = k + 1
+                }
+                if (p1 > 0 && p2 > p1) {
+                    val tag: Int = JitStackMapUtils.parseIntRange(this.recs, p1 + 1, p2)
+                    val cnt: Int = JitStackMapUtils.parseIntRange(this.recs, p2 + 1, e)
+                    if (cnt > bestCnt) { bestCnt = cnt; bestTag = tag }
+                }
+            }
+            i = e + 1
+        }
+        return bestTag
+    }
+
+    /// 站点总观察次数；无记录 0。
+    fun observationCount(siteId: Int): Int {
+        var total: Int = 0
+        var i: Int = 0
+        val n: Int = this.recs.length
+        val prefix: String = JitStackMapUtils.intToStr(siteId) + "|"
+        while (i < n) {
+            var e: Int = i
+            while (e < n) {
+                if (this.recs.charCodeAt(e) as Int == 59) { break }
+                e = e + 1
+            }
+            if (e > i && JitStackMapUtils.startsWithRange(this.recs, i, prefix)) {
+                var last: Int = 0 - 1
+                var k: Int = i
+                while (k < e) {
+                    if (this.recs.charCodeAt(k) as Int == 124) { last = k }
+                    k = k + 1
+                }
+                if (last > 0) {
+                    total = total + JitStackMapUtils.parseIntRange(this.recs, last + 1, e)
+                }
+            }
+            i = e + 1
+        }
+        return total
+    }
+
+    /// 单态判定：主导计数 * 10 >= 总数 * 9（≥90%）。
+    fun isMonomorphic(siteId: Int): Boolean {
+        // 主导 tag 段的计数 / 总数 >= 90%（纯整数）。
+        val total: Int = this.observationCount(siteId)
+        if (total == 0) { return false }
+        val dom: Int = this.dominantType(siteId)
+        if (dom < 0) { return false }
+        var domCount: Int = 0
+        var i: Int = 0
+        val n: Int = this.recs.length
+        val prefix: String = JitStackMapUtils.intToStr(siteId) + "|"
+        val tagPrefix: String = prefix + JitStackMapUtils.intToStr(dom) + "|"
+        while (i < n) {
+            var e: Int = i
+            while (e < n) {
+                if (this.recs.charCodeAt(e) as Int == 59) { break }
+                e = e + 1
+            }
+            if (e > i && JitStackMapUtils.startsWithRange(this.recs, i, tagPrefix)) {
+                var last: Int = 0 - 1
+                var k: Int = i
+                while (k < e) {
+                    if (this.recs.charCodeAt(k) as Int == 124) { last = k }
+                    k = k + 1
+                }
+                if (last > 0) {
+                    domCount = domCount + JitStackMapUtils.parseIntRange(this.recs, last + 1, e)
+                }
+            }
+            i = e + 1
+        }
+        return domCount * 10 >= total * 9
+    }
+
+    /// 站点数（诊断）。
+    fun siteCount(): Int {
+        if (this.recs == "") { return 0 }
+        var total: Int = 1
+        var i: Int = 0
+        val n: Int = this.recs.length
+        while (i < n) {
+            if (this.recs.charCodeAt(i) as Int == 59) { total = total + 1 }
+            i = i + 1
+        }
+        return total
+    }
+}
+
+// ═════
+// P3（Phase 4.1）：OSR 入口表 + 入口桩（并入本文件，理由同上）。
+// ═════
+
+/// OSR 入口表：`funcName|bytecodeIp|jitEntryOffset`（`;` 分隔）。
+class OsrTable {
+    var recs: String = ""
+
+    /// 登记 OSR 入口。
+    fun recordOsr(funcName: String, bytecodeIp: Int, jitEntryOffset: Int): Unit {
+        val seg: String = funcName + "|" + JitStackMapUtils.intToStr(bytecodeIp)
+                + "|" + JitStackMapUtils.intToStr(jitEntryOffset)
+        if (this.recs == "") {
+            this.recs = seg
+        } else {
+            this.recs = this.recs + ";" + seg
+        }
+    }
+
+    /// 查 ip 的 OSR 入口 ip：取 ≤ ip 的最近条目；未命中 -1。
+    fun lookupOsr(funcName: String, bytecodeIp: Int): Int {
+        var best: Int = 0 - 1
+        var found: Int = 0
+        var i: Int = 0
+        val n: Int = this.recs.length
+        val prefix: String = funcName + "|"
+        while (i < n) {
+            var e: Int = i
+            while (e < n) {
+                if (this.recs.charCodeAt(e) as Int == 59) { break }
+                e = e + 1
+            }
+            if (e > i && JitStackMapUtils.startsWithRange(this.recs, i, prefix)) {
+                var p1: Int = 0 - 1
+                var p2: Int = 0 - 1
+                var k: Int = i
+                while (k < e) {
+                    if (this.recs.charCodeAt(k) as Int == 124) {
+                        if (p1 < 0) { p1 = k }
+                        else { p2 = k; break }
+                    }
+                    k = k + 1
+                }
+                if (p1 > 0 && p2 > p1) {
+                    val ip: Int = JitStackMapUtils.parseIntRange(this.recs, p1 + 1, p2)
+                    if (ip <= bytecodeIp && (found == 0 || ip > best)) {
+                        best = ip
+                        found = 1
+                    }
+                }
+            }
+            i = e + 1
+        }
+        if (found == 0) { return 0 - 1 }
+        return best
+    }
+
+    /// 取 ip 对应的 JIT 入口偏移；未命中 -1。
+    fun entryOffsetOf(funcName: String, bytecodeIp: Int): Int {
+        val ip: Int = this.lookupOsr(funcName, bytecodeIp)
+        if (ip < 0) { return 0 - 1 }
+        var i: Int = 0
+        val n: Int = this.recs.length
+        val needle: String = funcName + "|" + JitStackMapUtils.intToStr(ip) + "|"
+        while (i < n) {
+            var e: Int = i
+            while (e < n) {
+                if (this.recs.charCodeAt(e) as Int == 59) { break }
+                e = e + 1
+            }
+            if (e > i && JitStackMapUtils.startsWithRange(this.recs, i, needle)) {
+                var cnt: Int = 0
+                var last: Int = 0 - 1
+                var kk: Int = i
+                while (kk < e) {
+                    if (this.recs.charCodeAt(kk) as Int == 124) {
+                        cnt = cnt + 1
+                        last = kk
+                    }
+                    kk = kk + 1
+                }
+                if (cnt >= 2) {
+                    return JitStackMapUtils.parseIntRange(this.recs, last + 1, e)
+                }
+            }
+            i = e + 1
+        }
+        return 0 - 1
+    }
+
+    /// 条目总数（诊断）。
+    fun entryCount(): Int {
+        if (this.recs == "") { return 0 }
+        var total: Int = 1
+        var i: Int = 0
+        val n: Int = this.recs.length
+        while (i < n) {
+            if (this.recs.charCodeAt(i) as Int == 59) { total = total + 1 }
+            i = i + 1
+        }
+        return total
+    }
+}
+
+/// OSR 入口桩编码/修补。
+object JitOsrUtils {
+
+    /// OSR 入口桩长度（12 字节）。
+    fun osrStubSize(): Int {
+        return 12
+    }
+
+    /// `mov rcx, osr_frame` imm32 的偏移。
+    fun osrFrameOffset(): Int {
+        return 1
+    }
+
+    /// `mov rax, jit_entry` imm32 的偏移。
+    fun osrEntryOffset(): Int {
+        return 6
+    }
+
+    /// 编码 OSR 入口桩（12 字节）：
+    ///   B9 id32   mov rcx, osr_frame
+    ///   B8 id32   mov rax, jit_entry
+    ///   FF E0     jmp rax
+    fun buildOsrStubHex(osrFrame: Int, jitEntry: Int): String {
+        var out: String = "B9" + JitStackMapUtils.hex8(osrFrame)
+        out = out + "B8" + JitStackMapUtils.hex8(jitEntry)
+        out = out + "FFE0"
+        return out
+    }
+
+    // patchOsrFrame/patchOsrEntry 已移除：跨文件 JitBackend 参数的方法
+    // 调用在 AOT 闭包下解析为未定义全局（#writeReloc32 未定义，实测
+    // P3/驱动重建）。调用方直接用 backend.writeReloc32(base+off, val)。
+}

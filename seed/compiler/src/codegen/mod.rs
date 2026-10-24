@@ -259,6 +259,17 @@ const LANG_PKG_ROOT: &str = "aura.lang.";
 /// 由使用方 `import aura.lang.native.*` 引用，而不是在各处重复声明。
 const NATIVE_PKG_ROOT: &str = "aura.lang.native.";
 
+/// `aura.lang.debugger.` 包根前缀：映射到 `aura/toolchain/debugger/aura/lang/debugger/`。
+///
+/// 调试器（`DebugVm` / `BreakpointManager` / `SourceMap` 等）属于**工具链**而非核心库，
+/// 源码位于独立的 `aura/toolchain/debugger/` 树中，因此无法用 `aura.lang.` 兜底
+/// （那会去 `aura/core/aura/lang/` 下找 `debugger/*.aura` 而落空）。
+/// 缺失该映射时 `import aura.lang.debugger.DebugVm` 会被**原样透传**给 VM，
+/// 表现为 `unresolved reference 'DebugVm'` + `未解析的函数调用`。
+///
+/// ⚠️ 必须在 `LANG_PKG_ROOT` 之前匹配，否则会被 `aura.lang.` 兜底抢走。
+const DEBUGGER_PKG_ROOT: &str = "aura.lang.debugger.";
+
 /// 检测 `native.arch.<platform>` 导入是否匹配当前目标平台。
 ///
 /// 平台字符串格式：`<arch>_<os>`，例如 `x86_64_windows` / `aarch64_linux` / `x86_64_darwin`。
@@ -337,6 +348,15 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
     let lang_pkg_root: Option<std::path::PathBuf> = project_root
         .as_ref()
         .map(|pr| pr.join("aura").join("core").join("aura").join("lang"));
+    // `debugger_pkg_root`：`aura.lang.debugger` 包根目录（工具链子树）。
+    let debugger_pkg_root: Option<std::path::PathBuf> = project_root.as_ref().map(|pr| {
+        pr.join("aura")
+            .join("toolchain")
+            .join("debugger")
+            .join("aura")
+            .join("lang")
+            .join("debugger")
+    });
     let mut visited = std::collections::HashSet::new();
     let mut out = resolve_aura_imports_rec(
         source,
@@ -344,6 +364,7 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
         &photon_pkg_root,
         &collection_pkg_root,
         &lang_pkg_root,
+        &debugger_pkg_root,
         &base_dir,
         &mut visited,
     );
@@ -367,6 +388,7 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
                     &photon_pkg_root,
                     &collection_pkg_root,
                     &lang_pkg_root,
+                    &debugger_pkg_root,
                     child_base,
                     &mut visited,
                 ));
@@ -407,6 +429,7 @@ fn resolve_aura_imports_rec(
     photon_pkg_root: &Option<std::path::PathBuf>,
     collection_pkg_root: &Option<std::path::PathBuf>,
     lang_pkg_root: &Option<std::path::PathBuf>,
+    debugger_pkg_root: &Option<std::path::PathBuf>,
     base_dir: &std::path::Path,
     visited: &mut std::collections::HashSet<std::path::PathBuf>,
 ) -> String {
@@ -431,6 +454,7 @@ fn resolve_aura_imports_rec(
                         photon_pkg_root,
                         collection_pkg_root,
                         lang_pkg_root,
+                        debugger_pkg_root,
                         child_base,
                         visited,
                     );
@@ -545,6 +569,17 @@ fn resolve_aura_imports_rec(
                     let rel = pkg_to_aura_path(pkg);
                     lang.join("native").join(rel)
                 })
+            } else if let Some(pkg) = rest.strip_prefix(DEBUGGER_PKG_ROOT) {
+                // `aura.lang.debugger.*` → `aura/toolchain/debugger/aura/lang/debugger/`。
+                // 去掉通配/别名的尾巴（如 `DebugVm.*` / `DebugVm as D`）。
+                let pkg = pkg.split_whitespace().next().unwrap_or(pkg);
+                let pkg = pkg.trim_end_matches(".*");
+                if let Some(root) = debugger_pkg_root {
+                    let rel = pkg_to_aura_path(pkg);
+                    Some(root.join(rel))
+                } else {
+                    None
+                }
             } else if let Some(pkg) = rest.strip_prefix(LANG_PKG_ROOT) {
                 // `aura.lang.*` 兜底：映射到 `aura/core/aura/lang/`
                 // 去掉通配/别名的尾巴（如 `File.*` / `File as F`）
@@ -591,6 +626,7 @@ fn resolve_aura_imports_rec(
                         photon_pkg_root,
                         collection_pkg_root,
                         lang_pkg_root,
+                        debugger_pkg_root,
                         child_base,
                         visited,
                     );

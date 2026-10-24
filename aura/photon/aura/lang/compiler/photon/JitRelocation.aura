@@ -1,0 +1,442 @@
+// aura:///aura/lang/compiler/photon/JitRelocation.aura
+package aura.lang.compiler.photon
+// ─────────────────────────────────────────────────────────────
+// JIT 重定位处理器 — P1-2（缺口一 + 缺口二的另一半）
+//
+// Photon 的 X86Encoder 在发射 `call rel32` / `lea [rip+disp32]` /
+// `call [rip+disp32]` 时写 4 字节 `00 00 00 00` 占位符并登记一条重定位
+// 记录（`offset|symbol|type`）。AOT 路径由 `lld-link` 在链接期回填；
+// JIT 路径没有链接器——必须在这里**运行时**回填。
+//
+// 数据流（P1-2 之后）：
+//
+//   PhotonPipeline.compileEncodeOnly
+//     ├─ machineCodeHex   裸机器码（含 00 00 00 00 占位符）
+//     ├─ relocRecords     "off|symbol|type;off|symbol|type;..."
+//     └─ funcNameOffsets  "funcA|128;funcB|416;..."
+//             │
+//             ▼
+//   JitBackend.emitFunction(hex, relocRecords, funcNameOffsets)
+//     1. allocateExecMemory  → base（RW）
+//     2. writeCode(base, 0, hex)
+//     3. JitRelocationUtils.applyRelocations(base, ..., relocs, names)
+//          ├─ R_X86_64_REL32 / PC32 : write32(base+off, target - (base+off+4))
+//          ├─ R_X86_64_64 / ADDR64  : write64(base+off, target)
+//          └─ 未知符号 → 跳过（保留占位符，计入 skipped）
+//     4. setExecutable(base, size) → RX
+//     5. return base
+//
+// 偏移语义：`relocRecords` 的 offset 与 `funcNameOffsets` 的 offset 都是
+// **模块内**绝对字节偏移（`X86Emitter` 用 `enc.byteCount()` 直接累计），
+// 因此 `target = codeBase + funcOffset`，无需再叠加函数自身起点。
+//
+// VM 安全：全部写操作都经 `JitBackend` 的 `writeReloc32` / `writeReloc64`
+// 入口，`vmMode=true` 时这些入口直接返回——重定位在「模拟分配」下不会
+// 真正触碰 `Memory`，与 `writeCode` / `setExecutable` 的既有约定一致。
+// ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// 重定位类型
+// ─────────────────────────────────────────────────────────────
+
+/// 重定位类型常量。
+object RelocType {
+    /// RIP 相对 32 位位移（`E8 rel32` call、`48 8D 05 disp32` lea、`FF 15` call [rip]）。
+    const val RIP32: Int = 0
+    /// 绝对 64 位地址（`48 B8 imm64`）。
+    const val ABS64: Int = 1
+    /// 数据段引用（指向 `.rdata` 内的符号，JIT 阶段由 `dataBase + offset` 解析）。
+    const val DATA_REF: Int = 2
+    /// PC 相对加载（语义同 RIP32，独立保留以便与 COFF 类型区分）。
+    const val PCREL32: Int = 3
+}
+
+/// 重定位类型名解析。
+object RelocTypeUtils {
+
+    /// 重定位类型名解析；未知类型返回 -1（调用方应跳过该重定位）。
+    fun fromName(name: String): Int {
+        if (name == "R_X86_64_REL32" || name == "R_X86_64_PLT32" ||
+            name == "R_X86_64_PC32" || name == "REL32") {
+            return RelocType.RIP32
+        }
+        if (name == "R_X86_64_64" || name == "ADDR64") {
+            return RelocType.ABS64
+        }
+        if (name == "R_X86_64_DATA" || name == "DATA_REF") {
+            return RelocType.DATA_REF
+        }
+        if (name == "PCREL32") {
+            return RelocType.PCREL32
+        }
+        return -1
+    }
+
+    /// 数值 → 重定位类型名（诊断输出用）。
+    fun nameOf(t: Int): String {
+        if (t == RelocType.RIP32) { return "RIP32" }
+        if (t == RelocType.ABS64) { return "ABS64" }
+        if (t == RelocType.DATA_REF) { return "DATA_REF" }
+        if (t == RelocType.PCREL32) { return "PCREL32" }
+        return "UNKNOWN"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 重定位条目
+// ─────────────────────────────────────────────────────────────
+
+/// 单条重定位。
+class Relocation {
+    /// 在机器码（模块内）中的字节偏移——占位符的**首字节**。
+    var offset: Int = 0
+    /// 目标符号名（函数名 / `@str.N` 字符串常量 / `__imp_*` 导入）。
+    var symbol: String = ""
+    /// 重定位类型（`RelocType` 之一）。
+    var type: Int = 0
+
+    init(offset: Int, symbol: String, type: Int) {
+        this.offset = offset
+        this.symbol = symbol
+        this.type = type
+    }
+}
+
+/// 应用结果统计。
+class RelocApplyResult {
+    /// 解析成功的条目总数。
+    var total: Int = 0
+    /// 成功回填的条目数。
+    var applied: Int = 0
+    /// 跳过的条目数（未知符号 / 未知类型 / 偏移越界）。
+    var skipped: Int = 0
+    /// 已回填条目摘要（诊断用，有界）。
+    var trace: String = ""
+
+    init() {
+        this.total = 0
+        this.applied = 0
+        this.skipped = 0
+        this.trace = ""
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// JitRelocationUtils
+// ─────────────────────────────────────────────────────────────
+
+object JitRelocationUtils {
+
+    // ── 解析 ──
+
+    /// 解析重定位记录串为条目列表。
+    ///
+    /// 格式：`offset|symbol|type`，条目间以 `;` 分隔
+    /// （`X86Emitter.joinRelocRecords` 的 P1-2 输出）。
+    fun parseRelocs(records: String): List<Relocation> {
+        val out: List<Relocation> = arrayListOf<Relocation>()
+        if (records == "") { return out }
+        val entries: List<String> = JitRelocationUtils.splitSemi(records)
+        var i: Int = 0
+        while (i < entries.size) {
+            val entry: String = entries[i]
+            if (entry != "") {
+                // 字段切分用区间索引（P5-⑤）：数字字段直接 parseIntRange，
+                // 符号字段保留 splitPipe 形态（需要字符串）。
+                val parts: List<String> = JitRelocationUtils.splitPipe(entry)
+                if (parts.size >= 3) {
+                    val r: Relocation = Relocation(
+                            JitRelocationUtils.parseIntRange(entry, 0, JitRelocationUtils.indexOf(entry, "|")),
+                            parts[1],
+                            RelocTypeUtils.fromName(parts[2]))
+                    out.add(r)
+                }
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 解析「函数名 → 段内偏移」表为 `;` 分隔的扁平列表。
+    fun parseFuncOffsets(text: String): List<String> {
+        if (text == "") { return arrayListOf<String>() }
+        return JitRelocationUtils.splitSemi(text)
+    }
+
+    /// 在 `;` 分隔的「名|偏移」表里按名查偏移；未找到返回 -1。
+    fun lookupFuncOffset(funcOffsets: String, symbol: String): Int {
+        if (funcOffsets == "" || symbol == "") { return -1 }
+        val entries: List<String> = JitRelocationUtils.splitSemi(funcOffsets)
+        var i: Int = 0
+        while (i < entries.size) {
+            val entry: String = entries[i]
+            val idx: Int = JitRelocationUtils.indexOf(entry, "|")
+            if (idx > 0) {
+                if (entry.substring(0, idx) == symbol) {
+                    return JitRelocationUtils.parseIntRange(entry, idx + 1, entry.length)
+                }
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    // ── 应用 ──
+
+    /// 应用重定位（VM 安全：vmMode 下写操作由 `backend` 守卫）。
+    ///
+    /// `codeBase`    可执行内存基址（已页对齐）；
+    /// `codeSize`    本段代码字节数（越界检查用）；
+    /// `relocs`      [`parseRelocs`] 的产物；
+    /// `funcOffsets` [`parseFuncOffsets`] 的产物（符号 → 段内偏移）；
+    /// `dataBase`    数据段基址（0 = 未分配，`DATA_REF` 重定位被跳过）。
+    fun applyRelocations(backend: JitBackend, codeBase: Int, codeSize: Int,
+                         relocs: List<Relocation>, funcOffsets: String,
+                         dataBase: Int): RelocApplyResult {
+        val res: RelocApplyResult = RelocApplyResult()
+        var i: Int = 0
+        while (i < relocs.size) {
+            val r: Relocation = relocs[i]
+            res.total = res.total + 1
+            if (r.type < 0 || r.offset < 0 || r.offset >= codeSize) {
+                res.skipped = res.skipped + 1
+                i = i + 1
+                continue
+            }
+
+            val funcOff: Int = JitRelocationUtils.lookupFuncOffset(funcOffsets, r.symbol)
+
+            if (r.type == RelocType.RIP32 || r.type == RelocType.PCREL32) {
+                if (funcOff < 0) {
+                    res.skipped = res.skipped + 1
+                    i = i + 1
+                    continue
+                }
+                // RIP 相对：x86-64 规定 disp 相对**下一条指令**的地址，
+                // 因此以占位符首字节 +4 作为指令结束点。
+                val insnEnd: Int = codeBase + r.offset + 4
+                val target: Int = codeBase + funcOff
+                val disp: Int = target - insnEnd
+                backend.writeReloc32(codeBase + r.offset, disp)
+                res.applied = res.applied + 1
+                res.trace = JitRelocationUtils.traceAdd(res.trace,
+                        "RIP32 off=" + JitRelocationUtils.intToStr(r.offset) +
+                                " sym=" + r.symbol +
+                                " disp=" + JitRelocationUtils.intToStr(disp))
+            } else if (r.type == RelocType.ABS64) {
+                if (funcOff < 0) {
+                    res.skipped = res.skipped + 1
+                    i = i + 1
+                    continue
+                }
+                backend.writeReloc64(codeBase + r.offset, codeBase + funcOff)
+                res.applied = res.applied + 1
+                res.trace = JitRelocationUtils.traceAdd(res.trace,
+                        "ABS64 off=" + JitRelocationUtils.intToStr(r.offset) +
+                                " sym=" + r.symbol)
+            } else if (r.type == RelocType.DATA_REF) {
+                if (dataBase == 0) {
+                    // 数据段未分配（P1-2 之前），跳过——不写错值。
+                    res.skipped = res.skipped + 1
+                    i = i + 1
+                    continue
+                }
+                if (funcOff < 0) {
+                    res.skipped = res.skipped + 1
+                    i = i + 1
+                    continue
+                }
+                backend.writeReloc64(codeBase + r.offset, dataBase + funcOff)
+                res.applied = res.applied + 1
+                res.trace = JitRelocationUtils.traceAdd(res.trace,
+                        "DATA off=" + JitRelocationUtils.intToStr(r.offset) +
+                                " sym=" + r.symbol)
+            } else {
+                res.skipped = res.skipped + 1
+            }
+            i = i + 1
+        }
+        return res
+    }
+
+    // ── 存根修正 ──
+
+    /// 修正分派存根（`mov rax,[rip+disp32]; jmp rax`）的位移占位符。
+    ///
+    /// 存根布局 `48 8B 05 [disp32] FF E0` 共 9 字节：disp32 位于
+    /// `stubBase + 3`，指令结束于 `stubBase + 7`。
+    fun patchDispatchStub(backend: JitBackend, stubBase: Int, target: Int): Unit {
+        if (target == 0) { return }
+        val disp: Int = target - (stubBase + 7)
+        backend.writeReloc32(stubBase + 3, disp)
+    }
+
+    /// 修正去优化蹦床的 `lea rax,[rip+disp32]`（占位符在偏移 4、指令长 8）。
+    fun patchDeoptTrampoline(backend: JitBackend, trampolineBase: Int, vmEntry: Int): Unit {
+        if (vmEntry == 0) { return }
+        val disp: Int = vmEntry - (trampolineBase + 8)
+        backend.writeReloc32(trampolineBase + 4, disp)
+    }
+
+    // ── 统计与诊断 ──
+
+    /// 统计重定位记录条数。
+    fun countRelocs(records: String): Int {
+        if (records == "") { return 0 }
+        return JitRelocationUtils.splitSemi(records).size
+    }
+
+    /// 汇总应用结果为一行诊断串。
+    fun formatApplyResult(res: RelocApplyResult): String {
+        return "reloc total=" + JitRelocationUtils.intToStr(res.total) +
+                " applied=" + JitRelocationUtils.intToStr(res.applied) +
+                " skipped=" + JitRelocationUtils.intToStr(res.skipped)
+    }
+
+    // ── 字符串 / 整数工具（不依赖 String stdlib，VM 与原生运行时均可用）──
+
+    /// 按 `;` 切分。
+    ///
+    /// ⚠️ P5-⑤：段文本抽取走 `rangeText`（fromCharCode 裸名，种子 VM 与
+    /// 原生 runtime 均链接）而非 `String.substring`（原生按构建漂移）。
+    private fun splitSemi(text: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") { return out }
+        var start: Int = 0
+        var i: Int = 0
+        val len: Int = text.length
+        while (i <= len) {
+            if (i == len || text.charCodeAt(i) == 59) {
+                out.add(JitRelocationUtils.rangeText(text, start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 按 `|` 切分（rangeText 形态，同 splitSemi 说明）。
+    private fun splitPipe(text: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") { return out }
+        var start: Int = 0
+        var i: Int = 0
+        val len: Int = text.length
+        while (i <= len) {
+            if (i == len || text.charCodeAt(i) == 124) {
+                out.add(JitRelocationUtils.rangeText(text, start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 区间转字符串（fromCharCode 裸名，两种运行时均链接）。
+    fun rangeText(text: String, start: Int, endEx: Int): String {
+        var out: String = ""
+        var i: Int = start
+        val textLen: Int = text.length
+        while (i < endEx && i < textLen) {
+            out = out + fromCharCode(text.charCodeAt(i) as Int)
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 区间解析整数（十进制，容错 0；支持负号）。
+    fun parseIntRange(text: String, start: Int, endEx: Int): Int {
+        if (start >= endEx) { return 0 }
+        var i: Int = start
+        var neg: Boolean = false
+        if (text.charCodeAt(i) as Int == 45) { neg = true; i = i + 1 }
+        var total: Int = 0
+        while (i < endEx) {
+            val c: Int = text.charCodeAt(i) as Int
+            if (c < 48 || c > 57) { return 0 }
+            total = total * 10 + (c - 48)
+            i = i + 1
+        }
+        if (neg) { total = 0 - total }
+        return total
+    }
+
+    /// 查找子串首次出现的索引（未找到返回 -1）。
+    private fun indexOf(text: String, needle: String): Int {
+        val nlen: Int = needle.length
+        if (nlen == 0 || text.length < nlen) { return -1 }
+        var i: Int = 0
+        val textLen2: Int = text.length
+        while (i + nlen <= textLen2) {
+            var j: Int = 0
+            var ok: Boolean = true
+            while (j < nlen) {
+                if (text.charCodeAt(i + j) != needle.charCodeAt(j)) {
+                    ok = false
+                    break
+                }
+                j = j + 1
+            }
+            if (ok) { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 十进制整数解析（支持负号）。
+    private fun parseInt(text: String): Int {
+        if (text == "") { return 0 }
+        var neg: Boolean = false
+        var i: Int = 0
+        val len: Int = text.length
+        if (len > 0 && text.charCodeAt(i) == 45) {
+            neg = true
+            i = i + 1
+        }
+        var result: Int = 0
+        while (i < len) {
+            val c: Int = text.charCodeAt(i)
+            if (c >= 48 && c <= 57) {
+                result = result * 10 + (c - 48)
+            }
+            i = i + 1
+        }
+        if (neg) { return -result }
+        return result
+    }
+
+    /// 整数转十进制字符串。
+    private fun intToStr(n: Int): String {
+        if (n == 0) { return "0" }
+        var neg: Boolean = false
+        if (n < 0) { neg = true; n = -n }
+        var result: String = ""
+        while (n > 0) {
+            result = JitRelocationUtils.digit(n % 10) + result
+            n = n / 10
+        }
+        if (neg) { return "-" + result }
+        return result
+    }
+
+    /// 数字 0-9 → 字符。
+    private fun digit(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        return "9"
+    }
+
+    /// 追加 trace 条目（有界）。
+    private fun traceAdd(trace: String, entry: String): String {
+        if (trace == "") { return entry }
+        if (trace.length > 2048) { return trace }
+        return trace + ", " + entry
+    }
+}

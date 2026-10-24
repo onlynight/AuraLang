@@ -33,6 +33,7 @@ package aura.lang.compiler.jit
 import aura.lang.std.String
 import aura.lang.collection.ArrayList
 import aura.lang.collection.HashMap
+import aura.lang.compiler.jit.JitUtil
 
 /// JIT 工具对象：集中管理 JIT 相关的全局函数，支持 O(1) 方法分派。
 object JitStateUtils {

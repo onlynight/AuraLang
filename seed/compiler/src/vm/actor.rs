@@ -1,3 +1,12 @@
+// ================================================================
+// 【冻结基线】Rust VM 双实现常驻（VM-PA-00 v3.2 / D6 / P4.3）
+// [FROZEN BASELINE] Rust VM dual-impl co-resident (D6/P4.3): bug-fix only, no new capabilities, never reference the Aura VM.
+// 本文件属于 Rust VM（只读冻结的兼容基线、第二实现）：
+//   - 禁止新增能力，仅允许修 bug 与安全修补；
+//   - 不得引用 Aura VM 实现（aura/compiler/aura/lang/compiler/vm/）；
+//   - 与 Aura VM 的唯一交集是 .auc 二进制格式（Rust 编译器产出，两侧各自执行）。
+// 依据：docs/vm_pure_aura/00-VM纯Aura化技术方案与达成路径.md 三-阶段P4 / 决策D6。
+// ================================================================
 //! Actor 模型运行时（P10.4）
 //!
 //! 对应 技术方案 §3.7 的 Actor 模型：每个 Actor 拥有私有状态和消息队列，
@@ -355,6 +364,20 @@ impl ActorRuntime {
     /// 获取 Actor 邮箱中的消息数量
     pub fn mailbox_len(&self, id: ActorId) -> usize {
         self.get(id).map(|a| a.mailbox.len()).unwrap_or(0)
+    }
+
+    /// 从 Actor 邮箱取出最早的一条消息（非阻塞；空或 Actor 不存在时返回 `None`）。
+    ///
+    /// 与 `send`（写入 `actor.mailbox`）配对，是**进程内** Actor 的接收原语。
+    ///
+    /// 为什么需要它：`Actor.recvProcessActor` 原先只查**跨进程**注册表
+    /// （`actor_process::PROCESS_ACTORS`，基于 socket），与进程内 `send` 写入的
+    /// 邮箱是**两个不相交的存储**。于是
+    /// `send(a, m); recvProcessActor(a)` 恒得 `null` —— 消息发进去了却读不出来
+    /// （`examples/concurrency/actor_system.aura` 的接收路径因此静默失效）。
+    /// 该 native 现在先查跨进程注册表，未命中则回落到本方法。
+    pub fn recv(&mut self, id: ActorId) -> Option<Value> {
+        self.get_mut(id).and_then(|actor| actor.mailbox.pop_front())
     }
 
     /// 获取 Actor 私有状态

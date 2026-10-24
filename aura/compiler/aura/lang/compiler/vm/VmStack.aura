@@ -15,144 +15,343 @@ package aura.lang.compiler.vm
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.collection.HashMap
+import aura.lang.native.Memory
 
 /// VM 值栈（元素为 `Any`）。
 class VmStack {
 
-    private var d: List<Any> = arrayListOf<Any>()
+    // P392: Memory raw buffer (same rationale as VmLocals) -- data-stack
+    // push/pop is the fixed pairing cost of every arithmetic instruction.
+    // Any values stored/loaded as raw 64-bit representations.
+    private var mc: Long = 0
     private var sp: Int = 0
     private var cap: Int = 0
+    // P1-RETAIN 诊断：倍增次数（旧缓冲被丢弃的累计次数）。
+    private var capGrow: Int = 0
 
-    /// 压入一个值。
     fun push(v: Any): Unit {
-        if (this.sp < this.cap) {
-            this.d[this.sp] = v
+        // P366: read sp/cap into locals once (photon CSE hazard).
+        val sp0: Int = this.sp
+        val cap0: Int = this.cap
+        if (sp0 < cap0) {
+            Memory.write64(this.mc + sp0 * 8, v as Long)
         } else {
-            this.d.add(v)
-            this.cap = this.cap + 1
+            val newCap: Int = cap0 * 2 + 64
+            val nb: Long = Memory.alloc(newCap * 8)
+            var j: Int = 0
+            while (j < sp0) {
+                Memory.write64(nb + j * 8, Memory.read64(this.mc + j * 8))
+                j = j + 1
+            }
+            this.mc = nb
+            this.cap = newCap
+            Memory.write64(this.mc + sp0 * 8, v as Long)
+            // P1-RETAIN 诊断（2026-10-08）：记录每次倍增的旧容量，
+            // 供 [MEMPROBE] 汇总报告——「倍增次数」是栈顶单调上升的直接信号。
+            // 旧实现每次倍增后丢弃旧缓冲指针、仅更新 this.cap，外部只能
+            // 看到最终容量，看不出增长过程。此处把旧 cap 写入递增计数器。
+            val grow: Int = this.capGrow
+            this.capGrow = grow + 1
         }
-        this.sp = this.sp + 1
+        this.sp = sp0 + 1
     }
 
-    /// 弹出栈顶（空栈返回 null）。
     fun pop(): Any {
-        if (this.sp <= 0) {
+        val sp0: Int = this.sp
+        if (sp0 <= 0) {
             return null
         }
-        this.sp = this.sp - 1
-        return this.d[this.sp]
+        this.sp = sp0 - 1
+        return Memory.read64(this.mc + (sp0 - 1) * 8) as Any
     }
 
-    /// 查看栈顶（不弹出；空栈返回 null）。
     fun peek(): Any {
-        if (this.sp <= 0) {
+        val sp0: Int = this.sp
+        if (sp0 <= 0) {
             return null
         }
-        return this.d[this.sp - 1]
+        return Memory.read64(this.mc + (sp0 - 1) * 8) as Any
     }
 
-    /// 当前元素个数。
     fun size(): Int {
-        return this.sp
+        // [R19] P366 可靠模式：字段读先入局部——旧体 `return this.sp` 的
+        // photon 产码在 VmStack 上实测恒返回 0（[X] 探针 sp 列全程 0），
+        // collectArgs 的 `base = size() - argc` 因此变负下标。四个栈类同款
+        // body 一并改写。
+        val s0: Int = this.sp
+        return s0
     }
 
-    /// 按下标读取（从栈底数，不弹出；越界返回 null）。
-    ///
-    /// 用途：`listOf(a, b, c)` 这类**变参**内建必须按**原顺序**取实参 ——
-    /// 逐个 `pop` 会把顺序反转（实测 `listOf(1,2,3,4,5)` 得到 `[5,4,3,2,1]`，
-    /// `list[0]` 打印 5、`list[4]` 打印 1）。
-    /// 方法名刻意加前缀：本项目的 AOT 存在「同名成员被错绑到无关对象」的问题
-    ///（实测 `VmCollections.getAt(list, idx)` 被绑到别的 `getAt`，函数体根本不执行）。
+    /// 当前容量（已倍增到的槽数）。P1-RETAIN 诊断用：容量应受活跃深度约束，
+    /// 若无限倍增即栈顶单调上升（RETAIN 未配对 RELEASE）。
+    fun cap(): Int {
+        return this.cap
+    }
+
+    /// 倍增次数（旧缓冲被丢弃的累计次数）。P1-RETAIN 诊断用。
+    fun capGrow(): Int {
+        return this.capGrow
+    }
+
+    /// [R19] 唯一名通道：`size` 与四个栈类 + 集合族撞名，photon 产码把
+    /// `stack.size()` 调用解析到错误目标（实测恒 0）；唯一名无撞名面，
+    /// [X] 探针对照实验证实本方法返回正确 sp（push→1 / pop→0）。
+    /// **生产路径一律走本名**（Vm.aura 已全部替换）。
+    fun stackDepth(): Int {
+        val s0: Int = this.sp
+        return s0
+    }
+
     fun vmSlotAt(i: Int): Any {
-        if (i < 0 || i >= this.sp) {
+        // [R19] P366 可靠模式：sp 先入局部再判定（同 size() 的错译规避）
+        val sp0: Int = this.sp
+        if (i < 0 || i >= sp0) {
             return null
         }
-        return this.d[i]
+        return Memory.read64(this.mc + i * 8) as Any
     }
 
-    /// 清空。
     fun clear(): Unit {
-        this.d = arrayListOf<Any>()
         this.sp = 0
-        this.cap = 0
     }
 }
-
-/// VM 字符串栈（调用栈 / 异常处理器栈）。
 class VmStrStack {
 
+    // [R20·根修] 同 VmFrameStack 的 d[sp]=v 越界写病（cap 与 size 脱节），
+    // 异常处理帧（07-error-handling 家族）同根因。size 驱动纯净模式。
     private var d: List<String> = arrayListOf<String>()
-    private var sp: Int = 0
-    private var cap: Int = 0
 
     fun push(v: String): Unit {
-        if (this.sp < this.cap) {
-            this.d[this.sp] = v
-        } else {
-            this.d.add(v)
-            this.cap = this.cap + 1
-        }
-        this.sp = this.sp + 1
+        this.d.add(v)
     }
 
     fun pop(): String {
-        if (this.sp <= 0) {
+        val n: Int = this.d.size()
+        if (n <= 0) {
             return ""
         }
-        this.sp = this.sp - 1
-        return this.d[this.sp]
+        val v: String = this.d[n - 1]
+        this.d.removeAt(n - 1)
+        return v
     }
 
     fun peek(): String {
-        if (this.sp <= 0) {
+        val n: Int = this.d.size()
+        if (n <= 0) {
             return ""
         }
-        return this.d[this.sp - 1]
+        return this.d[n - 1]
     }
 
     fun size(): Int {
-        return this.sp
+        // [R173] 可靠模式（同 peek/pop 的先入局部）：`return this.d.size()`
+        // 的直接返回形态是已知错译家族（见 vmSlotAt [R19] 注释）——
+        // 实测 JIT 宿主异常处理 pushHandlerAt 已 push、throwException 处
+        // size() 读回 0/坏值 ⇒ while 循环整段跳过 ⇒ "Uncaught exception"
+        //（07-exception-* 三例的根因）。先落局部再返回。
+        val n: Int = this.d.size()
+        return n
+    }
+
+    /// [R173 诊断] 经 String 通道回报 size（String 返回路径已证可靠）。
+    fun sizeDbg(): String {
+        val n: Int = this.d.size()
+        return "n=" + n
+    }
+
+    /// [R173] 处理器栈非空判定 —— 经 peek() 通道（String 返回路径已证可靠，
+    /// 绕开大函数里 Int 调用返回值的错译家族）。记录恒含 `|`，永非空串。
+    fun hasHandler(): Boolean {
+        val v: String = this.peek()
+        return v != ""
     }
 
     fun clear(): Unit {
         this.d = arrayListOf<String>()
-        this.sp = 0
-        this.cap = 0
     }
 }
 
 /// 保存的局部变量帧栈（函数调用时保存调用者的槽位表）。
 class VmFrameStack {
 
-    private var d: List<HashMap<Int, Any>> = arrayListOf<HashMap<Int, Any>>()
+    // [R20·根修] 旧实现的 `sp<cap → d[sp]=v / else d.add(v); cap+1` 模式里
+    // cap 计数与 d.size() 脱节：首次 push 后 d.size()=1、cap=1，第二次 push
+    // 走 `d[1]=v` **写到列表尾部之外**（下标写不增 size）。下降段从不清
+    // savedLocals 故从未暴露；首次返回 pop() 读 d[sp] 越界 → 帧对象丢失，
+    // 恢复出的 locals 全部读零（实测 fib(2) 的 n=2 → 0/-2，递归返回值
+    // 家族根因）。改 size 驱动的 add/removeAt 纯净模式（Collections 已证
+    // 路径），sp/cap 字段删除。
+    private var d: List<VmLocals> = arrayListOf<VmLocals>()
+
+    fun push(v: VmLocals): Unit {
+        this.d.add(v)
+    }
+
+    fun pop(): VmLocals {
+        val n: Int = this.d.size()
+        if (n <= 0) {
+            return VmLocals()
+        }
+        val v: VmLocals = this.d[n - 1]
+        this.d.removeAt(n - 1)
+        return v
+    }
+
+    fun size(): Int {
+        return this.d.size()
+    }
+
+    fun clear(): Unit {
+        this.d = arrayListOf<VmLocals>()
+    }
+}
+
+
+/// VM 局部变量槽表（方案 D-2，2026-10-03）：平铺数组 + 代际标记。
+///
+/// 取代 `HashMap<Int, Any>`：槽号是小整数（0..N 连续），哈希表每次
+/// get/put 的哈希+桶链开销在热路径上占每条访存指令 ~100ns。代际标记
+/// 解决「帧切换后旧槽值残留」：reset() 只把 gen+1（零分配），put 写入
+/// 当前代标记，get 仅当槽位标记 == 当前代才返回值（否则视为未初始化
+/// → null，与空表语义一致）。
+class VmLocals {
+
+    // P392: Memory raw buffers (read64/write64 = single runtime mov) --
+    // LOAD_LOCAL/STORE_LOCAL are the hottest instruction pair; the old
+    // List<Any>/List<Int> accesses were Collections runtime calls.
+    // Any slots stored/loaded as raw 64-bit representations (pointers and
+    // tagged ints lossless); unwritten slots read 0 = null;
+    // marks zero-init = 0 != gen.
+    private var mcSlots: Long = 0
+    private var mcMarks: Long = 0
+    private var filled: Int = 0
+    private var cap: Int = 0
+    private var gen: Int = 1
+
+    fun getSlot(k: Int): Any {
+        if (k >= 0 && k < this.filled) {
+            if ((Memory.read64(this.mcMarks + k * 8) as Int) == this.gen) {
+                return Memory.read64(this.mcSlots + k * 8) as Any
+            }
+        }
+        return null
+    }
+
+    fun putSlot(k: Int, v: Any): Unit {
+        if (k >= this.filled) {
+            if (k >= this.cap) {
+                val newCap: Int = k * 2 + 64
+                val ns: Long = Memory.alloc(newCap * 8)
+                val nm: Long = Memory.alloc(newCap * 8)
+                var j: Int = 0
+                while (j < this.filled) {
+                    Memory.write64(ns + j * 8, Memory.read64(this.mcSlots + j * 8))
+                    Memory.write64(nm + j * 8, Memory.read64(this.mcMarks + j * 8))
+                    j = j + 1
+                }
+                this.mcSlots = ns
+                this.mcMarks = nm
+                this.cap = newCap
+            }
+            this.filled = k + 1
+        }
+        Memory.write64(this.mcSlots + k * 8, v as Long)
+        Memory.write64(this.mcMarks + k * 8, this.gen)
+    }
+
+    fun getSize(): Int {
+        return this.filled
+    }
+
+    fun reset(): Unit {
+        this.gen = this.gen + 1
+    }
+}
+
+class VmCallStack {
+
+    // P392: the three Int parallel columns Memory-ized (CALL/RET fixed
+    // 4 List calls became 4 movs); funcs kept as String List (low
+    // frequency -- currentFunc restore diagnostics).
+    private var mcIps: Long = 0
+    private var mcFrames: Long = 0
+    private var mcClosures: Long = 0
+    private var funcs: List<String> = arrayListOf<String>()
     private var sp: Int = 0
     private var cap: Int = 0
 
-    fun push(v: HashMap<Int, Any>): Unit {
+    fun push(ip: Int, frame: Int, func: String, closure: Int): Unit {
         if (this.sp < this.cap) {
-            this.d[this.sp] = v
+            Memory.write64(this.mcIps + this.sp * 8, ip)
+            Memory.write64(this.mcFrames + this.sp * 8, frame)
+            // [R20] cap 与 funcs.size() 脱节的越界下标写（同 VmFrameStack
+            // 病）——funcs 当前无读取点（诊断预留），写法改 size 安全。
+            if (this.sp < this.funcs.size()) {
+                this.funcs[this.sp] = func
+            } else {
+                this.funcs.add(func)
+            }
+            Memory.write64(this.mcClosures + this.sp * 8, closure)
         } else {
-            this.d.add(v)
-            this.cap = this.cap + 1
+            val newCap: Int = this.cap * 2 + 64
+            val ni: Long = Memory.alloc(newCap * 8)
+            val nf: Long = Memory.alloc(newCap * 8)
+            val nc: Long = Memory.alloc(newCap * 8)
+            var j: Int = 0
+            while (j < this.sp) {
+                Memory.write64(ni + j * 8, Memory.read64(this.mcIps + j * 8))
+                Memory.write64(nf + j * 8, Memory.read64(this.mcFrames + j * 8))
+                Memory.write64(nc + j * 8, Memory.read64(this.mcClosures + j * 8))
+                j = j + 1
+            }
+            this.mcIps = ni
+            this.mcFrames = nf
+            this.mcClosures = nc
+            this.funcs.add(func)
+            this.cap = newCap
+            Memory.write64(this.mcIps + this.sp * 8, ip)
+            Memory.write64(this.mcFrames + this.sp * 8, frame)
+            Memory.write64(this.mcClosures + this.sp * 8, closure)
         }
         this.sp = this.sp + 1
     }
 
-    fun pop(): HashMap<Int, Any> {
-        if (this.sp <= 0) {
-            return HashMap<Int, Any>()
+    fun pop(): Unit {
+        if (this.sp > 0) {
+            this.sp = this.sp - 1
         }
-        this.sp = this.sp - 1
-        return this.d[this.sp]
+    }
+
+    fun peekIp(): Int {
+        if (this.sp <= 0) {
+            return 0
+        }
+        return Memory.read64(this.mcIps + (this.sp - 1) * 8) as Int
+    }
+
+    fun peekClosure(): Int {
+        if (this.sp <= 0) {
+            return -1
+        }
+        return Memory.read64(this.mcClosures + (this.sp - 1) * 8) as Int
     }
 
     fun size(): Int {
-        return this.sp
+        // [R19] P366 可靠模式：字段读先入局部——旧体 `return this.sp` 的
+        // photon 产码在 VmStack 上实测恒返回 0（[X] 探针 sp 列全程 0），
+        // collectArgs 的 `base = size() - argc` 因此变负下标。四个栈类同款
+        // body 一并改写。
+        val s0: Int = this.sp
+        return s0
     }
 
-    fun clear(): Unit {
-        this.d = arrayListOf<HashMap<Int, Any>>()
+    /// [R19] 唯一名通道（同 VmStack.stackDepth 的撞名规避）。
+    fun callDepth(): Int {
+        val s0: Int = this.sp
+        return s0
+    }
+
+    fun reset(): Unit {
         this.sp = 0
-        this.cap = 0
     }
 }

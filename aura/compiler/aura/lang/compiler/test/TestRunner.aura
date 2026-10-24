@@ -1,5 +1,9 @@
 // aura:///aura/lang/compiler/test/TestRunner.aura
 package aura.lang.compiler.test
+
+// [R26] bare toStr = P347 掷骰族（collectArgs 同案：同一次调用得错值）——
+// 断言比较统一走 VmOps.toStrAny（已证可靠路径）。
+import aura.lang.compiler.vm.VmOps
 // ─────────────────────────────────────────────────────────────
 // Aura 测试框架（纯 Aura 化迁移 · Phase 0）
 //
@@ -79,16 +83,16 @@ class TestRunner {
 
     /// 断言两个值相等（按字符串表示比较）。
     fun assertEq(a: Any, b: Any, message: String) {
-        if (toStr(a) == toStr(b)) {
+        if (VmOps.toStrAny(a) == VmOps.toStrAny(b)) {
             pass(message)
         } else {
-            fail(message + ": got " + toStr(a) + ", expected " + toStr(b))
+            fail(message + ": got " + VmOps.toStrAny(a) + ", expected " + VmOps.toStrAny(b))
         }
     }
 
     /// 断言两个值不相等。
     fun assertNotEq(a: Any, b: Any, message: String) {
-        if (toStr(a) != toStr(b)) {
+        if (VmOps.toStrAny(a) != VmOps.toStrAny(b)) {
             pass(message)
         } else {
             fail(message + " (values are equal)")
@@ -100,9 +104,9 @@ class TestRunner {
     /// 断言值不为 null。
     ///
     /// 说明：VM 内置 `isNull` 对 null 判定存在已知缺陷（恒返回 false），
-    /// 因此改用规范化的字符串表示比较（`toStr(null) == "null"`）。
+    /// 因此改用规范化的字符串表示比较（`VmOps.toStrAny(null) == "null"`）。
     fun assertNotNull(value: Any, message: String) {
-        if (toStr(value) != "null") {
+        if (VmOps.toStrAny(value) != "null") {
             pass(message)
         } else {
             fail(message + " (got null)")
@@ -111,7 +115,7 @@ class TestRunner {
 
     /// 断言值为 null。
     fun assertNull(value: Any, message: String) {
-        if (toStr(value) == "null") {
+        if (VmOps.toStrAny(value) == "null") {
             pass(message)
         } else {
             fail(message + " (expected null)")
@@ -125,7 +129,7 @@ class TestRunner {
         if (a > b) {
             pass(message)
         } else {
-            fail(message + ": expected " + toStr(a) + " > " + toStr(b))
+            fail(message + ": expected " + VmOps.toStrAny(a) + " > " + VmOps.toStrAny(b))
         }
     }
 
@@ -134,7 +138,7 @@ class TestRunner {
         if (a >= b) {
             pass(message)
         } else {
-            fail(message + ": expected " + toStr(a) + " >= " + toStr(b))
+            fail(message + ": expected " + VmOps.toStrAny(a) + " >= " + VmOps.toStrAny(b))
         }
     }
 
@@ -143,8 +147,8 @@ class TestRunner {
     /// 打印汇总并返回失败数（0 表示全部通过）。
     fun report(): Int {
         println("")
-        println("[" + suite + "] " + toStr(passed) + " passed, " + toStr(failed) + " failed, "
-            + toStr(passed + failed) + " assertions")
+        println("[" + suite + "] " + VmOps.toStrAny(passed) + " passed, " + VmOps.toStrAny(failed) + " failed, "
+            + VmOps.toStrAny(passed + failed) + " assertions")
         return failed
     }
 

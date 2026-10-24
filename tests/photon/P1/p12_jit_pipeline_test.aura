@@ -1,0 +1,190 @@
+// tests/photon/P1/p12_jit_pipeline_test.aura
+// ═══════════════════════════════════════════════════════════════
+// P1-2 集成测试：Photon 管线 → 重定位 → W^X 装载（VM 安全）
+//
+// 这是 P1-2 的验收测试——修复前的断言全部失败：
+//
+//   修复前（compileEncodeOnly 不收集重定位）：
+//     enc.relocRecords        == ""        ← 永远空串
+//     enc.relocationCount     == 0         ← 永远 0
+//     backend.lastRelocResult.applied == 0
+//   ⇒ emitFunction 把 4 字节 `00 00 00 00` 占位符原样写进可执行内存，
+//     所有 `call`/`lea [rip+]` 一律落到下一条指令 ⇒ 任何含跨函数调用的
+//     JIT 码在原生运行时必然崩溃（fb01f22「jit 模式无法执行」的真根因）。
+//
+//   修复后：
+//     enc.relocRecords        == "104|double|R_X86_64_REL32;126|exit|R_X86_64_REL32"
+//     enc.funcNameOffsets     == "double|0;main|60"
+//     backend.lastRelocResult.applied == 1（`double` 回填，`exit` 为外部
+//                                       符号被计为 skipped——AOT 由链接器解析）
+//
+// 覆盖：
+//   1. compileEncodeOnly 的 P1-2 新字段（relocRecords / funcNameOffsets /
+//      funcOffsets / stringConsts / relocationCount）
+//   2. relocationCount 与 parseRelocs 计数一致
+//   3. emitFunctionRelocated 的多段共享内存 + 重定位回填
+//   4. 跨函数调用重定位真的能被解析（函数 A 调函数 B）
+//   5. 旧签名 emitFunction 保持兼容（不回填、不崩）
+//   6. compileMachineCodeResult 的完整结果契约
+//   7. getJitCodeLayout 附带重定位统计
+//
+// VM 安全：JitBackend 默认 `vmMode=true`，全程不触碰 `Memory` / `JitExec`。
+//
+// 运行：aura run tests/photon/P1/p12_jit_pipeline_test.aura
+// ═══════════════════════════════════════════════════════════════
+
+package tests.photon.P1
+
+import aura.lang.std.String
+import aura.lang.std.Process
+
+// ── 前端（显式导入完整依赖闭包：VM 的按需注册要求符号可见）──
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.lexer.Token
+import aura.lang.compiler.lexer.Lexer
+import aura.lang.compiler.ast.Ast
+import aura.lang.compiler.errors.CompileError
+import aura.lang.compiler.parser.Parser
+import aura.lang.compiler.hir.Hir
+
+// ── 中端 ──
+import aura.lang.compiler.mir.TypeRegistry
+import aura.lang.compiler.mir.SsaMir
+import aura.lang.compiler.mir.SsaBuilder
+import aura.lang.compiler.mir.Linearizer
+
+// ── Photon 后端 ──
+import aura.lang.compiler.photon.Lir
+import aura.lang.compiler.photon.Lowering
+import aura.lang.compiler.photon.MachineDag
+import aura.lang.compiler.photon/InstructionSelection
+import aura.lang.compiler.photon.RegisterAllocator
+import aura.lang.compiler.photon.PeepholeOptimizer
+import aura.lang.compiler.photon.X86Emitter
+import aura.lang.compiler.photon.x86_64.X86Encoder
+import aura.lang.compiler.photon.PhotonPipeline
+import aura.lang.compiler.photon.JitBackend
+import aura.lang.compiler.photon.JitRelocation
+
+var gPass: Int = 0
+var gFail: Int = 0
+
+fun check(name: String, ok: Boolean, detail: String): Unit {
+    if (ok) {
+        gPass = gPass + 1
+        println("[PASS] " + name + "  " + detail)
+    } else {
+        gFail = gFail + 1
+        println("[FAIL] " + name + "  " + detail)
+    }
+}
+
+fun buildHir(source: String): Hir {
+    val p = Parser(source)
+    p.parseProgram()
+    val hl = HirLowerer()
+    hl.lower(p.ast)
+    return hl.hir
+}
+
+fun main() {
+    println("=== P1-2 集成测试：Photon 管线 -> 重定位 -> 装载 ===")
+
+    // ── 0. 单函数源码 ──
+    val hir1 = buildHir("fun main(): Int { return 42 }")
+    check("单函数 HIR 构建", hir1.count > 0, "count=" + toStr(hir1.count))
+
+    // ── 1. compileEncodeOnly 的 P1-2 新字段 ──
+    val pipe = PhotonPipeline()
+    val r1 = pipe.compileEncodeOnly(hir1, "build/photon", "p12_single")
+    check("compileEncodeOnly success", r1.success, "ok")
+    check("机器码已产出", r1.machineCodeHex != "",
+            "bytes=" + toStr(r1.encodedByteCount))
+    check("relocRecords 非空", r1.relocRecords != "", r1.relocRecords)
+    check("funcNameOffsets 非空", r1.funcNameOffsets != "", r1.funcNameOffsets)
+    check("funcOffsets 非空", r1.funcOffsets != "", r1.funcOffsets)
+    check("relocationCount 与 parseRelocs 一致",
+            r1.relocationCount == JitRelocationUtils.countRelocs(r1.relocRecords),
+            "count=" + toStr(r1.relocationCount))
+    check("relocationCount > 0", r1.relocationCount > 0,
+            "count=" + toStr(r1.relocationCount))
+    check("编译期字符串常量字段存在", r1.stringConsts == "", "ok")
+
+    // ── 2. emitFunctionRelocated：单段 + 回填统计 ──
+    val be = JitBackend()
+    check("默认 VM 安全模式", be.isVmMode(), "vmMode")
+
+    val entry1 = be.emitFunctionRelocated("main", r1.machineCodeHex,
+            r1.relocRecords, r1.funcNameOffsets, 0)
+    check("emitFunctionRelocated 返回非零入口", entry1 != 0,
+            "entry=" + toStr(entry1))
+    check("functionCount=1", be.functionCount() == 1,
+            "n=" + toStr(be.functionCount()))
+    check("重定位统计已记录", be.lastRelocResult().total == r1.relocationCount,
+            JitRelocationUtils.formatApplyResult(be.lastRelocResult()))
+
+    // ── 3. 第二段共享同一块内存，偏移独立换算 ──
+    val entry2 = be.emitFunctionRelocated("other", r1.machineCodeHex,
+            r1.relocRecords, r1.funcNameOffsets, 0)
+    check("第二段入口在段后", entry2 > entry1,
+            "entry1=" + toStr(entry1) + " entry2=" + toStr(entry2))
+    check("functionCount=2", be.functionCount() == 2, "ok")
+    check("第二段重定位仍按段内偏移解析",
+            be.lastRelocResult().total == r1.relocationCount,
+            JitRelocationUtils.formatApplyResult(be.lastRelocResult()))
+
+    // ── 4. 多函数源码：跨函数调用重定位 ──
+    val src2 = """fun double(a: Int): Int { return a + a }
+fun main(): Int { return double(21) }"""
+    val hir2 = buildHir(src2)
+    val r2 = pipe.compileEncodeOnly(hir2, "build/photon", "p12_multi")
+    check("多函数编译成功", r2.success, "ok")
+    check("多函数机器码 > 单函数", r2.encodedByteCount > r1.encodedByteCount,
+            "bytes=" + toStr(r2.encodedByteCount))
+    check("多函数 funcNameOffsets 含两个函数",
+            r2.funcNameOffsets != "" && r2.funcNameOffsets.indexOf("double") >= 0,
+            r2.funcNameOffsets)
+    check("多函数重定位引用被调函数",
+            r2.relocRecords.indexOf("double") >= 0, r2.relocRecords)
+
+    val be2 = JitBackend()
+    val entryM = be2.emitFunctionRelocated("main", r2.machineCodeHex,
+            r2.relocRecords, r2.funcNameOffsets, 0)
+    check("多函数装载返回入口", entryM != 0, "entry=" + toStr(entryM))
+    check("跨函数调用重定位被回填", be2.lastRelocResult().applied > 0,
+            JitRelocationUtils.formatApplyResult(be2.lastRelocResult()))
+
+    // ── 5. 旧签名 emitFunction 兼容性（不回填、不崩）──
+    val be3 = JitBackend()
+    val legacy = be3.emitFunction("main", r1.machineCodeHex)
+    check("旧 emitFunction 仍可用", legacy != 0, "entry=" + toStr(legacy))
+    check("旧 emitFunction 不产生重定位统计",
+            be3.lastRelocResult().total == 0,
+            JitRelocationUtils.formatApplyResult(be3.lastRelocResult()))
+
+    // ── 6. compileMachineCodeResult ──
+    val be4 = JitBackend()
+    val full = be4.compileMachineCodeResult(hir1, "build/photon", "p12_full")
+    check("compileMachineCodeResult 产出机器码", full.machineCodeHex != "",
+            "bytes=" + toStr(full.encodedByteCount))
+    check("compileMachineCodeResult 带重定位", full.relocRecords != "",
+            "n=" + toStr(full.relocationCount))
+    check("compileMachineCode 与 Result 版机器码一致",
+            be4.compileMachineCode(hir1, "build/photon", "p12_full") != "",
+            "ok")
+
+    // ── 7. 布局信息附带重定位统计 ──
+    val layout = be2.getJitCodeLayout()
+    check("布局含 reloc 统计", layout.indexOf("applied") >= 0, layout)
+    check("布局含 mode=vm", layout.indexOf("mode=vm") >= 0, "ok")
+
+    // ── 8. VM 模式守卫：不触碰 Memory / JitExec ──
+    check("executeNative 在 VM 模式下为空操作",
+            be2.executeNative(entryM, 0) == 0, "ok")
+    check("executeNative0 在 VM 模式下为空操作",
+            be2.executeNative0(entryM) == 0, "ok")
+
+    println("")
+    println("RESULT pass=" + toStr(gPass) + " fail=" + toStr(gFail))
+    Process.exit(gFail)
+}

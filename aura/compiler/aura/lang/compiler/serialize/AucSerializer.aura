@@ -142,7 +142,8 @@ object AucWriter {
     fun writeStr(s: String) {
         writeU16(s.length)
         var i: Int = 0
-        while (i < s.length) {
+        val sLen: Int = s.length
+        while (i < sLen) {
             writeByte(s.charCodeAt(i) as Byte)
             i = i + 1
         }
@@ -176,7 +177,8 @@ object AucWriter {
             i = 1
         }
         var total: Long = 0L
-        while (i < text.length) {
+        val textLen: Int = text.length
+        while (i < textLen) {
             val d: Int = text.charCodeAt(i) - 48
             if (d >= 0 && d <= 9) {
                 total = total * 10L + (d as Long)
@@ -199,11 +201,21 @@ object AucWriter {
         if (tag == AucConstants.CONST_INT) {
             writeU64(this.decToLong(value))
         } else if (tag == AucConstants.CONST_FLOAT) {
-            writeF64(value.toFloat())
+            // [R22] float 常量统一写文本（与 CONST_STR 同形：u32 长度 + 字节）
+            // ——读端 AucLoader tag==1 已改 readStrN（字符串已证路径），写位
+            // 模式将不兼容新格式。
+            writeU32(value.length)
+            var i: Int = 0
+            val valueLen: Int = value.length
+            while (i < valueLen) {
+                writeByte(value.charCodeAt(i) as Byte)
+                i = i + 1
+            }
         } else if (tag == AucConstants.CONST_STR) {
             writeU32(value.length)
             var i: Int = 0
-            while (i < value.length) {
+            val valueLen2: Int = value.length
+            while (i < valueLen2) {
                 writeByte(value.charCodeAt(i) as Byte)
                 i = i + 1
             }
@@ -233,14 +245,20 @@ object AucWriter {
 
     /// 字符串转缓冲区。
     private fun stringToBuffer(s: String): Long {
+        println("[L6a] enter")
+        println("[L6b] pre-len")
         val len: Long = s.length + 1
+        println("[L6c] len ok")
         val buf: Long = Allocator.malloc(len)
+        println("[L6d] malloc ok")
         if (buf == 0) { return 0 }
         var i: Int = 0
-        while (i < s.length) {
+        val sLen2: Int = s.length
+        while (i < sLen2) {
             Memory.write(buf + i, s.charCodeAt(i))
             i = i + 1
         }
+        println("[L6e] loop done")
         Memory.write(buf + s.length, 0)
         return buf
     }
@@ -272,42 +290,40 @@ class AucReader {
         val pathBuf: Long = stringToBuffer(path)
         if (pathBuf == 0) { return 0 }
 
-        val fd: Int = FileOps.open(pathBuf, 0x8000)  // O_RDONLY | 二进制位（见 winCrtWrapper）
+        // P2.2 修复：打开标志用 O_RDONLY(0)。原 `0x8000`（_O_BINARY）在 Windows
+        // 宿主 CRT 下 read 读出垃圾/0 字节（实测 bad magic）；二进制语义由
+        // 平台默认（Linux open 无文本模式差异）与宿主映射保证。
+        val fd: Int = FileOps.open(pathBuf, 0)
         Allocator.free(pathBuf)
         if (fd < 0) { return 0 }
 
-        val chunk: Long = 65536
-        var buf: Long = Allocator.malloc(chunk)
-        if (buf == 0) {
+        // 一次性读取（2026-10-06）：lseek 尾探定大小 → 分配 → **单次** read。
+        // 旧的「按块 read + 按需扩容」双循环让 buf/cap/total 三个循环携带变量
+        // 组成 phi 环（loop_phi ↔ if-merge_phi），photon 后端对这条链的入口
+        // MOV 仍会错位（实测 runner 里 cap=0/buf=垃圾 ⇒ read(count=0) 恒空、
+        // 装载即败）。.auc 是本地定长文件，尾探 + 一次读全即可，phi 环消失。
+        val size: Long = FileOps.lseek(fd, 0, 2)
+        if (size <= 0) {
             FileOps.close(fd)
             return 0
         }
-        var cap: Long = chunk
-        var total: Long = 0
-        while (true) {
-            if (total >= cap) {
-                val ncap: Long = cap * 2
-                val nbuf: Long = Allocator.malloc(ncap)
-                if (nbuf == 0) { break }
-                var k: Long = 0
-                while (k < total) {
-                    Memory.write(nbuf + k, Memory.read(buf + k))
-                    k = k + 1
-                }
-                Allocator.free(buf)
-                buf = nbuf
-                cap = ncap
-            }
-            val n: Long = FileOps.read(fd, buf + total, cap - total)
-            if (n <= 0) { break }
-            total = total + n
-        }
-        FileOps.close(fd)
-        if (total <= 0) {
-            Allocator.free(buf)
+        FileOps.lseek(fd, 0, 0)
+        // ⚠️ P310 关键修复：.auc 文件缓冲区改用 Memory.mmap（独立映射），
+        // 不走 Allocator.malloc（heapArena bump）。旧路径下 26KB 文件缓冲
+        // 与 AucReader 对象在 arena 内地址冲突（路径字符串覆写 reader 的
+        // data/dataLen/pos → decode 读路径字符 "buil//cur.eua" 而非 .auc
+        // 字节 → 99% opcode 不识别 → flat 截断 → Unknown function: p）。
+        val buf: Long = Memory.mmap(0, size, 3, 3, -1)
+        if (buf == 0 || buf == -1) {
+            FileOps.close(fd)
             return 0
         }
-        dataLen = total
+        val n: Long = FileOps.read(fd, buf, size)
+        FileOps.close(fd)
+        if (n <= 0) {
+            return 0
+        }
+        dataLen = n
         return buf
     }
 
@@ -373,6 +389,20 @@ class AucReader {
         return (lo as Long) | (((hi as Long) << 16))
     }
 
+    /// 读取 u32 并**直接以 Int 返回**（纯 Int 算术组合，无 Long→Int 转换）。
+    ///
+    /// ⚠️ P253：`codeLenL as Int` 在 photon AOT 下产出垃圾（实测 helloworld
+    /// 的 codeLens 全变 1-3 ⇒ 每函数只解 1 条指令；§10.54）。与 `.toInt()`
+    /// 不可靠同族——**Long↔Int 截断转换在自举 AOT 下均不可信**，凡可能
+    /// 被 Int 消费的读取一律用本函数。
+    fun readU32Int(): Int {
+        val lo: Int = readU16()
+        if (lo < 0) { return -1 }
+        val hi: Int = readU16()
+        if (hi < 0) { return -1 }
+        return lo + hi * 65536
+    }
+
     /// 读取 8 字节（小端）。
     fun readU64(): Long {
         val lo: Long = readU32()
@@ -385,16 +415,28 @@ class AucReader {
     /// 读取字符串（带长度前缀）。
     fun readStr(): String {
         val len: Int = readU16()
-        if (len < 0) { return "" }
-        var result: String = ""
-        var i: Int = 0
-        while (i < len) {
-            val c: Int = readByte()
-            if (c < 0) { break }
-            result = result + String.fromCharCode(c)
-            i = i + 1
-        }
-        return result
+        if (len <= 0) { return "" }
+        // P236：逐字符 while 循环的 result 是**跨迭代 String phi**——phi 缺陷
+        // 下 strcat 读到残值（§10.39）。改为**递归传参**：每帧的拼接结果是
+        // 单赋值局部，值经实参传递（实参不经过 merge phi），只用已验证
+        // 原语（fromCharCode/strcat）。深度 = 串长（名称类 ≤ 数百，1GB 栈）。
+        return readStrFrom("", len)
+    }
+
+    /// readStr 的递归体：已拼 result + 剩余 remaining 个字符。
+    private fun readStrFrom(result: String, remaining: Int): String {
+        if (remaining <= 0) { return result }
+        val c: Int = readByte()
+        if (c < 0) { return result }
+        return readStrFrom(result + String.fromCharCode(c), remaining - 1)
+    }
+
+    /// P356：读定长字符串（u32 长度前缀由调用方消费）。复用已验证的
+    /// readStrFrom 递归（readConstValue 的逐字节 while 在 photon 下
+    /// `i = i + 1` 不推进 → 常量读到 EOF，条目=池后缀）。
+    fun readStrN(len: Int): String {
+        if (len <= 0) { return "" }
+        return readStrFrom("", len)
     }
 
     /// 跳过字节。
@@ -408,7 +450,8 @@ class AucReader {
         val buf: Long = Allocator.malloc(len)
         if (buf == 0) { return 0 }
         var i: Int = 0
-        while (i < s.length) {
+        val sLen3: Int = s.length
+        while (i < sLen3) {
             Memory.write(buf + i, s.charCodeAt(i))
             i = i + 1
         }

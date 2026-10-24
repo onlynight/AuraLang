@@ -96,17 +96,17 @@ class LlvmEmitter {
     /// `super.m()` 需要解析到父类实现；`Child.m` 未定义时也要沿父链回退
     /// （继承方法）。此前继承关系在解析阶段即被丢弃，`super.name()` 会解析回
     /// 自身 → 无限递归 → 栈溢出（0xC00000FD）。
-    var fParents: String = ""
+    var fParents: EmitBuffer = EmitBuffer()
 
     /// 类名 → 类型声明 HIR 节点 id（`name|id` 每行一项）。
     /// 继承布局需要**先登记父类**（递归），此处用于反查父类节点。
-    var fClassNodes: String = ""
+    var fClassNodes: EmitBuffer = EmitBuffer()
 
     /// 方法名 → vtable 槽位（`name|slot` 每行一项，全局统一编号）。
-    var fMethodSlots: String = ""
+    var fMethodSlots: EmitBuffer = EmitBuffer()
 
     /// 类 → 该类提供的方法（`Class|method` 每行一项，供生成 vtable 项）。
-    var fClassMethods: String = ""
+    var fClassMethods: EmitBuffer = EmitBuffer()
 
     /// 动态派发被**静默降级**的清单（`Class|method|祖先` 每行一项）。
     ///
@@ -114,13 +114,13 @@ class LlvmEmitter {
     /// 调用点退回静态绑定。语义是安全的，但此前**没有任何提示**：排障时只看到
     /// 「动态派发没生效」，无从得知是签名不一致导致的。此处记录并在模块头部以
     /// IR 注释 + 一行 stderr 提示暴露（见 `vtableNotesHeader`）。
-    var fVtableNotes: String = ""
+    var fVtableNotes: EmitBuffer = EmitBuffer()
 
     /// `fVtableNotes` 的条数（避免依赖 `split(...).size` 的可靠性）。
     var fVtableNoteCount: Int = 0
 
     /// 方法定义表（`OwnerSym|method|节点id` 每行一项，供继承方法特化）。
-    var fMethodNodes: String = ""
+    var fMethodNodes: EmitBuffer = EmitBuffer()
 
     /// 非空时 `emitFunction` 用它替代方法所属类（继承方法特化用）。
     var fForceOwnerCls: String = ""
@@ -129,7 +129,7 @@ class LlvmEmitter {
     ///
     /// **必须与函数体发射分离**：签名表要在任何函数体发射**之前**登记完毕，
     /// 否则调用点（发射函数体时解析）解析不到 `Child.m`，仍会静态绑到父类符号。
-    var fInheritPlans: String = ""
+    var fInheritPlans: EmitBuffer = EmitBuffer()
 
     // ── 当前函数状态 ──
 
@@ -174,7 +174,7 @@ class LlvmEmitter {
     /// Phase B 修复：`object Math { fun sin(x: Float): Float }` 中的 `sin` 是静态方法，
     /// 不应有 `%struct.Math*` receiver 参数。此前 functionSignature 对所有 owner 方法
     /// 都加 receiver，导致 `Math.sin(1.0f)` 生成 `call void @sin(i32 %Math, ...)` 非法 IR。
-    var fObjectClassNames: String = ""
+    var fObjectClassNames: EmitBuffer = EmitBuffer()
 
     /// `inferType` 记忆化缓存（按 HIR 节点 id 索引）。
     ///
@@ -213,7 +213,7 @@ class LlvmEmitter {
     ///
     /// 调用点据此把 `f(args)` 发射为间接调用 `call <ret> %fn(env, args)`。
     /// 每函数重置（`emitFunction` 里清空）。
-    var fClosureSigs: String = ""
+    var fClosureSigs: EmitBuffer = EmitBuffer()
 
     /// `fSigList` 的并行「Aura 返回类型」列（`Int` / `String` / `(Int) -> Int`）。
     ///
@@ -229,16 +229,22 @@ class LlvmEmitter {
     /// `@<name> = global i8* null` + 惰性初始化函数 `@<name>__init()`
     /// （首次访问时构造闭包 env 并写入全局，之后直接返回）。
     /// 与 `fClosureSigs` 不同：本表跨函数有效（模块级）。
-    var fGlobalClosures: String = ""
+    var fGlobalClosures: EmitBuffer = EmitBuffer()
 
     /// 全局闭包惰性初始化 IR 片段（模块末尾统一输出）。
     var globalParts: EmitBuffer = EmitBuffer()
+
+    /// 顶层 `val`/`var` 普通变量名表（每行 `name|`）。
+    ///
+    /// 与 `fGlobalClosures`（闭包变量）平行的普通全局表：顶层非闭包变量
+    /// 发射为 `@<name> = global i64 <init>`，供函数体内的裸名读写。
+    var fGlobalNames: EmitBuffer = EmitBuffer()
 
     /// 当前 lambda 捕获的外层变量表（每行 `name|llvmTy`）。
     ///
     /// 闭包环境布局：`[0] = 函数指针`，`[1..]` = 按捕获顺序存放的值副本。
     /// 进入 lambda 时登记，发射 body 内引用时按槽位从 env 读取。
-    var fCapturedVars: String = ""
+    var fCapturedVars: EmitBuffer = EmitBuffer()
 
     /// `enterLambdaCtx` 的字段备份（lambda 嵌套超过一层时用于还原）。
     var svCapturedVars: String = ""
@@ -254,7 +260,7 @@ class LlvmEmitter {
     var fPreTable: String = ""
 
     /// 类型别名表（`Alias|Target`，每行一项；供 `typealias` 解析）。
-    var fTypeAliases: String = ""
+    var fTypeAliases: EmitBuffer = EmitBuffer()
 
     /// `extern object` 内 **带函数体** 的方法 id 集合（每行 `\n<id>\n`）。
     ///
@@ -262,7 +268,7 @@ class LlvmEmitter {
     /// 其 `fun` 体不应发射为 `define`——否则既与运行时已经 `declare` 的同名
     /// libc 符号（如 `malloc` / `free`）冲突（llc: invalid redefinition），
     /// 也与 Rust 侧后端行为不一致（Rust 侧只发射 declare、调用直接落 C 符号）。
-    var fExternFnIds: String = ""
+    var fExternFnIds: EmitBuffer = EmitBuffer()
 
     /// `extern object` 对象名清单（换行分隔，已 sanitize）。
     ///
@@ -271,7 +277,7 @@ class LlvmEmitter {
     /// 否则对象名会被当作表达式求值成 `0` 占住第 1 个实参位，实参整体后移一格
     ///（`_open(path, flags)` 收到 `(0, path, flags)` → CRT 无效参数 fail-fast
     /// 0xC0000409）。
-    var fExternObjNames: String = ""
+    var fExternObjNames: EmitBuffer = EmitBuffer()
 
     /// 本模块**已有 `define`** 的函数符号名（换行分隔）。
     ///
@@ -279,26 +285,26 @@ class LlvmEmitter {
     /// `define` 又有 `declare` 时 llc 报
     /// `invalid redefinition of function 'toString'`（编译器自身源码里定义了
     /// `toString(x: Any)`，而 `preludeTable` 又声明了 C 符号 `toString`）。
-    var fDefNames: String = ""
+    var fDefNames: EmitBuffer = EmitBuffer()
 
     /// 已发射的 @native 包装器符号（每行 `\n<sym>\n`）。
     ///
     /// HIR 里可能出现同名（内容不完整、也从不被调用）的 `HirNativeFunction`
     /// 节点（如 extern object 容器名 `Memory` / `Syscalls`），重复 `define`
     /// 会被 llc 拒绝（invalid redefinition of function）。首个定义胜出。
-    var fNativeSyms: String = ""
+    var fNativeSyms: EmitBuffer = EmitBuffer()
 
     /// 已发射的函数符号（换行分隔）。
     ///
     /// HIR 里可能出现同名 `HirFunction` 节点（如泛型类字段触发额外节点生成），
     /// 重复 `define` 会被 llc 拒绝（invalid redefinition of function）。首个定义胜出。
-    var fEmittedFnSyms: String = ""
+    var fEmittedFnSyms: EmitBuffer = EmitBuffer()
 
     /// 已发射的函数名（换行分隔）。
     ///
     /// HIR 里可能出现同名 `HirFunction` 节点（如泛型类字段触发额外节点生成），
     /// 重复 `define` 会被 llc 拒绝（invalid redefinition of function）。首个定义胜出。
-    var fEmittedFnNames: String = ""
+    var fEmittedFnNames: EmitBuffer = EmitBuffer()
 
     /// 用户结构体字段表（每项 `Sym|field|llvmTy|initLLVM|initExprId`）。
     var structLines: List<String> = arrayListOf<String>()
@@ -310,14 +316,14 @@ class LlvmEmitter {
     /// 无法区分二者 —— 前者应走 `HashMap_*` 类方法，后者应走 `Collections_*`。
     /// 一刀切改派会让自举编译器编译自身时崩溃（它大量使用 `mapOf`）。
     /// 因此在**声明处**按初始化器是否为类构造登记，使用处据此精确分流。
-    var fClsVars: String = ""
+    var fClsVars: EmitBuffer = EmitBuffer()
 
     /// 集合（List/Array/Set/Map）局部变量名（换行分隔）。
     ///
     /// 发射器内部把 String 与集合统一表示为 `i8*`，`.size` / `.add` / `for-in`
     /// 必须区分二者：String 用 `aura_strlen`，集合用 `aura_lang_std_Collections_*`。
     /// 声明处（`val lst = arrayListOf<...>()` 等）登记，使用处按名查询。
-    var fListVars: String = ""
+    var fListVars: EmitBuffer = EmitBuffer()
 
     /// 当前函数 LLVM 返回类型。
     var fRetTy: String = "void"
@@ -332,6 +338,23 @@ class LlvmEmitter {
 
     /// 当前位置是否已终结（ret/br）。
     var fTerminated: Boolean = false
+
+    // ── [P2-B] ARC 发射状态（对齐 seed `emit.rs` 的 D4 规则表）──────────
+    //
+    // 默认**全关**：只有 `AURA_ARC=1` 才注入 retain/release，且 `arcUsed`
+    // 只用于**惰性**补运行时 `declare`（默认路径产物逐字节不变 —— 这是
+    // 双发射器长期共存的前提，见 `arc_implementation_plan.md` §六）。
+    //
+    // 语义与 seed 侧的对应关系（D4 表）：
+    //   · `x = <expr>` 覆盖：复制类右值先 retain → load 旧值 → release → store
+    //   · 逃逸闸门：`arcScan` 收集「出现在存储/逃逸位置下的变量」并整体剔除
+    //   · 仅 String（LLVM `i8*`）槽参与 —— 与 P3 已验证的那一档同构
+    var arcOn: Int = -1
+    var arcUsed: Boolean = false
+    var arcEsc: String = " "
+    var arcEscCount: Int = 0
+    var arcRetainCount: Int = 0
+    var arcReleaseCount: Int = 0
 
     init() {
         this.targetTriple = "x86_64-pc-windows-msvc"
@@ -368,15 +391,15 @@ class LlvmEmitter {
         this.fInferGenStrs = arrayListOf<String>()
         this.fGen = 0
         this.fGenStr = "-1"
-        this.fTypeAliases = ""
-        this.fExternFnIds = ""
-        this.fExternObjNames = ""
-        this.fDefNames = ""
-        this.fNativeSyms = ""
-        this.fEmittedFnSyms = ""
+        this.fTypeAliases.sbReset()
+        this.fExternFnIds.sbReset()
+        this.fExternObjNames.sbReset()
+        this.fDefNames.sbReset()
+        this.fNativeSyms.sbReset()
+        this.fEmittedFnSyms.sbReset()
         this.structLines = arrayListOf<String>()
-        this.fListVars = ""
-        this.fClsVars = ""
+        this.fListVars.sbReset()
+        this.fClsVars.sbReset()
         this.fRetTy = "void"
         this.fCurClass = ""
         this.loopEnd = ""
@@ -384,11 +407,27 @@ class LlvmEmitter {
         this.fTerminated = false
         this.lambdaCount = 0
         this.lambdaParts = EmitBuffer()
-        this.fClosureSigs = ""
-        this.fGlobalClosures = ""
-        this.globalParts = EmitBuffer()
-        this.fCapturedVars = ""
+        this.fClosureSigs.sbReset()
+        this.fGlobalClosures.sbReset()
+        this.fGlobalNames.sbReset()
+        this.globalParts.sbReset()
+        this.fCapturedVars.sbReset()
         this.svCapturedVars = ""
+    }
+
+    /// 登记顶层普通全局变量（`@<name> = global i64 <init>`）。
+    ///
+    /// 与 `emitGlobalClosure` 平行：闭包变量走 `i8*` + 惰性初始化函数，
+    /// 普通标量 / 句柄变量直接以 `i64` 承载，初始值取字面量常量，
+    /// 非字面量初始化式（如 `Mutex.new()`）以 `0` 落地——初始化语句
+    /// 本身由 `main` 内的显式赋值完成（`SHARED_COUNT_LOCK = Mutex.new()`）。
+    fun declareGlobal(name: String): Unit {
+        val sym: String = sanitizeLlvm(name)
+        if (name == "" || this.fGlobalNames.sbContains("\n" + sym + "|")) {
+            return
+        }
+        this.fGlobalNames.sbAdd("\n" + sym + "|")
+        this.globalParts.sbAdd("@" + sym + " = global i64 0\n")
     }
 
     /// 生成新 SSA 临时变量名。
@@ -414,6 +453,16 @@ class LlvmEmitter {
 
     fun emitProgramEx(hir: Hir, moduleName: String, target: String, basePath: String): String {
         this.reset()
+        // [P2-B] ARC 状态显式初始化。⚠️ 不能依赖字段声明处的初值：本类的字段
+        // 初始化并不在构造期全部生效（实测 `var arcOn: Int = -1` 落地为 0 ⇒
+        // `-1 = 未初始化` 的哨兵判据失效、整个 ARC 通道静默不生效）。
+        this.arcOn = -1
+        this.arcUsed = false
+        this.arcEsc = " "
+        this.arcEscCount = 0
+        this.arcRetainCount = 0
+        this.arcReleaseCount = 0
+        println("[ARC-P2B] enter emitProgramEx arc=" + toStr(Env.get("AURA_ARC", "?")))
         this.moduleName = moduleName
         this.targetTriple = target
         this.basePath = basePath
@@ -438,8 +487,8 @@ class LlvmEmitter {
             val k: String = hir.kindOf(i)
             if (k == "HirStruct" || k == "HirClass" || k == "HirObject" || k == "HirEnum") {
                 val nm: String = hir.textOf(i)
-                if (nm != "" && !aotContains(this.fClassNodes, "\n" + nm + "|")) {
-                    this.fClassNodes = this.fClassNodes + "\n" + nm + "|" + toStr(i)
+                if (nm != "" && !this.fClassNodes.sbContains( "\n" + nm + "|")) {
+                    this.fClassNodes.sbAdd("\n" + nm + "|" + toStr(i))
                 }
             }
             i = i + 1
@@ -461,8 +510,8 @@ class LlvmEmitter {
                 val clsName: String = hir.textOf(i)
                 // Phase B: 记录 object 类名（object 内方法是静态方法，无 receiver）
                 if (ck == "HirObject") {
-                    if (!aotListContains(this.fObjectClassNames, clsName)) {
-                        this.fObjectClassNames = this.fObjectClassNames + clsName + "\n"
+                    if (!this.fObjectClassNames.sbContains( clsName)) {
+                        this.fObjectClassNames.sbAdd(clsName + "\n")
                     }
                 }
                 val cKids: String = hir.kidsOfList(i)
@@ -500,13 +549,13 @@ class LlvmEmitter {
                 val en: Int = hirKidsCount(ek)
                 val ename: String = sanitizeLlvm(hir.textOf(i))
                 if (ename != "") {
-                    this.fExternObjNames = this.fExternObjNames + "\n" + ename + "\n"
+                    this.fExternObjNames.sbAdd("\n" + ename + "\n")
                 }
                 var j: Int = 0
                 while (j < en) {
                     val mid: Int = hirKidsAt(ek, j)
                     if (hir.kindOf(mid) == "HirFunction") {
-                        this.fExternFnIds = this.fExternFnIds + "\n" + toStr(mid) + "\n"
+                        this.fExternFnIds.sbAdd("\n" + toStr(mid) + "\n")
                     }
                     j = j + 1
                 }
@@ -524,7 +573,7 @@ class LlvmEmitter {
                     val an: String = aotSlice(t, 0, eq)
                     val at: String = aotSlice(t, eq + 3, t.length - eq - 3)
                     if (an != "" && at != "") {
-                        this.fTypeAliases = this.fTypeAliases + an + "|" + at + "\n"
+                        this.fTypeAliases.sbAdd(an + "|" + at + "\n")
                     }
                 }
             }
@@ -546,10 +595,10 @@ class LlvmEmitter {
                 if (k == "HirFunction") {
                     // 登记「已 define 的符号」：供 `runtimeDeclarationsEx` 过滤同名
                     // `declare`（同名 define+declare 会被 llc 判为重定义）。
-                    this.fDefNames = this.fDefNames + aotFieldAt(sigTmp, 0, "|") + "\n"
+                    this.fDefNames.sbAdd(aotFieldAt(sigTmp, 0, "|") + "\n")
                     val own2: String = this.methodOwnerClass(i)
                     if (own2 != "") {
-                        this.fMethodNodes = this.fMethodNodes + sanitizeLlvm(own2) + "|"
+                        this.fMethodNodes.sbAdd(sanitizeLlvm(own2) + "|")
                             + hir.textOf(i) + "|" + toStr(i) + "\n"
                     }
                 }
@@ -603,13 +652,13 @@ class LlvmEmitter {
         while (i < hir.count) {
             if (hir.kindOf(i) == "HirFunction") {
                 // `extern object` 成员按外部 C 符号处理（只 declare，不 define）
-                if (!aotContains(this.fExternFnIds, "\n" + toStr(i) + "\n")) {
+                if (!this.fExternFnIds.sbContains( "\n" + toStr(i) + "\n")) {
                     val sigTmp: String = this.functionSignature(hir, i)
                     val fnSym: String = aotFieldAt(sigTmp, 0, "|")
                     // 去重：同名函数只发射一次（泛型类字段可能触发额外 HIR 节点）
-                    if (!aotListContains(this.fEmittedFnSyms, fnSym)) {
+                    if (!this.fEmittedFnSyms.sbContains( fnSym)) {
                         this.emitFunction(hir, i)
-                        this.fEmittedFnSyms = this.fEmittedFnSyms + fnSym + "\n"
+                        this.fEmittedFnSyms.sbAdd(fnSym + "\n")
                     }
                 }
             }
@@ -655,12 +704,12 @@ class LlvmEmitter {
         // 一旦方法体访问 object 字段（如 `totalAllocs = totalAllocs + 1`、
         // `this.kwTable = …`）就会**空指针解引用**（0xC0000005）。
         // 这里为每个 object 发射零初始化单例全局，调用点改传它的地址。
-        if (this.fObjectClassNames != "") {
+        if (this.fObjectClassNames.sbSize() > 0) {
             out.sbAdd("; ---- Object Singletons ----\n")
             var oi: Int = 0
-            val on: Int = aotLineCount(this.fObjectClassNames)
+            val on: Int = aotLineCount(this.fObjectClassNames.sbBuild())
             while (oi < on) {
-                val osym: String = sanitizeLlvm(aotLineAt(this.fObjectClassNames, oi))
+                val osym: String = sanitizeLlvm(aotLineAt(this.fObjectClassNames.sbBuild(), oi))
                 if (osym != "" && aotListContains(this.structConcrete, osym)) {
                     out.sbAdd("@aura_obj_" + osym + " = internal global %struct."
                         + osym + " " + this.singletonInit(osym) + "\n")
@@ -686,6 +735,16 @@ class LlvmEmitter {
             out.sbAdd(runtimeDeclarationsEx(this.fDefNames, this.basePath))
             out.sbAdd("\n")
         }
+        // [P2-B] ARC 运行时声明**惰性**注入：只有真的发过 retain/release 才补
+        // （默认路径一个字节都不加，双发射器才能长期共存而不动基线）。
+        if (this.arcUsed) {
+            out.sbAdd("; ---- ARC (P2-B, AURA_ARC=1) ----\n")
+            out.sbAdd("declare void @aura_arc_retain(i8*)\n")
+            out.sbAdd("declare void @aura_arc_release(i8*)\n")
+            out.sbAdd("\n")
+            out.sbAdd("; [P2-B] ARC 已启用（retain/release 由 emitAssign 注入）\n")
+        }
+
         if (this.emitDebug) {
             val di: DebugInfo = DebugInfo(moduleName, ".", true)
             out.sbAdd(debugMetadata(di))
@@ -700,9 +759,9 @@ class LlvmEmitter {
         // 顶层闭包变量（`val f: (Int) -> Int = x -> x * 2`）：
         // 每个闭包变量发射 `@f = global i8* null` + 惰性初始化函数 `@f__init()`。
         // 必须在 funcParts 之前：函数体内引用 `@f__init()` 时需要该符号可见。
-        if (this.fGlobalClosures != "") {
+        if (this.fGlobalClosures.sbSize() > 0) {
             out.sbAdd("; ---- Top-level Closures ----\n")
-            val gcLines: List<String> = this.fGlobalClosures.split("\n")
+            val gcLines: List<String> = this.fGlobalClosures.sbBuild().split("\n")
             var gci: Int = 0
             while (gci < gcLines.size) {
                 val gln: String = gcLines[gci]
@@ -718,6 +777,25 @@ class LlvmEmitter {
             val gIr: String = this.globalParts.sbBuild()
             if (gIr != "") {
                 out.sbAdd(gIr)
+            }
+            out.sbAdd("\n")
+        }
+        // 顶层普通变量（`val`/`var` 非闭包）：`@name = global i64 0`。
+        // 同样必须在 funcParts 之前，函数体 load/store 需要符号可见。
+        if (this.fGlobalNames.sbSize() > 0) {
+            out.sbAdd("; ---- Top-level Globals ----\n")
+            val gnLines: List<String> = this.fGlobalNames.sbBuild().split("\n")
+            var gni: Int = 0
+            while (gni < gnLines.size) {
+                val gln: String = gnLines[gni]
+                gni = gni + 1
+                if (gln == "") {
+                    continue
+                }
+                val gname: String = sanitizeLlvm(aotFieldAt(gln, 0, "|"))
+                if (gname != "") {
+                    out.sbAdd("@" + gname + " = global i64 0\n")
+                }
             }
             out.sbAdd("\n")
         }
@@ -758,9 +836,9 @@ class LlvmEmitter {
         val parentTy: String = hir.tyOf(id)
         if (parentTy != "") {
             val psym0: String = sanitizeLlvm(parentTy)
-            if (!aotContains(this.fParents, "\n" + sym + "|")) {
+            if (!this.fParents.sbContains( "\n" + sym + "|")) {
                 // 每项形如 `\nChild|Parent\n`：查找可只用 substringAfter，零 List 分配
-                this.fParents = this.fParents + "\n" + sym + "|" + psym0 + "\n"
+                this.fParents.sbAdd("\n" + sym + "|" + psym0 + "\n")
             }
             // 父类必须**先**登记：子类布局 = 父类字段前缀 + 自有字段，
             // 且 vtable 槽位继承自父类
@@ -850,8 +928,8 @@ class LlvmEmitter {
                 val fname: String = hir.textOf(i)
                 if (owner != "" && fname != "" && fname != "init") {
                     val osym: String = sanitizeLlvm(owner)
-                    if (!aotContains(this.fClassMethods, "\n" + osym + "|" + fname + "\n")) {
-                        this.fClassMethods = this.fClassMethods + "\n" + osym + "|" + fname + "\n"
+                    if (!this.fClassMethods.sbContains( "\n" + osym + "|" + fname + "\n")) {
+                        this.fClassMethods.sbAdd("\n" + osym + "|" + fname + "\n")
                     }
                 }
             }
@@ -860,7 +938,7 @@ class LlvmEmitter {
         // 2) **只有会被重写的名字才需要槽位**：某个祖先类与某子类都定义了同名方法。
         //    这样 vtable 尺寸 = 程序里真正的 override 数量（编译器自身几乎为 0），
         //    既省内存又省 IR 体积；其余方法仍走静态绑定（语义等价）。
-        val clsLines: List<String> = this.fClassMethods.split("\n")
+        val clsLines: List<String> = this.fClassMethods.sbBuild().split("\n")
         var ci: Int = 0
         while (ci < clsLines.size) {
             val line: String = clsLines[ci]
@@ -870,19 +948,19 @@ class LlvmEmitter {
                 var anc: String = this.parentOfClass(c)
                 var dep: Int = 0
                 while (anc != "" && dep < 16) {
-                    if (aotContains(this.fClassMethods, "\n" + anc + "|" + m + "\n")) {
+                    if (this.fClassMethods.sbContains( "\n" + anc + "|" + m + "\n")) {
                         // 链内签名必须一致（否则不是 override，退回静态绑定）
                         if (this.slotOf(m) < 0) {
                             if (this.chainSigConsistent(c, m)) {
-                                this.fMethodSlots = this.fMethodSlots + m + "|"
+                                this.fMethodSlots.sbAdd(m + "|")
                                     + toStr(this.slotTotal()) + "\n"
                             } else {
                                 // **非 override 的同名遮蔽**：不分配槽位，调用点按静态
                                 // 接收者类型直接绑定。语义安全，但会静默丢掉动态派发；
                                 // 记录之，避免排障时无从下手。
-                                if (!aotContains(this.fVtableNotes,
+                                if (!this.fVtableNotes.sbContains(
                                     c + "|" + m + "|" + anc + "\n")) {
-                                    this.fVtableNotes = this.fVtableNotes + c + "|" + m
+                                    this.fVtableNotes.sbAdd(c + "|" + m)
                                         + "|" + anc + "\n"
                                     this.fVtableNoteCount = this.fVtableNoteCount + 1
                                 }
@@ -947,14 +1025,14 @@ class LlvmEmitter {
     /// ; static-binding fallback: Child.m / ancestor Base (signature mismatch)
     /// ```
     fun vtableNotesHeader(): String {
-        if (this.fVtableNotes == "") {
+        if (this.fVtableNotes.sbSize() == 0) {
             return ""
         }
         var out: String = "; ---- vtable notes ----\n"
         // 用 `aotFieldAt(...)` 扫描行（不依赖 `split(...).size`）
         var i: Int = 0
         while (i < this.fVtableNoteCount) {
-            val ln: String = aotFieldAt(this.fVtableNotes, i, "\n")
+            val ln: String = aotFieldAt(this.fVtableNotes.sbBuild(), i, "\n")
             val c: String = aotFieldAt(ln, 0, "|")
             if (c != "") {
                 out = out + "; static-binding fallback: " + c + "."
@@ -969,10 +1047,10 @@ class LlvmEmitter {
 
     /// 方法名 → 槽位（未登记返回 -1）。
     fun slotOf(name: String): Int {
-        if (name == "" || this.fMethodSlots == "") {
+        if (name == "" || this.fMethodSlots.sbSize() == 0) {
             return -1
         }
-        val lines: List<String> = this.fMethodSlots.split("\n")
+        val lines: List<String> = this.fMethodSlots.sbBuild().split("\n")
         var i: Int = 0
         while (i < lines.size) {
             if (aotFieldAt(lines[i], 0, "|") == name) {
@@ -985,10 +1063,10 @@ class LlvmEmitter {
 
     /// 槽位 j 的方法名（越界返回 ""）。
     fun slotName(j: Int): String {
-        if (this.fMethodSlots == "") {
+        if (this.fMethodSlots.sbSize() == 0) {
             return ""
         }
-        val lines: List<String> = this.fMethodSlots.split("\n")
+        val lines: List<String> = this.fMethodSlots.sbBuild().split("\n")
         var i: Int = 0
         while (i < lines.size) {
             if (aotToInt(aotFieldAt(lines[i], 1, "|")) == j) {
@@ -1001,10 +1079,10 @@ class LlvmEmitter {
 
     /// 槽位总数。
     fun slotTotal(): Int {
-        if (this.fMethodSlots == "") {
+        if (this.fMethodSlots.sbSize() == 0) {
             return 0
         }
-        val lines: List<String> = this.fMethodSlots.split("\n")
+        val lines: List<String> = this.fMethodSlots.sbBuild().split("\n")
         var c: Int = 0
         var i: Int = 0
         while (i < lines.size) {
@@ -1107,7 +1185,7 @@ class LlvmEmitter {
     /// 限制：仅当接收者静态类型是具体子类时生效；`val a: Animal = Dog()` 这类
     /// 父类静态类型的调用仍是静态解析（真动态派发需要 vptr + vtable）。
     fun planInheritedMethods() {
-        if (this.fParents == "" || this.fMethodNodes == "") {
+        if (this.fParents.sbSize() == 0 || this.fMethodNodes.sbSize() == 0) {
             return
         }
         val classes: List<String> = this.structDeclared.split("\n")
@@ -1126,7 +1204,7 @@ class LlvmEmitter {
         var anc: String = this.parentOfClass(cls)
         var depth: Int = 0
         while (anc != "" && depth < 16) {
-            val nodes: List<String> = this.fMethodNodes.split("\n")
+            val nodes: List<String> = this.fMethodNodes.sbBuild().split("\n")
             var i: Int = 0
             while (i < nodes.size) {
                 val line: String = nodes[i]
@@ -1141,7 +1219,7 @@ class LlvmEmitter {
                             this.fSigList.add(cls + "_" + mname + "|"
                                 + aotFieldAt(psig, 1, "|") + "|" + aotFieldAt(psig, 2, "|"))
                             this.fSigNames.add(cls + "_" + mname)
-                            this.fInheritPlans = this.fInheritPlans + cls + "|"
+                            this.fInheritPlans.sbAdd(cls + "|")
                                 + toStr(nid) + "\n"
                         }
                     }
@@ -1155,10 +1233,10 @@ class LlvmEmitter {
 
     /// 按计划发射继承方法副本（符号 `Child.m`，`this` 为 `%struct.Child*`）。
     fun emitInheritedMethods(hir: Hir) {
-        if (this.fInheritPlans == "") {
+        if (this.fInheritPlans.sbSize() == 0) {
             return
         }
-        val plans: List<String> = this.fInheritPlans.split("\n")
+        val plans: List<String> = this.fInheritPlans.sbBuild().split("\n")
         var i: Int = 0
         while (i < plans.size) {
             val cls: String = aotFieldAt(plans[i], 0, "|")
@@ -1174,10 +1252,10 @@ class LlvmEmitter {
 
     /// 类名 → 类型声明节点 id（未命中返回 -1）。
     fun classNodeOf(name: String): Int {
-        if (name == "" || this.fClassNodes == "") {
+        if (name == "" || this.fClassNodes.sbSize() == 0) {
             return -1
         }
-        val lines: List<String> = this.fClassNodes.split("\n")
+        val lines: List<String> = this.fClassNodes.sbBuild().split("\n")
         var i: Int = 0
         while (i < lines.size) {
             if (aotFieldAt(lines[i], 0, "|") == name) {
@@ -1501,14 +1579,14 @@ class LlvmEmitter {
     /// 零 List 分配：`fParents` 形如 `\nChild|Parent\n…`，
     /// 直接 `substringAfter` + `substringBefore` 定位（该方法在自编译时被调用上万次）。
     fun parentOfClass(sym: String): String {
-        if (sym == "" || this.fParents == "") {
+        if (sym == "" || this.fParents.sbSize() == 0) {
             return ""
         }
         val key: String = "\n" + sym + "|"
-        if (!aotContains(this.fParents, key)) {
+        if (!this.fParents.sbContains( key)) {
             return ""
         }
-        return this.fParents.substringAfter(key).substringBefore("\n")
+        return this.fParents.sbBuild().substringAfter(key).substringBefore("\n")
     }
 
     /// 沿继承链查找**定义方法 `fname` 的类符号**（`Child.m` 未定义则回退父类）。
@@ -1784,7 +1862,8 @@ class LlvmEmitter {
         }
         var v: Int = 0
         var i: Int = start
-        while (i < s.length) {
+        val sLen: Int = s.length
+        while (i < sLen) {
             val c: Int = s.charCodeAt(i) as Int
             var d: Int = -1
             if (c >= 48 && c <= 57) {
@@ -1913,7 +1992,7 @@ class LlvmEmitter {
         val ownerCls: String = this.methodOwnerClass(id)
         var csv: String = ""
         // Phase B: object 内方法是静态方法，无 receiver 占位（-1）。
-        if (ownerCls != "" && !aotListContains(this.fObjectClassNames, ownerCls)) {
+        if (ownerCls != "" && !this.fObjectClassNames.sbContains( ownerCls)) {
             fname = sanitizeLlvm(ownerCls) + "." + fname
             csv = "-1"
         } else if (ownerCls != "") {
@@ -1952,10 +2031,11 @@ class LlvmEmitter {
         // 方法名本身可能含下划线，如 `JitUtil_patternCount`）。
         var up: Int = -1
         var k: Int = 0
-        while (k < fname.length) {
+        val fnameLen: Int = fname.length
+        while (k < fnameLen) {
             if (fname.charCodeAt(k) == 95) {
                 up = k
-                k = fname.length
+                k = fnameLen
             }
             k = k + 1
         }
@@ -1983,9 +2063,9 @@ class LlvmEmitter {
         // 集合局部变量表是**每函数**状态：不重置会让前一个函数登记的集合变量
         // 泄漏到后续函数（`isListVar` 误判 → 下标按集合 getAt + 按元素类型解箱，
         // 生成 `i32` 传 `i8*` 形参的非法 IR）。
-        this.fListVars = ""
+        this.fListVars.sbReset()
         this.fTerminated = false
-        this.fClosureSigs = ""
+        this.fClosureSigs.sbReset()
         // inferType 记忆化换代：类型推断依赖本函数的局部变量表 / 所属类
         this.fGen = this.fGen + 1
         this.fGenStr = toStr(this.fGen)
@@ -2013,7 +2093,7 @@ class LlvmEmitter {
             if (name != "main") {
                 var dotPos: Int = name.lastIndexOf(".")
                 if (dotPos >= 0) {
-                    name = name.substring(dotPos + 1)
+                    name = name.substring(dotPos + 1, name.length())
                 }
             }
         }
@@ -2153,6 +2233,12 @@ class LlvmEmitter {
         if (this.fTerminated == false && this.emitConcurrentBuiltin(fullFn, ownerCls, name, retTy)) {
             // 已发射完整函数体（含 ret）
         } else if (bodyId >= 0) {
+            // [P2-B] 逃逸扫描（每函数一次，先于发射）。默认 `AURA_ARC` 未设
+            // ⇒ 不扫描，这一段对产物零影响。
+            this.arcEsc = " "
+            if (this.arcEmitOn()) {
+                this.arcScan(hir, bodyId)
+            }
             this.emitBody(hir, bodyId)
         }
         if (!this.fTerminated) {
@@ -2622,10 +2708,10 @@ class LlvmEmitter {
         val sym: String = sanitizeLlvm(hir.textOf(id))
         val rawName: String = hir.textOf(id)
         // 同名包装器去重（首个定义胜出；重复会触发 llc invalid redefinition）
-        if (aotContains(this.fNativeSyms, "\n" + sym + "\n")) {
+        if (this.fNativeSyms.sbContains( "\n" + sym + "\n")) {
             return
         }
-        this.fNativeSyms = this.fNativeSyms + "\n" + sym + "\n"
+        this.fNativeSyms.sbAdd("\n" + sym + "\n")
         val meta: String = this.nativeMetaOf(hir, id)
         val isSyscall: Boolean = meta.startsWith("native|")
 
@@ -2947,8 +3033,8 @@ class LlvmEmitter {
     var svVarList: List<String> = arrayListOf<String>()
     var svVarNames: List<String> = arrayListOf<String>()
     var svRetTy: String = ""
-    var svListVars: String = ""
-    var svClosureSigs: String = ""
+    var svListVars: EmitBuffer = EmitBuffer()
+    var svClosureSigs: EmitBuffer = EmitBuffer()
     var svTerminated: Boolean = false
 
     /// 是否为 Aura 函数类型（`(Int) -> Int` / `(Int, String) -> Int` …）。
@@ -2978,7 +3064,8 @@ class LlvmEmitter {
         var depth: Int = 0
         var start: Int = 0
         var i: Int = 0
-        while (i < s.length) {
+        val sLen2: Int = s.length
+        while (i < sLen2) {
             val ch: String = aotSlice(s, i, 1)
             if (ch == "(") {
                 depth = depth + 1
@@ -3138,7 +3225,8 @@ class LlvmEmitter {
         var ret: String = this.auraRetTyOf(sym)
         if (ret == "") {
             var u: Int = 0
-            while (u < sym.length && aotSlice(sym, u, 1) != "_") {
+            val symLen: Int = sym.length
+            while (u < symLen && aotSlice(sym, u, 1) != "_") {
                 u = u + 1
             }
             if (u > 0 && u < sym.length - 1) {
@@ -3159,10 +3247,10 @@ class LlvmEmitter {
 
     /// 顶层闭包变量签名查询（未登记返回 ""）。
     fun globalClosureSigOf(name: String): String {
-        if (name == "" || this.fGlobalClosures == "") {
+        if (name == "" || this.fGlobalClosures.sbSize() == 0) {
             return ""
         }
-        val lines: List<String> = this.fGlobalClosures.split("\n")
+        val lines: List<String> = this.fGlobalClosures.sbBuild().split("\n")
         var i: Int = 0
         while (i < lines.size) {
             val ln: String = lines[i]
@@ -3195,7 +3283,7 @@ class LlvmEmitter {
         if (sig == "") {
             return
         }
-        this.fGlobalClosures = this.fGlobalClosures + name + "|" + sig + "\n"
+        this.fGlobalClosures.sbAdd(name + "|" + sig + "\n")
 
         // 惰性初始化函数 `@<name>__init()`：
         //   entry:
@@ -3342,10 +3430,10 @@ class LlvmEmitter {
 
     /// 闭包变量签名查询：返回 `retTy|p1,p2`（未登记返回 ""）。
     fun closureSigOfVar(name: String): String {
-        if (name == "" || this.fClosureSigs == "") {
+        if (name == "" || this.fClosureSigs.sbSize() == 0) {
             return ""
         }
-        val lines: List<String> = this.fClosureSigs.split("\n")
+        val lines: List<String> = this.fClosureSigs.sbBuild().split("\n")
         var i: Int = 0
         while (i < lines.size) {
             val ln: String = lines[i]
@@ -3365,7 +3453,7 @@ class LlvmEmitter {
         if (name == "" || sig == "") {
             return
         }
-        this.fClosureSigs = this.fClosureSigs + name + "|" + sig + "\n"
+        this.fClosureSigs.sbAdd(name + "|" + sig + "\n")
     }
 
     /// 拆解 HirLambda：返回 `paramId1,paramId2|bodyId`。
@@ -3511,8 +3599,8 @@ class LlvmEmitter {
         this.fAlloca = EmitBuffer()
         this.fVarList = arrayListOf<String>()
         this.fVarNames = arrayListOf<String>()
-        this.fListVars = ""
-        this.fClosureSigs = ""
+        this.fListVars = EmitBuffer()
+        this.fClosureSigs = EmitBuffer()
         this.fRetTy = retTy
         this.fTerminated = false
         // 换代 → 清空 inferType 记忆化（依赖局部变量表）
@@ -4462,6 +4550,134 @@ class LlvmEmitter {
     }
 
     /// 发射赋值语句。
+    // ── [P2-B] ARC 发射助手（与 seed `emit.rs` 的 D4 规则表逐条对齐）────
+
+    /// `AURA_ARC=1` 才注入 retain/release。结果缓存在 `arcOn`（-1=未初始化）。
+    fun arcEmitOn(): Boolean {
+        if (this.arcOn < 0) {
+            if (Env.get("AURA_ARC", "") == "1") {
+                this.arcOn = 1
+            } else {
+                this.arcOn = 0
+            }
+            // ⚠️ 这里不能靠 println 做诊断：本类方法里的 println 会被静默丢弃
+            // （字符串会进产物，但运行时一行都不打）。诊断要走「符号引用」或
+            // 往生成的 IR 里写注释，见 R153 记录。
+        }
+        return this.arcOn == 1
+    }
+
+    /// `AURA_ARC_RELEASE=1` 原始读取（不依赖 `arcEmitOn`，供诊断用）。
+    fun arcRelKnob(): Int {
+        if (Env.get("AURA_ARC_RELEASE", "") == "1") {
+            return 1
+        }
+        return 0
+    }
+
+    /// 释放必须再显式 `AURA_ARC_RELEASE=1`（释放是唯一会让内存消失的操作）。
+    fun arcRelOn(): Boolean {
+        if (!this.arcEmitOn()) {
+            return false
+        }
+        return Env.get("AURA_ARC_RELEASE", "") == "1"
+    }
+
+    /// 记录一个逃逸变量名（空格分隔的集合串；名字不含空格）。
+    fun arcMarkEsc(n: String) {
+        if (n == "") {
+            return
+        }
+        if (!this.arcEsc.contains(" " + n + " ")) {
+            this.arcEsc = this.arcEsc + n + " "
+            this.arcEscCount = this.arcEscCount + 1
+        }
+    }
+
+    /// 该变量是否已判定逃逸（逃逸 ⇒ 不参与 release，只 retain）。
+    fun arcEscapes(n: String): Boolean {
+        return this.arcEsc.contains(" " + n + " ")
+    }
+
+    /// 把某棵子树里的**所有变量名**标记为逃逸（用于「值被存进别处」）。
+    fun arcMarkSubtree(hir: Hir, id: Int) {
+        if (id < 0 || id >= hir.count) {
+            return
+        }
+        if (hir.kindOf(id) == "HirVar") {
+            this.arcMarkEsc(hir.textOf(id))
+            return
+        }
+        val kids: String = hir.kidsOfList(id)
+        val nk: Int = hirKidsCount(kids)
+        var i: Int = 0
+        while (i < nk) {
+            this.arcMarkSubtree(hir, hirKidsAt(kids, i))
+            i = i + 1
+        }
+    }
+
+    /// 存储型调用（把实参存进容器/对象）：与 seed `scan_escapes` 的清单同源。
+    /// 命中即「实参逃逸」——这是 P2 报告里「逃逸引用未计数」的主要来源。
+    fun arcStorageCallee(n: String): Boolean {
+        if (n == "") {
+            return false
+        }
+        if (n.contains("push") || n.contains("append") || n.contains("insert") ||
+            n.contains("add") || n.contains("set") || n.contains("put") ||
+            n.contains("addAll") || n.contains("addFirst") || n.contains("addLast") ||
+            n.contains("offer") || n.contains("enqueue") || n.contains("register")) {
+            return true
+        }
+        return false
+    }
+
+    /// 通用 HIR 递归：标记**逃逸写点**上的变量（与 seed `scan_escapes` 同构）。
+    ///
+    /// 逃逸写点（命中即该变量整体不参与 release）：
+    ///   · `obj.f = v` / `a[i] = v`（目标不是本帧变量）⇒ 值子树全逃逸；
+    ///   · 存储型调用实参（`add`/`set`/`put`/`push`/`insert`/`append`…）⇒ 实参全逃逸；
+    ///   · `Box` / `WeakRef` / `New` / `Await` / `Lambda` / `Try` / `Defer` ⇒ 子树全逃逸
+    ///     （跨帧生命周期，编译器看不见别名）。
+    ///
+    /// 普通读取（`println(s)`、`s.length`、`s + "x"`）**不**判逃逸 —— 与 seed 一致。
+    fun arcScan(hir: Hir, id: Int) {
+        if (id < 0 || id >= hir.count) {
+            return
+        }
+        val k: String = hir.kindOf(id)
+        val kids: String = hir.kidsOfList(id)
+        val nk: Int = hirKidsCount(kids)
+        if (k == "HirAssign" && nk >= 2) {
+            val tgt: Int = hirKidsAt(kids, 0)
+            if (hir.kindOf(tgt) != "HirVar") {
+                this.arcMarkSubtree(hir, hirKidsAt(kids, 1))
+            }
+        } else if (k == "HirCall" && nk >= 2) {
+            val callee: Int = hirKidsAt(kids, 0)
+            if (hir.kindOf(callee) == "HirVar" && this.arcStorageCallee(hir.textOf(callee))) {
+                var i: Int = 1
+                while (i < nk) {
+                    this.arcMarkSubtree(hir, hirKidsAt(kids, i))
+                    i = i + 1
+                }
+            }
+        } else if (k == "HirBox" || k == "HirWeakRef" || k == "HirNew" ||
+                   k == "HirAwait" || k == "HirLambda" || k == "HirTry" ||
+                   k == "HirDefer" || k == "HirSpawn") {
+            var i: Int = 0
+            while (i < nk) {
+                this.arcMarkSubtree(hir, hirKidsAt(kids, i))
+                i = i + 1
+            }
+        }
+        var i: Int = 0
+        while (i < nk) {
+            this.arcScan(hir, hirKidsAt(kids, i))
+            i = i + 1
+        }
+    }
+
     fun emitAssign(hir: Hir, id: Int) {
         val kids: String = hir.kidsOfList(id)
         if (hirKidsCount(kids) < 2) {
@@ -4508,6 +4724,19 @@ class LlvmEmitter {
             this.emitThisFieldStore(hir, name, valueId)
             return
         }
+        // 顶层 `val`/`var`（非闭包）：写入模块级全局符号（i64 承载）。
+        // 若仍走 `declareVar` 会退化成函数内 alloca，每个线程各自一份副本，
+        // 「共享状态」在并发测试里彻底失效。
+        if (this.lookupVarTy(name) == "" && this.globalClosureSigOf(name) == "") {
+            this.declareGlobal(name)
+            val gv: String = this.emitExpr(hir, valueId)
+            val gc: String = this.coerceValue(gv, this.inferType(hir, valueId), "i64")
+            this.fBody.sbAdd("  store i64 ")
+            this.fBody.sbAdd(gc)
+            this.fBody.sbAdd(", i64* @" + sanitizeLlvm(name) + "\n")
+            this.fTerminated = false
+            return
+        }
         val valueTy: String = this.inferType(hir, valueId)
         val value: String = this.emitExpr(hir, valueId)
         var ty: String = this.lookupVarTy(name)
@@ -4519,6 +4748,34 @@ class LlvmEmitter {
         }
         val coerced: String = this.coerceValue(value, valueTy, ty)
         val addr: String = this.declareVar(name, ty)
+        // [P2-B/D4] 覆盖释放：复制类右值先 retain → load 旧值 → release → store。
+        // 只在「ARC 开 + 槽是 String(i8*) + 未逃逸 + 非自赋值」时发射，
+        // 与 seed `emit_assign` 的已验证那一档同构（P3 二分矩阵：只有覆盖释放通过）。
+        if (this.arcEmitOn() && ty == "i8*" && !this.arcEscapes(name)) {
+            val isCopy: Boolean = hir.kindOf(valueId) == "HirVar" &&
+                hir.textOf(valueId) != name
+            if (isCopy && valueTy == "i8*") {
+                this.fBody.sbAdd("  call void @aura_arc_retain(i8* ")
+                this.fBody.sbAdd(coerced)
+                this.fBody.sbAdd(")\n")
+                this.arcUsed = true
+                this.arcRetainCount = this.arcRetainCount + 1
+            }
+            if (this.arcRelOn()) {
+                val oldv: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(oldv)
+                this.fBody.sbAdd(" = load i8*, ")
+                this.fBody.sbAdd(EmitUtils.toPtrTySp(ty))
+                this.fBody.sbAdd(addr)
+                this.fBody.sbAdd("\n")
+                this.fBody.sbAdd("  call void @aura_arc_release(i8* ")
+                this.fBody.sbAdd(oldv)
+                this.fBody.sbAdd(")\n")
+                this.arcUsed = true
+                this.arcReleaseCount = this.arcReleaseCount + 1
+            }
+        }
         this.fBody.sbAdd("  store ")
         this.fBody.sbAdd(ty)
         this.fBody.sbAdd(" ")
@@ -5085,7 +5342,21 @@ class LlvmEmitter {
             if (this.curClassFieldIndex(name) >= 0) {
                 return this.emitThisFieldLoad(name)
             }
-            return "0"
+            // 顶层 `val`/`var` 声明：发射全局符号（i64 承载任意小值 / 句柄），
+            // 与 VM 侧「top-level 作用域变量」的语义一致。缺失这一分支时，
+            // `lookupVarTy` 查不到类型会静默降级成字面量 `0`，于是
+            // `SHARED_COUNT = SHARED_COUNT + 1` 退化为 `0 + 1`，并发计数永远
+            // 停留在初值——`tests/concurrent/mutex_shared.aura` 的
+            // 「Mutex 保护并发递增 count=0」就是这条路径。
+            // 首次读到未登记的裸名时**按需登记**全局符号：顶层 val 声明本身
+            // 不参与任何函数体发射，若只在 `emitDecl` 里登记，`var` 这类
+            // 只被读写的顶层量永远不会进表。
+            this.declareGlobal(name)
+            val gt: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(gt)
+            this.fBody.sbAdd(" = load i64, i64* @" + sanitizeLlvm(name) + "\n")
+            return gt
         }
         val addr: String = this.lookupVarAddr(name)
         val t: String = this.freshVar()
@@ -6279,8 +6550,8 @@ class LlvmEmitter {
         // Plan A 低位标记给出保守判定：奇数 → "Int"，偶数非空 → "String"，空 → "Null"。
         // 此前该调用没有分支，落到「未解析符号」兜底**恒返回 0**，使
         // `VmOps.isString/isInt` 等全部误判（`add(2,5)` 被当成字符串拼接得到 "25"）。
-        if ((fname == "typeof" || fname == "typeOf") && n == 1) {
-            val fId: Int = hirKidsAt(kids, 0)
+        if ((fname == "typeof" || fname == "typeOf") && n - argStart == 1) {
+            val fId: Int = hirKidsAt(kids, argStart)
             val fTy: String = this.inferType(hir, fId)
             val fv: String = this.coerceValue(this.emitExpr(hir, fId), fTy, "i8*")
             val tt: String = this.freshVar()
@@ -6380,6 +6651,12 @@ class LlvmEmitter {
                 return t
             }
             return this.coerceValue(fv, fTy, "i32")
+        }
+        if (fname == "toLong" && n == 1) {
+            val fId: Int = hirKidsAt(kids, 0)
+            val fTy: String = this.inferType(hir, fId)
+            val fv: String = this.emitExpr(hir, fId)
+            return this.coerceValue(fv, fTy, "i64")
         }
         if (fname == "toFloat" && n == 1) {
             val fId: Int = hirKidsAt(kids, 0)
@@ -7223,7 +7500,7 @@ class LlvmEmitter {
             val rIdE: Int = hirKidsAt(kids, 0)
             val kE: String = hir.kindOf(rIdE)
             if (kE == "HirVar" || kE == "HirIdent") {
-                if (aotListContains(this.fExternObjNames, sanitizeLlvm(hir.textOf(rIdE)))) {
+                if (this.fExternObjNames.sbContains( sanitizeLlvm(hir.textOf(rIdE)))) {
                     effArgStart = 1
                 }
             }
@@ -7284,9 +7561,9 @@ class LlvmEmitter {
         if (userSig == "" && aotIndexOfSub(fname, "_") < 0) {
             var mnIdx: Int = 0
             var foundMn: String = ""
-            val mnLines: Int = aotLineCount(this.fMethodNodes)
+            val mnLines: Int = aotLineCount(this.fMethodNodes.sbBuild())
             while (mnIdx < mnLines) {
-                val mnLine: String = aotLineAt(this.fMethodNodes, mnIdx)
+                val mnLine: String = aotLineAt(this.fMethodNodes.sbBuild(), mnIdx)
                 if (aotFieldAt(mnLine, 1, "|") == fname) {
                     foundMn = aotFieldAt(mnLine, 0, "|") + "_" + fname
                     break
@@ -7328,7 +7605,8 @@ class LlvmEmitter {
                         val restStart: Int = prefixLen
                         var underscorePos: Int = -1
                         var scanI: Int = restStart
-                        while (scanI < m.length) {
+                        val mLen: Int = m.length
+                        while (scanI < mLen) {
                             if (aotSlice(m, scanI, 1) == "_") {
                                 underscorePos = scanI
                                 break
@@ -7427,7 +7705,8 @@ class LlvmEmitter {
                     val restStart: Int = prefixLen
                     var underscorePos: Int = -1
                     var scanI: Int = restStart
-                    while (scanI < methodSym.length) {
+                    val methodSymLen: Int = methodSym.length
+                    while (scanI < methodSymLen) {
                         if (aotSlice(methodSym, scanI, 1) == "_") {
                             underscorePos = scanI
                             break
@@ -7503,11 +7782,11 @@ class LlvmEmitter {
         //   * object 方法有隐式 self 形参，接收者位必须在实参之前确定
         //     （否则实参数比形参少一个 → callee 把第一个实参当 self，参数整体错位，
         //      如 `jitSlice(text, start, len)` 变成 `self=text, text=start, start=len`）。
-        if (retTy == "" && this.fObjectClassNames != "") {
+        if (retTy == "" && this.fObjectClassNames.sbSize() > 0) {
             var obIdx: Int = 0
-            val obN: Int = aotLineCount(this.fObjectClassNames)
+            val obN: Int = aotLineCount(this.fObjectClassNames.sbBuild())
             while (obIdx < obN && retTy == "") {
-                val obCls: String = sanitizeLlvm(aotLineAt(this.fObjectClassNames, obIdx))
+                val obCls: String = sanitizeLlvm(aotLineAt(this.fObjectClassNames.sbBuild(), obIdx))
                 val obCand: String = obCls + "_" + fname
                 val obSig: String = this.funcSignatureOf(obCand)
                 if (obSig != "") {
@@ -8177,6 +8456,9 @@ class LlvmEmitter {
             if (fname == "toInt" && hirKidsCount(kids) == 1) {
                 return "i32"
             }
+            if (fname == "toLong" && hirKidsCount(kids) == 1) {
+                return "i64"
+            }
             // `Memory.*` 访存内置：返回宽度由方法名决定，必须与 `emitCall`
             // 的 `Memory.*` 分支（inttoptr + load/store）一致。
             // 否则会落到 native 约定的 i64，与发射出的 i8/i16/i32 冲突：
@@ -8410,11 +8692,11 @@ class LlvmEmitter {
             }
             // 裸名调用 object 静态方法（与 `emitCall` 的同名路径一致）：
             // `keywordSearchTable()` → `TokenUtils_keywordSearchTable`。
-            if (this.fObjectClassNames != "") {
+            if (this.fObjectClassNames.sbSize() > 0) {
                 var obI: Int = 0
-                val obN2: Int = aotLineCount(this.fObjectClassNames)
+                val obN2: Int = aotLineCount(this.fObjectClassNames.sbBuild())
                 while (obI < obN2) {
-                    val obCls2: String = sanitizeLlvm(aotLineAt(this.fObjectClassNames, obI))
+                    val obCls2: String = sanitizeLlvm(aotLineAt(this.fObjectClassNames.sbBuild(), obI))
                     val obSig2: String = this.funcSignatureOf(obCls2 + "_" + fname)
                     if (obSig2 != "") {
                         return aotFieldAt(obSig2, 1, "|")
@@ -8445,7 +8727,8 @@ class LlvmEmitter {
                 val restStart: Int = prefixLen
                 var underscorePos: Int = -1
                 var scanI: Int = restStart
-                while (scanI < methodSym.length) {
+                val methodSymLen2: Int = methodSym.length
+                while (scanI < methodSymLen2) {
                     if (aotSlice(methodSym, scanI, 1) == "_") {
                         underscorePos = scanI
                         break
@@ -8485,11 +8768,11 @@ class LlvmEmitter {
         var cur: String = ty
         var guard: Int = 0
         while (guard < 8) {
-            val n: Int = aotLineCount(this.fTypeAliases)
+            val n: Int = aotLineCount(this.fTypeAliases.sbBuild())
             var found: String = ""
             var i: Int = 0
             while (i < n) {
-                val line: String = aotLineAt(this.fTypeAliases, i)
+                val line: String = aotLineAt(this.fTypeAliases.sbBuild(), i)
                 if (aotFieldAt(line, 0, "|") == cur) {
                     found = aotFieldAt(line, 1, "|")
                 }
@@ -9197,7 +9480,7 @@ class LlvmEmitter {
         if (name == "" || cls == "" || this.clsVarOf(name) != "") {
             return
         }
-        this.fClsVars = this.fClsVars + name + "|" + cls + "\n"
+        this.fClsVars.sbAdd(name + "|" + cls + "\n")
     }
 
     /// 查「类实例变量」对应的类符号（未登记返回 ""）。
@@ -9206,9 +9489,9 @@ class LlvmEmitter {
             return ""
         }
         var i: Int = 0
-        val n: Int = aotLineCount(this.fClsVars)
+        val n: Int = aotLineCount(this.fClsVars.sbBuild())
         while (i < n) {
-            val line: String = aotLineAt(this.fClsVars, i)
+            val line: String = aotLineAt(this.fClsVars.sbBuild(), i)
             if (aotFieldAt(line, 0, "|") == name) {
                 return aotFieldAt(line, 1, "|")
             }
@@ -9227,15 +9510,15 @@ class LlvmEmitter {
         if (name == "" || this.isListVar(name)) {
             return
         }
-        this.fListVars = this.fListVars + name + "|" + elemTy + "\n"
+        this.fListVars.sbAdd(name + "|" + elemTy + "\n")
     }
 
     /// 该局部变量是否为集合（List/Array/Set/Map）。
     fun isListVar(name: String): Boolean {
-        var n: Int = aotLineCount(this.fListVars)
+        var n: Int = aotLineCount(this.fListVars.sbBuild())
         var i: Int = 0
         while (i < n) {
-            if (aotFieldAt(aotLineAt(this.fListVars, i), 0, "|") == name) {
+            if (aotFieldAt(aotLineAt(this.fListVars.sbBuild(), i), 0, "|") == name) {
                 return true
             }
             i = i + 1
@@ -9245,10 +9528,10 @@ class LlvmEmitter {
 
     /// 集合局部变量的元素 LLVM 类型（未登记/空值时返回 `i8*`，见 `typeArgElemTy`）。
     fun listElemTy(name: String): String {
-        var n: Int = aotLineCount(this.fListVars)
+        var n: Int = aotLineCount(this.fListVars.sbBuild())
         var i: Int = 0
         while (i < n) {
-            val line: String = aotLineAt(this.fListVars, i)
+            val line: String = aotLineAt(this.fListVars.sbBuild(), i)
             if (aotFieldAt(line, 0, "|") == name) {
                 val e: String = aotFieldAt(line, 1, "|")
                 if (e != "") {
@@ -9327,7 +9610,7 @@ class LlvmEmitter {
         if (aotContains(rn, "ollections")) {
             return false
         }
-        if (aotListContains(this.fObjectClassNames, rn)) {
+        if (this.fObjectClassNames.sbContains( rn)) {
             return true
         }
         return this.isStructSym(sanitizeLlvm(rn))

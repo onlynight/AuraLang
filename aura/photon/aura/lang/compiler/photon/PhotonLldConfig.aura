@@ -85,9 +85,10 @@ class PhotonLldConfig {
         // —— 这两者在字节码生成阶段无法解析（见文件头注释）。
         var i: Int = 0
         var lineStart: Int = 0
-        while (i <= text.length) {
+        val textLen: Int = text.length
+        while (i <= textLen) {
             var isEol: Boolean = false
-            if (i == text.length) {
+            if (i == textLen) {
                 isEol = true
             } else {
                 val c: Int = text.substring(i, i + 1).charCodeAt(0)
@@ -143,7 +144,8 @@ class PhotonLldConfig {
     fun trimAscii(s: String): String {
         var start: Int = 0
         var scanning: Boolean = true
-        while (start < s.length && scanning) {
+        val sLen: Int = s.length
+        while (start < sLen && scanning) {
             val c: Int = s.substring(start, start + 1).charCodeAt(0)
             if (c == 32 || c == 9 || c == 13) {
                 start = start + 1
@@ -222,7 +224,8 @@ class PhotonLldConfig {
             // 取第一对引号之间的内容（逐字符扫描，避免依赖带起始位的 indexOf）
             var out: String = ""
             var i: Int = 1
-            while (i < v.length) {
+            val vLen: Int = v.length
+            while (i < vLen) {
                 val ch: String = v.substring(i, i + 1)
                 if (ch == "\"") {
                     return out

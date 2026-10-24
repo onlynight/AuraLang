@@ -171,10 +171,11 @@ object TypeUtils {
             return false
         } else if (base.startsWith("T") && base.length() > 1) {
             // 检查是否是 T 后跟数字
-            val rest: String = base.substring(1)
+            val rest: String = base.substring(1, base.length())
             val digits: String = "0123456789"
             var i: Int = 0
-            while (i < rest.length()) {
+            val restLen: Int = rest.length
+            while (i < restLen()) {
                 if (digits.indexOf(toStr(rest[i])) < 0) {
                     return false
                 }
@@ -291,7 +292,7 @@ object TypeUtils {
             return ""
         }
         // 去掉前导 `(`
-        val rest: String = ty.substring(1)
+        val rest: String = ty.substring(1, ty.length())
         val arrowPos: Int = rest.indexOf(") ->")
         if (arrowPos < 0) {
             return ""
@@ -309,6 +310,6 @@ object TypeUtils {
             return "Unit"
         }
         // `") ->"` 是 4 个字符，加上后面的空格共 5 个，从第 5 个字符后开始取
-        return ty.substring(arrowPos + 5)
+        return ty.substring(arrowPos + 5, ty.length())
     }
 }

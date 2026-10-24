@@ -1,0 +1,9 @@
+fun main() {
+    val s: String = "Hello"
+    val t: String = "Aura"
+    println(s + " " + t)
+    println(s.length)
+    println(s.toUpperCase())
+    println(t.toLowerCase())
+    println(s.charAt(0))
+}

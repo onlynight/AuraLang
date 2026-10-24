@@ -1,0 +1,5 @@
+fun main() {
+    val x: Int = 7
+    val y: Int = x + 3
+    println("m1=" + toStr(y))
+}

@@ -8,6 +8,7 @@ package aura.lang.compiler.photon.x86_64
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.std.string.StringBuilder
 
 /// x86_64 指令编码器：将操作码+操作数编码为机器码字节。
 class X86Encoder {
@@ -20,9 +21,14 @@ class X86Encoder {
     /// 编码阶段吃掉 5.6 GB（`aura_mem_used` 直方图：`<=1M` 桶 53292 次 / 5629 MB），
     /// 而 AOT 运行时**没有 GC**（`free_calls=0`），这些中间串全部驻留。
     ///
-    /// 改为「每字节一个列表项」：写入 O(1)、按下标改写 O(1)（`patchInt32` 用它）、
-    /// 只在 `toHex()` 时做一次两两归并（O(字节数 · log 字节数)）。
-    private var byteHex: List<String> = arrayListOf<String>()
+    /// ⚠️ 2026-10-09 第三次迭代（内存回合）：「每字节一个列表项」在自举
+    /// 闭包规模（6700 万字节 = 6700 万个 2 字符片段 + 两两归并 27 层）
+    /// 实测驻留 ~7 GB（AURA_MEM_STATS：aura_string_concat 98.8M 次 /
+    /// used 9.9 GB 的主力），改为 **StringBuilder**：写入 O(1)（appendHexByte，
+    /// 全程 Int）、按下标改写 O(1)（setChar2）、toHex() 一次线性 build——
+    /// 零归并中间层，扩容旧块真 free。前置修复：runtime ReadCStr 桩
+    /// return-0 → 恒等（build() 曾拿 null String 必崩）。
+    private var hex: StringBuilder = StringBuilder()
 
     /// 重定位项列表。
     private var relocations: List<String> = arrayListOf<String>()
@@ -36,28 +42,87 @@ class X86Encoder {
     /// 待回填的局部跳转（记录 `dispFieldOffset|labelName`）。
     private var pendingJumps: List<String> = arrayListOf<String>()
 
+    /// [R96] 标签名 → 偏移的哈希索引（`resolveLabels` 回填时用）。
+    ///
+    /// ⚠️ 旧 `labelOffset` 每查一个标签都把整张 `labels` 扫一遍，且每个候选
+    /// 都用 `fieldOf` 现解析 `name|offset` 记录（逐字符扫描 + 建子串）——
+    /// 自举实测 pendingJumps × labels 双线性，`resolveLabels` 单项吃掉
+    /// emit 87s 里的 **80s**（主循环本身只要 6.4s）。
+    /// 改成「名称/偏移各预解析一次 + 开放寻址哈希」后查询 O(1)，
+    /// 同名仍取**最早出现**者（与旧线性扫描的首次命中语义一致）。
+    private var labelNamesIdx: List<String> = arrayListOf<String>()
+    private var labelOffIdx: List<Int> = arrayListOf<Int>()
+    private var labelTable: List<Int> = arrayListOf<Int>()
+    private var labelIdxReady: Boolean = false
+
     init() {
-        this.byteHex = arrayListOf<String>()
         this.relocations = arrayListOf<String>()
         this.offset = 0
         this.labels = arrayListOf<String>()
         this.pendingJumps = arrayListOf<String>()
+        this.labelIdxReady = false
+        this.hex.reset()
     }
 
-    /// 重置编码器。
+    /// 重置编码器（保留缓冲容量，归零长度）。
     fun reset(): Unit {
-        this.byteHex = arrayListOf<String>()
         this.relocations = arrayListOf<String>()
         this.offset = 0
         this.labels = arrayListOf<String>()
         this.pendingJumps = arrayListOf<String>()
+        this.labelIdxReady = false
+        this.hex.reset()
+    }
+
+    // ── P413：peephole 支持（长度探测 + 安全回滚）──
+
+    /// 已发射字节数（下标即下一次写入的偏移）。
+    fun byteLen(): Int {
+        return this.offset
+    }
+
+    /// 已登记的重定位项数。
+    fun relocCount(): Int {
+        return this.relocations.size()
+    }
+
+    /// 已登记的函数内标签数。
+    fun labelCount(): Int {
+        return this.labels.size()
+    }
+
+    /// 待回填的局部跳转项数。
+    fun pendingJumpCount(): Int {
+        return this.pendingJumps.size()
+    }
+
+    /// 回滚最近 `n` 个字节。
+    ///
+    /// ⚠️ **仅供 X86Emitter 的 store→load peephole 使用**，且调用方必须保证
+    /// 这 `n` 个字节：
+    ///   ① 是刚发射的 `mov [rbp+disp32], reg`（定长 7 字节，无重定位）；
+    ///   ② 期间**没有**任何新重定位 / 新标签 / 新待回填跳转被登记
+    ///      （三项计数由 `relocCount`/`labelCount`/`pendingJumpCount` 校验）。
+    /// 否则回滚会让已登记的偏移错位（标签指向错误位置 → 跳转跑飞）。
+    /// 本函数自身不做校验——校验在调用方一次性完成。
+    fun rollback(n: Int): Unit {
+        if (n <= 0) {
+            return
+        }
+        val szc: Int = this.hex.length()
+        val cut: Int = n * 2
+        if (szc < cut) {
+            return
+        }
+        this.hex.truncate(szc - cut)
+        this.offset = this.offset - n
     }
 
     // ── 基础写入 ──
 
     /// 写入一个字节。
     fun writeByte(b: Int): Unit {
-        this.byteHex.add(toHex2(b & 255))
+        this.hex.appendHexByte(b)
         this.offset = this.offset + 1
     }
 
@@ -152,10 +217,24 @@ class X86Encoder {
     /// 编码 IMUL r/m64, imm32（REX.W 0F AF /r id，3-操作数形式）。
     fun emitImulRI(dst: String, imm: Int): Unit {
         val d: Int = this.regNum(dst)
-        this.writeByte(this.rexByte(true, 0, d))
-        this.writeByte(0x0F)
-        this.writeByte(0xAF)
-        this.writeByte(0xC0 + (d & 7))
+        // ⚠️ 两个坑，都实测过：
+        //
+        // 1) `IMUL r/m64, imm32` 的 opcode 是 `REX.W 69 /r id imm32`，
+        //    **不是** `0F AF /r id`——`0F AF` 只有寄存器-寄存器形式
+        //    (`IMUL r/m64, r64`)，无立即数。CPU 会把 0F AF 后面的 4 字节
+        //    立即数当下一条指令解码：`0A 00 00 00` 变成 `or al,[rax];
+        //    add [rax],al; ...`，首次解引用未初始化的 rax 段错误。
+        //
+        // 2) `IMUL r/m, imm` 是**单操作数**形式，Intel 惯例把 ModRM 的
+        //    reg 和 r/m 两个字段**都填成**目标寄存器（reg 字段被硬件
+        //    忽略、但装配器/GCC/objdump 都按此约定写）。旧实现只填了
+        //    r/m（`0xC0 + d`，reg=0），于是 `48 69 C2 0A...` 被 CPU 解成
+        //    `imul rax, rdx, 10`（reg=0 决定目标=rax），结果 rax 被覆写、
+        //    rdx 不变——toInt 的 `rdx = rdx*10 + digit` 变成无意义运算。
+        //    正确写法：ModRM = `0xC0 + (d<<3) + d`，reg 与 r/m 同为 d。
+        this.writeByte(this.rexByte(true, d, d))
+        this.writeByte(0x69)
+        this.writeByte(0xC0 + ((d & 7) << 3) + (d & 7))
         this.writeInt(imm)
     }
 
@@ -251,6 +330,17 @@ class X86Encoder {
         this.writeByte(rex)
         this.writeByte(0x89)
         // mod=10 (disp32)，rm = base（base=101 即 rbp/r13 在 mod=10 下合法）
+        // ⚠️ base = rsp/r12（rm=100）时**必须**补 SIB 字节 0x24
+        //（scale=0, index=100=无, base=100=rsp）——旧实现直接写 disp32，
+        // 首字节被当 SIB 解码（index/disp 全部错位）⇒ 野生地址写入
+        //（实测 VEH handler 的 [rsp+48] 存储变成 0x4c000000(%rax,%rsi)，
+        // handler 自身即崩、崩溃转储永不落地，2026-10-06）。
+        if ((b & 7) == 4) {
+            this.writeByte(0x84 + ((s & 7) << 3))
+            this.writeByte(0x24)   // SIB: scale=0, index=100(无), base=100(rsp)
+            this.writeInt(disp)
+            return
+        }
         this.writeByte(0x80 + ((s & 7) << 3) + (b & 7))
         this.writeInt(disp)
     }
@@ -289,6 +379,207 @@ class X86Encoder {
         this.emitBinOp(dst, src, 0x31)
     }
 
+    // ── R57: 浮点运算编码（xmm 寄存器）──
+
+    /// 编码 xmm 二元浮点运算（xmm, xmm 形式）。
+    ///
+    /// 使用 SSE2 指令集（0F xx ModRM，xmm0-xmm7）。
+    /// xmm8-xmm15 需要 VEX 前缀，当前不支持（寄存器分配器只分配
+    /// rbx/rsi/rdi/r12-r15，对应 xmm3/xmm6/xmm7/xmm12-xmm15）。
+    ///
+    /// opcode: 0x58=addpd, 0x5C=subpd, 0x59=mulpd, 0x5E=divpd
+    private fun emitSseFloatBinary(dst: String, src: String, sseOpcode: Int): Unit {
+        val dstNum: Int = this.xmmNum(dst)
+        val srcNum: Int = this.xmmNum(src)
+        // 66 0F + opcode（双精度 SSE2）。2026-10-16：此前漏 66 前缀 ——
+        // emitAddpd 等四个"pd"函数实际编码**单精度** addps/subps/mulps/
+        // divps：f64 位型低 32 位被当两个 f32 运算（1.5 的低位=0 ⇒
+        // 1.5+2.0 = 0），AddF/MulF 全链垃圾（实测 add(3,1.5)=3、
+        // sqrt(16) 指针值、11-imports 挂起）。
+        this.writeByte(0x66)
+        this.writeByte(0x0F)
+        this.writeByte(sseOpcode)
+        // ModRM: mod=11 (reg,reg), reg=dst[3:0], r/m=src[3:0]
+        // 仅支持 xmm0-xmm7（不需要 REX 前缀）
+        val modrm: Int = 0xC0 | ((dstNum & 0x0F) << 3) | (srcNum & 0x0F)
+        this.writeByte(modrm)
+    }
+
+    /// 获取 xmm 寄存器编号。
+    private fun xmmNum(reg: String): Int {
+        if (reg == "xmm0")  { return 0 }
+        if (reg == "xmm1")  { return 1 }
+        if (reg == "xmm2")  { return 2 }
+        if (reg == "xmm3")  { return 3 }
+        if (reg == "xmm4")  { return 4 }
+        if (reg == "xmm5")  { return 5 }
+        if (reg == "xmm6")  { return 6 }
+        if (reg == "xmm7")  { return 7 }
+        if (reg == "xmm8")  { return 8 }
+        if (reg == "xmm9")  { return 9 }
+        if (reg == "xmm10") { return 10 }
+        if (reg == "xmm11") { return 11 }
+        if (reg == "xmm12") { return 12 }
+        if (reg == "xmm13") { return 13 }
+        if (reg == "xmm14") { return 14 }
+        if (reg == "xmm15") { return 15 }
+        return 0
+    }
+
+    /// 编码 addpd dst, src（xmm, xmm）。
+    fun emitAddpd(dst: String, src: String): Unit {
+        this.emitSseFloatBinary(dst, src, 0x58)
+    }
+
+    /// 编码 subpd dst, src（xmm, xmm）。
+    fun emitSubpd(dst: String, src: String): Unit {
+        this.emitSseFloatBinary(dst, src, 0x5C)
+    }
+
+    /// 编码 mulpd dst, src（xmm, xmm）。
+    fun emitMulpd(dst: String, src: String): Unit {
+        this.emitSseFloatBinary(dst, src, 0x59)
+    }
+
+    /// 编码 divpd dst, src（xmm, xmm）。
+    fun emitDivpd(dst: String, src: String): Unit {
+        this.emitSseFloatBinary(dst, src, 0x5E)
+    }
+
+    // ── SSE2 数据搬运 / 整数↔浮点转换（toStringFloat 支持，2026-10-16）──
+
+    /// movq xmm, r/m64（66 REX 0F 6E /r）：64 位 GPR 位型搬入 xmm。
+    fun emitMovqXmmFromGpr(xmm: String, gpr: String): Unit {
+        val x: Int = this.xmmNum(xmm)
+        val r: Int = this.regNum(gpr)
+        this.writeByte(0x66)
+        this.writeByte(this.rexByte(true, x, r))
+        this.writeByte(0x0F)
+        this.writeByte(0x6E)
+        this.writeByte(0xC0 | ((x & 7) << 3) | (r & 7))
+    }
+
+    /// movq r/m64, xmm（66 REX 0F 7E /r）：xmm 位型搬入 64 位 GPR。
+    fun emitMovqGprFromXmm(gpr: String, xmm: String): Unit {
+        val r: Int = this.regNum(gpr)
+        val x: Int = this.xmmNum(xmm)
+        this.writeByte(0x66)
+        this.writeByte(this.rexByte(true, x, r))
+        this.writeByte(0x0F)
+        this.writeByte(0x7E)
+        this.writeByte(0xC0 | ((x & 7) << 3) | (r & 7))
+    }
+
+    /// cvttsd2si r64, xmm（F2 REX 0F 2C /r）：double → 有符号整数（向零截断）。
+    fun emitCvttsd2si(gpr: String, xmm: String): Unit {
+        val r: Int = this.regNum(gpr)
+        val x: Int = this.xmmNum(xmm)
+        this.writeByte(0xF2)
+        this.writeByte(this.rexByte(true, r, x))
+        this.writeByte(0x0F)
+        this.writeByte(0x2C)
+        this.writeByte(0xC0 | ((r & 7) << 3) | (x & 7))
+    }
+
+    /// cvtsi2sd xmm, r/m64（F2 REX 0F 2A /r）：有符号整数 → double。
+    fun emitCvtsi2sd(xmm: String, gpr: String): Unit {
+        val x: Int = this.xmmNum(xmm)
+        val r: Int = this.regNum(gpr)
+        this.writeByte(0xF2)
+        this.writeByte(this.rexByte(true, x, r))
+        this.writeByte(0x0F)
+        this.writeByte(0x2A)
+        this.writeByte(0xC0 | ((x & 7) << 3) | (r & 7))
+    }
+
+    /// 编码**双精度** xmm 二元运算（66 0F xx /r）。
+    /// ⚠️ emitSseFloatBinary 无 66 前缀（实为单精度 subps/mulps），
+    /// R57 既有调用按单精度工作不能动；toStringFloat 需要真 double。
+    private fun emitSseDoubleBinary(dst: String, src: String, sseOpcode: Int): Unit {
+        val d: Int = this.xmmNum(dst)
+        val s: Int = this.xmmNum(src)
+        this.writeByte(0x66)
+        this.writeByte(this.rexByte(false, d, s))
+        this.writeByte(0x0F)
+        this.writeByte(sseOpcode)
+        this.writeByte(0xC0 | ((d & 7) << 3) | (s & 7))
+    }
+
+    /// 编码 subsd dst, src（F2 REX 0F 5C /r，标量双精度）。
+    fun emitSubsd(dst: String, src: String): Unit {
+        val d: Int = this.xmmNum(dst)
+        val s: Int = this.xmmNum(src)
+        this.writeByte(0xF2)
+        this.writeByte(this.rexByte(false, d, s))
+        this.writeByte(0x0F)
+        this.writeByte(0x5C)
+        this.writeByte(0xC0 | ((d & 7) << 3) | (s & 7))
+    }
+
+    /// 编码 mulsd dst, src（F2 REX 0F 59 /r，标量双精度）。
+    fun emitMulsd(dst: String, src: String): Unit {
+        val d: Int = this.xmmNum(dst)
+        val s: Int = this.xmmNum(src)
+        this.writeByte(0xF2)
+        this.writeByte(this.rexByte(false, d, s))
+        this.writeByte(0x0F)
+        this.writeByte(0x59)
+        this.writeByte(0xC0 | ((d & 7) << 3) | (s & 7))
+    }
+
+    /// 编码 addsd dst, src（F2 REX 0F 58 /r，标量双精度）。
+    fun emitAddsd(dst: String, src: String): Unit {
+        val d: Int = this.xmmNum(dst)
+        val s: Int = this.xmmNum(src)
+        this.writeByte(0xF2)
+        this.writeByte(this.rexByte(false, d, s))
+        this.writeByte(0x0F)
+        this.writeByte(0x58)
+        this.writeByte(0xC0 | ((d & 7) << 3) | (s & 7))
+    }
+
+    /// 编码 divsd dst, src（F2 REX 0F 5E /r，标量双精度）。
+    fun emitDivsd(dst: String, src: String): Unit {
+        val d: Int = this.xmmNum(dst)
+        val s: Int = this.xmmNum(src)
+        this.writeByte(0xF2)
+        this.writeByte(this.rexByte(false, d, s))
+        this.writeByte(0x0F)
+        this.writeByte(0x5E)
+        this.writeByte(0xC0 | ((d & 7) << 3) | (s & 7))
+    }
+
+    /// ucomisd xmm, xmm（66 REX 0F 2E /r）：比较置 EFLAGS（ZF/PF/CF）。
+    fun emitUcomisd(xmm1: String, xmm2: String): Unit {
+        val a: Int = this.xmmNum(xmm1)
+        val b: Int = this.xmmNum(xmm2)
+        this.writeByte(0x66)
+        this.writeByte(this.rexByte(false, a, b))
+        this.writeByte(0x0F)
+        this.writeByte(0x2E)
+        this.writeByte(0xC0 | ((a & 7) << 3) | (b & 7))
+    }
+
+    /// 编码 NOT r/m64（REX.W F7 /2）。
+    ///
+    /// ⚠️ 与 emitMovRI 组合产生字节流歧义时（如 `mov rcx, -1` 紧跟
+    /// `call [rip+disp32]`）用 xor+not 组合替代，避免 `ff 15` 被误读。
+    /// 用 F7 二字节指令，ModRM 字节里 `reg` 字段 = 2（NOT 的 opcode_ext）。
+    fun emitNotRR(reg: String): Unit {
+        val r: Int = this.regNum(reg)
+        this.writeByte(this.rexByte(true, 0, r))
+        this.writeByte(0xF7)
+        this.writeByte(0xC0 + ((2 & 7) << 3) + (r & 7))
+    }
+
+    /// 编码 NEG r/m64（REX.W F7 /3）。
+    fun emitNegRR(reg: String): Unit {
+        val r: Int = this.regNum(reg)
+        this.writeByte(this.rexByte(true, 0, r))
+        this.writeByte(0xF7)
+        this.writeByte(0xC0 + ((3 & 7) << 3) + (r & 7))
+    }
+
     /// 编码 CMP reg, reg。
     fun emitCmpRR(dst: String, src: String): Unit {
         this.emitBinOp(dst, src, 0x39)
@@ -304,6 +595,11 @@ class X86Encoder {
         this.emitGroup1Imm(dst, 0, imm)
     }
 
+    /// 编码 AND reg, imm32（REX.W 81 /4 id，group1 扩展 4 = AND）。
+    fun emitAndRI(dst: String, imm: Int): Unit {
+        this.emitGroup1Imm(dst, 4, imm)
+    }
+
     /// 编码 SUB reg, imm32（REX.W 81 /5 id）。
     fun emitSubRI(dst: String, imm: Int): Unit {
         this.emitGroup1Imm(dst, 5, imm)
@@ -312,6 +608,17 @@ class X86Encoder {
     /// 编码 CMP reg, imm32（REX.W 81 /7 id）。
     fun emitCmpRI(reg: String, imm: Int): Unit {
         this.emitGroup1Imm(reg, 7, imm)
+    }
+
+    /// 编码 CMP EAX, imm32（3D id，**32 位**、无 REX.W）。
+    ///
+    /// ⚠️ Win64 API 只写 eax、rax 高 32 位零扩展：`cmp rax, -1` 永远撞不上
+    /// 64 位 -1 ⇒ INVALID_FILE_SIZE 哨兵失效，返回 +4294967295 骗过调用方
+    /// 的 `size <= 0` 守卫 ⇒ malloc(4G) 段错误（实测 fs 探针 readText，
+    /// 2026-10-03 —— §8.4 修复只换了 mov 侧，cmp 侧漏了）。
+    fun emitCmpEaxImm32(imm: Int): Unit {
+        this.writeByte(0x3D)
+        this.writeInt(imm)
     }
 
     /// 编码 MUL rax, reg（有符号乘法，REX.W 0F AF /r）。
@@ -474,16 +781,83 @@ class X86Encoder {
     /// 定义标签（记录当前字节偏移）。
     fun emitLabel(name: String): Unit {
         this.labels.add(name + "|" + toStr(this.offset))
+        // [R96] 新标签加入 ⇒ 索引失效，下次查询时重建。
+        this.labelIdxReady = false
+    }
+
+    /// 构建标签哈希索引（惰性，一次性）。容量取 ≥2×标签数 的 2 的幂。
+    private fun buildLabelIndex(): Unit {
+        this.labelIdxReady = true
+        this.labelNamesIdx = arrayListOf<String>()
+        this.labelOffIdx = arrayListOf<Int>()
+        var i: Int = 0
+        while (i < this.labels.size) {
+            this.labelNamesIdx.add(this.fieldOf(this.labels[i], 0))
+            this.labelOffIdx.add(this.decToInt(this.fieldOf(this.labels[i], 1)))
+            i = i + 1
+        }
+        var cap: Int = 16
+        val want: Int = this.labelNamesIdx.size * 2
+        while (cap < want) { cap = cap * 2 }
+        this.labelTable = arrayListOf<Int>()
+        var k: Int = 0
+        while (k < cap) {
+            this.labelTable.add(0)
+            k = k + 1
+        }
+        var j: Int = 0
+        while (j < this.labelNamesIdx.size) {
+            val nm: String = this.labelNamesIdx[j]
+            var h: Int = 0
+            var c: Int = 0
+            val nmLen: Int = nm.length
+            while (c < nmLen) {
+                h = (h * 31 + (nm.charCodeAt(c) as Int)) % cap
+                c = c + 1
+            }
+            var placed: Boolean = false
+            var probes: Int = 0
+            while (!placed && probes < cap) {
+                val slot: Int = this.labelTable[h]
+                if (slot == 0) {
+                    this.labelTable[h] = j + 1
+                    placed = true
+                } else if (this.labelNamesIdx[slot - 1] == nm) {
+                    // 同名：保留最早出现的那条（与旧线性扫描语义一致）
+                    placed = true
+                } else {
+                    h = h + 1
+                    if (h >= cap) { h = 0 }
+                }
+                probes = probes + 1
+            }
+            j = j + 1
+        }
     }
 
     /// 查询标签的字节偏移（未定义返回 -1）。
     fun labelOffset(name: String): Int {
-        var i: Int = 0
-        while (i < this.labels.size) {
-            if (this.fieldOf(this.labels[i], 0) == name) {
-                return this.decToInt(this.fieldOf(this.labels[i], 1))
+        // [R96] 哈希查询（见 `labelTable` 字段说明）：O(1)，零分配。
+        if (!this.labelIdxReady) { this.buildLabelIndex() }
+        val cap: Int = this.labelTable.size
+        if (cap == 0) { return -1 }
+        var h: Int = 0
+        var c: Int = 0
+        val nameLen: Int = name.length
+        while (c < nameLen) {
+            h = (h * 31 + (name.charCodeAt(c) as Int)) % cap
+            c = c + 1
+        }
+        var probes: Int = 0
+        while (probes < cap) {
+            val slot: Int = this.labelTable[h]
+            if (slot == 0) { return -1 }
+            if (this.labelNamesIdx[slot - 1] == name) {
+                return this.labelOffIdx[slot - 1]
             }
-            i = i + 1
+            h = h + 1
+            if (h >= cap) { h = 0 }
+            probes = probes + 1
         }
         return -1
     }
@@ -527,16 +901,26 @@ class X86Encoder {
         return true
     }
 
+    /// 当前 .text 字节数（函数区间扫描的右边界）。
+    private fun textBytes(): Int {
+        return this.byteCount()
+    }
+
     /// 在指定字节偏移处覆盖写入 4 字节小端整数。
     private fun patchInt32(byteOffset: Int, value: Int): Unit {
-        if (byteOffset < 0 || byteOffset + 4 > this.byteHex.size) {
+        if (byteOffset < 0 || byteOffset + 4 > this.hex.length() / 2) {
             return
         }
         // 小端写入 4 个字节（与 `intToHex8` 同序：先低字节）。
         var x: Int = value
         var i: Int = 0
         while (i < 4) {
-            this.byteHex[byteOffset + i] = toHex2(x & 255)
+            val b: Int = x & 255
+            val hiN: Int = b >> 4
+            val loN: Int = b & 15
+            val c1: Int = if (hiN < 10) { 48 + hiN } else { 87 + hiN }
+            val c2: Int = if (loN < 10) { 48 + loN } else { 87 + loN }
+            this.hex.setChar2((byteOffset + i) * 2, c1, c2)
             x = x >> 8
             i = i + 1
         }
@@ -656,11 +1040,20 @@ class X86Encoder {
         this.writeInt(offset)
     }
 
+    /// 编码 MOV qword [rbp + disp32], imm32（REX.W C7 /0，mod=10 rm=101）。
+    ///
+    /// imm32 按符号扩展成 64 位落栈——正数 imm 得到零扩展后的同值 64 位常量
+    ///（canary 哨兵用），负数 imm 得到高 32 位全 1 的常量。
+    fun emitStoreImm32Stack(offset: Int, imm: Int): Unit {
+        this.writeByte(this.rexByte(true, 0, 5))
+        this.writeByte(0xC7)
+        this.writeByte(0x85)   // mod=10, reg=000(/0), rm=101(rbp)
+        this.writeInt(offset)
+        this.writeInt(imm)
+    }
+
     /// 编码 MOV reg, [rbp + disp32]（栈加载）。
     fun emitStackLoad(reg: String, offset: Int): Unit {
-        if (offset == 0) {
-            println("[stkload0] reg=" + reg)
-        }
         val r: Int = this.regNum(reg)
         this.writeByte(this.rexByte(true, r, 5))
         this.writeByte(0x8B)
@@ -727,6 +1120,18 @@ class X86Encoder {
         if ((r & 7) == 5) {
             this.writeByte(0x78 + 5)   // mod=01, reg=111(/7), rm=101
             this.writeByte(0)
+        } else if ((r & 7) == 4) {
+            // ⚠️ base = rsp/r12（rm=100）必须补 SIB=0x24（scale0 无 index，
+            // base=100=rsp）——旧实现直接落 imm8，首字节被当 SIB 解码成
+            // [rax+rax]（实测 emitPrologue 栈页探测读野地址崩溃，
+            // 2026-10-06，与 emitStoreMemDisp32 同族）。注意 imm 在本分支
+            // 内已写，**不能**再落到尾部共用 writeByte（双写会多出一个
+            // 0x00 字节挤进指令流，实测 prologue 第二个 subq 前多出 0x00
+            // ⇒ CPU 从半截指令走飞，2026-10-06 二次修）。
+            this.writeByte(0x3c)   // mod=00, reg=111(/7), rm=100(SIB)
+            this.writeByte(0x24)
+            this.writeByte(imm & 255)
+            return
         } else {
             this.writeByte(0x38 + (r & 7))   // mod=00, reg=111(/7), rm=baseReg
         }
@@ -944,6 +1349,13 @@ class X86Encoder {
         val b: Int = this.regNum(base)
         this.writeByte(this.rexByte(true, d, b))   // REX.W + REX.R/B as needed
         this.writeByte(0x8B)                        // MOV r/m64, r64
+        // ⚠️ base = rsp/r12（rm=100）时必须补 SIB=0x24（同 emitStoreMemDisp32）
+        if ((b & 7) == 4) {
+            this.writeByte(0x84 + ((d & 7) << 3))
+            this.writeByte(0x24)   // SIB: scale=0, index=100(无), base=100(rsp)
+            this.writeInt(disp32)
+            return
+        }
         this.writeByte(0x80 + ((d & 7) << 3) + (b & 7))  // mod=10, reg=dst, rm=base
         this.writeInt(disp32)                       // disp32 (little-endian, signed extend)
     }
@@ -966,29 +1378,13 @@ class X86Encoder {
     /// 两两归并：每层拷贝总量恒为 O(总长)，共 O(log 字节数) 层
     /// ⇒ 总分配 O(总长 · log 总长)，避免 `r = r + c` 的 O(总长²)。
     private fun joinBytes(): String {
-        if (this.byteHex.size == 0) {
-            return ""
-        }
-        var cur: List<String> = this.byteHex
-        while (cur.size > 1) {
-            val next: List<String> = arrayListOf<String>()
-            var i: Int = 0
-            while (i < cur.size) {
-                if (i + 1 < cur.size) {
-                    next.add(cur[i] + cur[i + 1])
-                } else {
-                    next.add(cur[i])
-                }
-                i = i + 2
-            }
-            cur = next
-        }
-        return cur[0]
+        // StringBuilder 一次线性 build（零归并中间层，见 hex 字段说明）
+        return this.hex.build()
     }
 
     /// 获取编码后的字节数。
     fun byteCount(): Int {
-        return this.byteHex.size
+        return this.hex.length() / 2
     }
 
     /// 获取重定位项列表。
@@ -1034,7 +1430,16 @@ class X86Encoder {
         this.writeByte(this.rexByte(true, 0, r))
         this.writeByte(0xC1)
         this.writeByte(0xC0 + (ext << 3) + (r & 7))
-        this.writeByte(imm & 15)
+        // 64 位模式下硬件对 `shl/shr/sar r/m64, imm8` 实际取 **(imm8 & 63)** 为移位量。
+        // 这里把 imm8 原样写入低 8 位即可（CPU 会再 & 63）；用 `imm & 63` 与硬件
+        // 最终语义完全一致，且对任何 0..63 的移位常量都正确。
+        //
+        // ⚠️ 历史回归：曾误写成 `imm & 15`（只留低 4 位），导致 16/20/24/32 被错成
+        // 0/4/8/0——例如 `x << 20` 退化为 `x << 4`、`x << 32` 退化为恒等。这会让
+        // guest 的 i32↔i64 装拆箱全体失真，也让 P0-2b 的 `mb << 20`（扩容字节数）
+        // 算成 `mb << 4` ⇒ heapCap 下溢 ⇒ bump 分配越界段错误。正确做法是写完整
+        // imm8 字节，此处用 `imm & 63`。
+        this.writeByte(imm & 63)
     }
 
     /// 编码 SHL/SHR reg, CL（REX.W D3 /N）。
@@ -1088,6 +1493,9 @@ class X86Encoder {
         }
     }
 
+    /// [R84] 未知寄存器名警告首次即止标记
+    private var unknownRegReported: Int = 0
+
     /// 获取寄存器编号。
     private fun regNum(reg: String): Int {
         // 同一寄存器的 64/32/16/8 位别名都要映射到同一个 REX 字段值。
@@ -1110,6 +1518,17 @@ class X86Encoder {
         if (reg == "r13" || reg == "r13d" || reg == "r13w" || reg == "r13b") return 13
         if (reg == "r14" || reg == "r14d" || reg == "r14w" || reg == "r14b") return 14
         if (reg == "r15" || reg == "r15d" || reg == "r15w" || reg == "r15b") return 15
+        // [R84] 未知寄存器名不再静默落 RAX。本函数旧兜底 `return 0`
+        // 曾把「写 rdx」编成「写 rax」（见上注）；R84 又实测 emitChannelRecv
+        // 把 emitMovMemDisp32(dst,base,disp) 按 store 风格(base,disp,src) 调用，
+        // 字符串 "rax" 落进 disp32 、整数 0 落进 base，编出
+        // mov rax,[rax+0xF204EF00] 野读，11-imports §11.4 因此崩。
+        // 参数错位这类错误必须在编译器构建期可见。首次即止，避免
+        // trace 刷屏家族的 OOM 路数（见 X86Emitter P1-3 注）。
+        if (this.unknownRegReported != 1) {
+            this.unknownRegReported = 1
+            println("[X86ENCODE] 未知寄存器名: " + reg + " （检查调用点参数顺序）")
+        }
         return 0
     }
 
@@ -1139,6 +1558,14 @@ class X86Encoder {
         if (cond == "no") return 1                                  // JNO
         if (cond == "np") return 11                                 // JNP
         if (cond == "p") return 10                                  // JP
+        // [P41x] j 前缀别名：allocRWX 的 "jg" 曾未命中映射 → 静默回落 JE
+        //（0x7FFFFFFF 越界守卫失效，反汇编 0f 84 实证）。
+        if (cond == "jg") return 15                                 // JG
+        if (cond == "jl") return 12                                 // JL
+        if (cond == "jle") return 14                                // JLE
+        if (cond == "jge") return 13                                // JGE
+        if (cond == "je") return 4                                  // JE
+        if (cond == "jne") return 5                                 // JNE
         return 4  // 默认 JE
     }
 
@@ -1186,7 +1613,8 @@ object X86EncoderUtils {
         if (hex == "") return "(empty)"
         var result: String = ""
         var i: Int = 0
-        while (i < hex.length) {
+        val hexLen: Int = hex.length
+        while (i < hexLen) {
             if (result != "") result = result + " "
             result = result + hex.substring(i, i + 2)
             i = i + 2

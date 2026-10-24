@@ -33,4 +33,25 @@ extern interface JitExec {
 
     /// 调用 `entry` 处单参函数（`arg0` 按平台 C ABI 传第 1 个参数），返回 `rax`。
     fun callI64(entry: Long, arg0: Long): Long
+
+    /// 分配一页粒度的 RW 内存块（JIT W^X 区专用）。
+    ///
+    /// 2026-10-08 P1-3：在**运行时桩内**完成「低地址提示逐个重试 +
+    /// Int32 可容校验」（0x10000000/0x18000000/0x08000000/0x20000000）。
+    /// 单参原语刻意绕开 .auc 到 VM 再到 native 的多参编排（实测种子
+    /// 编译的 .auc 方法里 6 参调用首参之外全错位——P1-3 探针）。
+    /// 返回 Int32 正范围的页对齐基址；失败返回 0。
+    fun allocRW(size: Long): Long
+
+    /// 修改 JIT 区页保护（Win32 PAGE_*：20=EXECUTE_READ、4=READWRITE...）。
+    ///
+    /// 返回 BOOL（1 成功 / 0 失败）。W^X 的 RW 到 RX 切换走这里。
+    fun protect(addr: Long, size: Long, prot: Int): Int
+
+    /// 分配一页粒度的 **RWX** 内存块（2026-10-09 P5-① 对策）。
+    ///
+    /// PAGE_EXECUTE_READWRITE 直分配：3 参 protect 的实参序随构建布局
+    /// 翻转且自识别桩亦不稳定（实测 P3/P6），RWX 消除了 W→X 转换调用。
+    /// W^X 安全弱化已知；发射器实参序根因修复后恢复 allocRW+protect。
+    fun allocRWX(size: Long): Long
 }

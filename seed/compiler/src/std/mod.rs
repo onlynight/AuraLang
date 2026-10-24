@@ -238,6 +238,22 @@ pub fn module_name_from_path(path: &str) -> Option<&str> {
             _ => None,
         };
     }
+    // 中间命名：`aura.lang.<pkg>[.<...>]`（3 段起的「aura.lang」包路径）。
+    //
+    // 与 `aura.lang.std.<Class>`（4 段）不同，这类写法把**包名**直接放在第 3 段
+    //（`aura.lang.concurrent.*`、`aura.lang.math.*`）。必须在此显式返回包名：
+    // 否则会落到下面的旧命名分支，`strip_prefix("aura.")` 取到 `"lang"` ——
+    // 一个无意义的键，真正的包名丢失。
+    //
+    // 后果链（实测 `examples/concurrency/actor_system.aura`）：
+    // `enabled_modules = ["lang"]` → `Vm::new` 走
+    // `NativeRegistry::with_modules(&["lang"])` → `register_concurrent` 的开关
+    // `m == "concurrent"` 永不成立 → `Actor.*` / `Channel.*` 未注册
+    // → `warn_unlinked_once` + 返回 `Int(0)`（调用静默失效）。
+    if let Some(rest) = path.strip_prefix("aura.lang.") {
+        // 只取包名段；`aura.lang.std.X` 已在上方返回，不会走到这里。
+        return Some(rest.split('.').next().unwrap_or(rest));
+    }
     // Old scheme (kept for backwards compatibility during migration)
     if let Some(rest) = path.strip_prefix("aura.") { Some(rest) } else { None }
 }

@@ -1,0 +1,10 @@
+// 影子读探针 1：基础循环计数器
+fun main() {
+    var i: Int = 0
+    var sum: Int = 0
+    while (i < 100) {
+        sum = sum + i
+        i = i + 1
+    }
+    println("p1=" + toStr(sum))
+}

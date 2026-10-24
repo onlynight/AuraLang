@@ -34,7 +34,8 @@ val BUFFER_COUNT = 0
 // 读者：多次读共享数据
 fun rwReader(id: Int): Int {
     var sum = 0
-    for (i in 0..id) {
+    // 同 mutex_shared：`..` 包含端点，读 `id` 次须用 `0..<id`。
+    for (i in 0..<id) {
         RwLock.readLock(RW_LOCK)
         sum = sum + SHARED_DATA
         RwLock.readUnlock(RW_LOCK)
@@ -48,7 +49,8 @@ fun rwReader(id: Int): Int {
 
 // 写者：多次写共享数据
 fun rwWriter(id: Int): Int {
-    for (i in 0..id) {
+    // 写 `id` 次 → 排他区间（`..` 含端点会多写一次）。
+    for (i in 0..<id) {
         RwLock.writeLock(RW_LOCK)
         SHARED_DATA = SHARED_DATA + 1
         RwLock.writeUnlock(RW_LOCK)

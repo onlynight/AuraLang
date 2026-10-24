@@ -145,7 +145,7 @@ class ChecksumEntry {
             return null
         }
         val hash: String = trimmed.substring(0, spaceIdx).trim()
-        val path: String = trimmed.substring(spaceIdx).trim()
+        val path: String = trimmed.substring(spaceIdx, trimmed.length()).trim()
         if (hash.length != 64) {
             return null
         }

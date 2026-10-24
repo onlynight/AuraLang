@@ -1,0 +1,14 @@
+// 影子读探针 5：函数调用边界外的局部变量存活（跨 call 槽）
+fun helper(x: Int): Int {
+    return x * 2 + 1
+}
+
+fun main() {
+    var acc: Int = 3
+    var i: Int = 0
+    while (i < 50) {
+        acc = helper(acc) - 1
+        i = i + 1
+    }
+    println("p5=" + toStr(acc))
+}

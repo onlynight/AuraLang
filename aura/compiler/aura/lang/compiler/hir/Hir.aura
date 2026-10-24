@@ -44,6 +44,9 @@ import aura.lang.std.String
 // （`[bytecode] error: 未解析的函数调用 'kidsOf'/'spanOf'` …）。
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.ast.Ast
+// [R90] 家族路由：HIR 节点字符串幸存者经 Memory.strdupRetain 落 retain era
+// （text/ty 源自 AST，AST 在 scratch，模块 rewind 后会悬挂）。
+import aura.lang.native.Memory
 
 object HirUtils {
 
@@ -268,6 +271,12 @@ class Hir {
     /// 根节点 id（由 lower 方法设置）。
     var rootId: Int = 0
 
+    /// [R93] 原文列（未转义），与 `texts` 一一对应。
+    /// 旧实现 `textOf` 每次访问都对含转义的文本**逐字符重建**（O(L²) 分配），
+    /// 而 textOf 是前端最热访问之一 —— 实测自举编译单点 2.33 亿次分配 / 5.8GB
+    /// （2026-10-19 AURA_ATTR_DUMP 归因）。改为 add 时一次性落列、textOf O(1) 直返。
+    private var textRaw: List<String> = arrayListOf<String>()
+
     // ── 构造 ──
 
     /// 追加一个节点，返回其 id。
@@ -288,28 +297,84 @@ class Hir {
         if (this.spanEndLine == null) { this.spanEndLine = arrayListOf<Int>() }
         if (this.spanEndCol == null) { this.spanEndCol = arrayListOf<Int>() }
         if (this.kids == null) { this.kids = arrayListOf<List<Int>>() }
+        if (this.textRaw == null) { this.textRaw = arrayListOf<String>() }
         val id: Int = this.kinds.size
-        this.kinds.add(kind)
-        // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）。
-        // 绝大多数 text 不含换行：单次 `contains`（C `strstr`，零分配）判定后
-        // 直接复用原串，避免逐字符重建长文本（token 文本可达数千字符）。
+        // [R93] 原文/转义分离：`texts` 存 .hat 线格式（换行已转义），
+        // `textRaw` 存原文。两条输入路径：
+        //   ① 编译器 lowering：text 为原文（可能含真实换行）→ 转义入 texts；
+        //   ② .hat 反序列化：text 已是转义形态 → 一次性反转义入 textRaw。
         var escaped: String = text
+        var rawText: String = text
         if (text.contains("\n")) {
+            // 分块转义 + 两两归并（O(L·log k)）；旧逐字符 `buf=buf+ch` 是 O(L²)。
             val tlen: Int = text.length
-            var buf: String = ""
-            var i: Int = 0
-            while (i < tlen) {
-                if (text.charCodeAt(i) == 10) {
-                    buf = buf + "\\n"
-                } else {
-                    buf = buf + text.substring(i, i + 1)
+            var segs: List<String> = arrayListOf<String>()
+            var segStart: Int = 0
+            var ci: Int = 0
+            while (ci < tlen) {
+                if (text.charCodeAt(ci) == 10) {
+                    segs.add(text.substring(segStart, ci))
+                    segStart = ci + 1
                 }
-                i = i + 1
+                ci = ci + 1
             }
-            escaped = buf
+            segs.add(text.substring(segStart, tlen))
+            while (segs.size > 1) {
+                val merged: List<String> = arrayListOf<String>()
+                var si: Int = 0
+                while (si < segs.size) {
+                    if (si + 1 < segs.size) {
+                        merged.add(segs[si] + "\\n" + segs[si + 1])
+                        si = si + 2
+                    } else {
+                        merged.add(segs[si])
+                        si = si + 1
+                    }
+                }
+                segs = merged
+            }
+            escaped = segs[0]
+        } else if (text.contains("\\n")) {
+            // 反序列化路径：入参是 `\n` 两字符转义 → 还原为真实换行（一次性）。
+            val tlen: Int = text.length
+            var segs: List<String> = arrayListOf<String>()
+            var segStart: Int = 0
+            var ci: Int = 0
+            while (ci < tlen) {
+                if (ci + 1 < tlen && text.charCodeAt(ci) == 92 && text.charCodeAt(ci + 1) == 110) {
+                    segs.add(text.substring(segStart, ci))
+                    segs.add("\n")
+                    ci = ci + 2
+                    segStart = ci
+                } else {
+                    ci = ci + 1
+                }
+            }
+            segs.add(text.substring(segStart, tlen))
+            while (segs.size > 1) {
+                val merged: List<String> = arrayListOf<String>()
+                var si: Int = 0
+                while (si < segs.size) {
+                    if (si + 1 < segs.size) {
+                        merged.add(segs[si] + segs[si + 1])
+                        si = si + 2
+                    } else {
+                        merged.add(segs[si])
+                        si = si + 1
+                    }
+                }
+                segs = merged
+            }
+            rawText = segs[0]
         }
-        this.texts.add(escaped)
-        this.tys.add(ty)
+        // [R90] 幸存者落 retain：kind/escaped/ty 三者可能是 AST 指针直传
+        //（escaped 无换行时即 text 本体，ty 多为 sema/AST 派生），scratch
+        // rewind 后全部悬挂。此处统一 strdupRetain 一份；.rodata 字面量
+        // 的多余复制代价可忽略（对齐到 16B，单节点 ~32B）。
+        this.kinds.add(Memory.strdupRetain(kind))
+        this.texts.add(Memory.strdupRetain(escaped))
+        this.textRaw.add(Memory.strdupRetain(rawText))
+        this.tys.add(Memory.strdupRetain(ty))
         this.spanStart.add(sp.start)
         this.spanEnd.add(sp.end)
         this.spanStartLine.add(sp.startLine)
@@ -338,12 +403,17 @@ class Hir {
 
     /// 第 id 个节点的主文本。
     fun textOf(id: Int): String {
+        // [R93] 直返原文列（O(1)、零分配）。旧实现对每次访问做 `contains` +
+        // 逐字符反转义，是前端 2.33 亿次分配 / 5.8GB 的根因。
+        if (this.textRaw != null && id >= 0 && id < this.textRaw.size) {
+            return HirUtils.hirItemAt(this.textRaw, id)
+        }
         if (this.texts == null) {
             return ""
         }
         val raw: String = HirUtils.hirItemAt(this.texts, id)
-        // 绝大多数 text 不含换行转义：单次 `contains` 判定后直接复用原串，
-        // 避免每次访问都逐字符重建（textOf 是发射期最热访问之一）。
+        // 回退路径（textRaw 缺失，例如旧 .hat 缓存/外部构造的 Hir）：
+        // 单次 `contains` 判定后直接复用原串。
         if (!raw.contains("\\")) {
             return raw
         }
@@ -478,6 +548,75 @@ class HirLowerer {
     /// 输出的 HIR。
     private var hir: Hir = Hir()
 
+    // ── 2026-10-02 接收者类型传播（选项2 / 任务②）──
+    // 目标：`vm.loadAucAndRun()` 这类**小写接收者**的方法调用，前端直接限定为
+    // `VmRunner_loadAucAndRun`（过去只有"接收者名大写开头"的启发式，小写一律
+    // 发裸名 → Photon/AOT 链接期 undefined symbol）。
+    //   curTypeDecl   当前类型体名（class/object 体内部非空）
+    //   localVarTys   函数内局部量 name=Ty（CSV；函数入口清空）
+    //   typeMemberTys 类字段 Class.member=Ty（CSV；类型体声明登记）
+    //   typeMethods   类方法 Class.method（CSV；类型体声明预登记，限定前校验，
+    //                 防止把 toString 等误限定到不存在的 Class_toString）
+    private var curTypeDecl: String = ""
+
+    // P40x-c：当前类型的父类名表（List 条目）。Parser 在 parseTypeDecl 已把
+    // 冒号后的首个名字（class Dog : Animal() 的 Animal）记入类型节点 ty 列；
+    // lowerTypeDecl 时落表。super.m() 据此解析到父类实现——此前 super 无
+    // 分支，落入隐式 this 解析 → 同名方法自递归（实测 test_super_only 栈溢出）。
+    // 类型必须 List<String>（String 在 AOT 隐式转换退化，实测驱动段错误）；
+    // 成员必须追加在 var 块末尾（对象槽位按声明序编号，插中段即崩）。
+    private var classParents: List<String> = arrayListOf<String>()
+
+    // P40x-e：已声明类型名表（CSV，逗号前导）。大写 Ident 接收者的类名约定
+    // 静态限定必须先验此表——顶层 val/const 同样大写开头（DEC_INT），此前
+    // 一律按类名限定并丢弃接收者 → DEC_INT_toString(mem)（无接收者值）。
+    private var knownTypes: String = ""
+
+    // ⚠️ P237：类体方法降级的**接收者注入通道**。lowerStmt 的 Function 分支
+    // 在类型体上下文里把它设为类名，lowerFunction 据此：① 方法名限定为
+    // `Class_method`；② params 顶部注入 `this: Class` 形参（并登记
+    // localVarTys，方法体的 this.xxx / 隐式 this 字段解析依赖它）。
+    // 旧实现值类方法展平成**无 this 的裸 @fn**（接收者物化成 @i32_const 0
+    // ⇒ String.hashCode → strlen(0)，§10.40/§10.41）。
+    private var pendingMethodSelf: String = ""
+
+    // ⚠️ P237：接收者注入的**作用域白名单**——值包装类闭集。`value`/`override`
+    // 修饰符在 AST 里不保留（parser 跳过软关键字），无法按修饰符判定；而这
+    // 些包装类的 override 方法正是「无 this 展平」家族的全部成员（常规类
+    // HashMap/FileUtils 等的既有调用图依赖裸名互调，不能波及）。
+    private var valueLikeTypes: String = ",String,Byte,Boolean,Double,Unit,Char,Float,Int,Long,Short,"
+    // [MEM-FIX] 2026-10-10：原为 CSV 累积串（`k=v,k=v,…`）——每条声明整段
+    // 拷贝已累积串,O(条目²),AOT 无 GC 全驻留(OOM 归因 413MB×3936×6RA
+    // ≈2.4GB 的真身,RA 指纹 [67,65,71,65,71] 唯一命中 lowerValDecl/
+    // lowerVarDecl)。改为 List<String> 条目(`k=v`),追加 O(1)、查找
+    // 零分配线性扫描;csvLookup 语义(精确 key、首条命中)由 kvGet 保持。
+    private var localVarTys: List<String> = arrayListOf<String>()
+    private var typeMemberTys: List<String> = arrayListOf<String>()
+    private var typeMethods: String = ""
+    /// 是否正处在类型体的直接成员层（方法体内部为 false）
+    private var inTypeBody: Boolean = false
+    // 函数/方法名 → 返回类型（`k=v` 条目，预登记期填充；lowerCall 回填
+    // HirCall ty —— String 隐式拼接包裹需要它识别非 String 调用结果）。
+    // ⚠️ 必须追加在字段块**末尾**：AOT 对象槽位按声明序编号，插中段会把
+    // 后续字段槽位整体推歪（实测 llc 报 i32/ptr 混用，见类头注释）。
+    private var funcRetTys: List<String> = arrayListOf<String>()
+
+    /// import 别名表（2026-10-17）：行 \nalias|modulePath\n。
+    /// `import aura.concurrent as cc` ⇒ `cc.newChannel(0)` 的接收者 cc 是
+    /// 模块路径别名而非实例——旧实现降级成 __field_get(0,0) 且泄漏为
+    /// arg0 ⇒ rcx=垃圾（实测 11 §11.2/§11.4 段错误）。
+    private var importAliasCsv: String = ""
+
+    /// enum 成员序号表（2026-10-16）：行。
+    /// ColorKind.RED 折叠为 HirLit(序号)——此前发 __field_get(0,0)
+    /// （基址 0 段错误，实测 05-classes §5.11）。
+    private var enumMembersCsv: String = ""
+    /// 伴生对象常量表（2026-10-16）：行 \nType.name=litText|litTy\n。
+    /// `companion object { val BASE: Int = 100 }` 的**字面量**初始化成员
+    /// 折叠为编译期常量——此前 MathUtil.BASE 走 __field_get(0,0)（基址 0
+    /// 段错误；R62 注释预言的缺口）。非字面量初始化不登记。
+    private var companionValsCsv: String = ""
+
     init() {
         this.ast = Ast()
         this.hir = Hir()
@@ -508,6 +647,54 @@ class HirLowerer {
         // 根节点是 Program，其子节点是顶层声明（与顶层可执行语句混排）
         val rootKids: List<Int> = program.kidsOfList(rootIdx)
         val kCount: Int = HirUtils.hirKidsCount(rootKids)
+        // 2026-10-02 接收者类型传播：**预登记**全部类型体的方法/字段 ——
+        // 必须在正式降级前完成，否则方法体内的调用点会早于同类其它方法的登记
+        // （typeMethods 不完整 → 限定校验失败 → 仍发裸名）。
+        // （2026-10-02：登记累进，不清空 —— localVarTys 由 lowerFunction 清，
+        //  curTypeDecl/inTypeBody 由 lowerTypeDecl 保存/恢复。）
+        var ri: Int = 0
+        while (ri < kCount) {
+            val declId: Int = HirUtils.hirKidsAt(rootKids, ri)
+            val dk: String = program.kindOf(declId)
+            if (dk == "Class" || dk == "Struct" || dk == "Object") {
+                val tName: String = program.textOf(declId)
+                this.knownTypes = this.knownTypes + "," + tName
+                val tKids: List<Int> = program.kidsOfList(declId)
+                if (HirUtils.hirKidsCount(tKids) >= 1) {
+                    this.preRegisterTypeMembers(tName, HirUtils.hirKidsAt(tKids, 0))
+                }
+            } else if (dk == "Enum") {
+                // enum 成员按声明序编号（parseTypeDecl 枚举分支产
+                // ExprStmt(Ident) 挂 body Block）。
+                this.registerEnumMembers(program, declId)
+            } else if (dk == "Import") {
+                // import aura.<path> as <alias> ⇒ 别名表（std 静态调用识别）。
+                val itxt: String = program.textOf(declId)
+                if (itxt.startsWith("aura.")) {
+                    val asIdx: Int = itxt.indexOf(" as ")
+                    if (asIdx > 0) {
+                        val alias: String = itxt.substring(asIdx + 4, itxt.length)
+                        if (alias != "") {
+                            this.importAliasCsv = this.importAliasCsv + "\n"
+                                    + alias + "|" + itxt.substring(0, asIdx) + "\n"
+                        }
+                    }
+                }
+            } else if (dk == "Function") {
+                // 顶层函数返回类型预登记（lowerCall 回填 HirCall ty 用）。
+                // 同时按 `名/元数` 登记：重载同名不同参各自有类型。
+                val fName: String = program.textOf(declId)
+                val frty: String = this.cleanTy(program.tyOf(declId))
+                if (fName != "" && frty != "") {
+                    if (this.kvGet(this.funcRetTys, fName) == "") {
+                        this.funcRetTys = this.kvAdd(this.funcRetTys, fName, frty)
+                    }
+                    val arK: String = fName + "/" + toStr(this.paramCountOf(program, declId))
+                    this.funcRetTys = this.kvAdd(this.funcRetTys, arK, frty)
+                }
+            }
+            ri = ri + 1
+        }
         var hirKids: List<Int> = HirUtils.hirNoKids()
         i = 0
         while (i < kCount) {
@@ -557,8 +744,53 @@ class HirLowerer {
             i = i + 1
         }
         if (mainId >= 0) {
-            // 已有 main：不合成（见方法注释）
-            return kids
+            // P40x-f：顶层 val/var 拼接进已存在 main 的体首（seed hir.rs
+            // splice 同款）。此前「已有 main 不合成」→ 顶层 val 存储丢失，
+            // 函数内引用读野槽（实测 p15：顶层 val .toString() 段错误）。
+            var valKids: List<Int> = HirUtils.hirNoKids()
+            var hasVal: Boolean = false
+            var j: Int = 0
+            while (j < HirUtils.hirKidsCount(kids)) {
+                val id: Int = HirUtils.hirKidsAt(kids, j)
+                val k: String = this.hir.kindOf(id)
+                if (k == "HirValDecl" || k == "HirVarDecl") {
+                    valKids = HirUtils.hirKidsAdd(valKids, id)
+                    hasVal = true
+                }
+                j = j + 1
+            }
+            if (!hasVal) { return kids }
+            val mKids: List<Int> = this.hir.kidsOfList(mainId)
+            if (HirUtils.hirKidsCount(mKids) < 1) { return kids }
+            val oldBody: Int = HirUtils.hirKidsAt(mKids, 0)
+            val bodyStmts: List<Int> = this.hir.kidsOfList(oldBody)
+            var newStmts: List<Int> = valKids
+            var si: Int = 0
+            while (si < HirUtils.hirKidsCount(bodyStmts)) {
+                newStmts = HirUtils.hirKidsAdd(newStmts, HirUtils.hirKidsAt(bodyStmts, si))
+                si = si + 1
+            }
+            val newBody: Int = this.hir.add("HirBlock", "", "", this.hir.spanOf(oldBody), newStmts)
+            var mNewKids: List<Int> = HirUtils.hirKidsAdd(HirUtils.hirNoKids(), newBody)
+            var mi: Int = 1
+            while (mi < HirUtils.hirKidsCount(mKids)) {
+                mNewKids = HirUtils.hirKidsAdd(mNewKids, HirUtils.hirKidsAt(mKids, mi))
+                mi = mi + 1
+            }
+            val newMain: Int = this.hir.add("HirFunction", "main", this.hir.tyOf(mainId),
+                this.hir.spanOf(mainId), mNewKids)
+            var outKids: List<Int> = HirUtils.hirNoKids()
+            j = 0
+            while (j < HirUtils.hirKidsCount(kids)) {
+                val id2: Int = HirUtils.hirKidsAt(kids, j)
+                if (id2 == mainId) {
+                    outKids = HirUtils.hirKidsAdd(outKids, newMain)
+                } else {
+                    outKids = HirUtils.hirKidsAdd(outKids, id2)
+                }
+                j = j + 1
+            }
+            return outKids
         }
         // 第二遍：无 main，收集顶层可执行语句。
         //
@@ -639,8 +871,62 @@ class HirLowerer {
     /// 小端 8 字节，被 `strlen` 读成 1~2，再被逗号拼接成垃圾串，最终在
     /// `synthesizeMainInKids` 里被 `hirKidsAt` 解成野 id（Photon 前端链接阶段
     /// 0xC0000005 的根因）。
+    /// [R89] ModuleLink scratchRewind 前调用：置空本模块 AST 引用，
+    /// 防止字段悬挂指向已被 scratch 回收的内存（后续读=碎尸）。
+    fun releaseAst() {
+        this.ast = Ast()
+}
+
     fun lowerTopLevel(program: Ast): List<Int> {
         this.ast = program
+        // 2026-10-02 接收者类型传播：本模块类型体的方法/字段**预登记**。
+        // ModuleLink 链路逐模块调 lowerTopLevel，登记累进到 loader 实例
+        // （跨模块共享，不清空 —— 局部表由 lowerFunction 清，类型体状态由
+        // lowerTypeDecl 保存/恢复）。
+        val pn2: Int = program.count
+        var ppi: Int = 0
+        while (ppi < pn2) {
+            val declId: Int = ppi
+            val dk: String = program.kindOf(declId)
+            if (dk == "Class" || dk == "Struct" || dk == "Object") {
+                val tName: String = program.textOf(declId)
+                this.knownTypes = this.knownTypes + "," + tName
+                val tKids: List<Int> = program.kidsOfList(declId)
+                if (HirUtils.hirKidsCount(tKids) >= 1) {
+                    this.preRegisterTypeMembers(tName, HirUtils.hirKidsAt(tKids, 0))
+                }
+            } else if (dk == "Enum") {
+                // enum 成员按声明序编号（parseTypeDecl 枚举分支产
+                // ExprStmt(Ident) 挂 body Block）。
+                this.registerEnumMembers(program, declId)
+            } else if (dk == "Import") {
+                // import aura.<path> as <alias> ⇒ 别名表（std 静态调用识别）。
+                val itxt: String = program.textOf(declId)
+                if (itxt.startsWith("aura.")) {
+                    val asIdx: Int = itxt.indexOf(" as ")
+                    if (asIdx > 0) {
+                        val alias: String = itxt.substring(asIdx + 4, itxt.length)
+                        if (alias != "") {
+                            this.importAliasCsv = this.importAliasCsv + "\n"
+                                    + alias + "|" + itxt.substring(0, asIdx) + "\n"
+                        }
+                    }
+                }
+            } else if (dk == "Function") {
+                // 顶层函数返回类型预登记（lowerCall 回填 HirCall ty 用）。
+                // 同时按 `名/元数` 登记：重载同名不同参各自有类型。
+                val fName: String = program.textOf(declId)
+                val frty: String = this.cleanTy(program.tyOf(declId))
+                if (fName != "" && frty != "") {
+                    if (this.kvGet(this.funcRetTys, fName) == "") {
+                        this.funcRetTys = this.kvAdd(this.funcRetTys, fName, frty)
+                    }
+                    val arK: String = fName + "/" + toStr(this.paramCountOf(program, declId))
+                    this.funcRetTys = this.kvAdd(this.funcRetTys, arK, frty)
+                }
+            }
+            ppi = ppi + 1
+        }
         val n: Int = program.count
         var rootIdx: Int = -1
         var i: Int = 0
@@ -725,7 +1011,9 @@ class HirLowerer {
 
     /// 降级函数声明。
     fun lowerFunction(ast: Ast, id: Int): Int {
-        val name: String = ast.textOf(id)
+        // 2026-10-02 接收者类型传播：局部类型表按函数清空（作用域边界）。
+        this.localVarTys = arrayListOf<String>()
+        var name: String = ast.textOf(id)
         val retTy: String = ast.tyOf(id)
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
@@ -733,6 +1021,18 @@ class HirLowerer {
 
         var paramsStr: List<Int> = HirUtils.hirNoKids()
         var bodyId: Int = -1
+
+        // ⚠️ P237：类体方法 → 限定名 `Class_method` + 顶部注入 `this` 形参。
+        // 通道由 lowerStmt 的 Function 分支设置（仅类型体上下文非空）。
+        if (this.pendingMethodSelf != "") {
+            name = this.pendingMethodSelf + "_" + name
+            val thisParam: Int = this.hir.add("HirParam", "this",
+                this.pendingMethodSelf, sp, HirUtils.hirNoKids())
+            paramsStr = HirUtils.hirKidsAdd(paramsStr, thisParam)
+            // 接收者登记（方法体 this.length / this.charCodeAt 的派发依赖）
+            this.localVarTys = this.kvAdd(this.localVarTys, "this", this.pendingMethodSelf)
+            this.pendingMethodSelf = ""
+        }
 
         // 子节点 0: Params 节点
         if (kCount > 0) {
@@ -743,7 +1043,13 @@ class HirLowerer {
             while (pi < pkCount) {
                 val pId: Int = HirUtils.hirKidsAt(paramsKids, pi)
                 val pName: String = ast.textOf(pId)
-                val pTy: String = ast.tyOf(pId)
+                val pTy: String = this.cleanTy(ast.tyOf(pId))
+                // 2026-10-02 接收者类型传播：参数登记进 localVarTys（List 参数
+                // 接收者的 .size()/.get() 限定依赖它 —— 实测 registerAucClasses
+                // 的 names.size()/parentIds.get(i) 全靠此登记）。
+                if (pTy != "" && this.localVarTy(pName) == "") {
+                    this.localVarTys = this.kvAdd(this.localVarTys, pName, pTy)
+                }
                 val pSp: Span = ast.spanOf(pId)
                 // 默认参数值：作为 HirParam 的 kids[0]，供调用点补齐实参
                 var pKids: List<Int> = HirUtils.hirNoKids()
@@ -921,12 +1227,49 @@ class HirLowerer {
         var hirKids: List<Int> = HirUtils.hirNoKids()
         if (kCount > 0) {
             val initId: Int = HirUtils.hirKidsAt(kids, 0)
+            // Lambda 提升（R81）：`val f = x -> e` ⇒ 函数 f(x)=e，
+            // ValDecl 本体省略（无一等函数值，直呼 f(…) 走函数调用）。
+            if (ast.kindOf(initId) == "Lambda") {
+                val lifted: Int = this.lowerLambdaLift(ast, name, initId)
+                if (lifted >= 0) { return lifted }
+            }
             val initHirId: Int = this.lowerExpr(ast, initId)
             hirKids = HirUtils.hirKidsAdd(hirKids, initHirId)
-            // 无显式类型标注时，从初始化表达式推断（Phase 6.5.7）
-            if (ty == "" && initHirId >= 0) {
+            // 无显式类型标注时，从初始化表达式推断（Phase 6.5.7）。
+            // ⚠️ 门槛必须用 cleanTy（剥可见性前缀后判空）：parseDecl 无标注时
+            // ty 列是 prsVisTy("") = "#public|"（**非空**），按 ty=="" 判会
+            // 整体跳过推断 ⇒ 变量类型丢失 ⇒ String 拼接不包裹 ⇒ 段错误
+            //（实测 `val x = 5` 崩、`val x: Int = 5` 正常）。
+            if (this.cleanTy(ty) == "" && initHirId >= 0) {
                 ty = this.hir.tyOf(initHirId)
             }
+            // 2026-10-02：注解在解析器侧丢失（实测 `val vm: VmRunner = VmRunner()`
+            // 的节点 ty 只剩 "#public|"）时，从构造器调用推断 —— 大写命名的
+            // 初始化调用即类名。
+            // R51：**只认空类型**，不再认标量类型。旧门槛 `ty == "" || isScalarTy(ty)`
+            // 会在 `val a = Vec2()`（Vec2 是小写开头的类）这类形态上把已推断出的
+            // 正确标量类型整体覆盖成 callee 名，下游 localTypes 记成
+            // `a|Vec2` ⇒ 接收者定型错位（见 R51val/R51var 探针）。
+            if (this.cleanTy(ty) == "" && initHirId >= 0
+                && this.hir.kindOf(initHirId) == "HirCall") {
+                val calleeNm: String = this.hir.textOf(initHirId)
+                if (calleeNm.length() > 0) {
+                    val fc3: Int = calleeNm.substring(0, 1).charCodeAt(0)
+                    if (fc3 >= 65 && fc3 <= 90) {
+                        ty = calleeNm
+                    }
+                }
+            }
+        }
+        // 2026-10-02 接收者类型传播：登记局部/字段类型。
+        // 类型体直接成员 → typeMemberTys（隐式 this 字段解析用）；
+        // 函数内局部 → localVarTys（局部接收者解析用）。
+        val cty: String = this.cleanTy(ty)
+        if (cty != "") {
+            if (this.inTypeBody && this.curTypeDecl != "") {
+                this.typeMemberTys = this.kvAdd(this.typeMemberTys, this.curTypeDecl + "." + name, cty)
+            }
+            this.localVarTys = this.kvAdd(this.localVarTys, name, cty)
         }
         return this.hir.add("HirValDecl", name, ty, sp, hirKids)
     }
@@ -942,11 +1285,35 @@ class HirLowerer {
         var hirKids: List<Int> = HirUtils.hirNoKids()
         if (kCount > 0) {
             val initId: Int = HirUtils.hirKidsAt(kids, 0)
+            if (ast.kindOf(initId) == "Lambda") {
+                val lifted: Int = this.lowerLambdaLift(ast, name, initId)
+                if (lifted >= 0) { return lifted }
+            }
             val initHirId: Int = this.lowerExpr(ast, initId)
             hirKids = HirUtils.hirKidsAdd(hirKids, initHirId)
-            if (ty == "" && initHirId >= 0) {
+            // 门槛同 lowerValDecl：必须 cleanTy（"#public|" 非空但无类型）。
+            if (this.cleanTy(ty) == "" && initHirId >= 0) {
                 ty = this.hir.tyOf(initHirId)
             }
+            // 2026-10-02：同 lowerValDecl —— 注解丢失时从构造器调用推断类型。
+            // R51：同 lowerValDecl，只认空类型（见那里的说明）。
+            if (this.cleanTy(ty) == "" && initHirId >= 0
+                && this.hir.kindOf(initHirId) == "HirCall") {
+                val calleeNm: String = this.hir.textOf(initHirId)
+                if (calleeNm.length() > 0) {
+                    val fc3: Int = calleeNm.substring(0, 1).charCodeAt(0)
+                    if (fc3 >= 65 && fc3 <= 90) {
+                        ty = calleeNm
+                    }
+                }
+            }
+        }
+        val cty: String = this.cleanTy(ty)
+        if (cty != "") {
+            if (this.inTypeBody && this.curTypeDecl != "") {
+                this.typeMemberTys = this.kvAdd(this.typeMemberTys, this.curTypeDecl + "." + name, cty)
+            }
+            this.localVarTys = this.kvAdd(this.localVarTys, name, cty)
         }
         return this.hir.add("HirVarDecl", name, ty, sp, hirKids)
     }
@@ -959,6 +1326,19 @@ class HirLowerer {
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
+        // 2026-10-02：进入类型体 —— 记录当前类型名（this 限定 / 隐式 this 字段
+        // 解析用）。成员（方法/字段）已在 lower() 的预登记遍历里进入
+        // typeMethods / typeMemberTys。
+        val prevTypeDecl: String = this.curTypeDecl
+        val prevInTypeBody: Boolean = this.inTypeBody
+        this.curTypeDecl = name
+        this.inTypeBody = true
+        // P40x-c：登记父类名（ty 列，Parser 已写入）
+        val parentName: String = this.cleanTy(ast.tyOf(id))
+        if (parentName != "" && parentName != name) {
+            this.classParents = this.kvAdd(this.classParents, name, parentName)
+        }
+
         var hirKids: List<Int> = HirUtils.hirNoKids()
         if (kCount > 0) {
             // 类型体的 Block
@@ -968,6 +1348,8 @@ class HirLowerer {
                 hirKids = HirUtils.hirKidsAdd(hirKids, bodyHirId)
             }
         }
+        this.curTypeDecl = prevTypeDecl
+        this.inTypeBody = prevInTypeBody
 
         val hirKind: String = if (kind == "Struct") { "HirStruct" }
             else if (kind == "Class") { "HirClass" }
@@ -1001,6 +1383,23 @@ class HirLowerer {
         if (kind == "Block") {
             return this.lowerBlock(ast, id)
         }
+        // ⚠️ `else if` 的 else 是 **If 节点**：必须按语句降级并**包成 HirBlock**。
+        // 旧实现无此分支 → 落到 lowerExpr → lowerIfExpr 产出**裸 HirIfExpr**
+        //（无 HirBlock 包裹）→ SsaBuilder.buildIf 的 else 路径调 buildBlock
+        // 把 HirIfExpr 的子节点当语句迭代：条件（HirBinary）与嵌套
+        // HirIfExpr 链被 buildStmt 静默跳过（无 HirIfExpr 用例），只有第一个
+        // else-if 的 then 体被**无条件**发射 ⇒ 所有 else-if 链坍缩成
+        // `if (c0) A else { B }`（实测 readConstValue 的 tag==1/2/3 分支全部
+        // 丢失 ⇒ 装载链读出垃圾常量 → streq 野指针崩溃，2026-10-06）。
+        // seed Rust 前端无此缺陷，故只有 photon / 纯 Aura 自举链受影响。
+        if (kind == "If") {
+            val s: Int = this.lowerStmt(ast, id)
+            if (s < 0) {
+                return -1
+            }
+            var bk: List<Int> = HirUtils.hirKidsAdd(HirUtils.hirNoKids(), s)
+            return this.hir.add("HirBlock", "", "", ast.spanOf(id), bk)
+        }
         if (kind == "Assign" || kind == "ExprStmt" || kind == "Return"
             || kind == "ValDecl" || kind == "VarDecl" || kind == "While"
             || kind == "For" || kind == "CFor" || kind == "Break"
@@ -1017,6 +1416,24 @@ class HirLowerer {
 
     /// 降级语句块。
     fun lowerBlock(ast: Ast, id: Int): Int {
+        return this.lowerBlockWithKind(ast, id, "HirBlock")
+    }
+
+    /// 通用块降级：kind 参数用于区分「普通 HirBlock」与「伴生对象体」
+    /// （后者用 "HirCompanionBlock" 标记，SsaBuilder 侧据此跳过 `@this` 注入）。
+    ///
+    /// 伴生对象体的函数在 HIR 层就带 `Class_` 前缀（如 `add` → `MathUtil_add`），
+    /// 这样 SsaBuilder 把伴生函数当自由函数处理时（不设 ownerCls），发射出的
+    /// 符号名与调用点 `@call @MathUtil_add(...)` 一致。
+    ///
+    /// ⚠️ 伴生 `val`/`var`（如 `val BASE: Int = 100`）**当前不降级**——
+    /// 伴生 val 的运行时支持需要单例承载（`MathUtil.getInstance().BASE`），
+    /// 而 photon 后端尚未实现单例合成。若把伴生 val 当类字段降级，
+    /// 调用侧 `MathUtil.BASE` 会退化成 `__field_get(0, idx)`（this=0）⇒
+    /// 段错误（实测 05-classes §5.8）。这里直接跳过，牺牲运行时输出完整性
+    /// 换取不崩溃；调用点 `MathUtil.BASE.toString()` 会走通用路径（可能返回
+    /// 0/空串），至少不会崩。
+    private fun lowerBlockWithKind(ast: Ast, id: Int, hirKind: String): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -1025,13 +1442,38 @@ class HirLowerer {
         var i: Int = 0
         while (i < kCount) {
             val childId: Int = HirUtils.hirKidsAt(kids, i)
+            val childKind: String = ast.kindOf(childId)
+            // 伴生 val/var：跳过（单例未实现，避免 this=0 段错误）
+            if (hirKind == "HirCompanionBlock"
+                    && (childKind == "ValDecl" || childKind == "VarDecl")) {
+                i = i + 1
+                continue
+            }
             val childHirId: Int = this.lowerStmt(ast, childId)
-            if (childHirId >= 0) {
+            // 伴生对象体：给函数名加 `Class_` 前缀（如 `add` → `MathUtil_add`）。
+            // 只对 HirFunction 生效；其他节点保持原名。
+            if (hirKind == "HirCompanionBlock" && childHirId >= 0
+                    && this.hir.kindOf(childHirId) == "HirFunction"
+                    && this.curTypeDecl != "") {
+                val origName: String = this.hir.textOf(childHirId)
+                val newName: String = this.curTypeDecl + "_" + origName
+                hirKids = HirUtils.hirKidsAdd(hirKids,
+                    this.renameHirNode(childHirId, newName))
+            } else if (childHirId >= 0) {
                 hirKids = HirUtils.hirKidsAdd(hirKids, childHirId)
             }
             i = i + 1
         }
-        return this.hir.add("HirBlock", "", "", sp, hirKids)
+        return this.hir.add(hirKind, "", "", sp, hirKids)
+    }
+
+    /// 克隆 HirFunction 节点到新名字（arena 只读，不能原地改名）。
+    private fun renameHirNode(nodeId: Int, newName: String): Int {
+        val oldName: String = this.hir.textOf(nodeId)
+        val ty: String = this.hir.tyOf(nodeId)
+        val sp: Span = this.hir.spanOf(nodeId)
+        val kids: List<Int> = this.hir.kidsOfList(nodeId)
+        return this.hir.add("HirFunction", newName, ty, sp, kids)
     }
 
     // ── 语句降级 ──
@@ -1045,7 +1487,18 @@ class HirLowerer {
             return this.lowerVarDecl(ast, id)
         } else if (kind == "Function") {
             // 类体/嵌套块中的函数声明（类方法）——此前未处理，导致类方法整体丢失
-            return this.lowerFunction(ast, id)
+            // ⚠️ P237：类型体上下文且为**值包装类** ⇒ 设置接收者注入通道。
+            if (this.inTypeBody && this.curTypeDecl != ""
+                && this.csvContains(this.valueLikeTypes, this.curTypeDecl)
+                // ⚠️ 暂排除 toUpperCase/toLowerCase：其现有调用点（Vm_callOrBuiltin
+                // 的表达式 receiver）经解析期 demotion 保持裸名——限定定义会
+                // 断链。待调用侧 demotion 限定补齐后移除排除。
+                && ast.textOf(id) != "toUpperCase" && ast.textOf(id) != "toLowerCase") {
+                this.pendingMethodSelf = this.curTypeDecl
+            }
+            val fnHirId: Int = this.lowerFunction(ast, id)
+            this.pendingMethodSelf = ""
+            return fnHirId
         } else if (kind == "InitBlock") {
             // 构造初始化块 `init { ... }` → 合成 `<Class>.init` 方法体（Phase 6.5.1b）
             return this.lowerInitBlock(ast, id)
@@ -1061,6 +1514,14 @@ class HirLowerer {
             return this.lowerCFor(ast, id)
         } else if (kind == "Block") {
             return this.lowerBlock(ast, id)
+        } else if (kind == "CompanionBody") {
+            // 伴生对象体（`companion object { fun add(a,b) ... }`）：走 Block
+            // 同一降级路径，但产出 HirBlock 的 kind 用 "HirCompanionBlock"
+            // 标记，SsaBuilder 侧的 `registerClassBodyEx` 见到该 kind 时
+            // 递归下钻但**不设 ownerCls**——伴生函数是「静态」成员，调用点
+            // `MathUtil.add(3, 4)` 视作自由函数（不加接收者），形参表若注入
+            // `@this` 会与调用点 ABI 错位一位。
+            return this.lowerBlockWithKind(ast, id, "HirCompanionBlock")
         } else if (kind == "Assign") {
             return this.lowerAssign(ast, id)
         } else if (kind == "Break") {
@@ -1365,6 +1826,44 @@ class HirLowerer {
 
     // ── 表达式降级 ──
 
+    /// R51:radix 文本 → 十进制文本(跳过非法字符与下划线)。
+    private fun radixToDec(text: String, radix: Int, from: Int): String {
+        var v: Int = 0
+        var i: Int = from
+        val textLen: Int = text.length
+        while (i < textLen) {
+            val ch: Int = text.charCodeAt(i)
+            var d: Int = -1
+            if (ch >= 48 && ch <= 57) { d = ch - 48 }
+            else if (ch >= 97 && ch <= 122) { d = ch - 87 }   // a-z → 10-35
+            else if (ch >= 65 && ch <= 90) { d = ch - 55 }    // A-Z → 10-35
+            if (d >= 0 && d < radix) {
+                v = v * radix + d
+            }
+            i = i + 1
+        }
+        return this.intToDec(v)
+    }
+
+    /// R51:Int → 十进制文本。
+    private fun intToDec(v: Int): String {
+        if (v == 0) { return "0" }
+        var out: String = ""
+        var n: Int = v
+        var neg: Boolean = false
+        if (n < 0) {
+            neg = true
+            n = -n
+        }
+        while (n > 0) {
+            val d: Int = n % 10
+            out = String.fromCharCode(48 + d) + out
+            n = (n - d) / 10
+        }
+        if (neg) { out = "-" + out }
+        return out
+    }
+
     /// 降级表达式。
     fun lowerExpr(ast: Ast, id: Int): Int {
         val kind: String = ast.kindOf(id)
@@ -1375,7 +1874,18 @@ class HirLowerer {
 
         // 字面量（携带类型信息，供 AOT 发射器选择表示；Phase 6.5.5/6.5.7）
         if (kind == "IntLiteral") {
-            return this.hir.add("HirLit", text, "Int", sp, HirUtils.hirNoKids())
+            // R51:radix 字面量归一——lexer 保留 0x/0b 前缀,而 ISel 数值解析
+            // 只认十进制(实测 01:0xFF→0、0b1100→1100)。此处转十进制文本。
+            var litText: String = text
+            if (litText.length > 2 && litText.charCodeAt(0) == 48) {
+                val c1: Int = litText.charCodeAt(1)
+                if (c1 == 120 || c1 == 88) {
+                    litText = this.radixToDec(litText, 16, 2)
+                } else if (c1 == 98 || c1 == 66) {
+                    litText = this.radixToDec(litText, 2, 2)
+                }
+            }
+            return this.hir.add("HirLit", litText, "Int", sp, HirUtils.hirNoKids())
         } else if (kind == "FloatLiteral" || kind == "DoubleLiteral") {
             return this.hir.add("HirLit", text, "Double", sp, HirUtils.hirNoKids())
         } else if (kind == "StringLiteral") {
@@ -1383,14 +1893,30 @@ class HirLowerer {
         } else if (kind == "BoolLiteral") {
             return this.hir.add("HirLit", text, "Boolean", sp, HirUtils.hirNoKids())
         } else if (kind == "CharLiteral") {
-            return this.hir.add("HirLit", text, "Char", sp, HirUtils.hirNoKids())
+            // R51:Char 字面量值 = 码点。旧实现文本 "A" 直落 ⇒ ISel 物化为串
+            // "A" ⇒ toString 走 toStr 臂按数字解析 "A" ⇒ 0(实测 01:0/5/0)。
+            var cpText: String = "0"
+            if (text.length > 0) {
+                cpText = this.intToDec(text.charCodeAt(0))
+            }
+            return this.hir.add("HirLit", cpText, "Char", sp, HirUtils.hirNoKids())
         } else if (kind == "NullLiteral") {
             return this.hir.add("HirLit", "null", "Any", sp, HirUtils.hirNoKids())
         }
 
         // 标识符
         if (kind == "Ident") {
-            return this.hir.leaf("HirVar", text, sp)
+            // 回填声明类型（局部量表 → 类字段表 → AST ty 列）。旧实现恒空 ⇒
+            // lowerBinary 的 String 隐式拼接无法识别变量操作数的非 String
+            // 身份 ⇒ `println("x=" + intVar)` 发 `@add(String, i32)` 段错误。
+            var vty: String = this.localVarTy(text)
+            if (vty == "" && this.curTypeDecl != "") {
+                vty = this.kvGet(this.typeMemberTys, this.curTypeDecl + "." + text)
+            }
+            if (vty == "") {
+                vty = ast.tyOf(id)
+            }
+            return this.hir.add("HirVar", text, vty, sp, HirUtils.hirNoKids())
         } else if (kind == "This") {
             return this.hir.leaf("HirVar", "this", sp)
         } else if (kind == "Super") {
@@ -1468,9 +1994,12 @@ class HirLowerer {
             return this.lowerMember(ast, id)
         }
 
-        // 安全调用 `?.`：近似降级为普通成员访问（完整空安全检查留待运行时）
+        // 安全调用 `?.`：降级为 `if (recv != null) recv.name else null`。
+        // 旧实现近似为普通成员访问（"空安全检查留待运行时"但运行时并无该
+        // 语义）⇒ null 接收者照样求值成员 ⇒ nullStr?.length 打 0 而非 null
+        //（实测 06 §6.4）。
         if (kind == "SafeAccess") {
-            return this.lowerMember(ast, id)
+            return this.lowerSafeAccess(ast, id)
         }
 
         // 下标访问
@@ -1536,23 +2065,104 @@ class HirLowerer {
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
         var opTy: String = ""
+        var firstTy: String = ""
+        var wideTy: String = ""
         var i: Int = 0
         while (i < kCount) {
             val childId: Int = HirUtils.hirKidsAt(kids, i)
             val childHirId: Int = this.lowerExpr(ast, childId)
             if (childHirId >= 0) {
                 hirKids = HirUtils.hirKidsAdd(hirKids, childHirId)
-                if (this.hir.tyOf(childHirId) == "String") {
+                val cty: String = this.hir.tyOf(childHirId)
+                if (cty == "String") {
                     opTy = "String"
+                }
+                if (i == 0 && firstTy == "") {
+                    firstTy = cty
+                }
+                if (this.tyRank(cty) > this.tyRank(wideTy)) {
+                    wideTy = cty
                 }
             }
             i = i + 1
         }
         val normOp: String = HirUtils.hirNormBinOp(op)
+        // 字符串隐式拼接（对齐 Kotlin `String + T`）：`+` 且任一操作数为
+        // String 时，其余非 String 操作数显式包一层 `toString` 调用。
+        // 旧实现直接发混型 kids 的 `HirBinary +` ⇒ SSA `@add(String, i32)`
+        // ⇒ 后端按整数指针加法出垃圾指针 ⇒ println 段错误
+        //（toString_implicit_test §1 首行 `"  Int: " + 42` 即崩）。
+        // 与手写 `x.toString()` 完全同路（buildCall → `@call @toString`）。
+        if (normOp == "+" && opTy == "String") {
+            var wrapped: List<Int> = HirUtils.hirNoKids()
+            var wi: Int = 0
+            while (wi < HirUtils.hirKidsCount(hirKids)) {
+                val kid: Int = HirUtils.hirKidsAt(hirKids, wi)
+                var kty: String = this.hir.tyOf(kid)
+                // HirCall ty 空时按调用名（含 `Class_method` 限定名）兜底查
+                // 预登记返回类型表 —— 成员调用走限定名路径，ty 未回填。
+                // ⚠️ kid 是 HIR 节点 **id**（Int）：取其子节点必须经
+                // `hir.kidsOfList(id)`，直接把 id 传给 hirKidsCount（收
+                // List）无类型检查器拦截，会编出 `Collections_count(i32)`
+                // 非法 IR、llc 拒收（2026-10-16 实踩）。
+                if (kty == "" && this.hir.kindOf(kid) == "HirCall") {
+                    val cnm: String = this.hir.textOf(kid)
+                    val cKids: List<Int> = this.hir.kidsOfList(kid)
+                    kty = this.kvGet(this.funcRetTys,
+                            cnm + "/" + toStr(HirUtils.hirKidsCount(cKids)))
+                    if (kty == "") {
+                        kty = this.kvGet(this.funcRetTys, cnm)
+                    }
+                }
+                // `String`/`String?` 都不包（String? 的 toString 即原值）。
+                if (kty != "String" && kty != "" && !kty.startsWith("String")) {
+                    // 用户类/结构体若声明了 toString 方法 → 发**限定方法调用**
+                    //（`Vec2_toString`）；运行库 `@toString` 只认标量，对象
+                    // 指针进去会打出垃圾数字（实测 §10 `v1+v2`）。
+                    var callName: String = "toString"
+                    if (this.csvContains(this.typeMethods, kty + ".toString")) {
+                        callName = kty + "_toString"
+                    }
+                    wrapped = HirUtils.hirKidsAdd(wrapped, this.hir.add(
+                            "HirCall", callName, "String", sp,
+                            HirUtils.hirKidsAdd(HirUtils.hirNoKids(), kid)))
+                } else {
+                    wrapped = HirUtils.hirKidsAdd(wrapped, kid)
+                }
+                wi = wi + 1
+            }
+            hirKids = wrapped
+        }
+        // ── 运算符重载（2026-10-16）：左操作数类型声明了 operator fun plus ──
+        // `v1 + v2` → `Vec2_plus(v1, v2)`（接收者 kids[0]，走既有方法调用/
+        // 重载解析链）。此前发裸 @add 把对象指针当整数加 → 垃圾/段错误
+        //（实测 05 §5.17、toString_implicit §10）。
+        if (normOp == "+" && opTy != "String"
+                && HirUtils.hirKidsCount(hirKids) >= 2) {
+            val olTy: String = this.hir.tyOf(HirUtils.hirKidsAt(hirKids, 0))
+            if (olTy != "" && !this.isScalarTy(olTy)
+                    && this.csvContains(this.typeMethods, olTy + ".plus")) {
+                return this.hir.add("HirCall", olTy + "_plus", "", sp, hirKids)
+            }
+        }
         if (normOp != "+" && normOp != "&&" && normOp != "||" &&
             normOp != "==" && normOp != "!=" && normOp != "<" &&
             normOp != ">" && normOp != "<=" && normOp != ">=") {
-            opTy = ""
+            // R53:算术运算(-,*,/,%)结果类型 = 操作数取宽。
+            // 旧实现 opTy 一律置空 ⇒ val r = pi * 2 的 HIR 类型为 ""
+            // ⇒ lowerValDecl 推断 r 的类型为空 ⇒ Emit.inferType("r")
+            // 回落 "i32" ⇒ r.toString() 走装箱整数路径(把 double 的
+            // 8 字节按奇偶判指针/整数)⇒ 实测 14-string-interp §14.2
+            // 输出 281392529211456 而非 6.28。
+            // 2026-10-16：改为**取宽**（原实现取 firstTy，Int+Double 会
+            // 静态标成 Int ⇒ double 位型按整数装箱打印出垃圾）。
+            opTy = if (this.tyRank(wideTy) > this.tyRank(firstTy)) wideTy else firstTy
+        } else if (normOp == "+" && opTy == "" && firstTy != "") {
+            // 数值 `+`（无 String 操作数）结果类型 = 操作数取宽（理由同上）。
+            // 旧实现把 `+` 排除在推断外 ⇒ `val total = add(3,4) + square(2)`
+            // 的 total ty="" ⇒ String 拼接包裹跳过 ⇒ @add(String, i32) 段错误
+            //（toString_implicit_test §12）。
+            opTy = if (this.tyRank(wideTy) > this.tyRank(firstTy)) wideTy else firstTy
         }
         return this.hir.add("HirBinary", normOp, opTy, sp, hirKids)
     }
@@ -1565,16 +2175,23 @@ class HirLowerer {
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
         var hirKids: List<Int> = HirUtils.hirNoKids()
+        var kidTy: String = ""
         var i: Int = 0
         while (i < kCount) {
             val childId: Int = HirUtils.hirKidsAt(kids, i)
             val childHirId: Int = this.lowerExpr(ast, childId)
             if (childHirId >= 0) {
                 hirKids = HirUtils.hirKidsAdd(hirKids, childHirId)
+                if (kidTy == "") {
+                    kidTy = this.hir.tyOf(childHirId)
+                }
             }
             i = i + 1
         }
-        return this.hir.add("HirUnary", HirUtils.hirNormUnOp(op), "", sp, hirKids)
+        // 结果类型 = 首操作数类型（R53 算术同语义）。旧实现恒空 ⇒
+        // `(-7)` 这类节点进 lowerBinary 的 String 隐式拼接包裹时因
+        // ty=="" 被跳过 ⇒ `@add(String, i32)` 段错误。
+        return this.hir.add("HirUnary", HirUtils.hirNormUnOp(op), kidTy, sp, hirKids)
     }
 
     /// 接收者是否为**不该降级为 `Collections.*`** 的对象。
@@ -1625,6 +2242,93 @@ class HirLowerer {
             || ty.startsWith("LinkedHashSet") || ty.startsWith("TreeSet")
     }
 
+    /// [R174] 接收者的解析类型是否为**用户类**且该类确实声明了此方法。
+    ///
+    /// 背景（实测 JIT 宿主 07-exception-* 三例 "Uncaught exception"）：
+    /// `count/getSize/size/isEmpty/clear` 的集合内建拦截（lowerMemberCall）
+    /// 只靠 `receiverNotForCollections` 排除非集合接收者——而该守卫对
+    /// **Member 接收者**（`this.handlerStack`）取 `ast.tyOf` 为空 ⇒ return
+    /// false ⇒ 用户方法被劫持成 `Collections.count(非列表对象)`，读对象头
+    /// 当列表长度 ⇒ 垃圾值（throwException 的 handler 循环整段跳过）。
+    ///
+    /// 本判定与 lowerCall 的限定逻辑同源（localVarTy / typeMemberTy /
+    /// typeMethods）：命中 ⇒ 调用必须走用户方法限定路径（`Class_method`），
+    /// 集合内建不得拦截。集合族类型（List/Map/Set/ArrayList…）即使声明了
+    /// 同名方法也保持内建语义（其 size/clear 由 Collections.count/clear
+    /// 承载，无 `List_size` 符号）。
+    private fun userClassDeclaresMember(recvId: Int, memberName: String): Boolean {
+        var owner: String = ""
+        val k: String = this.ast.kindOf(recvId)
+        if (k == "This") {
+            owner = this.curTypeDecl
+        } else if (k == "Ident") {
+            val n: String = this.ast.textOf(recvId)
+            if (n == "this") {
+                owner = this.curTypeDecl
+            } else {
+                owner = this.cleanTy(this.localVarTy(n))
+                if (owner == "") {
+                    owner = this.cleanTy(this.typeMemberTy(this.curTypeDecl, n))
+                }
+            }
+        } else if (k == "Member") {
+            val fieldName: String = this.ast.textOf(recvId)
+            val m2: List<Int> = this.ast.kidsOfList(recvId)
+            if (fieldName != "" && HirUtils.hirKidsCount(m2) >= 1) {
+                val baseId: Int = HirUtils.hirKidsAt(m2, 0)
+                val baseKind: String = this.ast.kindOf(baseId)
+                var ok: Boolean = false
+                if (baseKind == "This") {
+                    owner = this.curTypeDecl
+                    ok = true
+                } else if (baseKind == "Ident") {
+                    val bn: String = this.ast.textOf(baseId)
+                    if (bn.length() > 0) {
+                        val fc: Int = bn.substring(0, 1).charCodeAt(0)
+                        if (fc >= 97 && fc <= 122) {
+                            val lt: String = this.localVarTy(bn)
+                            if (lt != "") {
+                                owner = lt
+                                ok = true
+                            }
+                        }
+                    }
+                }
+                if (ok) {
+                    owner = this.cleanTy(this.typeMemberTy(owner, fieldName))
+                } else {
+                    owner = ""
+                }
+            }
+        }
+        // [R174 实测] 字段声明类型登记值带尾部 "="（解析器把 `: Ty = init`
+        // 的 "=" 一起吃进注解文本，如 "VmStrStack="；cleanTy 只剥 "|" 前缀）。
+        // 不剥掉则 key 拼成 "VmStrStack=.size"，csvContains 恒 false。
+        while (owner.length() > 0 && owner.charCodeAt(owner.length() - 1) == 61) {
+            owner = owner.substring(0, owner.length() - 1)
+        }
+        if (owner == "" || owner == "Any" || owner == "String") {
+            return false
+        }
+        if (owner.startsWith("List") || owner.startsWith("Map") || owner.startsWith("Set")
+                || owner.startsWith("ArrayList") || owner.startsWith("LinkedList")
+                || owner.startsWith("HashMap") || owner.startsWith("LinkedHashMap")
+                || owner.startsWith("TreeMap") || owner.startsWith("HashSet")
+                || owner.startsWith("TreeSet") || owner.startsWith("Deque")) {
+            return false
+        }
+        val found: Boolean = this.csvContains(this.typeMethods, owner + "." + memberName)
+        if (Env.get("AURA_MAP_TRACE", "") == "1" && this.ucdmDiagN < 48) {
+            this.ucdmDiagN = this.ucdmDiagN + 1
+            println("[UCDM] recv=[" + this.ast.textOf(recvId) + "] m=" + memberName
+                    + " owner=" + owner + " has=" + toStr(if (found) 1 else 0))
+        }
+        return found
+    }
+
+    /// [R174 诊断] userClassDeclaresMember 有界打印计数。
+    private var ucdmDiagN: Int = 0
+
     /// `Env.get(...)` 的接收者是否为 std 的 `Env` 对象。
     ///
     /// 见 `lowerCall` 里该分支的说明：不拦下就会被当成集合取值。
@@ -1641,16 +2345,490 @@ class HirLowerer {
     }
 
     /// 降级函数调用表达式。
+    // ── 2026-10-02 接收者类型传播辅助 ──
+
+    /// 清理类型名：剥离访问修饰符前缀（解析器把 `#public|` 一并写进 ty 列，
+    /// 实测 `val x: Int` 的节点 ty 是 "#public|Int"，类类型只剩 "#public|" ——
+    /// 不剥离则一切基于类型名的逻辑失效）。
+    private fun cleanTy(ty: String): String {
+        if (ty == "") { return "" }
+        val bar: Int = ty.indexOf("|")
+        var out: String = ty
+        if (bar >= 0) {
+            out = ty.substring(bar + 1, ty.length)
+        }
+        // [R174 实测] 字段注解文本带尾部 "="（解析器把 `: Ty = init` 的
+        // "=" 吃进类型文本，如 "VmStrStack="）。不剥则 typeMemberTys 登记
+        // 值带 =，所有 `Class.method`/`Class.field` 的 kv/csv key 拼接恒错
+        // ⇒ Member 接收者的方法限定全链失效（裸名兜底撞 stdlib 名单被
+        // 劫持 —— JIT 宿主异常处理三例 "Uncaught exception" 的根因链）。
+        // 正当类型名不含 "="，尾部剥除对所有消费方只会更正确。
+        while (out.length() > 0 && out.charCodeAt(out.length() - 1) == 61) {
+            out = out.substring(0, out.length() - 1)
+        }
+        return out
+    }
+
+    /// 数值类型宽度序（取宽用）：Double > Float > Long > Int > 其它(0)。
+    private fun tyRank(ty: String): Int {
+        if (ty == "Int") { return 1 }
+        if (ty == "Long") { return 2 }
+        if (ty == "Float") { return 3 }
+        if (ty == "Double") { return 4 }
+        return 0
+    }
+
+    /// 函数声明节点的形参个数（`Params`→`Param` 两层）。
+    private fun paramCountOf(ast: Ast, fnId: Int): Int {
+        val kids: List<Int> = ast.kidsOfList(fnId)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        var n: Int = 0
+        var i: Int = 0
+        while (i < kCount) {
+            val kidId: Int = HirUtils.hirKidsAt(kids, i)
+            if (ast.kindOf(kidId) == "Params") {
+                val pk: List<Int> = ast.kidsOfList(kidId)
+                val pn: Int = HirUtils.hirKidsCount(pk)
+                var j: Int = 0
+                while (j < pn) {
+                    if (ast.kindOf(HirUtils.hirKidsAt(pk, j)) == "Param") {
+                        n = n + 1
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+        return n
+    }
+
+    /// 是否标量类型（接收者类型限定只对类/对象类型生效）。
+    private fun isScalarTy(ty: String): Boolean {
+        if (ty == "Int" || ty == "Long" || ty == "Bool" || ty == "Float"
+            || ty == "Double" || ty == "String" || ty == "Unit" || ty == "Byte"
+            || ty == "Short" || ty == "Any" || ty == "Basic" || ty == "") {
+            return true
+        }
+        return false
+    }
+
+    /// CSV（逗号分隔）中是否含指定条目。
+    private fun csvContains(csv: String, item: String): Boolean {
+        if (csv == "" || item == "") { return false }
+        // [R101] 原地逐项比较，**零分配**。旧实现每遇到一个逗号就
+        // `csv.substring(start, i)` 建一个临时串再比 —— 对 `typeMethods`
+        // （自举实测 57KB、约 2000 项）意味着**每次调用 2000 次分配**，
+        // 而它在每个成员访问上都会跑（PhotonRuntime 这类成员密集模块的
+        // 降级耗时被抬到同规模模块的 10 倍）。
+        val n: Int = csv.length
+        val ilen: Int = item.length
+        var start: Int = 0
+        var i: Int = 0
+        while (i <= n) {
+            if (i == n || csv.charCodeAt(i) == 44) {
+                if (i - start == ilen) {
+                    var k: Int = 0
+                    var same: Boolean = true
+                    while (k < ilen) {
+                        if (csv.charCodeAt(start + k) != item.charCodeAt(k)) {
+                            same = false
+                            k = ilen
+                        }
+                        k = k + 1
+                    }
+                    if (same) { return true }
+                }
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// "k1=v1,k2=v2" 形式的 CSV 中按键取值（未命中返回 ""）。
+    /// [MEM-FIX] 键值条目追加（O(1) 摊还,替代 CSV 整段拷贝累积）。
+    private fun kvAdd(list: List<String>, key: String, value: String): List<String> {
+        list.add(key + "=" + value)
+        return list
+    }
+
+    /// 键值查找（精确 key、首条命中——csvLookup 同语义,零分配）。
+    private fun kvGet(list: List<String>, key: String): String {
+        if (key == "") { return "" }
+        val kl: Int = key.length
+        var i: Int = 0
+        while (i < list.size) {
+            val e: String = list[i]
+            // [R93] 原地前缀比较。旧实现 `e.startsWith(key + "=")` **每次迭代
+            // 都分配一个 `key + "="` 临时串**：登记表（localVarTys/typeMemberTys/
+            // funcRetTys）随类型/方法数增长，每次查找产生 O(表长) 次小分配
+            // ⇒ 自举编译实测 2.33 亿次分配 / 5.8GB（AURA_ATTR_DUMP 归因主项）。
+            if (e.length > kl && e.charCodeAt(kl) == 61) {   // '='
+                var eq: Boolean = true
+                var j: Int = 0
+                while (j < kl && eq) {
+                    if (e.charCodeAt(j) != key.charCodeAt(j)) { eq = false }
+                    j = j + 1
+                }
+                if (eq) {
+                    return e.substring(kl + 1, e.length)
+                }
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    private fun csvLookup(csv: String, key: String): String {
+        if (csv == "" || key == "") { return "" }
+        // [R101] 原地比较（同 csvContains）：旧实现每项建 `pair` + 两次 substring，
+        // 只有**命中那一项**才需要真正分配返回值。
+        val n: Int = csv.length
+        val kl: Int = key.length
+        var start: Int = 0
+        var i: Int = 0
+        while (i <= n) {
+            if (i == n || csv.charCodeAt(i) == 44) {
+                if (i > start) {
+                    var eq: Int = -1
+                    var p: Int = start
+                    while (p < i) {
+                        if (csv.charCodeAt(p) == 61) {
+                            eq = p
+                            p = i
+                        }
+                        p = p + 1
+                    }
+                    if (eq > start && eq - start == kl) {
+                        var k: Int = 0
+                        var same: Boolean = true
+                        while (k < kl) {
+                            if (csv.charCodeAt(start + k) != key.charCodeAt(k)) {
+                                same = false
+                                k = kl
+                            }
+                            k = k + 1
+                        }
+                        if (same) { return csv.substring(eq + 1, i) }
+                    }
+                }
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 局部量声明类型（localVarTys 查表）。
+    private fun localVarTy(name: String): String {
+        return this.kvGet(this.localVarTys, name)
+    }
+
+    /// P40x-e：name 是否为已声明类型名（knownTypes CSV 精确匹配）。
+    private fun isKnownTypeName(name: String): Boolean {
+        if (name == "" || this.knownTypes == "") { return false }
+        // [R101] 原地比较（零分配）。旧实现在**每个逗号位置**都
+        // `substring(i+1, i+1+nameLen)` 建一个临时串 —— 名单越长分配越多，
+        // 而本函数在每个标识符上都会被调用一次。
+        val csv: String = this.knownTypes
+        val n: Int = csv.length
+        val nameLen: Int = name.length
+        var i: Int = 0
+        while (i + nameLen + 1 <= n) {
+            if (csv.charCodeAt(i) == 44) {
+                var k: Int = 0
+                var same: Boolean = true
+                while (k < nameLen) {
+                    if (csv.charCodeAt(i + 1 + k) != name.charCodeAt(k)) {
+                        same = false
+                        k = nameLen
+                    }
+                    k = k + 1
+                }
+                if (same) { return true }
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// R51：从 Member/Ident 嵌套链重建完整点分名。
+    ///
+    /// `aura.string.length` 的 AST 形态是
+    ///   Member(length, kid= Member(string, kid= Ident(aura)))
+    /// 递归把每层文本用 `.` 拼起来。遇到非 Member/Ident 节点（例如
+    /// `This`、`Call`、`Literal`）即停止——那意味着基座是「值」而非「路径」，
+    /// 返回已收集的部分供调用方判定。
+    private fun collectQualifiedName(ast: Ast, id: Int): String {
+        if (id < 0) { return "" }
+        val k: String = ast.kindOf(id)
+        if (k != "Member" && k != "Ident") { return ast.textOf(id) }
+        val own: String = ast.textOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
+        val kc: Int = HirUtils.hirKidsCount(kids)
+        if (kc == 0) { return own }
+        // 取最后一个 kid 作为基座（约定：Member 的 kid 列表里第一个/唯一是基座）
+        val baseId: Int = HirUtils.hirKidsAt(kids, kc - 1)
+        val baseName: String = this.collectQualifiedName(ast, baseId)
+        if (baseName == "") { return own }
+        return baseName + "." + own
+    }
+
+    /// 类字段声明类型（typeMemberTys 查表，owner 为类/对象名）。
+    private fun typeMemberTy(owner: String, field: String): String {
+        if (owner == "" || field == "") { return "" }
+        return this.kvGet(this.typeMemberTys, owner + "." + field)
+    }
+
+    /// 类型体成员预登记（在正式降级**之前**对每个 Class/Struct/Object 调用，
+    /// 消除「方法体先于同类其它方法降级」的顺序依赖）。
+    /// Lambda 提升（R81）：`val f = x -> e` ⇒ 函数 f(x) = e。
+    /// 本后端无一等函数值：ValDecl 本体省略，`f(…)` 直呼走函数调用；
+    /// 捕获外部变量的 lambda（闭包）提升后自由变量取 0 —— 需环境捕获，
+    /// 留待闭包专项。函数体：HirBlock[HirReturn[body]]（隐式返回值）。
+    private fun lowerLambdaLift(ast: Ast, fname: String, lambdaId: Int): Int {
+        val kids: List<Int> = ast.kidsOfList(lambdaId)
+        if (HirUtils.hirKidsCount(kids) < 2) { return -1 }
+        val paramsNode: Int = HirUtils.hirKidsAt(kids, 0)
+        val bodyId: Int = HirUtils.hirKidsAt(kids, 1)
+        if (ast.kindOf(paramsNode) != "Params") { return -1 }
+        val sp: Span = ast.spanOf(lambdaId)
+        var outKids: List<Int> = HirUtils.hirNoKids()
+        val pk: List<Int> = ast.kidsOfList(paramsNode)
+        var i: Int = 0
+        while (i < pk.size()) {
+            val pid: Int = pk[i]
+            outKids = HirUtils.hirKidsAdd(outKids, this.hir.add("HirParam",
+                    ast.textOf(pid), ast.tyOf(pid), ast.spanOf(pid),
+                    HirUtils.hirNoKids()))
+            i = i + 1
+        }
+        val bodyHir: Int = this.lowerExpr(ast, bodyId)
+        if (bodyHir < 0) { return -1 }
+        val retHir: Int = this.hir.add("HirReturn", "", "", sp,
+                HirUtils.hirKidsAdd(HirUtils.hirNoKids(), bodyHir))
+        val blk: Int = this.hir.add("HirBlock", "", "", sp,
+                HirUtils.hirKidsAdd(HirUtils.hirNoKids(), retHir))
+        outKids = HirUtils.hirKidsAdd(outKids, blk)
+        return this.hir.add("HirFunction", fname, "", sp, outKids)
+    }
+
+    /// enum 成员登记：body Block 的 ExprStmt(Ident) 按序入表。
+    private fun registerEnumMembers(ast: Ast, id: Int): Unit {
+        val name: String = ast.textOf(id)
+        if (name == "") {
+            return
+        }
+        this.knownTypes = this.knownTypes + "," + name
+        val kids: List<Int> = ast.kidsOfList(id)
+        if (HirUtils.hirKidsCount(kids) < 1) {
+            return
+        }
+        val bodyId: Int = HirUtils.hirKidsAt(kids, 0)
+        val bk: List<Int> = ast.kidsOfList(bodyId)
+        var idx: Int = 0
+        var i: Int = 0
+        while (i < bk.size()) {
+            val stmtId: Int = bk[i]
+            if (ast.kindOf(stmtId) == "ExprStmt") {
+                val sk: List<Int> = ast.kidsOfList(stmtId)
+                if (sk.size() > 0 && ast.kindOf(sk[0]) == "Ident") {
+                    val mname: String = ast.textOf(sk[0])
+                    if (mname != "") {
+                        this.enumMembersCsv = this.enumMembersCsv + "\n"
+                                + name + "." + mname + "=" + toStr(idx) + "\n"
+                        idx = idx + 1
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    private fun preRegisterTypeMembers(name: String, bodyAst: Int): Unit {
+        val mKids: List<Int> = this.ast.kidsOfList(bodyAst)
+        var mi: Int = 0
+        while (mi < mKids.size()) {
+            val mk: String = this.ast.kindOf(mKids[mi])
+            val mn: String = this.ast.textOf(mKids[mi])
+            if (mk == "Function") {
+                val key: String = name + "." + mn
+                if (!this.csvContains(this.typeMethods, key)) {
+                    this.typeMethods = this.typeMethods + "," + key
+                }
+                // 方法返回类型也登记（裸名 + 限定名 + 名/元数三份 —— String
+                // 隐式拼接包裹需要 HirCall ty；同名方法按元数区分）。
+                val rty: String = this.cleanTy(this.ast.tyOf(mKids[mi]))
+                if (mn != "" && rty != "") {
+                    if (this.kvGet(this.funcRetTys, mn) == "") {
+                        this.funcRetTys = this.kvAdd(this.funcRetTys, mn, rty)
+                    }
+                    val qmn: String = name + "_" + mn
+                    if (this.kvGet(this.funcRetTys, qmn) == "") {
+                        this.funcRetTys = this.kvAdd(this.funcRetTys, qmn, rty)
+                    }
+                    val arK: String = mn + "/" + toStr(this.paramCountOf(this.ast, mKids[mi]))
+                    this.funcRetTys = this.kvAdd(this.funcRetTys, arK, rty)
+                }
+            } else if (mk == "ValDecl" || mk == "VarDecl") {
+                val fty: String = this.cleanTy(this.ast.tyOf(mKids[mi]))
+                if (fty != "") {
+                    val key: String = name + "." + mn + "=" + fty
+                    if (this.kvGet(this.typeMemberTys, name + "." + mn) == "") {
+                        this.typeMemberTys = this.kvAdd(this.typeMemberTys, key, "")
+                    }
+                }
+            } else if (mk == "CompanionBody") {
+                // 伴生 val/var 的**字面量**初始化 → 编译期常量表
+                //（MathUtil.BASE 读取此前走 __field_get(0,0) 段错误）。
+                val ck: List<Int> = this.ast.kidsOfList(mKids[mi])
+                var cj: Int = 0
+                while (cj < ck.size()) {
+                    val cid: Int = ck[cj]
+                    val ckind: String = this.ast.kindOf(cid)
+                    if (ckind == "ValDecl" || ckind == "VarDecl") {
+                        val vname: String = this.ast.textOf(cid)
+                        val vKids: List<Int> = this.ast.kidsOfList(cid)
+                        if (vname != "" && vKids.size() > 0) {
+                            val initId: Int = vKids[0]
+                            val ik: String = this.ast.kindOf(initId)
+                            var litTy: String = ""
+                            if (ik == "IntLiteral") { litTy = "Int" }
+                            else if (ik == "StringLiteral") { litTy = "String" }
+                            else if (ik == "BoolLiteral") { litTy = "Boolean" }
+                            else if (ik == "FloatLiteral" || ik == "DoubleLiteral") { litTy = "Double" }
+                            if (litTy != "") {
+                                this.companionValsCsv = this.companionValsCsv + "\n"
+                                        + name + "." + vname + "="
+                                        + this.ast.textOf(initId) + "|" + litTy + "\n"
+                            }
+                        }
+                    }
+                    cj = cj + 1
+                }
+            }
+            mi = mi + 1
+        }
+    }
+
     fun lowerCall(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: List<Int> = ast.kidsOfList(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
 
+        // ── R51：`aura.string.length(s)` / `aura.string.size(s)` 归一 ──
+        //
+        // `aura.string.*` 是 stdlib 的老式**包对象**写法（14-string-interp.aura 等），
+        // 但 `String.length` 在 `aura.core/aura/lang/String.aura` 里是**属性**、
+        // 运行库也没有 `aura.string.length` 这个 C 函数 ⇒ 直译成
+        // `@aura_string_length`（lld-link: undefined symbol）或退化成
+        // `@StringBuilder_length`（把字符串指针当 StringBuilder 读字段 ⇒
+        // 0xC0000005）。两种落法都是死路，必须在此改写成 `s.length()`。
+        //
+        // 实现上**改写 AST 调用节点本身**（把 callee 换成裸 `Member(length)`，
+        // 实参整体右移一格），然后**重新调用 lowerCall**：这样复用全部既有降级逻辑
+        // （`Member` → 接收者前置、裸成员名），不必复制分支。
+        //
+        // 只认**恰好两段**限定名（`pkg.member`）：`aura.lang.std.Math.max(a,b)` 这类
+        // 三/四段形态是真正的 std 类静态调用，走 `stdClassReceiver` 既有路径。
+        //
+        // AST 形态：解析器对 `aura.string.length` 产出
+        //   Call( Member(length, kid= Member(string, kid= Ident(aura))),  Ident(name) )
+        // 递归把整条 Member/Ident 链的文本拼成 "aura.string.length"。
+        val r51callee: Int = HirUtils.hirKidsAt(kids, 0)
+        if (HirUtils.hirKidsCount(kids) >= 2
+                && ast.kindOf(r51callee) == "Member") {
+            val cText: String = this.collectQualifiedName(ast, r51callee)
+            val nC: Int = cText.length
+            // 判定「点分路径 + 末段为 length/size」：`cText` 以 `.length`/`.size`
+            // 结尾，去掉该后缀后仍非空。不限定前缀段数——`aura.string.length`
+            // （3 段）、`string.length`（2 段）都是老式**包对象**写法，
+            // 都应改写成成员调用；前缀段数不影响语义。
+            val tailLen: String = ".length"
+            val tailSz: String = ".size"
+            val mem: String = ""
+            if (cText.endsWith(tailLen)) {
+                val prefix: String = cText.substring(0, nC - tailLen.length)
+                if (prefix != "") {
+                    mem = "length"
+                }
+            } else if (cText.endsWith(tailSz)) {
+                val prefix: String = cText.substring(0, nC - tailSz.length)
+                if (prefix != "") {
+                    mem = "size"
+                }
+            }
+            if (mem != "") {
+                val newCallee: Int = this.ast.leaf("Member", mem, ast.spanOf(r51callee))
+                var nk: String = toStr(newCallee)
+                var ci: Int = 1
+                while (ci < kCount) {
+                    nk = nk + "," + toStr(HirUtils.hirKidsAt(kids, ci))
+                    ci = ci + 1
+                }
+                val nid: Int = this.ast.add("Call", "", "", sp, nk)
+                // 递归降级改写后的调用。深度 1 即返回：改写结果不含点分 callee。
+                return this.lowerCall(ast, nid)
+            }
+        }
+
         // List/Array/Set.get(i) / getAt(i) → Collections.getAt(collection, i)
-        if (kCount >= 2) {
+        // P40x-g：门槛从 kCount >= 2 放宽到 >= 1——零参方法调用（toString()/
+        // size()/isEmpty()…）此前被整体挡在接收者分派之外，直接落成裸名
+        //（实测 01-lexer：DEC_INT.toString() → @toString 裸名 → runtime 恒等
+        // 占位 → 标量值被当串指针段错误）。块内各特例自带参数校验，安全。
+        if (kCount >= 1) {
             val calleeId: Int = HirUtils.hirKidsAt(kids, 0)
             if (ast.kindOf(calleeId) == "Member" || ast.kindOf(calleeId) == "SafeAccess") {
                 val memberName: String = ast.textOf(calleeId)
+
+                // ── std 模块静态调用（R80）：`aura.<mod>.<m>(…)` 与
+                // `<alias>.<m>(…)`（alias = import aura.<path> as X）。
+                // 接收者链是模块路径/导入别名，不是实例。旧实现把接收者
+                // 降级成 __field_get(0,0) 并泄漏为 arg0 ⇒ rcx=垃圾
+                //（实测 11 §11.2 aura.io.fileExists 段错误）。处理：丢弃
+                // 接收者链，只发实参的裸名调用——由唯一属主（如
+                // Stdio_fileExists）/自由函数（prelu max）/运行库映射解析。
+                if (ast.kindOf(calleeId) == "Member") {
+                    val cq: String = this.collectQualifiedName(ast, calleeId)
+                    var stdCall: Int = 0
+                    var methodName: String = ""
+                    if (cq.startsWith("aura.")) {
+                        var dots: Int = 0
+                        var di: Int = 0
+                        val cqLen: Int = cq.length
+                        while (di < cqLen) {
+                            if (cq.charCodeAt(di) == 46) { dots = dots + 1 }
+                            di = di + 1
+                        }
+                        if (dots >= 2) {
+                            stdCall = 1
+                            var ld: Int = cq.length - 1
+                            while (ld >= 0 && cq.charCodeAt(ld) != 46) { ld = ld - 1 }
+                            methodName = cq.substring(ld + 1, cq.length)
+                        }
+                    } else {
+                        val cKids: List<Int> = ast.kidsOfList(calleeId)
+                        if (HirUtils.hirKidsCount(cKids) >= 1
+                                && ast.kindOf(HirUtils.hirKidsAt(cKids, 0)) == "Ident") {
+                            val alias: String = ast.textOf(HirUtils.hirKidsAt(cKids, 0))
+                            if (alias != "" && this.importAliasCsv.indexOf("\n" + alias + "|") >= 0) {
+                                stdCall = 1
+                                methodName = memberName
+                            }
+                        }
+                    }
+                    if (stdCall == 1) {
+                        var stdKids: List<Int> = HirUtils.hirNoKids()
+                        var ai: Int = 1
+                        while (ai < kCount) {
+                            val ah: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(kids, ai))
+                            if (ah >= 0) { stdKids = HirUtils.hirKidsAdd(stdKids, ah) }
+                            ai = ai + 1
+                        }
+                        return this.hir.add("HirCall", methodName, "", sp, stdKids)
+                    }
+                }
 
                 // ── `Env.get(name[, default])`：**不是**集合取值，必须先拦下 ──
                 //
@@ -1749,7 +2927,10 @@ class HirLowerer {
                         val recvId: Int = HirUtils.hirKidsAt(calleeKids, 0)
                         val recvTy: String = ast.tyOf(recvId)
                         // 仅当接收者不是 String、且不是用户集合类实例时才转换为 Collections 调用
-                        if (recvTy != "String" && !this.receiverNotForCollections(recvId)) {
+                        // [R174] 用户类声明了同名方法 ⇒ 走用户方法限定路径，不得劫持
+                        //（`this.handlerStack.contains(x)` 这类此前被静默劫持）。
+                        if (recvTy != "String" && !this.receiverNotForCollections(recvId)
+                            && !this.userClassDeclaresMember(recvId, memberName)) {
                             var hirKids: List<Int> = HirUtils.hirNoKids()
                             val recvHirId: Int = this.lowerExpr(ast, recvId)
                             if (recvHirId >= 0) {
@@ -1789,9 +2970,14 @@ class HirLowerer {
                         val recvTy: String = ast.tyOf(recvId)
                         // String 有同名成员（`s.count()` / `s.size`），必须排除；
                         // Map/Set 族要放行（见 `isCollectionMapOrSetTy`）。
+                        // [R174] 用户类声明了同名方法（如 VmStrStack.size）⇒ 不劫持，
+                        // 交给 lowerCall 限定成 Class_method —— Member 接收者在
+                        // receiverNotForCollections 里 tyOf 为空被误判为集合（实测
+                        // JIT 宿主异常处理三例 "Uncaught exception" 的根因）。
                         if (recvTy != "String"
                             && (!this.receiverNotForCollections(recvId)
-                                || this.isCollectionMapOrSetTy(recvTy))) {
+                                || this.isCollectionMapOrSetTy(recvTy))
+                            && !this.userClassDeclaresMember(recvId, memberName)) {
                             var hirKids: List<Int> = HirUtils.hirNoKids()
                             val recvHirId: Int = this.lowerExpr(ast, recvId)
                             if (recvHirId >= 0) {
@@ -1804,6 +2990,32 @@ class HirLowerer {
                                 qname = "Collections.clear"
                             }
                             return this.hir.add("HirCall", qname, "", sp, hirKids)
+                        }
+                    }
+                }
+                // ── take(n)：List 切片 → stdlib `Collections.take`（2026-10-16）──
+                // 此前发**裸名** take → 撞运行库机器码同名符号（ABI 与 stdlib
+                // Aura 实现的列表布局不同）⇒ 结果垃圾 + 堆 OOM（实测
+                // 15-advanced §15.2）。限定到 stdlib 定义（Collections.aura:201）。
+                if (memberName == "take" && kCount >= 2) {
+                    val calleeKids: List<Int> = ast.kidsOfList(calleeId)
+                    if (HirUtils.hirKidsCount(calleeKids) >= 1) {
+                        val recvId: Int = HirUtils.hirKidsAt(calleeKids, 0)
+                        if (!this.receiverNotForCollections(recvId)) {
+                            var hirKids: List<Int> = HirUtils.hirNoKids()
+                            val recvHirId: Int = this.lowerExpr(ast, recvId)
+                            if (recvHirId >= 0) {
+                                hirKids = HirUtils.hirKidsAdd(hirKids, recvHirId)
+                            }
+                            var ti: Int = 1
+                            while (ti < kCount) {
+                                val childHirId: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(kids, ti))
+                                if (childHirId >= 0) {
+                                    hirKids = HirUtils.hirKidsAdd(hirKids, childHirId)
+                                }
+                                ti = ti + 1
+                            }
+                            return this.hir.add("HirCall", "Collections.take", "", sp, hirKids)
                         }
                     }
                 }
@@ -1893,21 +3105,140 @@ class HirLowerer {
                     // 小写开头视为变量，保留裸名由 Emit.aura 回退逻辑解析。
                     if (ast.kindOf(recvId) == "Ident") {
                         val recvName: String = ast.textOf(recvId)
+                        var qualified: String = ""
                         if (recvName.length() > 0) {
                             val first: String = recvName.substring(0, 1)
                             val fc: Int = first.charCodeAt(0)
                             if (fc >= 65 && fc <= 90) {  // 'A'..'Z'
-                                calleeName = recvName + "_" + ast.textOf(calleeId)
+                                // P40x-e：大写开头且确为已声明类型名才走静态
+                                // 限定；顶层 val/const 非类名 → 走按值路径
+                                if (this.isKnownTypeName(recvName)) {
+                                    qualified = recvName + "_" + ast.textOf(calleeId)
+                                }
                             } else {
-                                calleeName = ast.textOf(calleeId)
+                                // 2026-10-02 接收者类型传播：小写接收者按
+                                // ① 局部声明类型（`val vm: VmRunner`）② 隐式 this
+                                // 字段声明类型，限定为 `Class_method` —— 且仅当
+                                // 目标类确实声明了该方法（typeMethods 校验，防止
+                                // 把 toString/equals 误限定到不存在的实现）。
+                                var rty: String = this.cleanTy(this.localVarTy(recvName))
+                                if (rty == "") {
+                                    rty = this.cleanTy(this.typeMemberTy(this.curTypeDecl, recvName))
+                                }
+                                if (rty != "" && !this.isScalarTy(rty) && this.csvContains(this.typeMethods, rty + "." + ast.textOf(calleeId))) {
+                                    qualified = rty + "_" + ast.textOf(calleeId)
+                                } else if ((rty.startsWith("List") || rty.startsWith("Map")) && ast.textOf(calleeId) == "size") {
+                                    // 接口类型 List/Map 的 size → Collections.count（runtime 导出）
+                                    qualified = "Collections.count"
+                                } else if (rty != "" && this.isScalarTy(rty) && ast.textOf(calleeId) == "toString") {
+                                    // 标量接收者的 .toString() 定 `toString` 分派器
+                                    //（后端按 SSA 值类型分派 Int/Long/Double/…）。
+                                    // 旧实现定 `toStr` —— 运行库 toStr 只做**整数→
+                                    // 十进制**，Double 位型按整数解析出垃圾
+                                    //（实测 toString_implicit_test §9
+                                    // `Manual Float: 140698358490360`）。
+                                    qualified = "toString"
+                                }
                             }
+                        }
+                        if (qualified != "") {
+                            calleeName = qualified
+                        } else {
+                            calleeName = ast.textOf(calleeId)
+                        }
+                    } else if (ast.kindOf(recvId) == "This") {
+                        // 2026-10-02：`this.method()` → Class_method（当前类型体）
+                        if (this.curTypeDecl != "" && !this.isScalarTy(this.curTypeDecl) && this.csvContains(this.typeMethods, this.curTypeDecl + "." + ast.textOf(calleeId))) {
+                            calleeName = this.curTypeDecl + "_" + ast.textOf(calleeId)
+                        } else {
+                            calleeName = ast.textOf(calleeId)
+                        }
+                    } else if (ast.kindOf(recvId) == "Member") {
+                        // 2026-10-02：一级字段链接收者 `this.field.m()` / `field.m()` ——
+                        // Member 节点 text 即字段名；基座 This → 当前类型体，
+                        // 小写 Ident → 同名局部（无则视为隐式 this 字段）。
+                        // 字段声明类型 → 限定；更深链保持裸名（既有行为）。
+                        var qualified: String = ""
+                        val fieldName: String = ast.textOf(recvId)
+                        val m2: List<Int> = ast.kidsOfList(recvId)
+                        if (fieldName != "" && HirUtils.hirKidsCount(m2) >= 1) {
+                            val baseId: Int = HirUtils.hirKidsAt(m2, 0)
+                            val baseKind: String = ast.kindOf(baseId)
+                            var owner: String = this.curTypeDecl
+                            var ok: Boolean = false
+                            if (baseKind == "This") {
+                                ok = true
+                            } else if (baseKind == "Ident") {
+                                val bn: String = ast.textOf(baseId)
+                                if (bn.length() > 0) {
+                                    val fc2: Int = bn.substring(0, 1).charCodeAt(0)
+                                    if (fc2 >= 97 && fc2 <= 122) {
+                                        val lt: String = this.localVarTy(bn)
+                                        if (lt != "") {
+                                            owner = lt
+                                            ok = true
+                                        }
+                                    }
+                                }
+                            }
+                            if (ok) {
+                                val fty: String = this.cleanTy(this.typeMemberTy(owner, fieldName))
+                                if (fty != "" && !this.isScalarTy(fty) && this.csvContains(this.typeMethods, fty + "." + ast.textOf(calleeId))) {
+                                    qualified = fty + "_" + ast.textOf(calleeId)
+                                } else if ((fty.startsWith("List") || fty.startsWith("Map")) && ast.textOf(calleeId) == "size") {
+                                    qualified = "Collections.count"
+                                }
+                            }
+                        }
+                        if (Env.get("AURA_TOSTR_DIAG", "") == "1") {
+                            println("[TOS] recv=" + recvName + " known=" + toStr(if (this.isKnownTypeName(recvName)) 1 else 0)
+                                    + " rty=" + this.cleanTy(this.localVarTy(recvName)) + " member=" + ast.textOf(calleeId)
+                                    + " qualified=" + qualified)
+                        }
+                        if (qualified != "") {
+                            calleeName = qualified
+                        } else {
+                            calleeName = ast.textOf(calleeId)
+                        }
+                    } else if (ast.kindOf(recvId) == "Super") {
+                        // P40x-c：super.m() → 父类实现 Parent_m（静态分派）
+                        val parentCls: String = this.kvGet(this.classParents, this.curTypeDecl)
+                        if (parentCls != "" && this.csvContains(this.typeMethods, parentCls + "." + ast.textOf(calleeId))) {
+                            calleeName = parentCls + "_" + ast.textOf(calleeId)
                         } else {
                             calleeName = ast.textOf(calleeId)
                         }
                     } else {
                         calleeName = ast.textOf(calleeId)
                     }
-                    val recvHir: Int = this.lowerExpr(ast, recvId)
+                    // 大写 Ident 接收者 = 单例/extern 模块名（`Memory.write(...)`）：
+                    // **保留 HirVar(name) 原样**，不降级。旧实现走 lowerExpr ⇒
+                    // 模块名不是局部变量 ⇒ 降成 `@i32_const 0`，self 占位进实参
+                    // ⇒ SsaBuilder.buildCall 的 skipFirst（要求 kids[0] 是 HirVar）
+                    // 失效 ⇒ `Memory_write(0, buf, val, mem)` 实参整体错位。
+                    // HirVar(name) 交给 buildCall 的 recvIsSingleton 判定：
+                    // 单例/extern 都会丢掉接收者、对齐普通函数 ABI（rcx=首实参）。
+                    var recvHir: Int = -1
+                    var keepRawRecv: Boolean = false
+                    if (ast.kindOf(recvId) == "Super") {
+                        // P40x-c：super 的实参形态就是 this
+                        recvHir = this.hir.leaf("HirVar", "this", ast.spanOf(recvId))
+                        keepRawRecv = true
+                    }
+                    if (ast.kindOf(recvId) == "Ident") {
+                        val rn: String = ast.textOf(recvId)
+                        if (rn.length() > 0) {
+                            val fc3: Int = rn.substring(0, 1).charCodeAt(0)
+                            // P40x-e：仅已知类型名保留原始接收者；顶层 val 走 lowerExpr
+                            if (fc3 >= 65 && fc3 <= 90 && this.isKnownTypeName(rn)) {
+                                recvHir = this.hir.leaf("HirVar", rn, ast.spanOf(recvId))
+                                keepRawRecv = true
+                            }
+                        }
+                    }
+                    if (!keepRawRecv) {
+                        recvHir = this.lowerExpr(ast, recvId)
+                    }
                     if (recvHir >= 0) {
                         hirKids = HirUtils.hirKidsAdd(hirKids, recvHir)
                     }
@@ -1929,7 +3260,28 @@ class HirLowerer {
             }
             i = i + 1
         }
-        return this.hir.add("HirCall", calleeName, "", sp, hirKids)
+        // 回填返回类型（预登记表；String 隐式拼接包裹依赖它识别调用结果）。
+        // 先按 `名/实参个数` 查（重载各自类型），退回裸名。
+        val arK: String = calleeName + "/" + toStr(kCount - argStart)
+        var callTy: String = this.kvGet(this.funcRetTys, arK)
+        if (callTy == "") {
+            callTy = this.kvGet(this.funcRetTys, calleeName)
+        }
+        // 重载按元数撞键时（`add/2` 既有 (Int,Int) 又有 (Int,Double)），首见
+        // 登记可能偏窄 ⇒ 结果静态标 Int、运行时 double 位型 ⇒ toString 装箱
+        // 打印垃圾（实测 17-function-overload `add(3, 1.5)`）。按实参宽度
+        // 提升数值返回类型。
+        if (callTy != "" && this.tyRank(callTy) > 0) {
+            var ai: Int = argStart
+            while (ai < HirUtils.hirKidsCount(hirKids)) {
+                val aty: String = this.hir.tyOf(HirUtils.hirKidsAt(hirKids, ai))
+                if (this.tyRank(aty) > this.tyRank(callTy)) {
+                    callTy = aty
+                }
+                ai = ai + 1
+            }
+        }
+        return this.hir.add("HirCall", calleeName, callTy, sp, hirKids)
     }
 
     /// 降级成员访问表达式。
@@ -1953,7 +3305,106 @@ class HirLowerer {
         if (memberName == "length" || memberName == "size") {
             mty = "Int"
         }
+        // enum 成员折叠：接收者是已知类型名且成员在 enum 表 → HirLit(序号)。
+        // 此前 ColorKind.RED 发 __field_get(0,0)（基址 0 段错误）。
+        if (kCount >= 1) {
+            val evRecv: Int = HirUtils.hirKidsAt(kids, 0)
+            if (this.ast.kindOf(evRecv) == "Ident") {
+                val evCls: String = this.ast.textOf(evRecv)
+                if (evCls != "" && this.isKnownTypeName(evCls)) {
+                    val evKey: String = "\n" + evCls + "." + memberName + "="
+                    val evPos: Int = this.enumMembersCsv.indexOf(evKey)
+                    if (evPos >= 0) {
+                        var evE: Int = evPos + evKey.length
+                        while (evE < this.enumMembersCsv.length
+                                && this.enumMembersCsv.charCodeAt(evE) != 10) {
+                            evE = evE + 1
+                        }
+                        val evIdx: String = this.enumMembersCsv.substring(evPos + evKey.length, evE)
+                        if (evIdx != "") {
+                            return this.hir.add("HirLit", evIdx, "Int", sp,
+                                    HirUtils.hirNoKids())
+                        }
+                    }
+                }
+            }
+        }
+        // 伴生常量折叠：接收者是已知类型名且成员在伴生常量表 → HirLit。
+        // 此前 MathUtil.BASE 发 __field_get(0,0)（基址 0 段错误）。
+        if (kCount >= 1) {
+            val cvRecv: Int = HirUtils.hirKidsAt(kids, 0)
+            if (this.ast.kindOf(cvRecv) == "Ident") {
+                val cvCls: String = this.ast.textOf(cvRecv)
+                if (cvCls != "" && this.isKnownTypeName(cvCls)) {
+                    val cvKey: String = "\n" + cvCls + "." + memberName + "="
+                    // 键唯一（Type.name），单次查找即可；双参 indexOf 在
+                    // 本运行时忽略起点，不能用。
+                    val cvPos: Int = this.companionValsCsv.indexOf(cvKey)
+                    if (cvPos >= 0) {
+                        var cvE: Int = cvPos + cvKey.length
+                        while (cvE < this.companionValsCsv.length
+                                && this.companionValsCsv.charCodeAt(cvE) != 10) {
+                            cvE = cvE + 1
+                        }
+                        val cvRow: String = this.companionValsCsv.substring(cvPos + cvKey.length, cvE)
+                        val cvBar: Int = cvRow.indexOf("|")
+                        if (cvBar > 0) {
+                            return this.hir.add("HirLit",
+                                    cvRow.substring(0, cvBar),
+                                    cvRow.substring(cvBar + 1, cvRow.length),
+                                    sp, HirUtils.hirNoKids())
+                        }
+                    }
+                }
+            }
+        }
+        if (mty == "" && HirUtils.hirKidsCount(hirKids) > 0) {
+            // 字段类型回填：接收者 ty（类名）→ 预登记字段表
+            //（typeMemberTys 条目 `Class.field=Ty`，kvGet 按 `Class.field=`
+            // 前缀命中、返回 Ty）。String 隐式拼接包裹依赖 HirMember ty。
+            val recvTy: String = this.hir.tyOf(HirUtils.hirKidsAt(hirKids, 0))
+            if (recvTy != "") {
+                val fty: String = this.kvGet(this.typeMemberTys, recvTy + "." + memberName)
+                if (fty != "") {
+                    mty = fty
+                }
+            }
+        }
         return this.hir.add("HirMember", memberName, mty, sp, hirKids)
+    }
+
+    /// 降级安全调用 `recv?.name` → `if (recv != null) recv.name else null`。
+    /// SafeAccess 节点与 Member 同形（text=成员名,kids=[接收者]）,
+    /// lowerMember 可原样复用。结果类型取 ast.tyOf,缺失按 length/size
+    /// → Int?、其余 → Int? 兜底（可空语义,phi/toStrN 据此打 null）。
+    fun lowerSafeAccess(ast: Ast, id: Int): Int {
+        val memberName: String = ast.textOf(id)
+        val sp: Span = ast.spanOf(id)
+        val kids: List<Int> = ast.kidsOfList(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (kCount < 1) {
+            return -1
+        }
+        val memberHir: Int = this.lowerMember(ast, id)
+        var resTy: String = ast.tyOf(id)
+        if (resTy == "") {
+            resTy = "Int?"
+            if (memberName == "length" || memberName == "size") {
+                resTy = "Int?"
+            }
+        }
+        val recvHir: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(kids, 0))
+        if (recvHir < 0) {
+            return memberHir
+        }
+        val nullLit: Int = this.hir.add("HirLit", "null", resTy, sp, HirUtils.hirNoKids())
+        var condKids: List<Int> = HirUtils.hirKidsAdd(HirUtils.hirNoKids(), recvHir)
+        condKids = HirUtils.hirKidsAdd(condKids, nullLit)
+        val cond: Int = this.hir.add("HirBinary", "!=", "Boolean", sp, condKids)
+        var ifKids: List<Int> = HirUtils.hirKidsAdd(HirUtils.hirNoKids(), cond)
+        ifKids = HirUtils.hirKidsAdd(ifKids, memberHir)
+        ifKids = HirUtils.hirKidsAdd(ifKids, nullLit)
+        return this.hir.add("HirIfExpr", "", resTy, sp, ifKids)
     }
 
     /// 降级下标访问表达式。
@@ -1989,6 +3440,13 @@ class HirLowerer {
             var childHirId: Int = -1
             if (i == 0) {
                 childHirId = this.lowerExpr(ast, childId)
+            } else if (ast.kindOf(childId) == "If") {
+                // else-if 链（表达式上下文）：必须按**嵌套 HirIfExpr 表达式**
+                // 降级进 phi 链。走 lowerBranch 会包成 HirBlock 语句，
+                // SsaBuilder.buildStmt 静默跳过 HirIfExpr ⇒ else 臂 = @null
+                //（实测 toString_implicit_test §8 `grade` 外层 phi 合并出 null
+                // → println 段错误）。
+                childHirId = this.lowerIfExpr(ast, childId)
             } else {
                 childHirId = this.lowerBranch(ast, childId)
             }
@@ -2177,7 +3635,13 @@ class HirLowerer {
             while (pi < pkCount) {
                 val pId: Int = HirUtils.hirKidsAt(paramsKids, pi)
                 val pName: String = ast.textOf(pId)
-                val pTy: String = ast.tyOf(pId)
+                val pTy: String = this.cleanTy(ast.tyOf(pId))
+                // 2026-10-02 接收者类型传播：参数登记进 localVarTys（List 参数
+                // 接收者的 .size()/.get() 限定依赖它 —— 实测 registerAucClasses
+                // 的 names.size()/parentIds.get(i) 全靠此登记）。
+                if (pTy != "" && this.localVarTy(pName) == "") {
+                    this.localVarTys = this.kvAdd(this.localVarTys, pName, pTy)
+                }
                 val pSp: Span = ast.spanOf(pId)
                 // 默认参数值：作为 HirParam 的 kids[0]，供调用点补齐实参
                 var pKids: List<Int> = HirUtils.hirNoKids()

@@ -25,6 +25,27 @@ pub struct RuntimeFn {
 
 /// 所有 runtime 函数的声明
 pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
+    // [P0/D2] 门控 ARC 原语（时代闸门/.rdata/magic/标签校验，见 aura_std_cffi.c）。
+    // [P2] 发射器在 AURA_ARC=1 时对槽位/字段/实参/返回值插入调用。
+    RuntimeFn {
+        name: "aura_arc_retain",
+        ret: "void",
+        params: &[("ptr", "i8*")],
+    },
+    RuntimeFn {
+        name: "aura_arc_release",
+        ret: "i32",
+        params: &[("ptr", "i8*")],
+    },
+    // [P2] 闭包 env 的带标签分配（TAG_ENV + count 字段，析构级联用）。
+    RuntimeFn {
+        name: "aura_arc_alloc_env",
+        ret: "i8*",
+        params: &[
+            ("size", "i64"),
+            ("count", "i64"),
+        ],
+    },
     RuntimeFn {
         name: "aura_arc_increment",
         ret: "void",
@@ -32,7 +53,7 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
     },
     RuntimeFn {
         name: "aura_arc_decrement",
-        ret: "void",
+        ret: "i32",
         params: &[("ptr", "i8*")],
     },
     RuntimeFn {
@@ -63,6 +84,27 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         ret: "i64",
         params: &[("s", "i8*")],
     },
+    // 1 参 `substring(start)` → [start, 末尾)。此前缺失声明/实现，调用点的
+    // 缺失实参落成未初始化寄存器（HatParser.parseRet 注记的「1 参得到空串」）。
+    RuntimeFn {
+        name: "aura_string_substringFrom",
+        ret: "i8*",
+        params: &[
+            ("s", "i8*"),
+            ("start", "i64"),
+        ],
+    },
+    // `substringAt(from, len)` → [from, from+len)。此前映射表缺失，调用点
+    // 发射裸名 `@substringAt` → `llc: use of undefined value`。
+    RuntimeFn {
+        name: "aura_string_substringAt",
+        ret: "i8*",
+        params: &[
+            ("s", "i8*"),
+            ("from", "i64"),
+            ("len", "i64"),
+        ],
+    },
     RuntimeFn {
         name: "toStringFloat",
         ret: "i8*",
@@ -76,6 +118,17 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
     RuntimeFn {
         name: "aura_lang_std_String_equals",
         ret: "i1",
+        params: &[
+            ("a", "i8*"),
+            ("b", "i8*"),
+        ],
+    },
+    // Plan A 感知的 Any `==`（emit 的 i8*==i8* 统一比较入口）。
+    // 装箱整数（奇数指针）按标记值相等；真实指针（偶数）按字符串内容比较。
+    // C 实现见 aura_std_cffi.c 的 aura_any_equals。
+    RuntimeFn {
+        name: "aura_any_equals",
+        ret: "i32",
         params: &[
             ("a", "i8*"),
             ("b", "i8*"),
@@ -122,6 +175,10 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
     // ⚠️ 这些是裸名调用，非 sanitized 名。正确做法是修复改派而非加声明。
     RuntimeFn { name: "read", ret: "i64", params: &[("fd", "i64"), ("buf", "i64"), ("count", "i64")] },
     RuntimeFn { name: "write", ret: "i64", params: &[("fd", "i64"), ("buf", "i64"), ("count", "i64")] },
+    // Windows UCRT system() — 供 Process.run 降级调用
+    RuntimeFn { name: "system", ret: "i32", params: &[("cmd", "i8*")] },
+    // Windows CreateProcessA 版 system — 避免 cmd.exe 解析差异
+    RuntimeFn { name: "aura_system", ret: "i32", params: &[("cmd", "i8*")] },
     RuntimeFn { name: "open", ret: "i64", params: &[("path", "i64"), ("flags", "i64")] },
     RuntimeFn { name: "close", ret: "i64", params: &[("fd", "i64")] },
     RuntimeFn { name: "access", ret: "i64", params: &[("path", "i64"), ("mode", "i64")] },
@@ -359,6 +416,16 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         params: &[
             ("list", "i8*"),
             ("value", "i8*"),
+        ],
+    },
+    // `remove(i)`/`removeAt(i)` 经 HIR 重路由的 `__list_remove_at` 的实现
+    //（aura_std_cffi.c）。未登记会报 `use of undefined value`（实测自举驱动构建）。
+    RuntimeFn {
+        name: "aura_lang_std_Collections_listRemoveAt",
+        ret: "i8*",
+        params: &[
+            ("list", "i8*"),
+            ("idx", "i64"),
         ],
     },
     // `to` 运算符 / Pair 构造：`a to b` 降级为 pairOf(a, b)，返回 2 元素列表（i8*）。
@@ -866,6 +933,16 @@ pub fn translate_to_legacy_c(name: &str) -> String {
         if let Some(mutex_rest) = rest.strip_prefix("Mutex_") {
             return format!("aura_lang_concurrent_Mutex_{}", mutex_rest);
         }
+        // Future 类：`await` 的 C 实现名为 `aura_lang_concurrent_FutureAwait`
+        //（只有 `spawn` / `isDone` / `cancel` 才是 `Future_<m>` 风格）。
+        // 不特判时调用点与声明都落到不存在的 `aura_lang_concurrent_Future_await`
+        // → 链接期 `undefined symbol`（`tests/concurrent/future_chain.aura` 的根因）。
+        if let Some(fut_rest) = rest.strip_prefix("Future_") {
+            return match fut_rest {
+                "await" => "aura_lang_concurrent_FutureAwait".to_string(),
+                _ => format!("aura_lang_concurrent_Future_{}", fut_rest),
+            };
+        }
         // Atomic / RwLock / Condvar / Barrier：保留完整形式
         let parts: Vec<&str> = rest.splitn(2, '_').collect();
         if parts.len() != 2 {
@@ -898,6 +975,21 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
     let (ret, params): (&'static str, &[&str]) = match name {
         // C 运行时函数（Phase 1: 使用 C 运行时 malloc/free，不依赖 aura_memory_*）
         "malloc" => ("i8*", &["i64"]),
+        // [MEM-FIX] 阶段区域原语:符号与 Photon 侧 Memory.aura 的 @native 声明一致
+        "Memory_regionEnter" => ("i64", &[]),
+        "Memory_regionReset" => ("i64", &[]),
+        // [R87] scratch 并行 arena
+        "Memory_regionScratchTarget" => ("i64", &[]),
+        "Memory_regionRetainTarget" => ("i64", &[]),
+        "Memory_scratchReset" => ("i64", &[]),
+        // [R87] æ å¼ mark/rewind
+        "Memory_scratchMark" => ("i64", &[]),
+        "Memory_scratchRewind" => ("i64", &["i64"]),
+        // [R89] 字符串幸存者 dup
+        "Memory_strdupRetain" => ("i8*", &["i8*"]),
+        // [MEM-FIX] 阶段区域原语(编译内存:前端 bump 区域 + 边界整块回收)
+        "RegionEnter" => ("i64", &[]),
+        "RegionReset" => ("i64", &[]),
         "free" => ("void", &[P]),
         // aura.math
         "aura_math_sin" | "aura_math_cos" | "aura_math_tan" | "aura_math_asin"
@@ -917,6 +1009,8 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
                 P, "i64", "i64",
             ],
         ),
+        "aura_string_substringFrom" => (P, &[P, "i64"]),
+        "aura_string_substringAt" => (P, &[P, "i64", "i64"]),
         "aura_string_charAt" => (P, &[P, "i64"]),
         "aura_string_replace" | "aura_string_replaceAll" => (P, &[P, P, P]),
         "aura_string_padStart" => (
@@ -1054,7 +1148,7 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
             ],
         ),
         "aura_lang_std_StringBuilder_length" => ("i64", &["i64"]),
-        "aura_lang_std_StringBuilder_finish" => (P, &["i64"]),
+        "aura_lang_std_StringBuilder_build" => (P, &["i64"]),
         "aura_lang_std_StringBuilder_reset" => ("i64", &["i64"]),
         // aura.fs
         "aura_fs_exists" | "aura_fs_isFile" | "aura_fs_isDirectory" => ("i1", &[P]),
@@ -1078,7 +1172,11 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
                 "i64", "i64",
             ],
         ),
-        "aura_thread_join" => ("void", &["i64"]),
+        // `Thread.join` 返回工作线程的返回值（与 VM 路径一致，见 aura_syscalls.c
+        // 的线程结果注册表）；历史上这里误标为 void，调用点据此发射
+        // `call void @aura_thread_join(...)` 丢弃结果 —— AOT 下 `Thread.join(t)`
+        // 恒得 0（atomic_ops 用例 6 `winners=0 v=1` 的根因）。
+        "aura_thread_join" => ("i64", &["i64"]),
         "aura_thread_sleep" => ("void", &["i64"]),
         "aura_thread_id" => ("i64", &[]),
         "aura_thread_available_parallelism" => ("i64", &[]),
@@ -1232,9 +1330,18 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
                 "i64", "i64",
             ],
         ),
-        "aura_lang_concurrent_Future_await" => ("i64", &["i64"]),
+        // 符号名与 C 实现一致（`await` 无下划线，见 translate_to_legacy_c）
+        "aura_lang_concurrent_FutureAwait" => ("i64", &["i64"]),
         "aura_lang_concurrent_Future_isDone" => ("i32", &["i64"]),
         "aura_lang_concurrent_Future_cancel" => ("i32", &["i64"]),
+        // Promise（C 实现，见 aura_std_cffi.c；与 Future 共享「待完成槽」语义）
+        "aura_lang_concurrent_Promise_create" => ("i64", &[]),
+        "aura_lang_concurrent_Promise_resolve" => ("void", &["i64", "i64"]),
+        "aura_lang_concurrent_Promise_reject" => ("void", &["i64", "i64"]),
+        "aura_lang_concurrent_Promise_await" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Promise_isDone" => ("i1", &["i64"]),
+        "aura_lang_concurrent_Promise_isRejected" => ("i1", &["i64"]),
+        "aura_lang_concurrent_Promise_tryAwait" => ("i64", &["i64"]),
         // Thread
         "aura_lang_concurrent_Thread_spawn" => (
             "i64",
@@ -1242,7 +1349,7 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
                 "i64", "i64",
             ],
         ),
-        "aura_lang_concurrent_Thread_join" => ("void", &["i64"]),
+        "aura_lang_concurrent_Thread_join" => ("i64", &["i64"]),
         "aura_lang_concurrent_Thread_sleep" => ("void", &["i64"]),
         "aura_lang_concurrent_Thread_id" => ("i64", &[]),
         "aura_lang_concurrent_Thread_parallelism" => ("i64", &[]),

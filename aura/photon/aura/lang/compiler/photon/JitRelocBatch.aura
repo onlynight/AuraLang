@@ -1,0 +1,455 @@
+// aura:///aura/lang/compiler/photon/JitRelocBatch.aura
+package aura.lang.compiler.photon
+// ─────────────────────────────────────────────────────────────
+// JIT 批量重定位 — Phase 1.4（多函数编译时链接）
+//
+// P1-2 的 `JitRelocation` 解决的是「单段」回填：`emitFunctionRelocated`
+// 每段各自分配内存、各自按 `funcNameOffsets` 解析符号。P1-2 已能让
+// `main → double` 这类同批次调用解析成功，但仍留两个洞：
+//
+//   1. 单段分配：每个函数独占一块可执行内存，`usedSize` 在段与段之间
+//      没有连续性。段间调用依赖 `call rel32` 的 32 位相对位移；若两段
+//      落在相距 > 2GB 的独立分配上，位移越界（x86-64 `call rel32` 的
+//      天然上限）——即使回填正确也无法跳转。
+//   2. 外部符号：`exit` / `println` / `@str.N` 在 JIT 下没有符号表
+//      （见 `09-P1-2实施报告` §4.3），只能计为 `skipped` 并保留
+//      `00 00 00 00`，即「跳到下一条指令」。
+//
+// 本模块把两者一起收掉：
+//
+//   ┌─ 段布局（连续追加，跨段调用位移永不越界）─┐
+//   │ text 段   base + off_i        每段 16B 对齐   │
+//   │            (机器码 + 重定位回填)              │
+//   │ ...                                         │
+//   │ stub 区   base + stubBase + 9*k            │
+//   │            (buildCallStub，imm64 内嵌目标)    │
+//   └─────────────────────────────────────────────┘
+//
+//   段内符号   → 直接写 `call rel32` 位移（相对**本块基址**换算）
+//   外部符号   → 替换 call 的 rel32 为「跳到本块内的调用存根」，
+//                存根体为 `mov rax, imm64; jmp rax`（11 字节），
+//                imm64 由调用方事后 `patchCallStubTarget` 回填；
+//                目标为 0（未知 runtime 符号）时**绝不**替换——
+//                保留原占位符，语义与 P1-2 的「跳过」一致。
+//
+// 与 `JitRelocation` 的分工：
+//   * `JitRelocation.applyRelocations` 是**单段**（一段一个 codeBase），
+//     保留给 `emitFunctionRelocated` 与存根/蹦床修正；
+//   * 本模块是**整块**（一个 codeBase、多个段），供 `compileBatch` 用。
+//
+// VM 安全：全部写操作经 `JitBackend.writeReloc32` / `writeReloc64`，
+// `vmMode=true` 时这些入口直接返回——与 `writeCode` / `setExecutable`
+// 的既有约定一致。本模块不 import 任何 stdlib 集合 / 字符串工具。
+// ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// 段描述符
+// ─────────────────────────────────────────────────────────────
+
+/// 批量编译中的一个函数段。
+///
+/// `offset` 是**本段代码首字节相对 `codeBase`（=整块分配起点）的偏移**。
+/// 与 `JitRelocation` 的单段模型不同：那里的 offset 已折算为段内偏移，
+/// 这里的段内偏移需要调用方（`compileBatch`）自行减去。
+class RelocSegment {
+    var name: String = ""
+    var offset: Int = 0
+    var size: Int = 0
+    var relocs: List<Relocation> = arrayListOf<Relocation>()
+
+    init() {
+        this.name = ""
+        this.offset = 0
+        this.size = 0
+        this.relocs = arrayListOf<Relocation>()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 调用存根布局常量（x86-64，与 `JitBackend.buildCallStub` 严格一致）
+// ─────────────────────────────────────────────────────────────
+
+/// 单个调用存根字节数：`mov rax, imm64`（10B）+ `jmp rax`（2B）。
+///
+/// **必须**与 `JitBackend.buildCallStub` 的输出长度一致——`patchCallStubTarget`
+/// 按此长度推进下一条存根的基址，长度漂移会让后续回填错段。
+object CallStub {
+    const val SIZE: Int = 12
+    /// `imm64` 在存根内的字节偏移（前缀 `48 B8` 之后）。
+    const val IMM_OFFSET: Int = 2
+}
+
+// ─────────────────────────────────────────────────────────────
+// 应用结果统计
+// ─────────────────────────────────────────────────────────────
+
+/// 批量回填结果。
+class BatchRelocResult {
+    /// 重定位条目总数。
+    var total: Int = 0
+    /// 已按段内符号直接回填 `call rel32` 位移的条目数。
+    var applied: Int = 0
+    /// 已改为「跳到本块内调用存根」的条目数（`applied + stubbed` 之和 ≤ total）。
+    var stubbed: Int = 0
+    /// 跳过的条目数（未知类型 / 偏移越界 / 外部符号目标为 0 / 无存根空间）。
+    var skipped: Int = 0
+    /// 段间跨调用的条目数（诊断：证明连续块布局的位移在 ±2GB 内）。
+    var crossSegment: Int = 0
+    /// 已生成调用存根的个数。
+    var stubCount: Int = 0
+    /// 回填摘要（有界，诊断用）。
+    var trace: String = ""
+
+    init() {
+        this.total = 0
+        this.applied = 0
+        this.stubbed = 0
+        this.skipped = 0
+        this.crossSegment = 0
+        this.stubCount = 0
+        this.trace = ""
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// JitRelocBatchUtils
+// ─────────────────────────────────────────────────────────────
+
+object JitRelocBatchUtils {
+
+    // ── 核心：批量回填 ──
+
+    /// 在已写入机器码的整块可执行内存上回填重定位。
+    ///
+    /// 参数：
+    ///   `backend`    JIT 后端（写操作经其守卫，vmMode 下为空操作）；
+    ///   `codeBase`   **整块**可执行内存基址（页对齐）；
+    ///   `segments`   段描述符列表（各自含段内重定位）；
+    ///   `symbolOffset` 符号名 → 段内偏移表（`;` 分隔的 `name|offset`）；
+    ///   `dataBase`   数据段基址（0 = 未分配，`DATA_REF` 被跳过）；
+    ///   `stubBase`   调用存根区首字节地址（0 = 不生成存根）；
+    ///   `stubCount`  可用存根个数上限（0 = 不生成存根）。
+    ///
+    /// 返回值统计见 `BatchRelocResult`。外部符号的存根**只填相对位移**
+    /// （`call rel32` → `call rel32` 到存根入口），存根体里的 `imm64`
+    /// 保持 `00 00 00 00 00 00 00 00`——由 [`patchCallStubTarget`]
+    /// 在拿到真实目标地址后回填。
+    fun applyBatch(backend: JitBackend, codeBase: Int,
+                   segments: List<RelocSegment>, symbolOffset: String,
+                   dataBase: Int, stubBase: Int, stubCount: Int): BatchRelocResult {
+        val res: BatchRelocResult = BatchRelocResult()
+        var stubIdx: Int = 0
+
+        var si: Int = 0
+        while (si < segments.size) {
+            val seg: RelocSegment = segments[si]
+            var ri: Int = 0
+            while (ri < seg.relocs.size) {
+                val r: Relocation = seg.relocs[ri]
+                res.total = res.total + 1
+
+                // 段内偏移 = 记录 offset - 段起点（编码器产出的是模块内偏移）。
+                val segOff: Int = r.offset - seg.offset
+
+                if (r.type < 0 || segOff < 0 || segOff >= seg.size) {
+                    res.skipped = res.skipped + 1
+                    ri = ri + 1
+                    continue
+                }
+                val placeholder: Int = codeBase + seg.offset + segOff
+                val insnEnd: Int = placeholder + 4
+
+                if (r.type == RelocType.RIP32 || r.type == RelocType.PCREL32) {
+                    val segOff2: Int = JitRelocBatchUtils.lookupOffset(symbolOffset, r.symbol)
+                    if (segOff2 >= 0) {
+                        // 命中本块内符号：直接写 RIP 相对位移。
+                        val target: Int = codeBase + segOff2
+                        backend.writeReloc32(placeholder, target - insnEnd)
+                        res.applied = res.applied + 1
+                        // 跨段判定：目标偏移不落在本段区间内。
+                        if (segOff2 < seg.offset || segOff2 >= seg.offset + seg.size) {
+                            res.crossSegment = res.crossSegment + 1
+                        }
+                        res.trace = JitRelocBatchUtils.traceAdd(res.trace,
+                                "seg=" + seg.name + " sym=" + r.symbol +
+                                        " disp=" + JitRelocBatchUtils.intToStr(target - insnEnd))
+                        ri = ri + 1
+                        continue
+                    }
+                    // 外部符号 → 分派存根兜底。
+                    if (stubBase != 0 && stubIdx < stubCount) {
+                        val stubAddr: Int = stubBase + stubIdx * CallStub.SIZE
+                        backend.writeReloc32(placeholder, stubAddr - insnEnd)
+                        res.stubbed = res.stubbed + 1
+                        res.stubCount = res.stubCount + 1
+                        res.trace = JitRelocBatchUtils.traceAdd(res.trace,
+                                "STUB sym=" + r.symbol +
+                                        " disp=" + JitRelocBatchUtils.intToStr(stubAddr - insnEnd))
+                        stubIdx = stubIdx + 1
+                    } else {
+                        // 无存根空间：保留占位符（不写错值）。
+                        res.skipped = res.skipped + 1
+                    }
+
+                } else if (r.type == RelocType.ABS64) {
+                    val segOff3: Int = JitRelocBatchUtils.lookupOffset(symbolOffset, r.symbol)
+                    if (segOff3 < 0) {
+                        res.skipped = res.skipped + 1
+                        ri = ri + 1
+                        continue
+                    }
+                    backend.writeReloc64(placeholder, codeBase + segOff3)
+                    res.applied = res.applied + 1
+
+                } else if (r.type == RelocType.DATA_REF) {
+                    if (dataBase == 0) {
+                        res.skipped = res.skipped + 1
+                        ri = ri + 1
+                        continue
+                    }
+                    val symOff: Int = JitRelocBatchUtils.lookupDataOffset(symbolOffset, r.symbol)
+                    if (symOff < 0) {
+                        res.skipped = res.skipped + 1
+                        ri = ri + 1
+                        continue
+                    }
+                    backend.writeReloc64(placeholder, dataBase + symOff)
+                    res.applied = res.applied + 1
+                    res.trace = JitRelocBatchUtils.traceAdd(res.trace,
+                            "DATA sym=" + r.symbol)
+
+                } else {
+                    res.skipped = res.skipped + 1
+                }
+                ri = ri + 1
+            }
+            si = si + 1
+        }
+        return res
+    }
+
+    // ── 存根目标回填 ──
+
+    /// 回填第 `index` 个调用存根的 `imm64` 目标地址。
+    ///
+    /// 存根布局 `48 B8 [imm64×8] FF E0`：imm64 位于
+    /// `stubBase + index*12 + 2`，指令结束于 `stubBase + index*12 + 10`
+    /// （之后是 `jmp rax`）。目标为 0 时**不写**——与 P1-2「不写错值」
+    /// 的原则一致，调用方应在拿到真实地址后再调用一次。
+    fun patchCallStubTarget(backend: JitBackend, stubBase: Int,
+                            index: Int, target: Long): Boolean {
+        if (stubBase == 0 || index < 0 || target == 0) {
+            return false
+        }
+        backend.writeReloc64(stubBase + index * CallStub.SIZE + CallStub.IMM_OFFSET, target)
+        return true
+    }
+
+    // ── 布局 ──
+
+    /// 计算连续块所需的总字节数（16 字节对齐）。
+    ///
+    /// `sizeOf` 给出每段代码的字节数（顺序与 `names` 一致）。
+    /// 返回的布局里，第 i 段起点是
+    /// `offsetOf[i]`，`offsetOf[i] >= 16` 且单调递增。
+    fun layoutSizes(names: List<String>, sizeOf: List<Int>,
+                    stubCount: Int): Int {
+        var used: Int = 0
+        var i: Int = 0
+        while (i < sizeOf.size) {
+            val n: Int = sizeOf[i]
+            used = used + n
+            val rem: Int = used % 16
+            if (rem != 0) {
+                used = used + (16 - rem)
+            }
+            i = i + 1
+        }
+        used = used + stubCount * CallStub.SIZE
+        if (used % 16 != 0) {
+            used = used + (16 - used % 16)
+        }
+        return used
+    }
+
+    /// 按 [`layoutSizes`] 的相同规则计算每段起点（返回与 `names` 等长）。
+    fun segmentOffsets(sizeOf: List<Int>): List<Int> {
+        val out: List<Int> = arrayListOf<Int>()
+        var used: Int = 0
+        var i: Int = 0
+        while (i < sizeOf.size) {
+            out.add(used)
+            used = used + sizeOf[i]
+            val rem: Int = used % 16
+            if (rem != 0) {
+                used = used + (16 - rem)
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 首段起点。
+    fun firstSegmentOffset(): Int {
+        return 0
+    }
+
+    // ── 符号表 ──
+
+    /// 在 `name|offset`（`;` 分隔）表里按名查偏移；未找到返回 -1。
+    ///
+    /// **必须**用 `indexOf(entry, "|")` 切分——`substring(0, idx)` 要求 `idx > 0`，
+    /// 因此以 `idx > 0` 而非 `idx >= 0` 判定（首个条目为空名的退化情况直接跳过）。
+    fun lookupOffset(table: String, name: String): Int {
+        if (table == "" || name == "") {
+            return -1
+        }
+        val entries: List<String> = JitRelocBatchUtils.splitSemi(table)
+        var i: Int = 0
+        while (i < entries.size) {
+            val entry: String = entries[i]
+            val idx: Int = JitRelocBatchUtils.indexOf(entry, "|")
+            if (idx > 0 && entry.substring(0, idx) == name) {
+                return JitRelocBatchUtils.parseInt(entry.substring(idx + 1))
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 在 `name|offset`（`;` 分隔）表里查**数据符号**偏移。
+    ///
+    /// 数据符号约定以 `@` 开头（`@str.N`、`@data.N`），与函数名区分：
+    /// 同一个符号表里，函数符号走 [`lookupOffset`]，数据符号走本方法。
+    fun lookupDataOffset(table: String, name: String): Int {
+        if (table == "" || name == "") {
+            return -1
+        }
+        return JitRelocBatchUtils.lookupOffset(table, name)
+    }
+
+    // ── 诊断 ──
+
+    /// 汇总批量回填结果为一行诊断串。
+    fun formatBatchResult(res: BatchRelocResult): String {
+        return "batch reloc total=" + JitRelocBatchUtils.intToStr(res.total) +
+                " applied=" + JitRelocBatchUtils.intToStr(res.applied) +
+                " stubbed=" + JitRelocBatchUtils.intToStr(res.stubbed) +
+                " skipped=" + JitRelocBatchUtils.intToStr(res.skipped) +
+                " crossSeg=" + JitRelocBatchUtils.intToStr(res.crossSegment) +
+                " stubs=" + JitRelocBatchUtils.intToStr(res.stubCount)
+    }
+
+    // ── 字符串 / 整数工具（不依赖 String stdlib）──
+
+    private fun splitSemi(text: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") {
+            return out
+        }
+        var start: Int = 0
+        var i: Int = 0
+        val len: Int = text.length
+        while (i <= len) {
+            if (i == len || text.charCodeAt(i) == 59) {
+                out.add(text.substring(start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    private fun indexOf(text: String, needle: String): Int {
+        val nlen: Int = needle.length
+        if (nlen == 0 || text.length < nlen) {
+            return -1
+        }
+        var i: Int = 0
+        val textLen: Int = text.length
+        while (i + nlen <= textLen) {
+            var j: Int = 0
+            var ok: Boolean = true
+            while (j < nlen) {
+                if (text.charCodeAt(i + j) != needle.charCodeAt(j)) {
+                    ok = false
+                    break
+                }
+                j = j + 1
+            }
+            if (ok) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    private fun parseInt(text: String): Int {
+        if (text == "") {
+            return 0
+        }
+        var neg: Boolean = false
+        var i: Int = 0
+        val len: Int = text.length
+        if (len > 0 && text.charCodeAt(i) == 45) {
+            neg = true
+            i = i + 1
+        }
+        var result: Int = 0
+        while (i < len) {
+            val c: Int = text.charCodeAt(i)
+            if (c >= 48 && c <= 57) {
+                result = result * 10 + (c - 48)
+            }
+            i = i + 1
+        }
+        if (neg) {
+            return -result
+        }
+        return result
+    }
+
+    private fun intToStr(n: Int): String {
+        if (n == 0) {
+            return "0"
+        }
+        var neg: Boolean = false
+        if (n < 0) {
+            neg = true
+            n = -n
+        }
+        var result: String = ""
+        while (n > 0) {
+            result = JitRelocBatchUtils.digit(n % 10) + result
+            n = n / 10
+        }
+        if (neg) {
+            return "-" + result
+        }
+        return result
+    }
+
+    private fun digit(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        return "9"
+    }
+
+    private fun traceAdd(trace: String, entry: String): String {
+        if (trace == "") {
+            return entry
+        }
+        if (trace.length > 2048) {
+            return trace
+        }
+        return trace + ", " + entry
+    }
+}

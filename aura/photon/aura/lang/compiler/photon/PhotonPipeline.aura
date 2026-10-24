@@ -50,6 +50,22 @@ import aura.lang.compiler.hir.Hir
 // HAT v2.0
 import aura.lang.compiler.hir.hat.HatParser
 
+// ── 逐阶段耗时（AURA_PHOTON_TIME=1）─────────────────────────────
+// 独立命名（pipeTimeNs/pipeSecOf）：驱动侧已有 tNs/secOf，闭包内顶层
+// 函数同名会冲突。默认零输出，不影响协议标记。
+fun pipeTimeNs(): Long {
+    ClockImpl.init()
+    return ClockImpl.timeNs()
+}
+
+fun pipeSecOf(deltaNs: Long): String {
+    val sec: Long = deltaNs / 1000000000
+    val ms: Long = (deltaNs % 1000000000) / 1000000
+    val mss: String = toStr(ms)
+    val pad: String = if (mss.length == 1) { "00" } else if (mss.length == 2) { "0" } else { "" }
+    return toStr(sec) + "." + pad + mss
+}
+
 /// 新后端编译结果。
 class BackendResult {
     var success: Boolean = false
@@ -58,6 +74,27 @@ class BackendResult {
     var executablePath: String = ""
     var machineCodeHex: String = ""
     var coffHex: String = ""
+    /// COFF **分片**列表（2026-10-09 内存回合）：emitPieces 的产出，与
+    /// coffHex 逐字节一致但**不做**单串归并——coffHex 仅在显式消费方
+    /// 出现时才由调用方自行拼接。驱动分片 print，writeObjectFilePieces
+    /// 分片落盘。
+    var coffPieces: List<String> = arrayListOf<String>()
+    /// 重定位记录（`;` 分隔，每条 `offset|symbol|type`；偏移为**模块内**绝对偏移）。
+    ///
+    /// AOT 路径由 `emitter.getRelocRecords()` 填充并交给 COFF 写入器；JIT 路径
+    /// （`compileEncodeOnly`，P1-2 之前）漏填，导致 `JitBackend.emitFunction`
+    /// 只能把占位符 `00 00 00 00` 原样写进 W^X 内存——所有 `call`/`lea [rip+]`
+    /// 一律跳/指向下一条指令，任何含跨函数调用的 JIT 码必然崩溃。
+    var relocRecords: String = ""
+    /// 「函数名 → 段内偏移」表（`;` 分隔），JIT 装载时解析重定位符号用。
+    var funcNameOffsets: String = ""
+    /// 「函数名 → 偏移」组表（`;;` 分隔，COFF 写入器格式）。
+    var funcOffsets: String = ""
+    /// 字符串常量（`.rdata` 数据来源）。
+    var stringConsts: String = ""
+    /// P1（Phase 2.2）：JIT 栈图（call 点 → GC 根候选列表）序列化文本。
+    /// 由 X86Emitter.getStackMaps() 填充，JIT 装载侧经 StackMapTable 解析。
+    var stackMaps: String = ""
     var relocationCount: Int = 0
     var functionCount: Int = 0
     var encodedByteCount: Int = 0
@@ -73,7 +110,20 @@ class PhotonPipeline {
     private var targetTriple: String = "x86_64-pc-windows-msvc"
 
     /// 优化级别。
+    ///
+    /// P3（Phase 4.3）：0 = 快速编译（跳过窥孔优化等可选通道），1 = 默认。
+    /// JIT 热路径首次编译追求低延迟时设 0；AOT/批量场景保持默认。
     private var optLevel: Int = 1
+
+    /// 设置优化级别（0=快速编译，1=默认全通道）。
+    fun setOptLevel(level: Int): Unit {
+        if (level >= 0 && level <= 1) { this.optLevel = level }
+    }
+
+    /// 读取优化级别。
+    fun getOptLevel(): Int {
+        return this.optLevel
+    }
 
     /// 输出目录。
     var outDir: String = "."
@@ -321,6 +371,10 @@ class PhotonPipeline {
         this.vprintln("[Phase D] Register Allocation + Peephole")
         val allocator = RegisterAllocatorUtils.emptyAllocator()
         allocator.allocate(dag)
+        // mergePhiHomesAfterRA 已停用（2026-10-06）：把 phi home 改写到入边 home
+        // 会把循环携带变量钉在易失寄存器上（实测 VM runner 读循环 buf/cap
+        // 双双读成垃圾：buf=装箱奇数、cap=0 ⇒ FileOps.read(count=0)）。P115
+        // 全绿基线本就不依赖它。//*selector.mergePhiHomesAfterRA()*/
         this.vprintln("  spillSlots=" + allocator.getSpillSlots() +
                 " dag=" + dag.nodeCount + "/" + dag.instrCount)
         if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
@@ -341,8 +395,12 @@ class PhotonPipeline {
         }
 
         // 窥孔优化
-        val peephole = PeepholeOptimizerUtils.emptyOptimizer()
-        peephole.optimize(dag)
+        // P3（Phase 4.3）：optLevel=0 快速编译——跳过窥孔（JIT 首译低延迟；
+        // AOT/批量保持默认全通道）。
+        var peephole: PeepholeOptimizer = PeepholeOptimizerUtils.emptyOptimizer()
+        if (this.optLevel > 0) {
+            peephole.optimize(dag)
+        }
         this.vprintln("  peephole passes=" + peephole.getPassCount() +
                 " dag=" + dag.nodeCount + "/" + dag.instrCount)
         if (Env.get("AURA_PHOTON_STOP") == "D") {
@@ -371,6 +429,9 @@ class PhotonPipeline {
         val emitter = X86EmitterUtils.emptyEmitter()
         this.vprintln("    Step 4b: setAllocator")
         emitter.setAllocator(allocator)
+        // P372：phi 槽别名表（定义节点 → phi 节点）——发射器 slotForNode
+        // 解析后，phi 入边值的定义写与 phi 读落同一栈槽（槽合并）。
+        // P386：phi 槽别名接线停用（实验）——跨入边 MOV 会覆写被别名定义槽
         this.vprintln("    Step 4c: emitFunction(dag)")
         emitter.emitFunction(dag, moduleName)
         this.vprintln("    Step 4d: emit done")
@@ -381,6 +442,8 @@ class PhotonPipeline {
         val relocRecords: String = emitter.getRelocRecords()
         result.machineCodeHex = machineCodeHex
         result.encodedByteCount = machineCodeHex.length / 2
+        // P1（Phase 2.2）：stack map 随机器码一起产出（GC 根枚举用）。
+        result.stackMaps = emitter.getStackMaps()
         this.vprintln("    机器码: " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
         this.vprintln("    字节数: " + result.encodedByteCount)
 
@@ -413,18 +476,27 @@ class PhotonPipeline {
         writer.buildSymbols(writer.functions, writer.stringConsts)
         this.peProbe("buildSymbols done symChars=" + toStr(writer.symbols.length) +
                 " relocChars=" + toStr(writer.relocs.length))
-        val coffHex: String = writer.emit()
-        this.peProbe("emit done coffChars=" + toStr(coffHex.length))
-        result.coffHex = coffHex
-        result.coffSize = coffHex.length / 2
+        // ⚠️ 分片模式（2026-10-09 内存回合）：emitPieces 跳过 writer 终归并
+        // （134M 字符级 = 内容 × log₂(片段数) 成对中间层，无 GC 全驻留），
+        // 落盘走 writeObjectFilePieces 逐片解码。
+        val coffPieces: List<String> = writer.emitPieces()
+        var coffChars: Int = 0
+        var px: Int = 0
+        while (px < coffPieces.size) {
+            coffChars = coffChars + coffPieces[px].length
+            px = px + 1
+        }
+        result.coffPieces = coffPieces
+        result.coffSize = coffChars / 2
+        this.peProbe("emit done coffChars=" + toStr(coffChars))
         this.vprintln("    COFF 大小: " + result.coffSize + " 字节")
 
         // 生成目标文件路径
         val objPath = this.outDir + "/" + this.moduleName + ".obj"
         result.objectFilePath = objPath
-        this.vprintln("    [pipe0] objPath=" + objPath + " coffHex.len=" + coffHex.length)
+        this.vprintln("    [pipe0] objPath=" + objPath + " coffChars=" + toStr(coffChars))
 
-        val wroteObj: Boolean = PhotonNativeWriter.writeObjectFile(objPath, coffHex)
+        val wroteObj: Boolean = PhotonNativeWriter.writeObjectFilePieces(objPath, coffPieces)
         this.vprintln("    [pipe1] wroteObj=" + wroteObj)
         if (!wroteObj) {
             println("    ⚠ 二进制落盘失败，回退 hex 文本（需外部脚本转换）：" + objPath + ".hex")
@@ -444,6 +516,20 @@ class PhotonPipeline {
         if (this.outputType != "so" && this.outputType != "dylib") {
             runtimeObjPath = this.outDir + "/aura_runtime.obj"
             var runtimeResult: Boolean = FileUtils.exists(runtimeObjPath)
+            // 2026-10-02 缓存失效校验：旧实现只看「文件存在」——RUNTIME_SYMBOLS
+            // 变更后（新增 String_fromCharCode / ProcessOps_aura_process_* 等），
+            // 旧 obj 被继续链接，链接期全是 undefined symbol（实测自举 Main.aura）。
+            // sidecar 记录构建时的符号表，不一致即重建。
+            if (runtimeResult) {
+                // 缓存键含 BUILD_ID：runtime 发射器变更必须递增它（见
+                // PhotonRuntime.BUILD_ID 说明），否则陈旧 obj 被复用。
+                val wantSyms: String = PhotonRuntime.RUNTIME_SYMBOLS + "|#build=" + PhotonRuntime.BUILD_ID
+                val gotSyms: String = FileUtils.readText(runtimeObjPath + ".syms")
+                if (gotSyms != wantSyms) {
+                    this.vprintln("    runtime obj 缓存失效（RUNTIME_SYMBOLS 变更）→ 重建")
+                    runtimeResult = false
+                }
+            }
             if (!runtimeResult) {
                 this.peProbe("genRuntimeObj path=" + runtimeObjPath)
                 val runtimeHex: String = PhotonRuntime.buildRuntimeObject()
@@ -453,6 +539,7 @@ class PhotonPipeline {
                 if (!runtimeResult) {
                     runtimeResult = PhotonRuntimeUtils.writeRuntimeObjectHexFile(runtimeObjPath)
                 }
+                FileUtils.writeText(runtimeObjPath + ".syms", PhotonRuntime.RUNTIME_SYMBOLS)
             }
             this.peProbe("writeRuntimeObj ok=" + this.toStr(runtimeResult) +
                     (if (runtimeResult) " (cached)" else ""))
@@ -466,16 +553,33 @@ class PhotonPipeline {
         // 设置链接器：main 对象 + 可选 runtime 对象
         val linker = PhotonSystemLinkerUtils.defaultLinker()
         linker.setOutputType(this.outputType)
+        // [R91] 补齐链接符号：aura_runtime.obj 提供 Memory_alloc/Free/Copy 等
+        // 带前缀符号，但 Collections.aura emit 路径生成裸名 alloc/copy/free/
+        // StringOps_strcmp 外调。aura_link_fix.obj 提供裸名→runtime 桥接
+        // （不依赖 libc，适配 /NODEFAULTLIB）。
+        // [R92] CFFI 不再链接（区域管理已移入 aura_link_fix.c）。
+        // /FORCE:MULTIPLE 忽略重复符号（toString/toStr/env_get 等在 runtime 与 CFFI 中重复定义）。
+        val linkFixObj: String = Env.get("AURA_LINK_FIX_OBJ",
+                "D:/Code/AuraLang/build/aura_link_fix_exe.obj")
+        val cffiObj: String = Env.get("AURA_CFFI_OBJ", "")
+        var extraObjs: String = if (linkFixObj != "") { " " + linkFixObj } else { "" }
+        if (cffiObj != "") {
+            extraObjs = extraObjs + " " + cffiObj
+        }
         if (runtimeObjPath == "") {
-            linker.objectFiles = objPath
+            linker.objectFiles = objPath + extraObjs
         } else {
-            linker.objectFiles = objPath + " " + runtimeObjPath
+            linker.objectFiles = objPath + " " + runtimeObjPath + extraObjs
         }
         if (this.outputType == "exe") {
             linker.addFlag("/SUBSYSTEM:CONSOLE")
             linker.addFlag("/ENTRY:main")
             linker.addFlag("/MACHINE:X64")
             linker.addFlag("/NODEFAULTLIB")
+            // [R92] /FORCE:MULTIPLE 已移除（不再链接 CFFI，无重复符号）
+            // P321: 大函数帧（ID 区间上界后仍可达数十 KB）× 深调用链需要更大栈；
+            // reserve=commit 免去守卫页提交依赖（emitPrologue 的逐页下探仍在）。
+            linker.addFlag("/STACK:16777216")
         }
         linker.useDefaultLibs = false
         // ⚠️ runtime **确实**需要 kernel32 了：`env_get` 走 `GetEnvironmentVariableA`
@@ -488,7 +592,7 @@ class PhotonPipeline {
         val k32Lib: String = Env.get("AURA_K32LIB",
                 "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/kernel32.lib")
         if (k32Lib != "") {
-            linker.libs = k32Lib
+            linker.libs = k32Lib + ",C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ntdll.lib"
         }
         // P2: runtime 使用 syscall 直接调用 Nt*，不再需要 kernel32 导入
         // linker.libs = ""  // 零依赖：无 DLL 导入
@@ -521,12 +625,14 @@ class PhotonPipeline {
         val linkRc: Int = linker.runLinker(linkCmd)
         if (linkRc == 0) {
             this.vprintln("    ✓ 链接成功: " + result.executablePath)
+            result.success = true
         } else {
             println("    ⚠ 链接失败 (rc=" + this.toStr(linkRc) + ")")
+            result.success = false
+            result.errorMessage = "链接失败 (rc=" + this.toStr(linkRc) + ")"
         }
 
         result.functionCount = lir.functionCount
-        result.success = true
 
         this.vprintln("")
         this.vprintln("══════════════════════════════════════════════")
@@ -545,6 +651,7 @@ class PhotonPipeline {
     fun compileHat(hatPath: String): BackendResult {
         this.readVerboseFlag()
         this.vprintln("[photon] compileHat: " + hatPath)
+        val tHatP0: Long = pipeTimeNs()
 
         // Step 1: 读取 .hat 文件
         val hatText: String = FileUtils.readText(hatPath)
@@ -558,6 +665,10 @@ class PhotonPipeline {
         // Step 2: 解析 .hat → SSA MIR
         val parser = HatParserUtils.emptyParser()
         val ssaMIR: MirSsaProgram = parser.parse(hatText)
+        if (Env.get("AURA_PHOTON_TIME", "") == "1") {
+            println("[time] hatReadParse=" + pipeSecOf(pipeTimeNs() - tHatP0)
+                    + " hatChars=" + toStr(hatText.length))
+        }
         this.traceMark("ssa functions=" + ssaMIR.functionCount + " values=" + ssaMIR.valueCount)
         this.vprintln("  SSA functions=" + ssaMIR.functionCount +
                 " values=" + ssaMIR.valueCount +
@@ -573,6 +684,14 @@ class PhotonPipeline {
     /// 从 SSA MIR 继续管线（Phase B-E）。
     ///
     /// 数据流：SSA MIR → LIR → MachineDag → RegAlloc → Peephole → Encode → COFF → Link
+    /// [MEM-FIX] 直连 SSA 编译入口：跳过「序列化 6.2MB HAT 文本 → 落盘 →
+    /// 重新解析」回环（重解析 = HatParser 4700 万次 substring/dup + 整套
+    /// SSA2 与前端 SSA1 双份驻留）。调用方须保证 SSA 与落盘文本语义等价
+    /// （补丁无改动时成立；驱动按 hatFixed == hatText 自动判定）。
+    fun compileSsaDirect(ssaMIR: MirSsaProgram): BackendResult {
+        return this.compileFromSsa(ssaMIR)
+    }
+
     private fun compileFromSsa(ssaMIR: MirSsaProgram): BackendResult {
         this.readVerboseFlag()
         this.probePath = this.readProbePath()
@@ -580,12 +699,14 @@ class PhotonPipeline {
         this.vprintln("[Phase B-E] SSA MIR → LIR → ... → Executable")
 
         val result = BackendResult()
+        val tB0: Long = pipeTimeNs()
 
         // ── Phase B: MIR → LIR ──
         this.traceMark("phaseB")
         this.vprintln("[Phase B] MIR → LIR (Lowering)")
         val lowering = Lowering()
         var lir = lowering.lower(ssaMIR)
+        val tB1: Long = pipeTimeNs()
         this.vprintln("  LIR functions=" + lir.functionCount +
                 " values=" + lir.valueCount +
                 " blocks=" + lir.blockCount)
@@ -604,6 +725,7 @@ class PhotonPipeline {
         this.vprintln("[Phase C] LIR → Machine DAG (InstructionSelection)")
         val selector = InstructionSelectorUtils.emptySelector()
         var dag = selector.select(lir)
+        val tC1: Long = pipeTimeNs()
         this.vprintln("  DAG nodes=" + dag.nodeCount +
                 " instrs=" + dag.instrCount)
         // ⚠️ 2026-09-29 阶段释放点：LIR 在 Phase C 产出 DAG 后不再需要。
@@ -618,6 +740,11 @@ class PhotonPipeline {
         this.vprintln("[Phase D] Register Allocation + Peephole")
         val allocator = RegisterAllocatorUtils.emptyAllocator()
         allocator.allocate(dag)
+        val tRA1: Long = pipeTimeNs()
+        // mergePhiHomesAfterRA 已停用（2026-10-06）：把 phi home 改写到入边 home
+        // 会把循环携带变量钉在易失寄存器上（实测 VM runner 读循环 buf/cap
+        // 双双读成垃圾：buf=装箱奇数、cap=0 ⇒ FileOps.read(count=0)）。P115
+        // 全绿基线本就不依赖它。//*selector.mergePhiHomesAfterRA()*/
         this.vprintln("  spillSlots=" + allocator.getSpillSlots() +
                 " dag=" + dag.nodeCount + "/" + dag.instrCount)
         if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
@@ -638,8 +765,13 @@ class PhotonPipeline {
         }
 
         // 窥孔优化
-        val peephole = PeepholeOptimizerUtils.emptyOptimizer()
-        peephole.optimize(dag)
+        // P3（Phase 4.3）：optLevel=0 快速编译——跳过窥孔（JIT 首译低延迟；
+        // AOT/批量保持默认全通道）。
+        var peephole: PeepholeOptimizer = PeepholeOptimizerUtils.emptyOptimizer()
+        if (this.optLevel > 0) {
+            peephole.optimize(dag)
+        }
+        val tP1: Long = pipeTimeNs()
         this.vprintln("  peephole passes=" + peephole.getPassCount() +
                 " dag=" + dag.nodeCount + "/" + dag.instrCount)
         if (Env.get("AURA_PHOTON_STOP") == "D") {
@@ -656,6 +788,7 @@ class PhotonPipeline {
             }
         }
 
+        val tEmit0: Long = pipeTimeNs()
         // ── Phase E: 指令编码 → 目标文件 → 链接 ──
         this.traceMark("phaseE")
         this.peProbe("phaseE enter instrs=" + toStr(dag.instrCount) +
@@ -668,16 +801,22 @@ class PhotonPipeline {
         val emitter = X86EmitterUtils.emptyEmitter()
         this.vprintln("    Step 4b: setAllocator")
         emitter.setAllocator(allocator)
+        // P372：phi 槽别名表（定义节点 → phi 节点）——发射器 slotForNode
+        // 解析后，phi 入边值的定义写与 phi 读落同一栈槽（槽合并）。
+        // P386：phi 槽别名接线停用（实验）——跨入边 MOV 会覆写被别名定义槽
         this.vprintln("    Step 4c: emitFunction(dag)")
         emitter.emitFunction(dag, moduleName)
         this.vprintln("    Step 4d: emit done")
         this.peProbe("emit done hexChars=" + toStr(emitter.getOutputHex().length) +
                 " relocs=" + toStr(emitter.getRelocRecords().length) +
                 " funcOffsets=" + toStr(emitter.getFuncOffsets().length))
+        val tEmit1: Long = pipeTimeNs()
         val machineCodeHex: String = emitter.getOutputHex()
         val relocRecords: String = emitter.getRelocRecords()
         result.machineCodeHex = machineCodeHex
         result.encodedByteCount = machineCodeHex.length / 2
+        // P1（Phase 2.2）：stack map 随机器码一起产出（GC 根枚举用）。
+        result.stackMaps = emitter.getStackMaps()
         this.vprintln("    机器码: " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
         this.vprintln("    字节数: " + result.encodedByteCount)
 
@@ -710,20 +849,29 @@ class PhotonPipeline {
         writer.buildSymbols(writer.functions, writer.stringConsts)
         this.peProbe("buildSymbols done symChars=" + toStr(writer.symbols.length) +
                 " relocChars=" + toStr(writer.relocs.length))
-        val coffHex: String = writer.emit()
-        this.peProbe("emit done coffChars=" + toStr(coffHex.length))
-        result.coffHex = coffHex
-        result.coffSize = coffHex.length / 2
+        // ⚠️ 分片模式（同 compileHir 处说明）：跳过终归并 + 分片落盘。
+        val coffPieces: List<String> = writer.emitPieces()
+        var coffChars2: Int = 0
+        var qx: Int = 0
+        while (qx < coffPieces.size) {
+            coffChars2 = coffChars2 + coffPieces[qx].length
+            qx = qx + 1
+        }
+        result.coffPieces = coffPieces
+        result.coffSize = coffChars2 / 2
+        this.peProbe("emit done coffChars=" + toStr(coffChars2))
         this.vprintln("    COFF 大小: " + result.coffSize + " 字节")
+        val tW1: Long = pipeTimeNs()
 
         // 生成目标文件路径
         val objPath = this.outDir + "/" + this.moduleName + ".obj"
         result.objectFilePath = objPath
 
-        // 落盘为**二进制** COFF。
-        this.peProbe("preWriteObj path=" + objPath + " chars=" + toStr(coffHex.length))
-        val wroteObj: Boolean = PhotonNativeWriter.writeObjectFile(objPath, coffHex)
+        // 落盘为**二进制** COFF（分片解码）。
+        this.peProbe("preWriteObj path=" + objPath + " chars=" + toStr(coffChars2))
+        val wroteObj: Boolean = PhotonNativeWriter.writeObjectFilePieces(objPath, coffPieces)
         this.peProbe("writeObj ok=" + this.toStr(wroteObj))
+        val tO1: Long = pipeTimeNs()
         if (!wroteObj) {
             println("    ⚠ 二进制落盘失败，回退 hex 文本（需外部脚本转换）：" + objPath + ".hex")
             writer.writeObjectBinaryFile(objPath)
@@ -739,6 +887,23 @@ class PhotonPipeline {
         if (this.outputType != "so" && this.outputType != "dylib") {
             runtimeObjPath = this.outDir + "/aura_runtime.obj"
             var runtimeResult: Boolean = FileUtils.exists(runtimeObjPath)
+            // 2026-10-02 缓存失效校验：旧实现只看「文件存在」——RUNTIME_SYMBOLS
+            // 变更后（新增 String_fromCharCode / ProcessOps_aura_process_* 等），
+            // 旧 obj 被继续链接，链接期全是 undefined symbol（实测自举 Main.aura）。
+            // sidecar 记录构建时的符号表，不一致即重建。
+            if (runtimeResult) {
+                // ⚠️ 缓存键必须含 **BUILD_ID**（与下方第一路径一致）：runtime
+                // 的发射体（emitListAlloc/listAppend/veh 等函数体）改动**不改变**
+                // RUNTIME_SYMBOLS，只看符号表会让发射器修复被陈旧 obj 吞掉
+                //（实测 listAppend 的 r9 未初始化 / listAlloc 不留余量两项修复
+                // 三轮构建全被 08:45 的旧 obj 吞掉，2026-10-06）。
+                val wantSyms: String = PhotonRuntime.RUNTIME_SYMBOLS + "|#build=" + PhotonRuntime.BUILD_ID
+                val gotSyms: String = FileUtils.readText(runtimeObjPath + ".syms")
+                if (gotSyms != wantSyms) {
+                    this.vprintln("    runtime obj 缓存失效（RUNTIME_SYMBOLS/BUILD_ID 变更）→ 重建")
+                    runtimeResult = false
+                }
+            }
             if (!runtimeResult) {
                 this.peProbe("genRuntimeObj path=" + runtimeObjPath)
                 val runtimeHex: String = PhotonRuntime.buildRuntimeObject()
@@ -748,6 +913,8 @@ class PhotonPipeline {
                 if (!runtimeResult) {
                     runtimeResult = PhotonRuntimeUtils.writeRuntimeObjectHexFile(runtimeObjPath)
                 }
+                FileUtils.writeText(runtimeObjPath + ".syms",
+                    PhotonRuntime.RUNTIME_SYMBOLS + "|#build=" + PhotonRuntime.BUILD_ID)
             }
             this.peProbe("writeRuntimeObj ok=" + this.toStr(runtimeResult) +
                     (if (runtimeResult) " (cached)" else ""))
@@ -761,23 +928,40 @@ class PhotonPipeline {
         // 设置链接器：main 对象 + 可选 runtime 对象
         val linker = PhotonSystemLinkerUtils.defaultLinker()
         linker.setOutputType(this.outputType)
+        // [R91] 补齐链接符号：aura_runtime.obj 提供 Memory_alloc/Free/Copy 等
+        // 带前缀符号，但 Collections.aura emit 路径生成裸名 alloc/copy/free/
+        // StringOps_strcmp 外调。aura_link_fix.obj 提供裸名→runtime 桥接
+        // （不依赖 libc，适配 /NODEFAULTLIB）。
+        // [R92] CFFI 不再链接（区域管理已移入 aura_link_fix.c）。
+        // /FORCE:MULTIPLE 忽略重复符号（toString/toStr/env_get 等在 runtime 与 CFFI 中重复定义）。
+        val linkFixObj: String = Env.get("AURA_LINK_FIX_OBJ",
+                "D:/Code/AuraLang/build/aura_link_fix_exe.obj")
+        val cffiObj: String = Env.get("AURA_CFFI_OBJ", "")
+        var extraObjs: String = if (linkFixObj != "") { " " + linkFixObj } else { "" }
+        if (cffiObj != "") {
+            extraObjs = extraObjs + " " + cffiObj
+        }
         if (runtimeObjPath == "") {
-            linker.objectFiles = objPath
+            linker.objectFiles = objPath + extraObjs
         } else {
-            linker.objectFiles = objPath + " " + runtimeObjPath
+            linker.objectFiles = objPath + " " + runtimeObjPath + extraObjs
         }
         if (this.outputType == "exe") {
             linker.addFlag("/SUBSYSTEM:CONSOLE")
             linker.addFlag("/ENTRY:main")
             linker.addFlag("/MACHINE:X64")
             linker.addFlag("/NODEFAULTLIB")
+            // [R92] /FORCE:MULTIPLE 已移除（不再链接 CFFI，无重复符号）
+            // P321: 大函数帧（ID 区间上界后仍可达数十 KB）× 深调用链需要更大栈；
+            // reserve=commit 免去守卫页提交依赖（emitPrologue 的逐页下探仍在）。
+            linker.addFlag("/STACK:16777216")
         }
         linker.useDefaultLibs = false
         // 同另一条链接路径：`env_get` 需要 kernel32（见上）。
         val k32Lib2: String = Env.get("AURA_K32LIB",
                 "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/kernel32.lib")
         if (k32Lib2 != "") {
-            linker.libs = k32Lib2
+            linker.libs = k32Lib2 + ",C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ntdll.lib"
         }
         linker.outputName = this.outDir + "/" + this.moduleName
         val linkCmd = linker.buildCommand()
@@ -805,17 +989,29 @@ class PhotonPipeline {
         val linkRc: Int = linker.runLinker(linkCmd)
         if (linkRc == 0) {
             this.vprintln("    ✓ 链接成功: " + result.executablePath)
+            result.success = true
         } else {
             println("    ⚠ 链接失败 (rc=" + this.toStr(linkRc) + ")")
+            result.success = false
+            result.errorMessage = "链接失败 (rc=" + this.toStr(linkRc) + ")"
         }
 
         result.functionCount = lir.functionCount
-        result.success = true
 
         this.vprintln("")
         this.vprintln("══════════════════════════════════════════════")
         this.vprintln("Photon 管线完成 (HAT) — 目标文件已生成")
         this.vprintln("══════════════════════════════════════════════")
+        if (Env.get("AURA_PHOTON_TIME", "") == "1") {
+            println("[time] phaseB=" + pipeSecOf(tB1 - tB0)
+                    + " phaseC=" + pipeSecOf(tC1 - tB1)
+                    + " ra=" + pipeSecOf(tRA1 - tC1)
+                    + " peephole=" + pipeSecOf(tP1 - tRA1)
+                    + " emit=" + pipeSecOf(tEmit1 - tEmit0)
+                    + " writer=" + pipeSecOf(tW1 - tEmit1)
+                    + " objWrite=" + pipeSecOf(tO1 - tW1)
+                    + " runtimeObj+link=" + pipeSecOf(pipeTimeNs() - tO1))
+        }
 
         return result
     }
@@ -901,8 +1097,12 @@ class PhotonPipeline {
         this.vprintln("  spillSlots=" + allocator.getSpillSlots() +
                 " dag=" + dag.nodeCount + "/" + dag.instrCount)
 
-        val peephole = PeepholeOptimizerUtils.emptyOptimizer()
-        peephole.optimize(dag)
+        // P3（Phase 4.3）：optLevel=0 快速编译——跳过窥孔（JIT 首译低延迟；
+        // AOT/批量保持默认全通道）。
+        var peephole: PeepholeOptimizer = PeepholeOptimizerUtils.emptyOptimizer()
+        if (this.optLevel > 0) {
+            peephole.optimize(dag)
+        }
         this.vprintln("  peephole passes=" + peephole.getPassCount() +
                 " dag=" + dag.nodeCount + "/" + dag.instrCount)
 
@@ -912,10 +1112,24 @@ class PhotonPipeline {
         emitter.setAllocator(allocator)
         emitter.emitFunction(dag, moduleName)
         val machineCodeHex: String = emitter.getOutputHex()
+        val relocRecords: String = emitter.getRelocRecords()
+        val funcNameOffsets: String = emitter.getFuncNameOffsets()
+        val funcOffsets: String = emitter.getFuncOffsets()
+        val stringConsts: String = selector.stringConstants
         result.machineCodeHex = machineCodeHex
         result.encodedByteCount = machineCodeHex.length / 2
+        // P1（Phase 2.2）：stack map 随机器码一起产出（GC 根枚举用）。
+        result.stackMaps = emitter.getStackMaps()
+        // P1-2：JIT 路径必须与 AOT 路径一样收集重定位——否则 `emitFunction`
+        // 把 `00 00 00 00` 占位符原样写进可执行内存（缺口一/缺口二的根源）。
+        result.relocRecords = relocRecords
+        result.funcNameOffsets = funcNameOffsets
+        result.funcOffsets = funcOffsets
+        result.stringConsts = stringConsts
+        result.relocationCount = this.countRelocRecords(relocRecords)
         this.vprintln("  机器码 hex（前 80 字符）: " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
-        this.vprintln("  字节数: " + result.encodedByteCount)
+        this.vprintln("  字节数: " + result.encodedByteCount +
+                " 重定位: " + result.relocationCount)
 
         result.functionCount = lir.functionCount
         result.success = true
@@ -983,6 +1197,29 @@ class PhotonPipeline {
         if (d == 8) { return "8" }
         if (d == 9) { return "9" }
         return ""
+    }
+
+    /// 统计重定位记录条数（`;` 分隔）。
+    private fun countRelocRecords(records: String): Int {
+        if (records == "") { return 0 }
+        return this.splitSemi(records).size
+    }
+
+    /// 按 `;` 切分（空串返回 0 个元素）。
+    private fun splitSemi(text: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") { return out }
+        var start: Int = 0
+        var i: Int = 0
+        val len: Int = text.length
+        while (i <= len) {
+            if (i == len || text.charCodeAt(i) == 59) { // 59 = ';'
+                out.add(text.substring(start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        return out
     }
 
     /// 从函数偏移表解析函数名列表（格式 "funcName|offset;;funcName|offset"）。
@@ -1064,7 +1301,8 @@ class PhotonPipeline {
     /// 查找字符在字符串中的位置（返回 -1 表示未找到）。
     private fun indexOf(text: String, ch: String): Int {
         var i: Int = 0
-        while (i < text.length) {
+        val textLen: Int = text.length
+        while (i < textLen) {
             if (text.charAt(i).toString() == ch) {
                 return i
             }

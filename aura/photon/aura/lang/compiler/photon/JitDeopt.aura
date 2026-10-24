@@ -1,0 +1,228 @@
+// aura:///aura/lang/compiler/photon/JitDeopt.aura
+// ═══════════════════════════════════════════════════════════════
+// P2（Phase 3.1 Guards + Phase 3.2 Deoptimization）。
+//
+// 设计文档：docs/pure_aura_jit/08 §Phase 3。
+//
+// ── Guards（3.1）──
+// 投机优化的守卫指令：JIT 代码对「编译期假设」（对象类型、值范围）
+// 生成 `cmp + jne deopt` 序列；假设失效时跳到 deopt 蹦床回退解释器。
+// 本模块提供 guard 序列的**手工编码/修补**原语（与 JitBackend 的
+// buildDispatchStub 同层）；ISS 层的 guard 节点生成等类型反馈（P3）
+// 就绪后再接入。
+//
+// guard 序列布局（12 字节）：
+//   48 3D imm32       cmp rax, imm32   （对 rax 里的投机值做检查）
+//   0F 85 rel32       jne deopt        （失效 → 蹦床；rel32 占位 0）
+// guardBase+6 为 rel32 位置，guardBase+10 为指令结束。
+//
+// ── Deoptimization（3.2）──
+// deopt 蹦床：保存易失寄存器 → 以 targetFrame 恢复 VM 帧 → 跳 VM 解释器。
+// 蹦床布局（26 字节，可重定位）：
+//   55                push rbp
+//   53                push rbx
+//   48 89 E5          mov rbp, rsp
+//   48 81 EC 20 00 00 00   sub rsp, 0x20       （shadow space）
+//   BF id32           mov edi, targetFrame      （+13，绝对 imm32，可补丁）
+//   B8 id32           mov eax, vmEntry          （+18，绝对 imm32，可补丁）
+//   FF D0             call rax
+//   C9                leave
+//   C3                ret
+// 帧映射：JIT 局部变量 k 位于 [frameBase - 8*(k+1)]（frameBase = 进入
+// JIT 函数后的 rbp）；VM 侧按 DeoptFrameLayout 逐一读回。
+// ═══════════════════════════════════════════════════════════════
+
+package aura.lang.compiler.photon
+
+import aura.lang.native.Memory
+import aura.lang.compiler.photon.JitBackend
+
+/// Guard 规格：对 `reg` 寄存器与 imm 的相等检查 + 失效跳转。
+class GuardSpec {
+    /// 被检查的寄存器（当前支持 "rax"）。
+    var reg: String = "rax"
+    /// 投机假设值（相等才走快路径）。
+    var expectedImm: Int = 0
+    /// guard 序列在函数内的字节偏移（发射后回填）。
+    var codeOffset: Int = 0
+    /// deopt 蹦床地址（补丁后回填，诊断用）。
+    var deoptAddr: Int = 0
+}
+
+/// JIT 帧 → VM 帧的布局描述（Phase 3.2）。
+///
+/// JIT 帧（进入函数后）：
+///   [rbp]      = saved rbp
+///   [rbp+8]    = return address
+///   [rbp-8*k]  = local_k（k 从 1 起）
+/// VM 侧恢复：locals 逐一从上述地址 read64。
+class DeoptFrameLayout {
+    var funcName: String = ""
+    var localCount: Int = 0
+    /// 原始字节码 IP（回退后从该处继续解释）。
+    var bytecodeIp: Int = 0
+    /// 原始字节码函数名（VM 帧定位）。
+    var bytecodeFunc: String = ""
+
+    /// JIT 局部变量 k（1 起）的帧偏移（负值）。
+    fun localDisp(k: Int): Int {
+        return 0 - 8 * k
+    }
+}
+
+/// Guard / Deopt 编码与修补工具。
+object JitDeoptUtils {
+
+    /// 编码 guard 序列（12 字节）：cmp rax, imm32 + jne rel32(0 占位)。
+    ///
+    /// 假设 imm 非负且 < 2^31（类型 tag / 值范围检查的常规形态）。
+    fun buildGuardHex(expectedImm: Int): String {
+        // 48 3D id32 — cmp rax, imm32（符号扩展）
+        var out: String = "483D" + JitDeoptUtils.hex8(expectedImm)
+        // 0F 85 rel32 — jne rel32（占位 0，patchGuardDeopt 回填）
+        out = out + "0F85" + "00000000"
+        return out
+    }
+
+    /// guard 序列总长（12 字节）。
+    fun guardSize(): Int {
+        return 12
+    }
+
+    /// jne rel32 的 disp32 在 guard 序列内的偏移。
+    ///
+    /// ⚠️ guard 序列 = cmp（48 3D id32，6B，+0..5）+ jne（0F 85 rel32，6B）：
+    /// 0F85 操作码在 +6..7，**disp32 在 +8..11**。旧值 6 打在操作码上
+    /// —— 实测 jit_vmhost 自检 §4 因此把 disp 写错位并覆写快路径操作码
+    ///（2026-10-09 逐字节核对修正）。
+    fun guardDeoptDispOffset(): Int {
+        return 8
+    }
+
+    /// jne 指令结束偏移（rel32 的基准）。
+    fun guardDeoptInsnEnd(): Int {
+        return 12
+    }
+
+    /// 计算 jne rel32 位移：deoptAddr - (guardBase + 12)。
+    fun guardDeoptDisp(guardBase: Int, deoptAddr: Int): Int {
+        return deoptAddr - (guardBase + JitDeoptUtils.guardDeoptInsnEnd())
+    }
+
+    /// 修补 guard 的 deopt 跳转（guard 序列已写入 JIT 内存后调用）。
+    ///
+    /// backend.vmMode=true 时为无副作用跳过（与 writeReloc32 一致）。
+    fun patchGuardDeopt(backend: JitBackend, guardBase: Int, deoptAddr: Int): Unit {
+        backend.writeReloc32(guardBase + JitDeoptUtils.guardDeoptDispOffset(),
+                JitDeoptUtils.guardDeoptDisp(guardBase, deoptAddr))
+    }
+
+    /// 编码 deopt 蹦床（26 字节，targetFrame/vmEntry 为绝对 imm32 占位）。
+    ///
+    /// 布局见文件头；两处 imm32 的偏移由 trampolineFrameOffset() /
+    /// trampolineEntryOffset() 给出，trampolinePatch* 回填。
+    fun buildDeoptTrampolineHex(targetFrame: Int, vmEntry: Int): String {
+        var out: String = ""
+        out = out + "55"                          // push rbp
+        out = out + "53"                          // push rbx
+        out = out + "4889E5"                      // mov rbp, rsp
+        out = out + "4881EC20000000"              // sub rsp, 0x20
+        // mov edi, targetFrame（JIT 区/帧地址 < 2^31，edi 零扩展到 rdi）
+        out = out + "BF" + JitDeoptUtils.hex8(targetFrame)
+        // mov eax, vmEntry（占位；trampolinePatchEntry 回填）
+        out = out + "B8" + JitDeoptUtils.hex8(vmEntry)
+        out = out + "FFD0"                        // call rax
+        out = out + "C9"                          // leave
+        out = out + "C3"                          // ret
+        return out
+    }
+
+    /// 蹦床内 `mov edi, targetFrame` 的 imm32 偏移。
+    /// （55+53+4889E5+4881EC20 000000 = 12 字节后是 BF 操作码，imm 在 +13）
+    fun trampolineFrameOffset(): Int {
+        return 13
+    }
+
+    /// 蹦床内 `mov eax, vmEntry` 的 imm32 偏移。
+    /// （BF+imm32 = 5 字节，B8 操作码在 +17，imm 在 +18）
+    fun trampolineEntryOffset(): Int {
+        return 18
+    }
+
+    /// 蹦床总长（26 字节）。
+    fun trampolineSize(): Int {
+        return 26
+    }
+
+    /// 修补蹦床的 targetFrame（绝对 imm32，非 rip 相对，直接写值）。
+    fun patchTrampolineFrame(backend: JitBackend, trampolineBase: Int, targetFrame: Int): Unit {
+        if (targetFrame == 0) { return }
+        backend.writeReloc32(trampolineBase + JitDeoptUtils.trampolineFrameOffset(), targetFrame)
+    }
+
+    /// 修补蹦床的 vmEntry（绝对 imm32）。
+    fun patchTrampolineEntry(backend: JitBackend, trampolineBase: Int, vmEntry: Int): Unit {
+        if (vmEntry == 0) { return }
+        backend.writeReloc32(trampolineBase + JitDeoptUtils.trampolineEntryOffset(), vmEntry)
+    }
+
+    /// ── 帧映射（Phase 3.2）：JIT 局部变量 → VM 栈值 ──
+    ///
+    /// 从 JIT 帧读回 local 列表（`Memory.read64`，仅原生模式；
+    /// vmMode=true 时返回全 0 的守卫列表——与 JIT 写路径的模拟对称）。
+    /// backend 引入而非裸 Memory 调用，是为了守卫语义集中。
+    fun readVmLocals(backend: JitBackend, frameBase: Int, layout: DeoptFrameLayout): List<Int> {
+        val out: List<Int> = arrayListOf<Int>()
+        var k: Int = 1
+        while (k <= layout.localCount) {
+            if (backend.isVmMode()) {
+                out.add(0)
+            } else {
+                val addr: Long = (frameBase + layout.localDisp(k)) as Long
+                out.add(Memory.read64(addr) as Int)
+            }
+            k = k + 1
+        }
+        return out
+    }
+
+    /// ── hex 工具 ──
+
+    /// Int → 8 位十六进制（小端序 imm32 编码，x86 为 LE；负数按
+    /// 32 位二进制补码归一化到无符号后再取字节）。
+    fun hex8(v: Int): String {
+        var n: Long = v as Long
+        if (n < 0) { n = n + 4294967296 }
+        val b0: Int = (n / 16777216) % 256
+        val b1: Int = (n / 65536) % 256
+        val b2: Int = (n / 256) % 256
+        val b3: Int = (n % 256) as Int
+        return JitDeoptUtils.hex2(b3) + JitDeoptUtils.hex2(b2) + JitDeoptUtils.hex2(b1) + JitDeoptUtils.hex2(b0)
+    }
+
+    /// Int → 2 位十六进制。
+    fun hex2(v: Int): String {
+        val hi: Int = (v / 16) % 16
+        val lo: Int = v % 16
+        return JitDeoptUtils.hexDigit(hi) + JitDeoptUtils.hexDigit(lo)
+    }
+
+    fun hexDigit(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        if (d == 9) { return "9" }
+        if (d == 10) { return "A" }
+        if (d == 11) { return "B" }
+        if (d == 12) { return "C" }
+        if (d == 13) { return "D" }
+        if (d == 14) { return "E" }
+        return "F"
+    }
+}

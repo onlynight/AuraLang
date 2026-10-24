@@ -197,11 +197,20 @@ class HashMap<K, V> : Map<K, V> {
             }
             i = i - 1
         }
-        ks.add(key)
-        vs.add(value)
-        fs = this.boolAliveAppend(fs, true)
-        this._records = this._records + 1
-        if (existed == false) {
+        // 命中**存活**记录 → 原地更新值，不再追加。
+        //
+        // 旧实现无条件追加新记录（墓碑追加设计）：VM 的 locals 键集固定
+        //（≤ 级十几个槽位），每次 STORE_LOCAL 都 put 同一批键 ⇒ 桶链每
+        // put 增长一条且永不回收，25M 迭代基准实测泄漏 6GB+ 触发内存
+        // 守卫中止，且 put 的线性扫描随链长 O(n²) 退化。仅「已删除记录
+        // 复活」与「新键」才追加。
+        if (existed) {
+            vs.set(i, value)
+        } else {
+            ks.add(key)
+            vs.add(value)
+            fs = this.boolAliveAppend(fs, true)
+            this._records = this._records + 1
             this._size = this._size + 1
         }
         this.checkResize()
@@ -240,6 +249,27 @@ class HashMap<K, V> : Map<K, V> {
     /// 清空映射，保留当前容量。
     override fun clear(): Unit {
         this.allocBuckets(this.capacity)
+        this._size = 0
+        this._records = 0
+    }
+
+    /// 帧复用专用重置：**零分配**地把映射置空（全部存活标记置 false）。
+    ///
+    /// 与 clear() 的差异：clear() 重建桶列表（每次 3×capacity 次分配）；
+    /// 本方法只翻转 bucketAlive 的元素——失效记录残留桶链中（内存保留、
+    /// 复用），put 命中失效记录时按「新记录」追加，死记录在扩容重建时
+    /// 统一清除。供 VM 的 locals 帧池（Vm.localsPool）每调用复用。
+    fun resetForReuse(): Unit {
+        var b: Int = 0
+        while (b < this.capacity) {
+            var ba: List<Boolean> = this.bucketAlive.get(b)
+            var i: Int = ba.size - 1
+            while (i >= 0) {
+                ba.set(i, false)
+                i = i - 1
+            }
+            b = b + 1
+        }
         this._size = 0
         this._records = 0
     }
@@ -360,14 +390,15 @@ class HashMap<K, V> : Map<K, V> {
     /// Aura 侧 `binPrec` 不接受单词形式），自举时会把它们降级成未定义调用或
     /// 错误的逻辑指令。符号形式在两个后端都有确定语义。
     private fun hashKey(key: Any): Int {
-        var h: Int = key.hashCode()
-        h = h + 0x9e3779b9
-        h = h ^ (h >> 16)
-        h = h * 16777619
-        h = h ^ (h >> 13)
-        h = h * 16777619
-        h = h ^ (h >> 16)
-        return h
+        // ⚠️ P237：key 类型收紧为 String 局部——`key.hashCode()`（key: Any）
+        // 会派发到裸名 hashCode（无 this 的旧展平形态）；String 局部的
+        // `.hashCode()` 才会限定到 String_hashCode（带 this 的新定义）。
+        // R65：key 未必是 String（JitState.aura 用 HashMap<Int, ...>），
+        // `as String` 对 Int/Boolean key 抛 "as cast failed"。改用 toStr()
+        // 统一转字符串再 hash——toStr 对所有内置类型安全，String 局部的
+        // .hashCode() 保证派发到 String_hashCode 而非裸名。
+        val ks: String = toStr(key)
+        return ks.hashCode() * 31 + 0
     }
 
     /// 计算键的桶下标。`capacity` 是 2 的幂，故用 `& (capacity - 1)`

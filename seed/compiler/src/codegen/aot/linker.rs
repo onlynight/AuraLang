@@ -197,12 +197,32 @@ pub fn link_to_executable(
             if let Some(clang_path) = find_tool("clang", options) {
                 let mut cmd = Command::new(clang_path);
                 cmd.arg(input_path);
+                // [R92] 添加 aura_link_fix.obj（提供区域管理 + libc 自含实现）
+                let link_fix_obj = std::env::var("AURA_LINK_FIX_OBJ")
+                    .unwrap_or_else(|_| "D:/Code/AuraLang/build/aura_link_fix.obj".to_string());
+                if !link_fix_obj.is_empty() {
+                    cmd.arg(&link_fix_obj);
+                }
                 for cffi_obj in &cffi_object_paths {
                     cmd.arg(cffi_obj);
                 }
                 cmd.arg("-o").arg(exe_path).arg(options.opt_level.as_llvm_flag());
                 if options.debug_info {
                     cmd.arg("-g");
+                }
+                // Windows 主线程栈默认 1MB：自举编译器/解释器等递归下降程序
+                // （Parser/Lexer/link 递归 import）深层数即溢出——段错误且
+                // 无任何输出（实测 Photon 驱动编译任意输入瞬段错误，
+                // 64MB 栈重链后消失）。这里统一给 64MB。
+                cmd.arg("-Wl,/STACK:67108864");
+                // [R92] 允许重复符号定义（aura_link_fix.obj 与 CFFI 的 RegionEnter/ScratchMark 等）
+                cmd.arg("-Wl,/FORCE:MULTIPLE");
+                // 诊断：AURA_LINK_MAP=1 时输出链接映射表（<exe>.map），
+                // 供 ARC 失衡点/崩溃地址按 RVA 反查符号（llvm-nm 读不到
+                // PE 符号表，map 是唯一可靠来源）。默认关闭，产物不变。
+                if std::env::var_os("AURA_LINK_MAP").is_some() {
+                    let map_path = exe_path.with_extension("map");
+                    cmd.arg(format!("-Wl,/MAP:{}", map_path.display()));
                 }
                 run_and_report(&mut cmd, "clang")?;
                 return Ok(());
@@ -221,7 +241,8 @@ pub fn link_to_executable(
             }
             cmd.arg(format!("/out:{}", exe_path.display()))
                 .arg("/entry:main")
-                .arg("/subsystem:console");
+                .arg("/subsystem:console")
+                .arg("/STACK:67108864");
             run_and_report(&mut cmd, "lld-link")?;
             return Ok(());
         }
@@ -642,6 +663,8 @@ pub fn link_to_rust_host(
         use super::target::OperatingSystem;
         if options.target.os == OperatingSystem::Windows {
             cmd.arg("-Wl,/subsystem:console");
+            // [R92] 忽略重复符号错误（CFFI 与 runtime 的 toString/toStr/env_get 等）
+            cmd.arg("-Wl,/ERROR:4007");
         }
     }
 

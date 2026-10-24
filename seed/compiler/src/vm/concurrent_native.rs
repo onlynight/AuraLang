@@ -1,3 +1,12 @@
+// ================================================================
+// 【冻结基线】Rust VM 双实现常驻（VM-PA-00 v3.2 / D6 / P4.3）
+// [FROZEN BASELINE] Rust VM dual-impl co-resident (D6/P4.3): bug-fix only, no new capabilities, never reference the Aura VM.
+// 本文件属于 Rust VM（只读冻结的兼容基线、第二实现）：
+//   - 禁止新增能力，仅允许修 bug 与安全修补；
+//   - 不得引用 Aura VM 实现（aura/compiler/aura/lang/compiler/vm/）；
+//   - 与 Aura VM 的唯一交集是 .auc 二进制格式（Rust 编译器产出，两侧各自执行）。
+// 依据：docs/vm_pure_aura/00-VM纯Aura化技术方案与达成路径.md 三-阶段P4 / 决策D6。
+// ================================================================
 //! Phase B: 并发原生函数（Thread / Mutex / Atomic / RwLock / Condvar / Barrier）
 //!
 //! 通过 Rust 标准库原语（std::sync / std::thread / std::sync::atomic）
@@ -342,9 +351,27 @@ pub fn native_thread_sleep(args: &[Value]) -> Value {
 }
 
 /// Thread.id() → Int：获取当前线程 ID
+///
+/// 每个 OS 线程首次调用时分配一个稳定的唯一 ID（主线程 = 1，新建线程依次 2、3…），
+/// 之后该线程的所有调用返回同一值。原实现恒返回 `1`，使
+/// `tests/concurrent/thread_basics.aura` 的「工作线程 ID ≠ 主线程 ID」判定无法成立。
 pub fn native_thread_id(_args: &[Value]) -> Value {
-    // 返回当前线程的标识（使用线程局部存储，简化为 1）
-    Value::Int(1)
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    thread_local! {
+        static TID: Cell<i64> = const { Cell::new(0) };
+    }
+    static NEXT_TID: AtomicI64 = AtomicI64::new(1);
+    let id = TID.with(|c| {
+        let cur = c.get();
+        if cur != 0 {
+            return cur;
+        }
+        let assigned = NEXT_TID.fetch_add(1, Ordering::SeqCst);
+        c.set(assigned);
+        assigned
+    });
+    Value::Int(id)
 }
 
 /// Thread.parallelism() → Int：获取可用并行度
@@ -398,6 +425,14 @@ pub fn native_thread_spawn(args: &[Value]) -> Value {
         Some(m) => m,
         None => return Value::Int(0),
     };
+    // P3.2：共享父 VM 的模块级全局存储。
+    //
+    // 新线程 VM 若各自 `Vm::new` 出一份独立存储，顶层 `val`/`var`
+    // （`tests/concurrent/mutex_shared.aura` 的 `SHARED_COUNT`、
+    // `integration.aura` 的任务计数等）在线程内外的写入互不可见，
+    // 表现为「主线程读到的计数恒为初值」。此处把父 VM 的 `Arc` 传进去，
+    // 使所有线程读写同一份 `i64` 槽位。
+    let shared_globals = crate::vm::native::current_vm_globals_store();
 
     // 创建结果通道（线程 → 调用者）
     let (result_tx, result_rx) = mpsc::channel();
@@ -413,6 +448,9 @@ pub fn native_thread_spawn(args: &[Value]) -> Value {
                 return;
             }
         };
+        if let Some(g) = shared_globals {
+            vm.set_globals_store(g);
+        }
 
         // 设置当前线程的 VM 引用（供原生函数访问）
         crate::vm::native::set_vm_ref(&mut vm as *mut _ as *mut ());
@@ -574,6 +612,7 @@ pub fn native_atomic_add(args: &[Value]) -> Value {
         let id = args[0].as_int() as usize;
         let delta = args[1].as_int();
         let reg = ATOMIC_REGISTRY.lock().unwrap();
+        // 契约：返回 add 之后的值（fetch_add 得到旧值，需加 delta）
         if let Some(Some(a)) = reg.get(id) {
             Value::Int(a.fetch_add(delta, Ordering::SeqCst) + delta)
         } else {
@@ -590,6 +629,7 @@ pub fn native_atomic_sub(args: &[Value]) -> Value {
         let id = args[0].as_int() as usize;
         let delta = args[1].as_int();
         let reg = ATOMIC_REGISTRY.lock().unwrap();
+        // 契约：返回 sub 之后的值（fetch_sub 得到旧值，需减 delta）
         if let Some(Some(a)) = reg.get(id) {
             Value::Int(a.fetch_sub(delta, Ordering::SeqCst) - delta)
         } else {

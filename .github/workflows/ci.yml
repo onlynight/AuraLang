@@ -1,0 +1,81 @@
+# VM-PA-00 v3.2 / P4.6: differential framework + isolation guards in CI (D6/R14/R15/R16)
+#
+# Any change to either VM implementation must:
+#   1. keep bootstrap/ isolated            (scripts/check-bootstrap-isolation.*)
+#   2. keep the two VMs non-cross-referencing and the Rust VM frozen
+#      (scripts/check-dual-impl-isolation.*)
+#   3. keep both backends byte-identical on the sample corpus
+#      (scripts/diff-test.ps1 + scripts/diff-test-full.ps1)
+#
+# The self-host bootstrap loop (scripts/bootstrap-loop.sh) runs as a
+# non-blocking check until the AOT-substrate emit defects are fixed
+# (see docs/vm_pure_aura/00 P4 completion record).
+
+name: aura-vm-ci
+
+on:
+  push:
+    paths:
+      - 'seed/compiler/src/vm/**'
+      - 'seed/compiler/src/codegen/**'
+      - 'aura/compiler/aura/lang/compiler/vm/**'
+      - 'aura/compiler/aura/lang/compiler/serialize/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'examples/**'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  guards:
+    name: isolation guards
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bootstrap isolation guard (D1)
+        shell: bash
+        run: bash scripts/check-bootstrap-isolation.sh
+      - name: dual-impl isolation guard (D6 / P4.5)
+        shell: bash
+        run: bash scripts/check-dual-impl-isolation.sh
+      - name: dual-impl isolation guard (PowerShell variant)
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-dual-impl-isolation.ps1
+
+  differential:
+    name: rust-vm vs aura-vm differential
+    runs-on: windows-latest
+    needs: guards
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build seed compiler
+        shell: pwsh
+        run: |
+          cd seed
+          cargo build -p compiler --features llvm --release
+      - name: Differential sample set (P2.4)
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/diff-test.ps1
+      - name: Full differential regression (P4.2)
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/diff-test-full.ps1 -TimeoutSec 180
+
+  bootstrap-loop:
+    name: self-host bootstrap loop (P4.1, non-blocking)
+    runs-on: windows-latest
+    needs: guards
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build seed compiler
+        shell: pwsh
+        run: |
+          cd seed
+          cargo build -p compiler --features llvm --release
+      - name: Build Aura VM runner (AOT)
+        shell: pwsh
+        run: |
+          seed\target\release\aura.exe build examples/compiler/auc_vm_runner.aura --output build/bin/auc_vm_runner.exe --aot
+      - name: Bootstrap Stage-1/2/3
+        shell: bash
+        run: bash scripts/bootstrap-loop.sh
