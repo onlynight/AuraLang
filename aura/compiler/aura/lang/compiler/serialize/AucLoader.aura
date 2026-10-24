@@ -389,7 +389,26 @@ import aura.lang.compiler.serialize.AucSerializer
             // ⚠️ P253：readU32Int 直接产出 Int——`codeLenL as Int` 在 photon
             // AOT 下产出垃圾（实测 codeLens 全变 1-3 ⇒ 每函数只解 1 条指令）。
             val codeLen: Int = reader.readU32Int()
-            funcNames.add(fname)
+            // [R245] 重载消歧：**.auc 的 CALL 操作数是函数下标**，重载的同名
+            // 函数下标不同（17-function-overload：4 个 `add`、3 个 `greet`）。
+            // 旧径把下标翻成函数名 ⇒ 所有重载调用串到第一个同名项（实测
+            // `add(1,2,3)=5`、`greet('Aura')=Hello`）。首个名字保持原样
+            // （13-stdlib 的 319 个函数里只有 2 组重名），后续重名追加
+            // "@<下标>"。⚠ 不要用 `funcNames[i] = ...` 事后改写：那段索引
+            // 赋值在本函数里实测把整个加载器搞坏（r246 全用例空输出）。
+            var dup9: Int = 0
+            var mj9: Int = 0
+            while (mj9 < fi) {
+                if (funcNames[mj9] == fname) {
+                    dup9 = 1
+                }
+                mj9 = mj9 + 1
+            }
+            if (dup9 == 1) {
+                funcNames.add(fname + "@" + toStr(fi))
+            } else {
+                funcNames.add(fname)
+            }
             funcParams.add(params)
             codeStarts.add(reader.pos)
             codeLens.add(codeLen)

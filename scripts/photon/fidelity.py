@@ -20,7 +20,7 @@ SLOT = os.path.join(ROOT, "build", "vm", "current.auc")
 TESTS = os.path.join(ROOT, "tests", "language-test")
 
 DEBUG_PREFIX = (b"[LAF]", b"[A78]", b"[62]", b"[VMLOADOK]", b"[VMDONE]", b"[VEHI]",
-                b"VEHI", b"[CM]")
+                b"VEHI", b"[CM]", b"[TS]", b"[RT]", b"[RTV]", b"[RT2]", b"[CF]")
 VM_BANNER = (b"[ok]", b"[vm]", b"[warn]", b"semantic warning", b"aura:")
 
 
