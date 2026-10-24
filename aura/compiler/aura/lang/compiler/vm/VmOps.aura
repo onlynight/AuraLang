@@ -28,6 +28,55 @@ object VmOps {
     /// [R4] vmSubstr 定性探针计数
     var vmSubDiag: Int = 0
 
+    // [R251] 对象引用注册表：按**创建序**记录已分配对象的键（ptrKeyOf 形态）。
+    // 种子端 toStr(对象) 打印为 "<ref#N>"，N = 0 起的创建序——探针实证：
+    // 单对象 → ref#0；先建 Resource 再建 Box → Box 是 ref#1；07 里
+    // MyError→#0、MyException→#1，与打印顺序无关（p_ref.aura：乱序打印
+    // 仍按创建序编号，同一对象重复打印编号不变）。
+    // ⚠ 只用 `.add()` 追加，不做下标赋值（同 R246 的 funcNames 教训）。
+    var refKeysL: List<String> = arrayListOf<String>()
+
+    /// 登记一个新分配对象的键（Vm.newObject 每次分配调用）。
+    /// ⚠ 形态约束：**不要**在循环体内 `return`（实测返回值被循环 phi 家槽
+    /// 污染成指针值）；用 found 标志 + `i = n` 断出，循环外统一收口
+    /// （同 getField 的 kindF 扫描形状）。
+    fun refRegister(key: String): Unit {
+        val n: Int = this.refKeysL.size()
+        var dup: Int = 0
+        var i: Int = 0
+        while (i < n) {
+            if (this.refKeysL[i] == key) {
+                dup = 1
+                i = n
+            }
+            i = i + 1
+        }
+        if (dup == 0) {
+            this.refKeysL.add(key)
+        }
+    }
+
+    /// [R251] 查找结果中转槽。⚠ 不要用函数返回值传它：实测本调用点的
+    /// 返回值会漂移成对象指针（P266 rax→调用方槽句柄漂移同族），
+    /// 与 AucLoader.loadModule 的「返回值全局槽中转」同一规避手法。
+    var refHit: Int = -1
+
+    /// 值若是已登记对象则把创建序写入 `refHit`，否则写 -1。
+    fun refLocate(v: Any): Unit {
+        val key: String = ptrKeyOf(v)
+        val n: Int = this.refKeysL.size()
+        var found: Int = -1
+        var i: Int = 0
+        while (i < n) {
+            if (this.refKeysL[i] == key) {
+                found = i
+                i = n
+            }
+            i = i + 1
+        }
+        this.refHit = found
+    }
+
     // ═══════════════════════════════════════════════════════════
     //  类型判定
     // ═══════════════════════════════════════════════════════════
@@ -1021,6 +1070,20 @@ object VmOps {
                 return "-" + toStr(0 - iv)
             }
             return toStr(iv)
+        }
+        // [R251] 已登记的堆对象 → "<ref#N>"（N = 0 起的**创建序**，见
+        // `refRegister`）。种子端 toStr(对象) 的打印面就是它：
+        // 07-test-classes `MyError: <ref#0>`、10-memory `Box: <ref#1>`
+        // （种子编译器把 `e.getMessage()` 这类 getter 内联成对象本身，
+        // 两条通道拿到的都是对象，只差渲染；旧行为 `v as String` 把对象头
+        // 当字符串读 ⇒ 打出空串）。
+        // ⚠ 必须放在 typeof 分派**之前**：typeof(对象指针) 会走 String 分支。
+        refLocate(v)
+        var ri: Int = this.refHit
+        if (ri >= 0) {
+            // ⚠ 用运行时 `toStr` 而不是 `intToStr`：后者在本调用窗腐坏
+            // （floatTextOf 体内 intToStr 窗腐坏同族，实测打出指针值）。
+            return "<ref#" + toStr(ri) + ">"
         }
         // 种子 VM：typeof 区分 Int/Boolean/String。
         // ⚠️ 必须用裸 `typeof`（内建），不能用 `VmOps.typeof`：

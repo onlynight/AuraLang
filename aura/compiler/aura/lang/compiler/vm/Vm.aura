@@ -3559,6 +3559,9 @@ import aura.lang.compiler.serialize.AucLoader
         // 类名键取栈值的 toStrAny 形态——与 get/set/方法解析同一转换路径；
         // 不得对 Long 局部变量做 toStr（装箱路径不一致会导致键不匹配）。
         val objKey: String = VmOps.ptrKeyOf(this.stack.peek())
+        // [R251] 按创建序登记进引用表——toStrAny 据此渲染 "<ref#N>"
+        //（种子端 toStr(对象) 的打印面）。
+        VmOps.refRegister(objKey)
         // [R33] 线性登记
         this.ocKeys.add(objKey)
         this.ocVals.add(cls)
@@ -4515,6 +4518,10 @@ import aura.lang.compiler.serialize.AucLoader
         }
         this.stack.push(ptr)
         this.heapKinds.put(VmOps.toStrAny(this.stack.peek()), "box")
+        // [R251] Box 分配也按创建序登记（wire 58 BOX_ALLOC 不走 NEW_OBJECT）：
+        // 种子端 Box(42) 同样占一个 `<ref#N>` 名额（10-memory：Resource→#0、
+        // Box→#1）。放在 push 之后，与 newObject 同一取键路径。
+        VmOps.refRegister(VmOps.ptrKeyOf(this.stack.peek()))
     }
 
     // ═══════════════════════════════════════════════════════════
